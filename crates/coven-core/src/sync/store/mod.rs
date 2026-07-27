@@ -131,13 +131,10 @@ pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use operations::load_local_store_authority as load_local_store_authority_for_test;
+#[cfg(test)]
+pub(crate) use operations::prepare_plan as prepare_store_operation_plan_for_test;
 pub(crate) use operations::CircleAckActivation;
 pub(crate) use operations::PreparedStoreOperationCommit;
-#[cfg(test)]
-pub(crate) use operations::{
-    exact_next_announcement_slot as exact_next_announcement_slot_for_test,
-    prepare_plan as prepare_store_operation_plan_for_test,
-};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use owner::anchor_owner_membership;
 pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
@@ -219,6 +216,36 @@ pub(crate) async fn stage_store_acknowledgement_for_test(
     store
         .stage_acknowledgement(frontier, sync_time, identity)
         .await
+}
+
+#[cfg(test)]
+pub(crate) async fn exact_next_announcement_slot_for_test(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
+    registration: &super::store_commit::StoreDeviceRegistration,
+    previous: Option<&super::store_commit::StoreBatchCommitRef>,
+) -> Result<
+    (
+        crate::storage::cloud::ObjectSlot,
+        Option<super::store_commit::StoreDeviceHeadRef>,
+    ),
+    StoreError,
+> {
+    let mut verifier = pull::StoreCommitVerifier::new(storage, root).await?;
+    let previous = match previous {
+        Some(reference) => Some(verifier.load_ref(reference).await?),
+        None => None,
+    };
+    operations::exact_next_announcement_slot(
+        storage,
+        root,
+        registration_ref,
+        registration,
+        &mut verifier,
+        previous.as_ref(),
+    )
+    .await
 }
 
 #[cfg(any(test, feature = "test-utils"))]

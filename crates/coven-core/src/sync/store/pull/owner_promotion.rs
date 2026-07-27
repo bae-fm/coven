@@ -146,21 +146,22 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
             "Owner-promotion request activation is absent from its verified history".to_string(),
         )
     })?;
-    let verified_announcement_commits = verified_commits
-        .iter()
-        .map(|(reference, commit)| (reference.clone(), commit.verified.clone()))
-        .collect();
-    let (_, exact_head) =
-        crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
-            storage,
-            root,
-            &request.promoter_registration,
-            &promoter.value,
-            &verified.verified,
-            &verified_announcement_commits,
-        )
-        .await
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+    for verified in verified_commits.values() {
+        commit_verifier
+            .remember(verified.verified.clone())
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+    }
+    let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
+        storage,
+        root,
+        &request.promoter_registration,
+        &promoter.value,
+        &mut commit_verifier,
+        Some(&verified.verified),
+    )
+    .await
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
     if opened.value != head
         || head.head_hash() != activation_head.head_hash
         || head.commit != *activation_commit

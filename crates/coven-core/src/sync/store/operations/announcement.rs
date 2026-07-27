@@ -1,13 +1,13 @@
 use super::*;
 use crate::sync::store_commit::VerifiedStoreBatchCommit;
-use std::collections::BTreeMap;
 
 pub(crate) async fn exact_next_announcement_slot(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
-    previous: Option<&StoreBatchCommitRef>,
+    verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    previous: Option<&VerifiedStoreBatchCommit>,
 ) -> Result<
     (
         crate::storage::cloud::ObjectSlot,
@@ -15,54 +15,33 @@ pub(crate) async fn exact_next_announcement_slot(
     ),
     StoreError,
 > {
-    let path =
-        exact_next_announcement_slot_impl(storage, root, registration_ref, registration, previous)
-            .await?;
-    for commit in &path.commits {
-        super::store_objects::load_commit_ref(storage, root.store_root_hash, commit, registration)
-            .await?;
-    }
-    Ok((path.next_slot, path.accepted_head))
-}
-
-pub(crate) async fn exact_next_announcement_slot_for_verified_commit(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registration_ref: &StoreDeviceRegistrationRef,
-    registration: &StoreDeviceRegistration,
-    commit: &VerifiedStoreBatchCommit,
-    verified_predecessors: &BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
-) -> Result<
-    (
-        crate::storage::cloud::ObjectSlot,
-        Option<StoreDeviceHeadRef>,
-    ),
-    StoreError,
-> {
-    if commit.value().author_registration != *registration_ref || commit.author() != registration {
-        return Err(StoreError::InvalidOutbound(
-            "verified Store commit author differs from its announcement registration".to_string(),
-        ));
+    if let Some(previous) = previous {
+        if previous.value().author_registration != *registration_ref
+            || previous.author() != registration
+        {
+            return Err(StoreError::InvalidOutbound(
+                "verified Store commit author differs from its announcement registration"
+                    .to_string(),
+            ));
+        }
     }
     let path = exact_next_announcement_slot_impl(
         storage,
         root,
         registration_ref,
         registration,
-        Some(commit.reference()),
+        previous.map(VerifiedStoreBatchCommit::reference),
     )
     .await?;
     for reference in &path.commits {
-        let verified = if reference == commit.reference() {
-            commit
-        } else {
-            verified_predecessors.get(reference).ok_or_else(|| {
-                StoreError::InvalidOutbound(
-                    "Store announcement names a commit absent from the verified operation history"
-                        .to_string(),
-                )
-            })?
-        };
+        let loaded;
+        let verified =
+            if let Some(previous) = previous.filter(|commit| reference == commit.reference()) {
+                previous
+            } else {
+                loaded = verifier.load_ref(reference).await?;
+                &loaded
+            };
         if verified.reference() != reference
             || verified.author() != registration
             || verified.value().author_registration != *registration_ref

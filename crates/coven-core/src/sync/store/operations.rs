@@ -25,7 +25,7 @@ use crate::sync::store_commit::{
 use crate::sync::store_objects::{run_blocking_object_verification, StoreObjectError};
 use crate::sync::{
     audience_package, circle_control, membership, provider, remote_object, service, store_commit,
-    store_objects, wrapped_store_key,
+    wrapped_store_key,
 };
 use std::future::Future;
 use std::pin::Pin;

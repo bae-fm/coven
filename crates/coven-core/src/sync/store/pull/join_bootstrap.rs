@@ -228,7 +228,8 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             root,
             &commit.author_registration,
             &author,
-            Some(reference),
+            history_verifier.commit_verifier(),
+            Some(&verified_commit),
         )
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -312,18 +313,27 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 &commit,
                 &registrations,
             )?;
-            crate::sync::store::database::StoreDatabaseTransaction::new(&tx)
-                .record_materialized_merge_commit(
+            let circle_activations = VerifiedCircleActivations::none(&commit, &commit_ref)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let materialization = VerifiedMergeMaterialization::verify(
                 &root,
                 &commit,
                 &commit_ref,
                 &registrations,
+                &device_operations,
+                &circle_activations,
                 &head.value,
                 &head.object,
                 &history.summary,
+                None,
                 &[],
                 None,
             )?;
+            crate::sync::store::database::StoreDatabaseTransaction::new(&tx)
+                .record_operation_verified_merge_materialization(
+                    materialization,
+                    &verified_commit,
+                )?;
             tx.commit().map_err(DbError::from)
         })
         .await?;

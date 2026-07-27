@@ -2131,9 +2131,15 @@ async fn verify_reclaim_authorization_activation(
         .validate()
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let commit_ref = activation.commit();
-    let (commit_value, author) = super::pull::load_commit_with_author(storage, root, commit_ref)
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
         .await
         .map_err(StoreReclaimError::Object)?;
+    let verified_commit = commit_verifier
+        .load_ref(commit_ref)
+        .await
+        .map_err(StoreReclaimError::Object)?;
+    let commit_value = verified_commit.value();
+    let author = verified_commit.author();
     if commit_value.reclaim_authorization() != Some(authorization) {
         return Err(StoreReclaimError::Authorization(
             "reclaim activation commit names another authorization".to_string(),
@@ -2145,7 +2151,7 @@ async fn verify_reclaim_authorization_activation(
         storage,
         root.store_root_hash,
         head,
-        &author,
+        author,
         commit,
     )
     .await?;
@@ -2158,8 +2164,9 @@ async fn verify_reclaim_authorization_activation(
         storage,
         root,
         &commit_value.author_registration,
-        &author,
-        Some(commit),
+        author,
+        &mut commit_verifier,
+        Some(&verified_commit),
     )
     .await?;
     if accepted_head.as_ref() != Some(head) {

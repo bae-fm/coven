@@ -138,6 +138,7 @@ pub enum StoreProtocolError {
 
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedStoreBatchCommit {
+    store_root_hash: ObjectHash,
     reference: StoreBatchCommitRef,
     value: StoreBatchCommit,
     author: StoreDeviceRegistration,
@@ -153,10 +154,15 @@ impl VerifiedStoreBatchCommit {
         let value = StoreBatchCommit::parse_at(bytes, store_root_hash, &reference.coord, author)?;
         reference.verify_commit(&value)?;
         Ok(Self {
+            store_root_hash,
             reference: reference.clone(),
             value,
             author: author.clone(),
         })
+    }
+
+    pub(crate) fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
     }
 
     pub(crate) fn reference(&self) -> &StoreBatchCommitRef {

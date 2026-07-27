@@ -364,9 +364,15 @@ pub(crate) async fn verify_merge_membership_head_activation(
     head: &super::membership::AuthorHead,
     activation: &StoreBatchCommitRef,
 ) -> Result<bool, String> {
-    let (commit, author) = Box::pin(load_commit_with_author(storage, root, activation))
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(|error| error.to_string())?;
+    let verified = history_verifier
+        .load_ref(activation)
+        .await
+        .map_err(|error| error.to_string())?;
+    let commit = verified.value();
+    let author = verified.author();
     let transition = commit
         .control()
         .map(|control| &control.transition)
@@ -384,8 +390,9 @@ pub(crate) async fn verify_merge_membership_head_activation(
         storage,
         root,
         &commit.author_registration,
-        &author,
-        Some(activation),
+        author,
+        history_verifier.commit_verifier(),
+        Some(&verified),
     )
     .await;
     match activation_observation {
@@ -397,16 +404,20 @@ pub(crate) async fn verify_merge_membership_head_activation(
         ))) => return Ok(false),
         Err(error) => return Err(error.to_string()),
     }
-    let (_, _, replayed, verified_control) =
-        Box::pin(replay_merge_device_history(storage, root, activation))
-            .await
-            .map_err(|error| error.to_string())?;
-    if replayed != commit {
-        return Err("membership head activation replay changed its Store commit".to_string());
-    }
-    if verified_control.is_none() {
+    history_verifier
+        .verify_refs([activation.clone()])
+        .await
+        .map_err(|error| error.to_string())?;
+    let verified_control = history_verifier
+        .history()
+        .commits
+        .get(activation)
+        .and_then(|commit| commit.membership_control.as_ref());
+    if !verified_control
+        .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
+    {
         return Err(
-            "membership head activation replay did not verify its Merge membership control"
+            "membership head activation differs from its verified Merge membership control"
                 .to_string(),
         );
     }

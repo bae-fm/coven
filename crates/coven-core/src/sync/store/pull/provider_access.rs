@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn joining_device_bootstrap_authenticates_its_history_once() {
+    async fn joining_device_bootstrap_and_activation_authenticate_each_commit_once() {
         let fixture = provider_access_fixture("join-bootstrap-verification").await;
         let ProviderAccessFixture {
             owner,
@@ -410,7 +410,7 @@ mod tests {
             crate::sync::store_commit::StoreCommitVerificationAudit::begin(references.as_slice());
         let joining_database = StoreDatabase::new(&joining_db);
 
-        crate::sync::store::bootstrap_joining_device(
+        let readiness = crate::sync::store::bootstrap_joining_device(
             &joining_database,
             &pending,
             store.storage.as_ref(),
@@ -423,5 +423,33 @@ mod tests {
         .expect("bootstrap joining device");
 
         audit.assert_each_verified_once();
+        let completion = crate::sync::store::complete_device_provider_admission(
+            &database, None, &owner, readiness,
+        )
+        .await
+        .expect("complete bootstrap verification admission");
+        let activation = crate::sync::store::finalize_device_join(
+            &database,
+            store.storage.as_ref(),
+            &membership,
+            &owner,
+            completion,
+        )
+        .await
+        .expect("activate bootstrap verification registration");
+        let activation_audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(
+            std::slice::from_ref(&activation.outcome_activation),
+        );
+
+        crate::sync::store::complete_device_join(
+            &joining_database,
+            &pending,
+            store.storage.as_ref(),
+            activation,
+        )
+        .await
+        .expect("complete joining device activation");
+
+        activation_audit.assert_each_verified_once();
     }
 }

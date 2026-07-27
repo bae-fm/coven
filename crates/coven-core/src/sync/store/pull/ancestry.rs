@@ -1,5 +1,59 @@
 use super::*;
 
+pub(crate) struct StoreCommitVerifier<'a> {
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    verified_root: super::store_commit::StoreProtocolRoot,
+    commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+}
+
+impl<'a> StoreCommitVerifier<'a> {
+    pub(crate) async fn new(
+        storage: &'a dyn SyncStorage,
+        root: &'a StoreRootRef,
+    ) -> Result<Self, StoreObjectError> {
+        let verified_root = load_store_protocol_root(storage, root).await?.value;
+        Ok(Self {
+            storage,
+            root,
+            verified_root,
+            commits: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) async fn load_ref(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
+        if let Some(commit) = self.commits.get(reference) {
+            return Ok(commit.clone());
+        }
+        let verified =
+            load_verified_commit_at_root(self.storage, self.root, &self.verified_root, reference)
+                .await?;
+        self.commits.insert(reference.clone(), verified.clone());
+        Ok(verified)
+    }
+
+    pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
+        &self.verified_root
+    }
+
+    pub(crate) fn remember(
+        &mut self,
+        commit: VerifiedStoreBatchCommit,
+    ) -> Result<(), StoreProtocolError> {
+        if commit.store_root_hash() != self.root.store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: self.root.store_root_hash,
+                actual: commit.store_root_hash(),
+            });
+        }
+        self.commits.insert(commit.reference().clone(), commit);
+        Ok(())
+    }
+}
+
 pub(crate) async fn load_commit_with_author(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

@@ -24,12 +24,19 @@ async fn verify_terminal_candidate_head(
         candidate,
     )
     .map_err(|error| StorePullError::Database(error.to_string()))?;
-    candidate
-        .verify_commit(candidate_commit)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    candidate_commit
-        .verify_at(root.store_root_hash, &candidate.coord, candidate_author)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let verified_candidate = VerifiedStoreBatchCommit::parse(
+        &candidate_commit.to_bytes(),
+        root.store_root_hash,
+        candidate,
+        candidate_author,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let candidate_commit = verified_candidate.value();
+    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+    let verified_predecessor = match candidate_commit.order.predecessor() {
+        Some(predecessor) => Some(commit_verifier.load_ref(predecessor).await?),
+        None => None,
+    };
     candidate_head_object.verify(&candidate_head.to_bytes())?;
     let (candidate_slot, predecessor_head) =
         crate::sync::store::operations::exact_next_announcement_slot(
@@ -37,7 +44,8 @@ async fn verify_terminal_candidate_head(
             root,
             &candidate_commit.author_registration,
             candidate_author,
-            candidate_commit.order.predecessor(),
+            &mut commit_verifier,
+            verified_predecessor.as_ref(),
         )
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -97,13 +105,12 @@ async fn verify_terminal_candidate_head(
                         .to_string(),
                 ));
             }
-            load_commit_ref(
-                storage,
-                root.store_root_hash,
-                &unverified.commit,
-                candidate_author,
-            )
-            .await?;
+            let competing_commit = commit_verifier.load_ref(&unverified.commit).await?;
+            if competing_commit.author() != candidate_author {
+                return Err(StorePullError::Database(
+                    "competing terminal candidate belongs to another author".to_string(),
+                ));
+            }
             let winner = StoreDeviceHead::parse_at(
                 &bytes,
                 root.store_root_hash,
@@ -299,12 +306,20 @@ pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
             &witness_head.commit,
         )
         .await?;
+        let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+        let witness_commit = commit_verifier.load_ref(&witness_head.commit).await?;
+        if witness_commit.author() != &witness_author.value {
+            return Err(StorePullError::Database(
+                "membership revocation witness commit belongs to another author".to_string(),
+            ));
+        }
         let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
             storage,
             root,
             &witness_head.author_registration,
             &witness_author.value,
-            Some(&witness_head.commit),
+            &mut commit_verifier,
+            Some(&witness_commit),
         )
         .await
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -313,26 +328,19 @@ pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
                 "membership revocation witness is not an accepted exact head".to_string(),
             ));
         }
-        let witness_commit = load_commit_ref(
-            storage,
-            root.store_root_hash,
-            &witness_head.commit,
-            &witness_author.value,
-        )
-        .await?;
         let (_, _, replayed_witness_commit, _) = Box::pin(replay_merge_device_history(
             storage,
             root,
             &witness_head.commit,
         ))
         .await?;
-        if replayed_witness_commit != witness_commit.value {
+        if replayed_witness_commit != *witness_commit.value() {
             return Err(StorePullError::Database(
                 "membership revocation witness commit differs from its verified history"
                     .to_string(),
             ));
         }
-        if witness_commit.value.membership_state != *membership {
+        if witness_commit.value().membership_state != *membership {
             return Err(StorePullError::Database(
                 "membership revocation witness commit names another membership state".to_string(),
             ));
@@ -340,7 +348,7 @@ pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
         let current_membership = load_merge_predecessor_membership(
             storage,
             root,
-            &witness_commit.value.membership_state,
+            &witness_commit.value().membership_state,
         )
         .await
         .map_err(|error| match error {
@@ -395,7 +403,7 @@ pub(crate) fn verify_membership_grant_revocation_nonactivation<'a>(
             ));
         }
         let cap = witness_commit
-            .value
+            .value()
             .order
             .predecessor_cut()
             .map_err(|error| StorePullError::Database(error.to_string()))?;

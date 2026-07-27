@@ -113,6 +113,17 @@ pub(crate) struct VerifiedMergeMembershipControl {
     conflict_resolution: Option<VerifiedMergeConflictResolutionActivation>,
 }
 
+impl VerifiedMergeMembershipControl {
+    pub(crate) fn verifies_head_activation(
+        &self,
+        reference: &super::membership::MembershipHeadRef,
+        head: &super::membership::AuthorHead,
+        commit: &StoreBatchCommitRef,
+    ) -> bool {
+        self.head_activation.verifies(reference, head, commit)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMergeConflictResolutionActivation {
     reference: super::membership::StoreMembershipConflictResolutionRef,
@@ -488,8 +499,7 @@ pub(crate) struct VerifiedMergeHistory {
 pub(crate) struct MergeHistoryVerifier<'a> {
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
-    verified_root: super::store_commit::StoreProtocolRoot,
-    loaded: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+    commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }
 
@@ -1109,13 +1119,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         storage: &'a dyn SyncStorage,
         root: &'a StoreRootRef,
     ) -> Result<Self, StorePullError> {
-        let verified_root = Box::pin(load_store_protocol_root(storage, root))
-            .await?
-            .value;
+        let commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+        let verified_root = commit_verifier.verified_root();
         let founder = Box::pin(load_founder_registration_with_root(
             storage,
             root,
-            &verified_root,
+            verified_root,
         ))
         .await?;
         let founder_ref =
@@ -1131,8 +1140,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(Self {
             storage,
             root,
-            verified_root,
-            loaded: BTreeMap::new(),
+            commit_verifier,
             history: VerifiedMergeHistory {
                 genesis,
                 commits: BTreeMap::new(),
@@ -1147,18 +1155,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         if let Some(verified) = self.history.commits.get(reference) {
             return Ok(verified.verified.clone());
         }
-        if let Some(loaded) = self.loaded.get(reference) {
-            return Ok(loaded.clone());
-        }
-        let loaded = Box::pin(load_verified_commit_at_root(
-            self.storage,
-            self.root,
-            &self.verified_root,
-            reference,
-        ))
-        .await?;
-        self.loaded.insert(reference.clone(), loaded.clone());
-        Ok(loaded)
+        Ok(self.commit_verifier.load_ref(reference).await?)
     }
 
     pub(crate) fn history(&self) -> &VerifiedMergeHistory {
@@ -1166,7 +1163,11 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
-        &self.verified_root
+        self.commit_verifier.verified_root()
+    }
+
+    pub(crate) fn commit_verifier(&mut self) -> &mut StoreCommitVerifier<'a> {
+        &mut self.commit_verifier
     }
 
     pub(super) fn into_history(self) -> VerifiedMergeHistory {
@@ -1179,7 +1180,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<(), StorePullError> {
         let storage = self.storage;
         let root = self.root;
-        let verified_root = self.verified_root.clone();
+        let verified_root = self.commit_verifier.verified_root().clone();
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
         while let Some(reference) = pending.pop() {
@@ -1196,12 +1197,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commits
             .iter()
             .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let mut verified_announcement_commits = self
-            .history
-            .commits
-            .iter()
-            .map(|(reference, history)| (reference.clone(), history.verified.clone()))
             .collect::<BTreeMap<_, _>>();
         while !loaded.is_empty() {
             let next = loaded.iter().find_map(|(reference, verified)| {
@@ -1223,13 +1218,13 @@ impl<'a> MergeHistoryVerifier<'a> {
             let commit = verified.value().clone();
             let author = verified.author().clone();
             let (_, accepted_head) = Box::pin(
-                crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
+                crate::sync::store::operations::exact_next_announcement_slot(
                     storage,
                     root,
                     &commit.author_registration,
                     &author,
-                    &verified,
-                    &verified_announcement_commits,
+                    &mut self.commit_verifier,
+                    Some(&verified),
                 ),
             )
             .await
@@ -1452,7 +1447,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                     &state,
                 )
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
-            verified_announcement_commits.insert(reference.clone(), verified.clone());
             states.insert(reference.clone(), state.clone());
             self.history.commits.insert(
                 reference,
