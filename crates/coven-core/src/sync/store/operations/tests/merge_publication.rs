@@ -939,7 +939,8 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .expect("prepared write exists")
             .commit
             .value
-            .write_id;
+            .write_id
+            .clone();
         db.call(move |conn| {
             match invalid_root {
                 Some(value) => conn.execute(

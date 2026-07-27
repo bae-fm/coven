@@ -342,7 +342,7 @@ async fn authenticate_blocked_candidate(
         .commit_verifier()
         .authenticate_bytes(reference, &candidate.commit.bytes)
         .await?;
-    if verified.value() != &candidate.commit.value
+    if verified.value() != candidate.commit.value.value()
         || verified.reference().object != candidate.commit.object
         || verified.value().to_bytes() != candidate.commit.bytes
     {

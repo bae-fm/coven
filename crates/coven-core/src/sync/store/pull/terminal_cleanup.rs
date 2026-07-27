@@ -89,7 +89,7 @@ async fn verify_terminal_cleanup_candidate(
         .commit_verifier()
         .authenticate_bytes(reference, &verification.candidate.commit.bytes)
         .await?;
-    if candidate.value() != &verification.candidate.commit.value {
+    if candidate.value() != verification.candidate.commit.value.value() {
         return Err(StorePullError::Database(
             "terminal cleanup candidate differs from its authenticated commit".to_string(),
         ));

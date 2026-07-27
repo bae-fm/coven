@@ -3,7 +3,7 @@ use crate::sync::remote_object::{remote_object_id, RemoteObjectRecord};
 use crate::sync::storage::ExactObjectRef;
 use crate::sync::store_commit::{
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistrationRef, StoreHistoryCut,
+    StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
 use crate::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};
@@ -11,10 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::publication_state::PreparedStoreWriteState;
 use super::store_device_state::store_device_state_for_history_cut_on;
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedMergeCandidate {
-    pub(crate) commit: StoreBatchCommit,
+    pub(crate) commit: VerifiedStoreBatchCommit,
     pub(crate) reference: StoreBatchCommitRef,
     pub(crate) canonical_signed_bytes: Vec<u8>,
     pub(crate) commit_prepared: crate::sync::storage::PreparedExactObject,
@@ -137,16 +136,15 @@ pub(crate) fn parse_prepared_merge_candidate_parts_on(
         ),
         sequence: unverified.seq(),
     };
-    let value = StoreBatchCommit::parse_at(
+    let value = VerifiedStoreBatchCommit::parse_prepared(
         commit.semantic_bytes(),
         root.store_root_hash,
-        &coord,
+        coord,
+        commit.prepared().reference().clone(),
         &registration,
     )
     .map_err(|error| DbError::Message(format!("verify Merge candidate: {error}")))?;
-    let reference =
-        StoreBatchCommitRef::from_commit(&value, coord, commit.prepared().reference().clone())
-            .map_err(|error| DbError::Message(error.to_string()))?;
+    let reference = value.reference().clone();
     let head_value = StoreDeviceHead::parse_at(
         head.semantic_bytes(),
         root.store_root_hash,

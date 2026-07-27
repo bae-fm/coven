@@ -133,6 +133,23 @@ pub(crate) struct VerifiedStoreBatchCommit {
 }
 
 impl VerifiedStoreBatchCommit {
+    pub(crate) fn parse_prepared(
+        bytes: &[u8],
+        store_root_hash: ObjectHash,
+        coord: StoreCommitCoord,
+        object: ExactObjectRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<Self, StoreProtocolError> {
+        let value = StoreBatchCommit::parse_at(bytes, store_root_hash, &coord, author)?;
+        let reference = StoreBatchCommitRef::from_commit(&value, coord, object)?;
+        Ok(Self {
+            store_root_hash,
+            reference,
+            value,
+            author: author.clone(),
+        })
+    }
+
     pub(crate) fn parse(
         bytes: &[u8],
         store_root_hash: ObjectHash,
@@ -163,6 +180,14 @@ impl VerifiedStoreBatchCommit {
 
     pub(crate) fn author(&self) -> &StoreDeviceRegistration {
         &self.author
+    }
+}
+
+impl std::ops::Deref for VerifiedStoreBatchCommit {
+    type Target = StoreBatchCommit;
+
+    fn deref(&self) -> &Self::Target {
+        self.value()
     }
 }
 

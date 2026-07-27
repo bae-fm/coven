@@ -8,7 +8,7 @@ use crate::database::{
 };
 use crate::sync::store_commit::{
     CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
 use crate::write::WriteId;
 use rusqlite::OptionalExtension;
@@ -121,21 +121,17 @@ impl StoreDatabase {
                         stream_id,
                         sequence: unverified_commit.seq(),
                     };
-                    let commit_value = StoreBatchCommit::parse_at(
+                    let commit_value = VerifiedStoreBatchCommit::parse_prepared(
                         commit.semantic_bytes(),
                         root.store_root_hash,
-                        &coord,
+                        coord,
+                        commit.prepared().reference().clone(),
                         &registration,
                     )
                     .map_err(|error| {
                         DbError::Message(format!("verify prepared Store commit: {error}"))
                     })?;
-                    let commit_ref = StoreBatchCommitRef::from_commit(
-                        &commit_value,
-                        coord,
-                        commit.prepared().reference().clone(),
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    let commit_ref = commit_value.reference().clone();
                     let head_value = StoreDeviceHead::parse_at(
                         head.semantic_bytes(),
                         root.store_root_hash,

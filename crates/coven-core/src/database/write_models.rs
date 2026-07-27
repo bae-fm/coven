@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store_commit::VerifiedStoreBatchCommit;
 
 pub(crate) struct PreparedStoreWrite {
     pub write_id: WriteId,
@@ -109,13 +110,13 @@ pub(crate) struct PreparedProtocolObject<T> {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedStoreWriteCommit {
     pub audiences: PreparedAudienceObjects,
-    pub commit: ExactProtocolObject<StoreBatchCommit>,
+    pub commit: ExactProtocolObject<VerifiedStoreBatchCommit>,
     pub head: ExactProtocolObject<StoreDeviceHead>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockedMergeCandidate {
-    pub commit: ExactProtocolObject<StoreBatchCommit>,
+    pub commit: ExactProtocolObject<VerifiedStoreBatchCommit>,
     pub head: ExactProtocolObject<StoreDeviceHead>,
 }
 

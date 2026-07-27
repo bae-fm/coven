@@ -90,12 +90,12 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
             canonical_signed_bytes: bytes,
         }
     };
-    let mut wrong_root = batch.commit.value.clone();
+    let mut wrong_root = batch.commit.value.value().clone();
     wrong_root.store_root_hash = ObjectHash::digest(b"wrong Store root");
     assert!(observation
         .verified_nonactivation(exact_target(wrong_root), &author,)
         .is_err());
-    let mut wrong_predecessor = batch.commit.value.clone();
+    let mut wrong_predecessor = batch.commit.value.value().clone();
     let predecessor = &mut wrong_predecessor.order.predecessor;
     *predecessor = match predecessor.take() {
         Some(_) => None,
@@ -104,14 +104,14 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
     assert!(observation
         .verified_nonactivation(exact_target(wrong_predecessor), &author,)
         .is_err());
-    let mut wrong_author = batch.commit.value.clone();
+    let mut wrong_author = batch.commit.value.value().clone();
     wrong_author.author_registration = observation.winner().author_registration.clone();
     wrong_author.author_registration.registration_hash =
         ObjectHash::digest(b"wrong author registration");
     assert!(observation
         .verified_nonactivation(exact_target(wrong_author), &author,)
         .is_err());
-    let mut unsigned = batch.commit.value.clone();
+    let mut unsigned = batch.commit.value.value().clone();
     unsigned.signature = "00".to_string();
     assert!(observation
         .verified_nonactivation(exact_target(unsigned), &author,)

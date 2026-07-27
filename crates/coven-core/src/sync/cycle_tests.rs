@@ -4061,7 +4061,8 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .into_iter()
         .next()
         .expect("host write is queued")
-        .write_id;
+        .write_id
+        .clone();
 
     let pending_rotation = PendingRotation::none();
     pending_rotation.mark_committed(2).unwrap();
@@ -5290,7 +5291,8 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .expect("the exact Store write remains after append failure")
         .commit
         .value
-        .write_id;
+        .write_id
+        .clone();
     assert!(!local_store_package_exists(&db, &storage, 2).await);
 
     storage
