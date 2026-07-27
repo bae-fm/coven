@@ -250,10 +250,8 @@ pub(crate) async fn prepare_store_write(
         let successor = super::pull::prepare_merge_history_successor(
             database,
             &root,
-            commit.value(),
-            &commit_ref,
+            &commit,
             &authorization.membership,
-            &registration,
             None,
             authorization.device_state.clone(),
             super::pull::MergeHistorySuccessorEvidence::none(),

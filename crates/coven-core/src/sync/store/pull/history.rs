@@ -642,17 +642,20 @@ fn insert_membership_proof(
 pub(crate) async fn prepare_merge_history_successor(
     database: &StoreDatabase,
     root: &StoreRootRef,
-    commit: &StoreBatchCommit,
-    commit_ref: &StoreBatchCommitRef,
+    verified_commit: &VerifiedStoreBatchCommit,
     membership: &MembershipChain,
-    author: &StoreDeviceRegistration,
     recovery_author: Option<&StoreDeviceRegistrationRef>,
     state_after: ResolvedStoreDeviceState,
     evidence: MergeHistorySuccessorEvidence,
 ) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
-    commit_ref
-        .verify_commit(commit)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    if verified_commit.store_root_hash() != root.store_root_hash {
+        return Err(StorePullError::Database(
+            "authenticated Merge successor belongs to another Store root".to_string(),
+        ));
+    }
+    let commit = verified_commit.value();
+    let commit_ref = verified_commit.reference();
+    let author = verified_commit.author();
     state_after.validate_canonical().map_err(|error| {
         StorePullError::Database(format!("validate Merge successor post-state: {error}"))
     })?;

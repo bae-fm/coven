@@ -164,13 +164,18 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .store_device_state_for_order(&commit.order)
         .await
         .expect("load exact predecessor device state for the forged Circle commit");
+    let verified_commit = crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+        &commit.to_bytes(),
+        store.root.store_root_hash,
+        &commit_ref,
+        &author,
+    )
+    .expect("authenticate re-signed Store commit");
     let history = crate::sync::store::pull::prepare_merge_history_successor(
         &database,
         &store.root,
-        &commit,
-        &commit_ref,
+        &verified_commit,
         &membership,
-        &author,
         None,
         state_after,
         crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),

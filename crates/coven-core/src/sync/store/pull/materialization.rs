@@ -1339,10 +1339,8 @@ async fn commit_candidate(
     let history = prepare_merge_history_successor(
         database,
         root,
-        commit,
-        commit_ref,
+        &candidate.verified,
         predecessor_membership,
-        author,
         recovery_author.as_ref(),
         state_after.clone(),
         MergeHistorySuccessorEvidence {

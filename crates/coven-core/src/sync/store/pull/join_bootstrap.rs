@@ -267,10 +267,8 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         let history = prepare_merge_history_successor(
             database,
             root,
-            &commit,
-            reference,
+            &verified_commit,
             &membership,
-            &author,
             recovery_author.as_ref(),
             state_after.clone(),
             MergeHistorySuccessorEvidence {

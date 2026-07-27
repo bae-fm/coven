@@ -17,7 +17,13 @@ pub(crate) async fn prepare_store_operation_candidate_common(
     storage: &dyn SyncStorage,
     plan: &StoreOperationPlanCommon,
     batch: StoreOperationBatch,
-) -> Result<PreparedStoreOperationCommon, StoreError> {
+) -> Result<
+    (
+        PreparedStoreOperationCommon,
+        crate::sync::store_commit::VerifiedStoreBatchCommit,
+    ),
+    StoreError,
+> {
     let store_root_hash = plan.root.store_root_hash;
     let registration_activation = match &batch {
         StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
@@ -259,13 +265,22 @@ pub(crate) async fn prepare_store_operation_candidate_common(
     let prepared = storage
         .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
         .map_err(StoreObjectError::from)?;
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, plan.coord.clone(), prepared.reference().clone())
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    Ok(PreparedStoreOperationCommon {
-        commit,
-        prepared,
-        reference: commit_ref,
-        registration_activation,
-    })
+    let verified = crate::sync::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+        &commit.to_bytes(),
+        store_root_hash,
+        plan.coord.clone(),
+        prepared.reference().clone(),
+        &plan.registration,
+    )
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let reference = verified.reference().clone();
+    Ok((
+        PreparedStoreOperationCommon {
+            commit,
+            prepared,
+            reference,
+            registration_activation,
+        },
+        verified,
+    ))
 }

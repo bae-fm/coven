@@ -21,10 +21,10 @@ use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects,
-    CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreOperationMembershipAuthority,
-    StoreRootRef, StreamActivation, StreamAnchorDomain, SuccessorLink,
+    CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreCommitCoord,
+    StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreOperationMembershipAuthority, StoreRootRef, StreamActivation,
+    StreamAnchorDomain, SuccessorLink,
 };
 
 pub(super) fn verify_prepared_objects_are_signed(
@@ -1957,16 +1957,20 @@ pub(super) async fn prepare_circle_operation_request(
             commit.to_bytes(),
         )
         .await?;
-        let commit_ref =
-            StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let verified_commit = crate::sync::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+            &commit.to_bytes(),
+            store_root_hash,
+            coord,
+            commit_prepared.reference().clone(),
+            &author,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let commit_ref = verified_commit.reference().clone();
         let history_summary = crate::sync::store::pull::prepare_merge_history_successor(
             database,
             &root,
-            &commit,
-            &commit_ref,
+            &verified_commit,
             &exact,
-            &author,
             None,
             resolved_devices,
             crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),

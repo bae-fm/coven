@@ -195,7 +195,7 @@ pub(crate) async fn prepare_candidate_borrowed(
         ),
         _ => None,
     };
-    let common =
+    let (common, verified_commit) =
         prepare_store_operation_candidate_common(db, storage, plan.common(), batch).await?;
     let acknowledgement = match acknowledgement_evidence {
         Some((reference, value)) => Some(
@@ -255,10 +255,8 @@ pub(crate) async fn prepare_candidate_borrowed(
     let successor = super::pull::prepare_merge_history_successor(
         database,
         plan.root(),
-        &common.commit,
-        &common.reference,
+        &verified_commit,
         plan.membership(),
-        plan.registration(),
         None,
         state_after,
         merge_history_evidence,

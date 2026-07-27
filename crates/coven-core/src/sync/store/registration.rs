@@ -1156,10 +1156,8 @@ pub async fn recover_owner_device(
     let history = crate::sync::store::pull::prepare_merge_history_successor(
         database,
         &root,
-        &commit,
-        &commit_ref,
+        &verified_commit,
         membership,
-        &registration,
         Some(&registration_ref),
         state_after,
         crate::sync::store::pull::MergeHistorySuccessorEvidence {
