@@ -1,17 +1,18 @@
 # Storage
 
 coven syncs over a [`CloudHome`](rustdoc:trait:coven::storage::cloud::CloudHome):
-a small trait that moves opaque encrypted bytes between a device and storage the
-user already controls. coven owns encryption, the key layout, and retry; the
-trait is the raw byte boundary below all of that. A `CloudHome` never sees
-plaintext, never assigns sequence numbers, and never coordinates concurrent
-writers. It reads, writes, lists, and deletes objects addressed by a flat string
-key.
+a trait that moves opaque encrypted bytes between a device and storage the user
+already controls. coven owns encryption, the key layout, ordering, and retry.
+A `CloudHome` never sees plaintext and never assigns protocol sequence numbers
+or coordinates a global transaction order.
 
-That byte interface is the whole boundary. coven's protocol writes only
-immutable objects and never overwrites one, so a `CloudHome` never assigns
-sequence numbers, coordinates concurrent writers, or offers a conditional write
-— there is no mutable global head anywhere for it to guard.
+The provider boundary has two parts: `CloudHome` supplies flat-key byte
+operations, while
+[`ExactSlotStorage`](rustdoc:trait:coven::storage::cloud::ExactSlotStorage),
+which every sync home must also supply, allocates a provider-specific location
+before publication and creates it once. A second create at that location must
+report `AlreadyExists`, never replace the first object. This is collision
+safety for immutable objects, not a mutable global head.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
@@ -26,14 +27,14 @@ sequence numbers, coordinates concurrent writers, or offers a conditional write
 <line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
 <text class="lbl s11" x="330" y="158" text-anchor="middle">CloudHome</text>
-<text class="sub" x="330" y="172" text-anchor="middle">bytes by key: put_object · open_multipart · read · list · delete</text>
+<text class="sub" x="330" y="172" text-anchor="middle">bytes by key · create-once exact slots · provider access</text>
 <line class="arr" x1="330" y1="184" x2="330" y2="196" marker-end="url(#fa)"/>
 <text class="sub" x="330" y="208" text-anchor="middle">Google Drive · Dropbox · OneDrive · iCloud · S3</text>
 </svg>
 
 Examples use the todos app. Its encrypted changesets, snapshots, attachment
 blobs, and membership records all land in one cloud home under keys like
-`changes/dev1/42.enc`.
+`store-v1/candidates/<family>/commits/<device>/42/<hash>.json.enc`.
 
 ## What the host configures
 
@@ -53,15 +54,15 @@ keyring").
 
 ## The trait
 
-A rich storage interface would mean five implementations of encryption,
-ordering, and retry, each subtly different, with the bugs living in the
-least-tested backend. So the trait is deliberately dumb. Everything that has
-to be *correct* lives above it, written once; a backend supplies bytes by
-key, plus the two provider-shaped concerns no wrapper can hide (uploads and
-sharing).
+Encryption, protocol ordering, verification, and retry live above the provider
+implementations. A backend supplies bytes by key plus the provider-shaped
+operations no wrapper can manufacture: multipart uploads, create-once exact
+slots, and account access.
 
 ```rust
 pub trait CloudHome: Send + Sync {
+    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>>;
+
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
 
     // Uploads: one bounded request, or a streaming multipart session.
@@ -84,13 +85,33 @@ pub trait CloudHome: Send + Sync {
     async fn set_access(&self, desired: CloudAccessState)
         -> Result<CloudAccessOutcome, CloudHomeError>;
 }
+
+pub trait ExactSlotStorage: Send + Sync {
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CloudHomeError>;
+    async fn cross_principal_evidence(&self)
+        -> Result<CrossPrincipalProviderEvidence, CloudHomeError>;
+    async fn allocate_slot(&self, logical_key: &str)
+        -> Result<ObjectSlot, CloudHomeError>;
+    async fn create_at(&self, slot: &ObjectSlot, body: BlobBody, progress: &UploadProgress<'_>)
+        -> Result<(), CloudHomeError>;
+    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
+    async fn read_range_at(&self, slot: &ObjectSlot, start: u64, end: u64)
+        -> Result<Vec<u8>, CloudHomeError>;
+    async fn read_at_to_file(&self, slot: &ObjectSlot, destination: &Path)
+        -> Result<(), CloudFileReadError>;
+    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
+}
 ```
 
+- `exact_slot_storage` supplies the create-once object operations required by
+  Store commits, heads, membership, snapshots, blobs, and other immutable
+  objects. Sync setup refuses a home that returns `None`.
 - `probe` checks that the backend is reachable with the configured credentials.
   Setup flows call it before persisting credentials, so a typo or a missing
   bucket fails at setup instead of via a delayed reconnect banner. The default
   implementation lists a sentinel prefix; backends override it with a cheaper
-  check (S3 uses `HeadBucket`).
+  check (S3 uses `HeadBucket`). It does not test durability or infer exact-slot
+  behavior from a trial write.
 - A provider implements two raw upload pieces: `put_object`, one bounded
   single-request upload, and `open_multipart`, a streaming session that accepts
   ordered parts. `multipart_threshold` is the cut between them. The provided
@@ -152,8 +173,17 @@ failure crosses this boundary as a sentence a UI can show verbatim.
 ```rust
 pub enum CloudHomeError {
     NotFound(String),
+    AlreadyExists(String),
     Configuration(String),
     Transport(String),
+    CleanupFailed {
+        operation: Box<CloudHomeError>,
+        cleanup: Box<CloudHomeError>,
+    },
+    UnresolvedOutcome {
+        operation: Box<CloudHomeError>,
+        readback: Box<CloudHomeError>,
+    },
     Io(#[from] std::io::Error),
 }
 ```
@@ -161,11 +191,18 @@ pub enum CloudHomeError {
 - `NotFound(key)`: the key is not there. coven uses it for the expected misses
   (no snapshot yet, a blob not uploaded yet), so a host that maps it to a UI
   state matches the variant directly.
+- `AlreadyExists(key)`: an exact slot is occupied. The protocol reads that slot
+  and decides whether the same immutable object completed an earlier attempt or
+  a competing object won it.
 - `Configuration(msg)`: missing or invalid settings, credentials, OAuth
   authorization, or provider capability. Retrying the same request cannot
   succeed until configuration changes.
 - `Transport(msg)`: a backend, network, response, or service failure that may
   succeed when the initiating operation retries.
+- `CleanupFailed`: the primary operation and its required cleanup both failed;
+  neither cause is discarded.
+- `UnresolvedOutcome`: a create lost its response and the exact readback needed
+  to determine the result also failed.
 - `Io`: a local filesystem or I/O failure surfaced from `std::io::Error`.
 
 Each driver classifies the failures a user can act on. For example, S3
@@ -192,6 +229,15 @@ provider transport typed through this boundary.
 Five cloud backends ship, plus an in-memory home for tests. Each maps the same
 flat keys onto its own naming and upload protocol; the differences below are the
 only places a provider deviates from "write opaque bytes by key".
+
+Every built-in backend supplies exact slots internally. AWS S3 is enabled
+directly. A custom S3 endpoint is accepted only when local config sets
+`s3_exact_slots: standard_conditional_requests`, asserting that the endpoint
+implements the standard create-if-absent request semantics. That assertion is
+local operator configuration: invite and restore data cannot enable it on
+another device. Setup still checks that the constructed home exposes the exact
+slot adapter; it does not claim that a reachability probe can prove a
+provider's durability.
 
 - **S3** ([`S3CloudHome`](rustdoc:struct:coven::storage::cloud::s3::S3CloudHome))
   works against any S3-compatible endpoint (AWS, Backblaze B2, Wasabi, MinIO).

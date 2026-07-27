@@ -62,7 +62,9 @@ There is one protocol and no mode to select. Each device keeps one append-only
 commit stream. A commit names its exact predecessor and its materialized
 dependency frontier, so devices publish while offline and pull merges the
 independent streams. Nothing anywhere holds a mutable global head, and no
-provider needs a conditional-write or coordination capability.
+provider coordinates a global transaction order. Storage must provide
+create-once exact object slots so concurrent publishers cannot replace one
+another's protocol objects.
 
 The signed Store protocol root binds the store id, founder, schema version, and
 the immutable schema-routing contract; open, join, and restore verify it before
