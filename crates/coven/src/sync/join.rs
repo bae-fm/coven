@@ -1277,14 +1277,6 @@ pub(crate) async fn open_db_and_pull(
         .await?;
     }
 
-    // Bootstrap installed the snapshot's position vector before pulling anything
-    // above it, and each higher position committed with its rows. Record the remaining
-    // bootstrap marker so the first real cycle treats this device as a joiner,
-    // not a brand-new store that should publish an initial snapshot.
-    db.set_protocol_state("snapshot_seq", "0")
-        .await
-        .map_err(|e| BootstrapError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
-
     Ok(OpenDbPullOutcome {
         changesets_applied: pull_result.changesets_applied,
     })

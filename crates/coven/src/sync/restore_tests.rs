@@ -1236,14 +1236,15 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
     ));
 }
 
-/// Restore bootstrap records the snapshot position before its first real sync
-/// cycle, so that cycle does not replace the shared snapshot as an initial sync.
+/// A restored continuation preserves its imported immutable snapshot generation.
+/// When cadence is already due, the first cycle appends an exact successor
+/// without replacing the imported objects.
 #[tokio::test]
-async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
-    Box::pin(run_restore_first_cycle_does_not_clobber_snapshot()).await;
+async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
+    Box::pin(run_restore_first_cycle_extends_snapshot_stream()).await;
 }
 
-async fn run_restore_first_cycle_does_not_clobber_snapshot() {
+async fn run_restore_first_cycle_extends_snapshot_stream() {
     crate::keys::test_keyring::install();
 
     let store_id = "restore-anti-clobber-test";
@@ -1423,9 +1424,39 @@ async fn run_restore_first_cycle_does_not_clobber_snapshot() {
         .list("store-v1/snapshots/")
         .await
         .expect("list Store snapshot objects");
+    assert!(
+        snapshot_before
+            .iter()
+            .all(|object| snapshot_after.contains(object)),
+        "the restored cycle preserves every imported snapshot object",
+    );
+    let imported_snapshot = expected_latest_snapshot.expect("continued snapshot reference");
+    let (successor_generation, successor_bytes) = db_b
+        .call(|conn| {
+            conn.query_row(
+                "SELECT generation, meta_bytes FROM published_store_snapshot \
+                 ORDER BY generation DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read continued snapshot stream");
+    let successor: crate::sync::store_commit::SnapshotMeta =
+        serde_json::from_slice(&successor_bytes).expect("parse continued snapshot metadata");
     assert_eq!(
-        snapshot_after, snapshot_before,
-        "a restored device's first cycle must not republish/clobber the shared snapshot",
+        u64::try_from(successor_generation).expect("non-negative snapshot generation"),
+        imported_snapshot
+            .generation
+            .checked_add(1)
+            .expect("snapshot generation successor"),
+        "the due snapshot advances exactly one immutable generation",
+    );
+    assert_eq!(
+        successor.predecessor,
+        Some(imported_snapshot),
+        "the due snapshot extends the imported exact generation",
     );
 }
 
