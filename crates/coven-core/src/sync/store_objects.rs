@@ -84,8 +84,7 @@ pub(crate) fn load_provider_access_grant_ref_with_root<'a>(
             reference.grant_hash,
             move |bytes| {
                 let grant: super::provider::StoreMemberProviderAccessGrant =
-                    serde_json::from_slice(bytes)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    decode_protocol_object(bytes)?;
                 expected
                     .verify(&grant)
                     .and_then(|()| grant.verify(&store, &administrator))
@@ -124,6 +123,23 @@ pub async fn create_exact_object(
 ) -> Result<ExactObjectRef, StoreObjectError> {
     storage.create_protocol_object(prepared).await?;
     Ok(prepared.reference().clone())
+}
+
+/// Decode the JSON body of one protocol object. Bytes that do not parse as `T`
+/// are malformed for the slot they were read from.
+fn decode_protocol_object<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, StoreProtocolError> {
+    serde_json::from_slice(bytes).map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+}
+
+/// Reject an object that names a different Store root than the one it was read
+/// under.
+fn verify_store_root(expected: ObjectHash, actual: ObjectHash) -> Result<(), StoreProtocolError> {
+    if actual != expected {
+        return Err(StoreProtocolError::StoreRootMismatch { expected, actual });
+    }
+    Ok(())
 }
 
 /// Open one supplied exact reference and verify its typed semantic contents.
@@ -410,14 +426,8 @@ pub async fn load_device_join_outcome_ref(
         &semantic_prefix,
         expected_hash,
         move |bytes| {
-            let outcome: DeviceJoinOutcome = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            if outcome.store_root_hash != expected_store_root_hash {
-                return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: expected_store_root_hash,
-                    actual: outcome.store_root_hash,
-                });
-            }
+            let outcome: DeviceJoinOutcome = decode_protocol_object(bytes)?;
+            verify_store_root(expected_store_root_hash, outcome.store_root_hash)?;
             outcome
                 .owner_registration
                 .verify_registration(&expected_owner)?;
@@ -458,15 +468,9 @@ pub async fn load_device_exclusion_proposal_ref(
         &semantic_prefix,
         reference.proposal_hash,
         move |bytes| {
-            let proposal: StoreDeviceExclusionProposal = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let proposal: StoreDeviceExclusionProposal = decode_protocol_object(bytes)?;
             expected.verify_proposal(&proposal)?;
-            if proposal.store_root_hash != expected_store_root_hash {
-                return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: expected_store_root_hash,
-                    actual: proposal.store_root_hash,
-                });
-            }
+            verify_store_root(expected_store_root_hash, proposal.store_root_hash)?;
             Ok(proposal)
         },
     )
@@ -518,8 +522,7 @@ pub async fn load_device_exclusion_outcome_ref(
         &semantic_prefix,
         reference.outcome_hash(),
         move |bytes| {
-            let outcome: StoreDeviceExclusionOutcome = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let outcome: StoreDeviceExclusionOutcome = decode_protocol_object(bytes)?;
             if outcome.outcome_hash() != expected.outcome_hash()
                 || outcome.proposal() != expected.proposal()
             {
@@ -602,15 +605,9 @@ pub async fn load_reclaim_authorization_ref(
         &evidence_prefix,
         reference.evidence.evidence_hash,
         move |bytes| {
-            let evidence: super::store::ReclaimEvidence = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let evidence: super::store::ReclaimEvidence = decode_protocol_object(bytes)?;
             expected_evidence.verify(&evidence)?;
-            if evidence.store_root_hash != expected_store_root_hash {
-                return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: expected_store_root_hash,
-                    actual: evidence.store_root_hash,
-                });
-            }
+            verify_store_root(expected_store_root_hash, evidence.store_root_hash)?;
             Ok(evidence)
         },
     )
@@ -631,16 +628,9 @@ pub async fn load_reclaim_authorization_ref(
         &authorization_prefix,
         reference.authorization_hash,
         move |bytes| {
-            let authorization: super::store::ReclaimAuthorization =
-                serde_json::from_slice(bytes)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let authorization: super::store::ReclaimAuthorization = decode_protocol_object(bytes)?;
             expected_authorization.verify(&authorization, &owner_pubkey)?;
-            if authorization.store_root_hash != expected_store_root_hash {
-                return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: expected_store_root_hash,
-                    actual: authorization.store_root_hash,
-                });
-            }
+            verify_store_root(expected_store_root_hash, authorization.store_root_hash)?;
             Ok(authorization)
         },
     )
@@ -691,12 +681,7 @@ pub async fn load_reclaim_receipt_ref(
     let receipt = reference
         .verify(&unverified, &executor)
         .and_then(|()| {
-            if unverified.store_root_hash != store_root.store_root_hash {
-                return Err(StoreProtocolError::StoreRootMismatch {
-                    expected: store_root.store_root_hash,
-                    actual: unverified.store_root_hash,
-                });
-            }
+            verify_store_root(store_root.store_root_hash, unverified.store_root_hash)?;
             Ok(unverified)
         })
         .map_err(|source| StoreObjectError::InvalidObject {
@@ -1061,8 +1046,7 @@ pub async fn load_membership_entry_ref(
         &semantic_prefix,
         coord.entry_hash,
         move |bytes| {
-            let entry: MembershipEntry = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let entry: MembershipEntry = decode_protocol_object(bytes)?;
             if entry.coord() != expected_coord
                 || !super::membership::verify_membership_entry(&entry)
             {
@@ -1109,8 +1093,7 @@ pub async fn load_membership_head_ref(
         semantic_prefix,
         reference.head_hash,
         move |bytes| {
-            let head: AuthorHead = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let head: AuthorHead = decode_protocol_object(bytes)?;
             if head.entry_coord() != expected_coord
                 || head.head_hash() != expected_head_hash
                 || !head.verify(&expected_registration)
@@ -1147,8 +1130,7 @@ pub async fn load_membership_resolution_ref(
         &semantic_prefix,
         reference.resolution_hash,
         move |bytes| {
-            let resolution: StoreMembershipConflictResolution = serde_json::from_slice(bytes)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            let resolution: StoreMembershipConflictResolution = decode_protocol_object(bytes)?;
             if resolution.store_root_hash != store_root_hash
                 || resolution.conflict_hash != expected.conflict_hash
                 || resolution.resolver_pubkey != expected.resolver_pubkey
