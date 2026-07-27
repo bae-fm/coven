@@ -1248,6 +1248,14 @@ pub(crate) async fn bootstrap_pending_device(
     }
     let attempt = verified_attempt.value;
     let activation_stream = attempt_activation.coord.stream_id.to_string();
+    let verified_activation = bootstrap_plan
+        .verified_commit(&attempt_activation)
+        .cloned()
+        .ok_or_else(|| {
+            StoreRegistrationError::Invalid(
+                "device join bootstrap omits its attempt activation".to_string(),
+            )
+        })?;
     Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
         .await
         .map_err(database_error)?;
@@ -1261,14 +1269,8 @@ pub(crate) async fn bootstrap_pending_device(
     {
         return Err(StoreRegistrationError::ActivationRequired);
     }
-    let (activation_commit, activation_author) =
-        Box::pin(crate::sync::store::pull::load_commit_with_author(
-            storage,
-            &attempt.store_root,
-            &attempt_activation,
-        ))
-        .await?;
-    if activation_author != *owner
+    let activation_commit = verified_activation.value();
+    if verified_activation.author() != owner
         || activation_commit.author_registration != attempt.owner_registration
         || !activation_commit
             .device_join_attempt_decisions()

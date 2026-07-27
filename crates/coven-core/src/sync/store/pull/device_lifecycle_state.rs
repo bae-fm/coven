@@ -22,6 +22,18 @@ pub(crate) struct DeviceJoinBootstrapPlan {
     pub commits: Vec<DeviceJoinBootstrapCommit>,
 }
 
+impl DeviceJoinBootstrapPlan {
+    pub(crate) fn verified_commit(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&VerifiedStoreBatchCommit> {
+        self.commits
+            .iter()
+            .find(|commit| &commit.reference == reference)
+            .map(|commit| &commit.commit)
+    }
+}
+
 pub(crate) fn history_cut_references(cut: &StoreHistoryCut) -> Vec<StoreBatchCommitRef> {
     cut.0.values().cloned().collect()
 }

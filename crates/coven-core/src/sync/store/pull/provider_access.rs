@@ -392,13 +392,20 @@ mod tests {
         )
         .await
         .expect("load bootstrap attempt");
-        let references = attempt
+        let mut references = attempt
             .value
             .bootstrap_cut
             .0
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        references.push(
+            provider_ready
+                .bootstrap
+                .publication_authorization
+                .attempt_activation
+                .clone(),
+        );
         let audit =
             crate::sync::store_commit::StoreCommitVerificationAudit::begin(references.as_slice());
         let joining_database = StoreDatabase::new(&joining_db);
