@@ -12,7 +12,6 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::blob::retry::entry_in_backoff;
 use crate::blob::BlobTransitionObserver;
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation, OutboxUploadState};
@@ -211,7 +210,14 @@ pub async fn drain_uploads(
     // the finalizer reads every row-version journal in one transaction and flips
     // only when all are Created.
     let limit = db.transfer_limits().uploads.get();
-    let mut pending = uploads.into_iter();
+    let mut pending = uploads
+        .into_iter()
+        .map(|entry| {
+            crate::blob::retry::entry_in_backoff(&entry, now).map(|in_backoff| (entry, in_backoff))
+        })
+        .collect::<Result<Vec<_>, DbError>>()?
+        .into_iter()
+        .filter_map(|(entry, in_backoff)| (!in_backoff).then_some(entry));
     let mut inflight = FuturesUnordered::new();
     // Set once a pause is seen or a make_remote completes: stop admitting new
     // uploads while letting those already in flight finish (never aborting them).
@@ -229,10 +235,7 @@ pub async fn drain_uploads(
                     break;
                 }
             }
-            // Pull the next entry outside its retry backoff window; entries still
-            // inside it are skipped this pass (a poisoned entry isn't re-attempted
-            // every cycle).
-            let Some(entry) = next_ready_entry(&mut pending, now) else {
+            let Some(entry) = pending.next() else {
                 break;
             };
             inflight.push(upload_entry(
@@ -290,15 +293,6 @@ enum EntryOutcome {
         made_remote: bool,
         created_this_pass: bool,
     },
-}
-
-/// The next queued entry ready to attempt now — skipping any still inside its
-/// backoff window — or `None` when the queue is exhausted.
-fn next_ready_entry(
-    pending: &mut std::vec::IntoIter<OutboxEntry>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<OutboxEntry> {
-    pending.by_ref().find(|entry| !entry_in_backoff(entry, now))
 }
 
 #[allow(clippy::too_many_arguments)]

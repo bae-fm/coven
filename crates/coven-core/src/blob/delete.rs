@@ -303,7 +303,14 @@ async fn drain_tombstones_inner(
     let now_rfc = now.to_rfc3339();
     let suffix = cipher.snapshot().suffix();
     let mut count = 0;
-    for entry in deletes {
+    let scheduled_deletes = deletes
+        .into_iter()
+        .map(|entry| {
+            crate::blob::retry::entry_in_backoff(&entry, now).map(|in_backoff| (entry, in_backoff))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read delete retry schedule: {error}"))?;
+    for (entry, in_backoff) in scheduled_deletes {
         let OutboxOperation::Delete { stored } = &entry.operation else {
             return Err(format!(
                 "pending delete query returned non-delete outbox entry {}",
@@ -311,7 +318,7 @@ async fn drain_tombstones_inner(
             ));
         };
         let cloud_key = stored_cloud_key(stored);
-        if crate::blob::retry::entry_in_backoff(&entry, now) {
+        if in_backoff {
             continue;
         }
 

@@ -3,8 +3,7 @@
 //! ([`crate::blob::delete`]) — so a row's retry schedule does not depend on which
 //! operation it carries.
 
-use tracing::warn;
-
+use crate::database::DbError;
 use crate::db::OutboxEntry;
 
 /// Minimum delay before a failed outbox entry is retried, keyed on its prior
@@ -22,31 +21,23 @@ pub(super) fn backoff_window(attempt_count: i64) -> chrono::Duration {
 }
 
 /// Whether `entry` is still inside its retry backoff window and must be skipped
-/// this pass.
-///
-/// An unparseable `last_attempt_at` is logged and the entry treated as due: the
-/// timestamp is local retry bookkeeping, not the deletion or upload intent, so a
-/// corrupt one must not decide anything. Treating it as due rewrites it on the
-/// next attempt, which clears the corruption through the ordinary path — and,
-/// because a drain walks its queue in order, refusing the row instead would
-/// strand every entry queued behind it for as long as the corruption lasts.
-pub(super) fn entry_in_backoff(entry: &OutboxEntry, now: chrono::DateTime<chrono::Utc>) -> bool {
+/// this pass. A malformed durable timestamp makes that decision unknowable, so
+/// the caller must stop before performing remote effects.
+pub(super) fn entry_in_backoff(
+    entry: &OutboxEntry,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, DbError> {
     let Some(last) = entry.last_attempt_at.as_deref() else {
-        return false;
+        return Ok(false);
     };
-    match chrono::DateTime::parse_from_rfc3339(last) {
-        Ok(last_dt) => {
-            let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-            elapsed < backoff_window(entry.attempt_count)
-        }
-        Err(e) => {
-            warn!(
-                "Outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                entry.id
-            );
-            false
-        }
-    }
+    let last_dt = chrono::DateTime::parse_from_rfc3339(last).map_err(|error| {
+        DbError::Message(format!(
+            "outbox entry {} has unparseable last_attempt_at {last:?}: {error}",
+            entry.id
+        ))
+    })?;
+    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+    Ok(elapsed < backoff_window(entry.attempt_count))
 }
 
 #[cfg(test)]

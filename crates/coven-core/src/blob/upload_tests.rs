@@ -703,6 +703,66 @@ async fn backoff_skips_item_inside_window() {
 }
 
 #[tokio::test]
+async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
+    let fixture = upload_fixture(1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(
+        &fixture,
+        &store_dir,
+        &[("healthy1", b"healthy"), ("badtime1", b"corrupt")],
+        false,
+    )
+    .await;
+    let entry = journal(&fixture, "badtime1").await;
+    let entry_id = entry.id;
+    fixture
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE cloud_outbox
+                 SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
+                 WHERE id = ?1 AND operation = 'upload'",
+                [entry_id],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("corrupt last_attempt_at");
+
+    let result = run_drain(
+        &fixture,
+        &store_dir,
+        &fixed_clock("2024-06-01T00:00:10Z"),
+        None,
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("a corrupt retry timestamp must fail the drain"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unparseable last_attempt_at"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture.home.create_calls(),
+        0,
+        "the corrupt entry produces no remote effect",
+    );
+    assert_eq!(
+        journal_attempt(&fixture, "badtime1").await.0,
+        1,
+        "the corrupt journal row remains unchanged",
+    );
+    assert_eq!(
+        journal_attempt(&fixture, "healthy1").await.0,
+        0,
+        "the earlier healthy journal row remains unchanged",
+    );
+}
+
+#[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
     let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();

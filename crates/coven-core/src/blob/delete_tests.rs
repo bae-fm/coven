@@ -1008,11 +1008,11 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 }
 
-/// An unparseable `last_attempt_at` is no retry decision at all, so the row is
-/// due now: it drains, and its rewritten timestamp clears the corruption through
-/// the normal path. A corrupt row never gates the rows queued behind it.
+/// A corrupt durable retry timestamp makes the schedule unknowable. The drain
+/// fails before any remote effect or journal mutation rather than treating the
+/// entry as due and overwriting the evidence.
 #[tokio::test]
-async fn corrupt_delete_backoff_timestamp_drains_and_does_not_strand_siblings() {
+async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
     tokio::task::LocalSet::new()
         .run_until(async {
             tokio::task::spawn_local(async {
@@ -1048,12 +1048,13 @@ async fn corrupt_delete_backoff_timestamp_case() {
     Box::pin(enqueue_delete(&db, &corrupt, T0)).await;
     Box::pin(enqueue_delete(&db, &healthy, T0)).await;
 
-    // Row 1 carries an attempt count, so a *parseable* recent timestamp would
-    // hold it inside its backoff window; the unparseable one must not.
+    // The later row carries an attempt count, so a *parseable* recent timestamp
+    // would hold it inside its backoff window. Its corruption must be found
+    // before the earlier healthy row produces a remote effect.
     Box::pin(db.call(|conn| {
         conn.execute(
             "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1 \
-             WHERE id = 1 AND operation = 'delete'",
+             WHERE id = 2 AND operation = 'delete'",
             [],
         )
         .map(|_| ())
@@ -1063,7 +1064,7 @@ async fn corrupt_delete_backoff_timestamp_case() {
     .expect("corrupt last_attempt_at");
 
     let clock = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = Box::pin(drain_tombstones(
+    let error = Box::pin(drain_tombstones(
         &db,
         cloud,
         &cipher,
@@ -1073,23 +1074,23 @@ async fn corrupt_delete_backoff_timestamp_case() {
         &clock,
     ))
     .await
-    .expect("a corrupt retry timestamp does not fail the drain");
-    assert_eq!(n, 2, "both deletes drain");
+    .expect_err("a corrupt retry timestamp fails the drain");
+    assert!(error.contains("unparseable last_attempt_at"), "{error}");
     assert!(
-        cloud.get(&exact_tombstone_key(&corrupt)).is_some(),
-        "the row with the corrupt timestamp is treated as due and writes its tombstone",
+        cloud.get(&exact_tombstone_key(&corrupt)).is_none(),
+        "the corrupt entry produces no remote effect",
     );
     assert!(
-        cloud.get(&exact_tombstone_key(&healthy)).is_some(),
-        "the healthy row queued behind it is not stranded",
+        cloud.get(&exact_tombstone_key(&healthy)).is_none(),
+        "the drain stops before later entries",
     );
     assert!(
-        Box::pin(get_delete(&db, 1)).await.is_none(),
-        "the drained corrupt row is cleared",
+        Box::pin(get_delete(&db, 1)).await.is_some(),
+        "the earlier healthy journal row remains unchanged",
     );
     assert!(
-        Box::pin(get_delete(&db, 2)).await.is_none(),
-        "the drained healthy row is cleared",
+        Box::pin(get_delete(&db, 2)).await.is_some(),
+        "the corrupt journal row remains unchanged",
     );
 }
 
