@@ -140,7 +140,6 @@ impl StoreDeviceRegistrationRef {
         {
             return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
                 device_id: self.device_id.to_string(),
-                revision: 1,
                 expected: self.registration_hash,
                 actual: registration.registration_hash(),
             });

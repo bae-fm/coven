@@ -871,8 +871,7 @@ impl StoreDeviceExclusionProposal {
         target: &StoreDeviceRegistration,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let proposal: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let proposal: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(proposal.version)?;
         expected.verify_proposal(&proposal)?;
         proposal.target.verify_registration(target)?;
@@ -1088,8 +1087,7 @@ impl StoreDeviceExclusionOutcome {
         target: &StoreDeviceRegistration,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let outcome: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let outcome: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         if outcome.proposal().proposal_id != proposal.proposal_id
             || outcome.proposal().proposal_hash != proposal.proposal_hash()
             || outcome.proposal().target != proposal.target
@@ -1255,7 +1253,6 @@ impl ResolvedStoreDeviceState {
         if self.devices.contains_key(&registration.device_id) {
             return Err(StoreProtocolError::DuplicateDeviceRegistration {
                 device_id: registration.device_id.to_string(),
-                revision: 1,
             });
         }
         let mut devices = self.devices.clone();

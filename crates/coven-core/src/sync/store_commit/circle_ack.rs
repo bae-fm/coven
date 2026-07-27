@@ -123,8 +123,7 @@ impl CircleAck {
     }
 
     pub fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
-        let ack: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let ack: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         Ok(ack.ack_hash())
     }
 
@@ -141,8 +140,7 @@ impl CircleAck {
         expected: &CircleAckRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let ack: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let ack: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(ack.version)?;
         crate::sync::store_objects::verify_store_root(
             expected_store_root.store_root_hash,
@@ -152,7 +150,6 @@ impl CircleAck {
         if ack.registration != expected.registration {
             return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
                 device_id: expected.registration.device_id.to_string(),
-                revision: 1,
                 expected: expected.registration.registration_hash,
                 actual: ack.registration.registration_hash,
             });

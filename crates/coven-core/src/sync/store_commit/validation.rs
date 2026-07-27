@@ -45,14 +45,11 @@ pub enum StoreProtocolError {
     EmptyBatch,
     #[error("Store batch has no Store package")]
     MissingStorePackage,
-    #[error("Store batch repeats Store device registration {device_id:?} revision {revision}")]
-    DuplicateDeviceRegistration { device_id: String, revision: u64 },
-    #[error(
-        "Store device registration {device_id:?} revision {revision} has hash {actual}, expected {expected}"
-    )]
+    #[error("Store batch repeats Store device registration {device_id:?}")]
+    DuplicateDeviceRegistration { device_id: String },
+    #[error("Store device registration {device_id:?} has hash {actual}, expected {expected}")]
     DeviceRegistrationRefMismatch {
         device_id: String,
-        revision: u64,
         expected: ObjectHash,
         actual: ObjectHash,
     },

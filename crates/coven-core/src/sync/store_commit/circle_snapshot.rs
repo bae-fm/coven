@@ -148,8 +148,7 @@ impl CircleSnapshotMeta {
     }
 
     pub fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
-        let meta: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let meta: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         Ok(meta.snapshot_hash())
     }
 
@@ -169,8 +168,7 @@ impl CircleSnapshotMeta {
         expected: &CircleSnapshotRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let meta: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let meta: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(meta.version)?;
         crate::sync::store_objects::verify_store_root(
             expected_store_root_hash,

@@ -92,8 +92,7 @@ impl StoreDeviceHead {
         expected_registration: &StoreDeviceRegistration,
         expected_ref: &StoreBatchCommitRef,
     ) -> Result<Self, StoreProtocolError> {
-        let head: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let head: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(head.version)?;
         crate::sync::store_objects::verify_store_root(
             expected_store_root_hash,

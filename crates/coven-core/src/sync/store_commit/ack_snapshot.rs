@@ -156,8 +156,7 @@ impl StoreAck {
     }
 
     pub fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
-        let ack: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let ack: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         Ok(ack.ack_hash())
     }
 
@@ -167,8 +166,7 @@ impl StoreAck {
         expected: &StoreAckRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let ack: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let ack: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(ack.version)?;
         crate::sync::store_objects::verify_store_root(
             expected_store_root.store_root_hash,
@@ -178,7 +176,6 @@ impl StoreAck {
         if ack.registration != expected.registration {
             return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
                 device_id: expected.registration.device_id.to_string(),
-                revision: 1,
                 expected: expected.registration.registration_hash,
                 actual: ack.registration.registration_hash,
             });
@@ -361,8 +358,7 @@ impl SnapshotMeta {
     }
 
     pub fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
-        let meta: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let meta: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         Ok(meta.snapshot_hash())
     }
 
@@ -376,8 +372,7 @@ impl SnapshotMeta {
         expected: &StoreSnapshotRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let meta: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let meta: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(meta.version)?;
         crate::sync::store_objects::verify_store_root(
             expected_store_root_hash,

@@ -965,8 +965,7 @@ impl StoreBatchCommit {
         expected_coord: &StoreCommitCoord,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let commit: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let commit: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         commit.verify_at(expected_store_root_hash, expected_coord, author)?;
         Ok(commit)
     }

@@ -8,7 +8,6 @@ pub(super) fn validate_device_registration_refs(
         if !seen.insert(activation.registration.device_id) {
             return Err(StoreProtocolError::DuplicateDeviceRegistration {
                 device_id: activation.registration.device_id.to_string(),
-                revision: 1,
             });
         }
     }

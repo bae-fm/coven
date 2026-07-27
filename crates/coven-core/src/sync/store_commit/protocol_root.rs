@@ -96,8 +96,7 @@ impl StoreProtocolRoot {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, StoreProtocolError> {
-        let store_protocol_root: Self = serde_json::from_slice(bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let store_protocol_root: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
         require_version(store_protocol_root.descriptor.version)?;
         store_protocol_root.validate_descriptor()?;
         if !keys::verify_signature_hex(

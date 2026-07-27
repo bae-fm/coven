@@ -127,7 +127,7 @@ pub async fn create_exact_object(
 
 /// Decode the JSON body of one protocol object. Bytes that do not parse as `T`
 /// are malformed for the slot they were read from.
-fn decode_protocol_object<T: serde::de::DeserializeOwned>(
+pub(crate) fn decode_protocol_object<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<T, StoreProtocolError> {
     serde_json::from_slice(bytes).map_err(|error| StoreProtocolError::Malformed(error.to_string()))
