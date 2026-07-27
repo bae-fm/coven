@@ -480,7 +480,8 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         None,
     )
     .await
-    .expect("materialize pre-exclusion snapshot coverage on peer");
+    .expect("materialize pre-exclusion snapshot coverage on peer")
+    .result;
     assert!(peer_pull.held_positions.is_empty());
     for (database, timestamp) in [
         (&owner_db, "2026-07-18T00:00:01Z"),
@@ -2546,7 +2547,8 @@ async fn pull_peer_exclusion(
         None,
     ))
     .await
-    .expect("pull peer exclusion");
+    .expect("pull peer exclusion")
+    .result;
     let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
         matches!(
             pull.held_positions.as_slice(),

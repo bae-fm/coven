@@ -173,6 +173,13 @@ struct LoadedMergePredecessorMemberships {
     by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct StorePullExecution {
+    pub result: StorePullResult,
+    pub membership: MembershipChain,
+}
+
 impl LoadedMergePredecessorMemberships {
     fn membership_for(
         &self,
@@ -193,7 +200,7 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
-        let result = pull_store_commits(
+        let execution = pull_store_commits(
             self.database(),
             self.db().synced_tables(),
             self.storage(),
@@ -205,8 +212,8 @@ impl AuthorizedStore<'_> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
-        self.refresh_membership().await?;
-        Ok(result)
+        self.adopt_verified_membership(execution.membership);
+        Ok(execution.result)
     }
 
     pub(crate) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
@@ -225,7 +232,7 @@ pub fn pull_store_commits<'a>(
     membership: &'a crate::sync::membership::MembershipChain,
     identity: Option<&'a UserKeypair>,
     routing_encryption: Option<&'a crate::encryption::EncryptionService>,
-) -> Pin<Box<dyn Future<Output = Result<StorePullResult, StorePullError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<StorePullExecution, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
         let db = database.sqlite();
         let root = required_pull_root(database, store_root_hash).await?;
@@ -540,6 +547,7 @@ pub fn pull_store_commits<'a>(
         let mut changesets_applied = 0_u64;
         let mut asset_downloads_failed = false;
         let mut blocked = BTreeMap::new();
+        let mut latest_membership = membership.clone();
 
         loop {
             let mut progressed = false;
@@ -605,7 +613,7 @@ pub fn pull_store_commits<'a>(
                             &candidate,
                             &loaded_predecessor_memberships,
                             identity,
-                            membership,
+                            &mut latest_membership,
                             routing_key.as_ref(),
                         ))
                         .await?
@@ -658,15 +666,18 @@ pub fn pull_store_commits<'a>(
         let devices_pulled = u64::try_from(applied_devices.len())
             .map_err(|_| StorePullError::Database("pulled device count exceeds u64".to_string()))?;
 
-        Ok(StorePullResult {
-            changesets_applied,
-            devices_pulled,
-            held_positions: held,
-            visible_heads,
-            row_changes,
-            asset_downloads_failed,
-            local_blob_cleanup_pending,
-            frontier,
+        Ok(StorePullExecution {
+            result: StorePullResult {
+                changesets_applied,
+                devices_pulled,
+                held_positions: held,
+                visible_heads,
+                row_changes,
+                asset_downloads_failed,
+                local_blob_cleanup_pending,
+                frontier,
+            },
+            membership: latest_membership,
         })
     })
 }

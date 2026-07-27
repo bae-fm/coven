@@ -478,9 +478,11 @@ impl AuthorizedStore<'_> {
         &self.membership
     }
 
-    pub(super) async fn refresh_membership(&mut self) -> Result<(), SyncCycleFailure> {
-        self.membership = load_authorized_membership(&self.access).await?;
-        Ok(())
+    pub(super) fn adopt_verified_membership(
+        &mut self,
+        membership: crate::sync::membership::MembershipChain,
+    ) {
+        self.membership = membership;
     }
 
     pub(crate) fn storage(&self) -> &dyn SyncStorage {

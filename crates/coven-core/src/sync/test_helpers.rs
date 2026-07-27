@@ -1501,7 +1501,8 @@ pub fn install_active_device_fixture<'a>(
             Some(&routing_encryption),
         ))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .result;
         if !bootstrap_pull.held_positions.is_empty() {
             return Err(format!(
                 "device join bootstrap pull held signed positions: {:?}",
@@ -2395,7 +2396,8 @@ pub async fn pull_into_result(
         None,
         Some(&routing_encryption),
     ))
-    .await?;
+    .await?
+    .result;
     let sequences = result
         .frontier
         .iter()

@@ -378,6 +378,7 @@ async fn pull_scoped(
     )
     .await
     .expect("pull scoped replay Store")
+    .result
 }
 
 async fn pull_scoped_with(
@@ -400,6 +401,7 @@ async fn pull_scoped_with(
         Some(&routing),
     )
     .await
+    .map(|execution| execution.result)
 }
 
 fn exact_circle_package_slot(commit: &StoreBatchCommit) -> crate::storage::cloud::ObjectSlot {
@@ -1544,7 +1546,8 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         None,
     ))
     .await
-    .expect("pull candidate Owner to the common Store history");
+    .expect("pull candidate Owner to the common Store history")
+    .result;
     assert!(candidate_pull.held_positions.is_empty());
 
     let earlier_db = &candidate_db;

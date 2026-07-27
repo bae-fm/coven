@@ -1411,10 +1411,10 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 }
 
 /// One sync cycle traverses each exact membership stream once. The chain is loaded
-/// and anchored a single time at the top of the cycle and threaded to every
-/// authorization site — the refresh, the pull, the outgoing write-grant, the
-/// snapshot-author check, and the tombstone GC — so the whole cycle judges one
-/// chain state. The storage wrapper counts exact membership-head slot reads.
+/// and anchored at the top of the cycle. Pull advances that chain from membership
+/// controls it has already verified and materialized, then threads the result to
+/// post-pull authorization sites without another storage traversal. The storage
+/// wrapper counts exact membership-head slot reads.
 ///
 /// Mutation proof: route any of those sites through its own membership load and
 /// the count rises above the exact traversal count.

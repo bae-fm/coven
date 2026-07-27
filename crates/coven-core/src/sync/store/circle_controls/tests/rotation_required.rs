@@ -700,7 +700,8 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         Some(&routing),
     )
     .await
-    .expect("pull the close outcome as the removed member");
+    .expect("pull the close outcome as the removed member")
+    .result;
     assert!(
         !member_pull
             .frontier
@@ -1597,7 +1598,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         Some(&routing),
     )
     .await
-    .expect("the restored device pulls the close without a foreign-key violation");
+    .expect("the restored device pulls the close without a foreign-key violation")
+    .result;
     assert!(
         pull.held_positions.is_empty(),
         "the restored device holds no positions after the close: {:?}",

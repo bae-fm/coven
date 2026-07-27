@@ -1278,7 +1278,7 @@ pub(crate) async fn open_db_and_pull(
     }
 
     Ok(OpenDbPullOutcome {
-        changesets_applied: pull_result.changesets_applied,
+        changesets_applied: pull_result.result.changesets_applied,
     })
 }
 

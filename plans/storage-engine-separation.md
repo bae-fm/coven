@@ -103,9 +103,10 @@ This ownership work completes the Store foundation required by
 - Complete: per-cycle membership/key refresh is owned by authorized Store
   membership, and atomic snapshot-cut capture is owned by the authorized Store
   snapshot subsystem. Cycle invokes both operations without assembling their
-  authority or reaching into Store database state. A successful pull reloads
-  the authorized Store's membership before any post-pull publication, so a
-  removal discovered by pull cannot leave snapshot or write authority stale.
+  authority or reaching into Store database state. A successful pull advances
+  the authorized Store's membership from the membership controls it verified
+  and materialized, without a second storage traversal, so a removal discovered
+  by pull cannot leave snapshot or write authority stale.
 - Complete: the loaded Store owns remote blocked-write discard through
   abandonment, cleanup, and the final atomic local reversal. The application
   handle retains the offline local-only discard attempt, but it neither

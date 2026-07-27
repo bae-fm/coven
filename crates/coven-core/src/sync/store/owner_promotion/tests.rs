@@ -92,7 +92,8 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         None,
     )
     .await
-    .expect("pull second Owner through the first promotion");
+    .expect("pull second Owner through the first promotion")
+    .result;
     assert!(pull.held_positions.is_empty());
 
     crate::sync::test_helpers::promote_active_member_fixture(

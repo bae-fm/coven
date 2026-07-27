@@ -532,7 +532,8 @@ async fn pull_exact_store_into(
         Some(&routing_encryption),
     )
     .await
-    .expect("pull exact Store commits");
+    .expect("pull exact Store commits")
+    .result;
     let positions = result
         .frontier
         .iter()
@@ -4246,7 +4247,8 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         Some(&routing_encryption),
     )
     .await
-    .expect("pull Circle-scoped rows");
+    .expect("pull Circle-scoped rows")
+    .result;
 
     assert!(result.changesets_applied >= 1);
     assert!(
@@ -4403,7 +4405,8 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         Some(&routing_encryption),
     )
     .await
-    .expect("pull Circle activation and successor in one pass");
+    .expect("pull Circle activation and successor in one pass")
+    .result;
 
     assert!(result.held_positions.is_empty(), "{result:?}");
     assert_eq!(
@@ -4517,6 +4520,7 @@ async fn pull_scoped(
         Some(&routing_encryption),
     )
     .await
+    .map(|execution| execution.result)
 }
 
 /// A receiver holds a category only because a comment it owns references it as an
@@ -6977,7 +6981,8 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         None,
     )
     .await
-    .expect("pull with an empty mid-cycle membership LIST");
+    .expect("pull with an empty mid-cycle membership LIST")
+    .result;
     let updated: HashMap<_, _> = result
         .frontier
         .iter()
@@ -8054,7 +8059,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         None,
     )
     .await
-    .expect("a failed membership reload holds only the affected stream");
+    .expect("a failed membership reload holds only the affected stream")
+    .result;
 
     // The failed read leaves authorization undecided and the position unchanged.
     assert!(result.held_positions.iter().any(|held| matches!(

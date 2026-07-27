@@ -319,7 +319,7 @@ pub(super) async fn apply_candidate(
     merge_candidate: &MergeCandidate,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
     identity: Option<&crate::keys::UserKeypair>,
-    latest_membership: &MembershipChain,
+    latest_membership: &mut MembershipChain,
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
@@ -329,13 +329,14 @@ pub(super) async fn apply_candidate(
     let membership_objects =
         verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
             .await?;
-    let local_store_membership = local_store_membership_after_candidate(
-        latest_membership,
-        root,
-        &merge_candidate.predecessor_membership,
-        membership_objects.as_ref(),
-        identity,
-    )?;
+    let (local_store_membership, membership_after_candidate) =
+        local_store_membership_after_candidate(
+            latest_membership,
+            root,
+            &merge_candidate.predecessor_membership,
+            membership_objects.as_ref(),
+            identity,
+        )?;
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     let circle_activations = if candidate.commit.control().is_some() {
         verify_merge_membership_control(storage, root, &candidate.commit_ref, &candidate.commit)
@@ -473,6 +474,9 @@ pub(super) async fn apply_candidate(
         routing_key,
     ))
     .await?;
+    if matches!(outcome, ApplyOutcome::Applied(_)) {
+        *latest_membership = membership_after_candidate;
+    }
     #[cfg(any(test, feature = "test-utils"))]
     if matches!(outcome, ApplyOutcome::Applied(_)) {
         db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
@@ -490,7 +494,7 @@ fn local_store_membership_after_candidate(
     predecessor: &MembershipChain,
     membership_objects: Option<&VerifiedMergeMembershipClosure>,
     identity: Option<&crate::keys::UserKeypair>,
-) -> Result<LocalStoreMembership, StorePullError> {
+) -> Result<(LocalStoreMembership, MembershipChain), StorePullError> {
     let candidate = if let Some(membership_objects) = membership_objects {
         let proof = &membership_objects.proof;
         let mut successor = predecessor.clone();
@@ -518,15 +522,15 @@ fn local_store_membership_after_candidate(
         .map_err(StorePullMembershipError::State)
         .map_err(StorePullError::Membership)?;
     if candidate.causally_includes(latest) {
-        return Ok(candidate_state);
+        return Ok((candidate_state, candidate));
     }
     if latest.causally_includes(&candidate) {
         let latest_state = LocalStoreMembership::from_membership(latest, identity)
             .map_err(StorePullMembershipError::State)
             .map_err(StorePullError::Membership);
-        return Ok(historical_local_store_membership(
-            latest_state?,
-            candidate_state,
+        return Ok((
+            historical_local_store_membership(latest_state?, candidate_state),
+            latest.clone(),
         ));
     }
     Err(StorePullError::Membership(

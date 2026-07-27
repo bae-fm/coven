@@ -153,7 +153,7 @@ pub(crate) use pull::{
     prepare_merge_abandonment_history_summary, retained_membership_floor_is_included, BlobDownload,
 };
 #[doc(hidden)]
-pub use pull::{load_cycle_membership, pull_store_commits, CycleMembership};
+pub use pull::{load_cycle_membership, pull_store_commits, CycleMembership, StorePullExecution};
 pub use pull::{
     BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures, HeldStoreCoordinate,
     HeldStorePosition, HeldStorePositionReason, PullError, StorePullError,
