@@ -13,8 +13,8 @@ use crate::database::{
 };
 use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
-    CommitFrontier, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    CommitFrontier, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef,
 };
 use crate::write::WriteStatus;
 use rusqlite::OptionalExtension;
@@ -102,24 +102,27 @@ impl StoreDatabase {
                 &registration_ref,
                 crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
-            let coord = StoreCommitCoord {
+            let expected_coord = StoreCommitCoord {
                 stream_id,
                 sequence: stage.commit.value.seq(),
             };
-            stage.commit.value.verify_at(root.store_root_hash, &coord, &registration)
-                .map_err(|error| DbError::Message(format!(
-                    "verify prepared Store commit: {error}"
-                )))?;
+            if stage.commit.value.store_root_hash() != root.store_root_hash
+                || stage.commit.value.author() != &registration
+                || stage.commit.value.reference().coord != expected_coord
+                || stage.commit.value.reference().object
+                    != *stage.commit.prepared.reference()
+            {
+                return Err(DbError::Message(
+                    "authenticated prepared Store commit differs from its current local authority"
+                        .to_string(),
+                ));
+            }
             if stage.commit.value.write_id != stage.write_id {
                 return Err(DbError::Message(
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
-            let commit_ref = StoreBatchCommitRef::from_commit(
-                &stage.commit.value,
-                coord,
-                stage.commit.prepared.reference().clone(),
-            ).map_err(|error| DbError::Message(error.to_string()))?;
+            let commit_ref = stage.commit.value.reference().clone();
             if stage.head.value.commit != commit_ref {
                 return Err(DbError::Message(
                     "prepared Store head does not activate the exact prepared commit".to_string(),
@@ -211,7 +214,7 @@ impl StoreDatabase {
                 &stage.write_id,
                 root.store_root_hash,
                 &commit_ref,
-                &stage.commit.value,
+                stage.commit.value.value(),
                 stage.commit.prepared.stored_bytes(),
                 &partitions,
                 &stage.remote_objects,
@@ -326,17 +329,17 @@ impl StoreDatabase {
                     &root,
                     &candidate.commit.author_registration,
                 )?;
-                stage
-                    .commit
-                    .value
-                    .verify_at(
-                        root.store_root_hash,
-                        &candidate.reference.coord,
-                        &registration,
-                    )
-                    .map_err(|error| {
-                        DbError::Message(format!("verify Merge abandonment commit: {error}"))
-                    })?;
+                if stage.commit.value.store_root_hash() != root.store_root_hash
+                    || stage.commit.value.author() != &registration
+                    || stage.commit.value.reference().coord != candidate.reference.coord
+                    || stage.commit.value.reference().object
+                        != *stage.commit.prepared.reference()
+                {
+                    return Err(DbError::Message(
+                        "authenticated Merge abandonment commit differs from its current local authority"
+                            .to_string(),
+                    ));
+                }
                 if stage.commit.value.write_id != stage.write_id
                     || stage.commit.value.abandoned_candidates()
                         != [crate::sync::store_commit::CandidateCleanupManifest {
@@ -351,12 +354,7 @@ impl StoreDatabase {
                         "Merge abandonment does not name its exact prepared candidate".to_string(),
                     ));
                 }
-                let authority_ref = StoreBatchCommitRef::from_commit(
-                    &stage.commit.value,
-                    candidate.reference.coord.clone(),
-                    stage.commit.prepared.reference().clone(),
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                let authority_ref = stage.commit.value.reference().clone();
                 if stage.head.value.commit != authority_ref
                     || stage.history_summary.digest() != stage.head.value.history_summary
                     || stage.history_summary.causal_cut.get(&authority_ref.coord)

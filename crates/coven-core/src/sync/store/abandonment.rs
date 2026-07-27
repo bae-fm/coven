@@ -8,8 +8,8 @@ use crate::sync::storage::{
 use crate::sync::store::database::publication_state::MergeCandidateAbandonmentPreparation;
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef, StoreDeviceHead,
-    StoreDeviceRegistration, VerifiedStoreBatchCommit,
+    StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreDeviceHead, StoreDeviceRegistration,
+    VerifiedStoreBatchCommit,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -86,21 +86,27 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
             commit.to_bytes(),
         )
         .map_err(StoreObjectError::from)?;
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let commit = VerifiedStoreBatchCommit::parse_prepared(
+        &commit.to_bytes(),
+        root.store_root_hash,
+        coord,
+        commit_prepared.reference().clone(),
+        &registration,
+    )
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let commit_ref = commit.reference().clone();
     let history_summary = super::pull::prepare_merge_abandonment_history_summary(
         &candidate_summary,
         &candidate.head.value.commit,
         &candidate.commit.value,
         &commit_ref,
-        &commit,
+        commit.value(),
     )
     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head = StoreDeviceHead::signed(
         root.store_root_hash,
         registration_ref,
-        commit_ref,
+        commit_ref.clone(),
         history_summary.digest(),
         candidate.head.value.successor,
         &device_signer,

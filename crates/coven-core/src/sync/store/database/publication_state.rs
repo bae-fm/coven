@@ -3,14 +3,14 @@ use crate::database::{
     StoreBatchCompletion, StoreBatchLocalCleanup,
 };
 use crate::sync::remote_object::RemoteObjectRecord;
-use crate::sync::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
+use crate::sync::store_commit::{StoreBatchCommitRef, StoreDeviceHead, VerifiedStoreBatchCommit};
 use crate::write::WriteId;
 
 pub(crate) struct StoreWritePreparation {
     pub write_id: WriteId,
     pub remote_objects: Vec<RemoteObjectRecord>,
     pub audiences: PreparedAudienceObjects,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
+    pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
     pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     pub local_cleanup: StoreBatchLocalCleanup,
@@ -19,7 +19,7 @@ pub(crate) struct StoreWritePreparation {
 
 pub(crate) struct MergeCandidateAbandonmentPreparation {
     pub write_id: WriteId,
-    pub commit: PreparedProtocolObject<StoreBatchCommit>,
+    pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
     pub history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
 }

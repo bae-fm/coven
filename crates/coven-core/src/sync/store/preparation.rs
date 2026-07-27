@@ -7,8 +7,8 @@ use crate::sync::store::database::publication_state::StoreWritePreparation;
 use crate::sync::store::package_preparation::{close_prepared_packages, prepare_partition_package};
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
-    StoreCommitOrder, StoreDeviceHead, StorePackageInput, SuccessorLink,
+    StoreBatchCommit, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
+    StoreDeviceHead, StorePackageInput, SuccessorLink,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -238,13 +238,19 @@ pub(crate) async fn prepare_store_write(
                 commit.to_bytes(),
             )
             .map_err(StoreObjectError::from)?;
-        let commit_ref =
-            StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let commit = crate::sync::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+            &commit.to_bytes(),
+            store_root_hash,
+            coord,
+            commit_prepared.reference().clone(),
+            &registration,
+        )
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let commit_ref = commit.reference().clone();
         let successor = super::pull::prepare_merge_history_successor(
             database,
             &root,
-            &commit,
+            commit.value(),
             &commit_ref,
             &authorization.membership,
             &registration,
@@ -280,7 +286,7 @@ pub(crate) async fn prepare_store_write(
             )
             .map_err(StoreObjectError::from)?;
         let (remote_objects, audience_objects) =
-            close_prepared_packages(prepared_packages, &commit, &commit_ref)?;
+            close_prepared_packages(prepared_packages, commit.value(), &commit_ref)?;
         let local_cleanup = crate::sync::service::bind_local_cleanup(
             payload.local_cleanup,
             &audience_objects.blobs,
