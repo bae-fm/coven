@@ -63,26 +63,6 @@ pub trait PlaintextChunkReader: Send {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError>;
 }
 
-#[async_trait]
-trait AtomicChunkSource {
-    type Error: Send;
-
-    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error>;
-}
-
-struct ByteStreamAtomicChunkSource<E> {
-    stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
-}
-
-#[async_trait]
-impl<E: Send> AtomicChunkSource for ByteStreamAtomicChunkSource<E> {
-    type Error = E;
-
-    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error> {
-        self.stream.next().await.transpose()
-    }
-}
-
 enum AtomicChunkWriteError<E> {
     Source(E),
     Local(String),
@@ -661,8 +641,7 @@ pub async fn write_byte_stream_atomic<E: Send>(
     path: &Path,
     stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
 ) -> Result<u64, ByteStreamWriteError<E>> {
-    let mut source = ByteStreamAtomicChunkSource { stream };
-    write_atomic_chunks(path, &mut source)
+    write_atomic_chunks(path, stream)
         .await
         .map_err(|error| match error {
             AtomicChunkWriteError::Source(error) => ByteStreamWriteError::Source(error),
@@ -670,10 +649,10 @@ pub async fn write_byte_stream_atomic<E: Send>(
         })
 }
 
-async fn write_atomic_chunks<S: AtomicChunkSource>(
+async fn write_atomic_chunks<E: Send>(
     path: &Path,
-    source: &mut S,
-) -> Result<u64, AtomicChunkWriteError<S::Error>> {
+    mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
+) -> Result<u64, AtomicChunkWriteError<E>> {
     use tokio::io::AsyncWriteExt;
 
     let parent = path.parent().ok_or_else(|| {
@@ -685,9 +664,10 @@ async fn write_atomic_chunks<S: AtomicChunkSource>(
     let mut temp =
         AtomicTempFile::create(temp_sibling(parent)).map_err(AtomicChunkWriteError::Local)?;
     let mut written = 0u64;
-    while let Some(chunk) = source
-        .next_atomic_chunk()
+    while let Some(chunk) = stream
+        .next()
         .await
+        .transpose()
         .map_err(AtomicChunkWriteError::Source)?
     {
         temp.file_mut().write_all(&chunk).await.map_err(|e| {
