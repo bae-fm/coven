@@ -85,7 +85,6 @@ impl AuthorizedStore<'_> {
             )
             .await?;
             let activation_commit = activation.value();
-            let activation_author = activation.author();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(
                     "Circle {} closing state differs from its activating Store commit",
@@ -117,9 +116,7 @@ impl AuthorizedStore<'_> {
                 self.database(),
                 self.storage(),
                 &root,
-                &activation_commit_ref,
-                activation_commit,
-                activation_author,
+                &activation,
                 reference,
                 &current.control,
                 keyring,

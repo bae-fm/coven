@@ -29,9 +29,7 @@ mod metadata;
 mod roster;
 mod state;
 
-pub(crate) use context::{
-    read_exact_circle_object, verify_control_context, verify_control_context_for_verified_commit,
-};
+pub(crate) use context::{read_exact_circle_object, verify_control_context_for_verified_commit};
 use context::{verify_control_membership, verify_control_membership_with_verified_activations};
 use metadata::load_circle_metadata_state;
 use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle_roster_state};
@@ -62,14 +60,14 @@ pub(crate) async fn load_circle_control_roster_chain(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
+    verified: &VerifiedStoreBatchCommit,
     reference: &crate::sync::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
     keyring: &str,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
-    verify_control_context(reference, control, commit_ref, commit, author)?;
+    verify_control_context_for_verified_commit(reference, control, verified)?;
+    let commit_ref = verified.reference();
+    let commit = verified.value();
     let encryption =
         EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
             CircleOperationError::InvalidState(format!(
@@ -1449,19 +1447,11 @@ pub(crate) async fn load_circle_activations(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
+    verified: &VerifiedStoreBatchCommit,
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
-    let verified = VerifiedStoreBatchCommit::parse(
-        &commit.to_bytes(),
-        root.store_root_hash,
-        commit_ref,
-        author,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let commit = verified.value();
     let history = crate::sync::store::pull::verify_merge_history_refs(
         storage,
         root,
@@ -1483,7 +1473,7 @@ pub(crate) async fn load_circle_activations(
         database,
         storage,
         root,
-        &verified,
+        verified,
         Some(identity),
         routing_key,
         &verified_prefix,

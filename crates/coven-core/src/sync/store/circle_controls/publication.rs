@@ -1,5 +1,5 @@
 use super::{
-    load_circle_activations, read_exact_circle_object, verify_control_context,
+    load_circle_activations, read_exact_circle_object, verify_control_context_for_verified_commit,
     verify_prepared_objects_are_signed, CircleOperationError, CircleOperationJournal,
     CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
 };
@@ -16,6 +16,7 @@ use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
+    VerifiedStoreBatchCommit,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -46,19 +47,21 @@ pub(super) async fn publish_circle_operation(
     let author = database
         .activated_store_device_registration(commit.author_registration.clone())
         .await?;
+    let verified_commit = VerifiedStoreBatchCommit::parse(
+        &journal.operation().commit_bytes,
+        store_root_hash,
+        &journal.operation().commit_ref,
+        &author,
+    )
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let commit = verified_commit.value();
     let reference = commit.circle_controls();
     let [reference] = reference else {
         return Err(CircleOperationError::InvalidState(
             "Circle operation commit must activate one control".to_string(),
         ));
     };
-    verify_control_context(
-        reference,
-        &creation.control,
-        &journal.operation().commit_ref,
-        &commit,
-        &author,
-    )?;
+    verify_control_context_for_verified_commit(reference, &creation.control, &verified_commit)?;
     if !commit.operations().is_some_and(
         crate::sync::store_commit::StoreCommitOperations::is_circle_control_activation_only,
     ) {
@@ -80,7 +83,7 @@ pub(super) async fn publish_circle_operation(
         ));
     }
     if let CurrentMergeAuthority::Revoked { grant_id } =
-        current_merge_authority(database, storage, &commit, &author).await?
+        current_merge_authority(database, storage, commit, &author).await?
     {
         let block = crate::sync::circle::CircleOperationBlock::AuthorityLost { grant_id };
         database
@@ -125,7 +128,7 @@ pub(super) async fn publish_circle_operation(
         };
         history_summary
             .open(
-                &commit,
+                commit,
                 &journal.operation().commit_ref,
                 head,
                 &head_ref,
@@ -495,9 +498,7 @@ pub(super) async fn publish_circle_operation(
         database,
         storage,
         &root,
-        &journal.operation().commit_ref,
-        &commit,
-        &author,
+        &verified_commit,
         identity,
         routing_key,
     )
@@ -564,7 +565,7 @@ pub(super) async fn publish_circle_operation(
                 &journal,
                 store_root_hash,
                 &head,
-                &commit,
+                commit,
                 operation_id,
                 circle_id,
             )

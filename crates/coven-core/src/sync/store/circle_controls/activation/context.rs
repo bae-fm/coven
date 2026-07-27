@@ -1,10 +1,7 @@
 use crate::sync::circle::{PreparedCircleControl, StoreMembershipStateRef};
 use crate::sync::storage::{ExactObjectRef, ProtocolObjectContext, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
-use crate::sync::store_commit::{
-    CircleControlRef, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
-    VerifiedStoreBatchCommit,
-};
+use crate::sync::store_commit::{CircleControlRef, StoreRootRef, VerifiedStoreBatchCommit};
 
 pub(super) async fn verify_control_membership(
     storage: &dyn SyncStorage,
@@ -86,23 +83,6 @@ fn verify_loaded_control_membership(
         ));
     }
     Ok(chain.current_members())
-}
-
-pub(crate) fn verify_control_context(
-    reference: &CircleControlRef,
-    control: &PreparedCircleControl,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
-) -> Result<(), CircleOperationError> {
-    let verified = VerifiedStoreBatchCommit::parse(
-        &commit.to_bytes(),
-        commit.store_root_hash,
-        commit_ref,
-        author,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    verify_control_context_for_verified_commit(reference, control, &verified)
 }
 
 pub(crate) fn verify_control_context_for_verified_commit(

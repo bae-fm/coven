@@ -22,7 +22,7 @@ use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor,
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StreamActivation,
+    StreamActivation, VerifiedStoreBatchCommit,
 };
 use crate::sync::test_helpers::{
     install_active_device_fixture, open_test_db, temp_store_dir, test_migrations,
@@ -202,13 +202,18 @@ async fn load_circle_activations(
         root.store_root_hash,
     )
     .expect("derive Circle test routing key");
+    let verified = VerifiedStoreBatchCommit::parse(
+        &commit.to_bytes(),
+        root.store_root_hash,
+        commit_ref,
+        author,
+    )
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     super::load_circle_activations(
         &StoreDatabase::new(db),
         storage,
         root,
-        commit_ref,
-        commit,
-        author,
+        &verified,
         identity,
         Some(&routing_key),
     )
