@@ -2722,15 +2722,6 @@ async fn move_document_audience(
                             "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
                             rusqlite::params![document_id, audience_value, stamp],
                         )
-                        .map_err(DbError::from)?;
-                    // The file rows are re-sealed under the destination audience, so
-                    // their bindings land at a new row stamp rather than replacing the
-                    // content already bound at the old one.
-                    transaction
-                        .execute(
-                            "UPDATE document_files SET _updated_at = ?2 WHERE document_id = ?1",
-                            rusqlite::params![document_id, stamp],
-                        )
                         .map(|_| ())
                         .map_err(DbError::from)
                 },
@@ -2873,6 +2864,74 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         fixture.store.home.read(&tombstone_key).await.is_err(),
         "the stale tombstone is canceled"
     );
+}
+
+/// An audience move re-seals every blob its rows carry under the destination
+/// audience's key, which mints a new locator for content the row still binds at
+/// its old `_updated_at` — and one row stamp binds one exact locator. The move
+/// carries its own stamp onto the blob rows it drags along, so the new binding is
+/// a new one and the host never has to know that publishing a moved subtree needs
+/// its children restamped by hand.
+#[tokio::test]
+async fn an_audience_move_restamps_the_blob_rows_it_drags() {
+    let fixture = rotation_fixture("audience-move-restamps-blob-rows").await;
+    let member_storage = member_storage(&fixture);
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    member_pull(&fixture, &member_storage, &member_store_dir).await;
+
+    let document = "00000000-0000-4000-8000-0000000000e4";
+    let file = "00000000-0000-4000-8000-0000000000f4";
+    capture_document_with_file(
+        &fixture,
+        document,
+        file,
+        Some(fixture.circle_id),
+        b"attachment that moves with its document",
+        "2026-07-23T00:10:00Z",
+    )
+    .await;
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("publish the Circle document and its file");
+    assert_eq!(
+        document_file_stamp(&fixture, file).await,
+        "2026-07-23T00:10:00Z",
+    );
+
+    // The move touches the document alone: the file row keeps the stamp its
+    // published blob is already bound at.
+    move_document_audience(&fixture, document, None, "2026-07-23T00:20:00Z").await;
+
+    assert_eq!(
+        document_file_stamp(&fixture, file).await,
+        "2026-07-23T00:20:00Z",
+        "the dragged blob row carries the stamp its move published it at",
+    );
+    fixture
+        .components
+        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
+        .await
+        .expect("republish the document and its re-sealed file under the Store audience");
+}
+
+/// The `_updated_at` a document's file row currently carries.
+async fn document_file_stamp(fixture: &RotationFixture, file_id: &str) -> String {
+    let file_id = file_id.to_string();
+    fixture
+        .db
+        .call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT _updated_at FROM document_files WHERE id = ?1",
+                    [file_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read the document file row stamp")
 }
 
 /// Moving a row between audiences republishes its blob under the destination

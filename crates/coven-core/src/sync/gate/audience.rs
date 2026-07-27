@@ -32,6 +32,10 @@ pub(crate) struct AudienceMove {
     pub(crate) source: Audience,
     pub(crate) destination: Audience,
     pub(crate) rows: BTreeSet<(String, String)>,
+    /// The moved row's `_updated_at` after the change that moved it — the version
+    /// at which its whole component now lives in `destination`, and the stamp the
+    /// routing transitions for that component carry.
+    pub(crate) stamp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1107,6 +1111,43 @@ fn delete_scoped_rows(
     Ok(())
 }
 
+/// Every audience move a captured write performs, with the component of rows each
+/// one drags and the stamp it moves them at. Reads only, so a caller can decide
+/// what a move obliges it to change before the write is partitioned for real —
+/// partitioning writes the routing rows the move implies, and doing that twice
+/// would leave the second pass with nothing to publish.
+pub(crate) fn audience_moves(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+) -> Result<Vec<AudienceMove>, GateError> {
+    let mut moves = Vec::new();
+    unsafe {
+        for_each_change(changeset, |_iter, row| {
+            if !gates.tables.contains_key(&row.table) {
+                return Ok(());
+            }
+            let Some((source, destination)) = row_audience_move(conn, gates, &row)? else {
+                return Ok(());
+            };
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let seed = (row.table.clone(), row_id.to_string());
+            let stamp = live_row_stamp(conn, &seed.0, &seed.1)?;
+            let component = scoped_materialization_rows(conn, gates, seed)?;
+            moves.push(AudienceMove {
+                source,
+                destination,
+                rows: component.into_iter().collect(),
+                stamp,
+            });
+            Ok(())
+        })?;
+    }
+    Ok(moves)
+}
+
 unsafe fn partition_outbound_raw(
     conn: &Connection,
     changeset: &[u8],
@@ -1114,7 +1155,7 @@ unsafe fn partition_outbound_raw(
     gates: &Gates,
 ) -> Result<PartitionedAudienceWrite, GateError> {
     let mut groups = BTreeMap::<Audience, PartitionGroup>::new();
-    let mut moves = Vec::new();
+    let audience_moves = audience_moves(conn, changeset, gates)?;
     let mut ancestor_inserts = HashSet::new();
     let mut ancestor_deletes = HashSet::new();
     let captured_deletes = collect_deletes(changeset)?;
@@ -1136,11 +1177,7 @@ unsafe fn partition_outbound_raw(
         if !gates.tables.contains_key(&row.table) {
             return Ok(());
         }
-        if let Some((source, destination)) = row_audience_move(conn, gates, &row)? {
-            let row_id = row
-                .pk()
-                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            moves.push((source, destination, (row.table.clone(), row_id.to_string())));
+        if row_audience_move(conn, gates, &row)?.is_some() {
             return Ok(());
         }
         let row_id = row
@@ -1188,33 +1225,29 @@ unsafe fn partition_outbound_raw(
             ancestor_deletes.insert((table, id));
         }
     }
-    let mut audience_moves = Vec::with_capacity(moves.len());
-    for (source, destination, seed) in moves {
-        let component = scoped_materialization_rows(conn, gates, seed)?;
+    for audience_move in &audience_moves {
+        let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
         let ancestors = required_store_ancestors(conn, gates, &component)?;
-        if source == Audience::Local && destination != Audience::Local {
+        if audience_move.source == Audience::Local && audience_move.destination != Audience::Local {
             ancestor_inserts.extend(ancestors.iter().cloned());
-        } else if source != Audience::Local && destination == Audience::Local {
+        } else if audience_move.source != Audience::Local
+            && audience_move.destination == Audience::Local
+        {
             for (table, id) in ancestors {
                 if !gates.row_kept(conn, &table, &id)? {
                     ancestor_deletes.insert((table, id));
                 }
             }
         }
-        if destination != Audience::Local {
+        if audience_move.destination != Audience::Local {
             add_materialization(
                 conn,
                 gates,
                 &component,
                 FullStateDirection::Inserts,
-                partition_group(conn, &mut groups, destination.clone())?,
+                partition_group(conn, &mut groups, audience_move.destination.clone())?,
             )?;
         }
-        audience_moves.push(AudienceMove {
-            source,
-            destination,
-            rows: component.into_iter().collect(),
-        });
     }
     if !ancestor_inserts.is_empty() {
         add_materialization(
@@ -2210,6 +2243,55 @@ mod tests {
                 .map(|(routing_id, audience, stamp)| (routing_id, (audience, stamp)))
                 .collect(),
         }
+    }
+
+    /// Capturing a write's routing is the write that installs its audience mirror,
+    /// and it publishes that mirror by snapshotting what it just wrote — so it runs
+    /// exactly once per write. A second pass over the same write re-upserts the rows
+    /// it already wrote, sees no change, and hands back an empty mirror: the moved
+    /// rows would reach their destination audience with nothing telling the devices
+    /// there that they moved. Whatever a write has to decide between capture and
+    /// partition (an audience move's blob row stamps, today) is read separately and
+    /// this runs after it.
+    #[test]
+    fn capturing_a_write_s_routing_publishes_its_mirror_once() {
+        let conn = Connection::open_in_memory().expect("open connection");
+        routing_schema(&conn);
+        let gates = note_gates(&conn);
+        let key = routing_key();
+        let circle = CircleId::from_bytes([3; 16]);
+        conn.execute("INSERT INTO notes VALUES ('moved', NULL, 'body', '1')", [])
+            .expect("insert the note in the Store audience");
+        let mut session = Session::new(&conn).expect("create session");
+        session.attach(Some("notes")).expect("attach notes");
+        conn.execute(
+            "UPDATE notes SET audience = ?1, _updated_at = '2' WHERE id = 'moved'",
+            [circle.to_string()],
+        )
+        .expect("move the note into the Circle");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("extract the move changeset");
+        drop(session);
+
+        let first = capture_routing_changes(&conn, &changeset, &gates, &key)
+            .expect("capture the move's routing");
+        let mirror = crate::changeset::walk(&first.store_mirror).expect("walk the Store mirror");
+        assert_eq!(
+            mirror.len(),
+            1,
+            "the move publishes the moved row's audience mirror: {mirror:?}",
+        );
+
+        let again = capture_routing_changes(&conn, &changeset, &gates, &key)
+            .expect("capture the same move's routing again");
+        assert!(
+            crate::changeset::walk(&again.store_mirror)
+                .expect("walk the repeated Store mirror")
+                .is_empty(),
+            "a second capture has nothing left to publish",
+        );
     }
 
     #[test]

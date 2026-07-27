@@ -34,6 +34,19 @@ impl StoreDatabase {
         capture_changeset(session)
     }
 
+    /// Everything the attached journal has recorded so far. A session accumulates,
+    /// so draining it again after more changes returns the whole write, merged —
+    /// which is what lets a write react to what it captured and be captured again.
+    fn drain_host_change_journal(
+        session: &mut rusqlite::session::Session<'_>,
+        synced_tables: &[SyncedTable],
+    ) -> Result<Vec<u8>, DbError> {
+        let captured = Self::drain_host_change_journal_on(session)?;
+        crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        Ok(captured)
+    }
+
     pub(crate) fn invert_changeset(changeset: &[u8]) -> Result<Vec<u8>, DbError> {
         if changeset.is_empty() {
             return Ok(Vec::new());
@@ -63,24 +76,6 @@ impl StoreDatabase {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
-    }
-
-    pub(crate) fn capture_host_changes_on<R, E>(
-        conn: &Connection,
-        synced_tables: &[SyncedTable],
-        f: impl FnOnce() -> Result<R, E>,
-    ) -> Result<(R, Vec<u8>), E>
-    where
-        E: From<DbError>,
-    {
-        let mut journal =
-            Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
-        let value = Self::run_host_sql_on(conn, f)?;
-        let captured = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
-        crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
-            .map_err(|error| DbError::Message(error.to_string()))
-            .map_err(E::from)?;
-        Ok((value, captured))
     }
 
     fn capture_store_write_blob_facts_on(
@@ -209,6 +204,52 @@ impl StoreDatabase {
         Ok(StoreWriteBlobFacts {
             blobs: facts.into_values().collect(),
         })
+    }
+
+    /// Give every blob-bearing row an audience move drags along the move's stamp.
+    ///
+    /// The move re-seals those blobs under the destination audience, which mints a
+    /// new locator for content the row still binds at its old `_updated_at` — and a
+    /// row stamp binds one exact locator, so publishing would refuse the second
+    /// binding at that stamp. The stamp is the row's version, the re-seal is a new
+    /// version of it, and the move already stamps the component's routing at this
+    /// value: carrying the same stamp onto the rows makes the binding a fresh one by
+    /// construction. Rows the caller already stamped past the move are left alone —
+    /// their bindings are new stamps already, and lowering them would reorder the
+    /// caller's own writes.
+    fn advance_moved_blob_row_stamps_on(
+        tx: &rusqlite::Transaction<'_>,
+        moves: &[gate::AudienceMove],
+        blob_decls: &BlobDecls,
+    ) -> Result<bool, DbError> {
+        let mut advanced = false;
+        for audience_move in moves {
+            for (table, row_id) in &audience_move.rows {
+                let carries_blob = blob_decls
+                    .publication_blob_for_row(tx, table, row_id)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "read audience-move blob row {table}/{row_id}: {error}"
+                        ))
+                    })?
+                    .is_some();
+                if !carries_blob {
+                    continue;
+                }
+                let sql = format!(
+                    "UPDATE {} SET {} = ?1 WHERE {} = ?2 AND {} < ?1",
+                    crate::sync::session::quote_ident(table),
+                    crate::sync::session::quote_ident("_updated_at"),
+                    crate::sync::session::quote_ident("id"),
+                    crate::sync::session::quote_ident("_updated_at"),
+                );
+                let updated = tx
+                    .execute(&sql, rusqlite::params![audience_move.stamp, row_id])
+                    .map_err(DbError::from)?;
+                advanced |= updated > 0;
+            }
+        }
+        Ok(advanced)
     }
 
     pub(crate) fn capture_partition_blob_facts_on(
@@ -471,10 +512,37 @@ impl StoreDatabase {
                 .unchecked_transaction()
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
+            let mut journal =
+                Self::start_host_change_journal_on(&tx, synced_tables).map_err(E::from)?;
+            let value = Self::run_host_sql_on(&tx, || f(&tx))?;
+            let mut captured =
+                Self::drain_host_change_journal(&mut journal, synced_tables).map_err(E::from)?;
             gate::validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(|error| DbError::Message(error.to_string()))
                 .map_err(E::from)?;
+            // A move whose blobs get re-sealed owes those rows new stamps, and the
+            // rows have to reach the destination audience carrying them — so the
+            // moves are read first, the stamps land as more changes to this same
+            // transaction, and the journal that now holds all of it is what gets
+            // partitioned. Only the re-sealing materialization owes them: a blob
+            // locality transition moves its own bindings across the two phases it
+            // already runs, and restamping under it would rewrite rows it is
+            // mid-flight over.
+            if matches!(
+                blob_materialization,
+                Some(AudienceBlobMoveMaterialization::Host(_))
+            ) {
+                let moves = gate::audience_moves(&tx, &captured, gates)
+                    .map_err(|error| DbError::Message(error.to_string()))
+                    .map_err(E::from)?;
+                if Self::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
+                    .map_err(E::from)?
+                {
+                    captured = Self::drain_host_change_journal(&mut journal, synced_tables)
+                        .map_err(E::from)?;
+                }
+            }
+            drop(journal);
             let partitioned = Self::partition_captured_write_on(&tx, &captured, gates, routing)
                 .map_err(E::from)?;
             let mut blob_facts =

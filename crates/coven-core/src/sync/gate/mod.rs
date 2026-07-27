@@ -70,9 +70,9 @@ mod model;
 mod outbound;
 
 pub(crate) use audience::{
-    active_circle_control, align_inbound_scoped_root_audiences, capture_routing_changes,
-    filter_inbound_circle_changeset, filter_inbound_store_rows, is_routing_table,
-    live_row_audience, normalize_inbound_store_changeset, partition_outbound,
+    active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
+    capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
+    is_routing_table, live_row_audience, normalize_inbound_store_changeset, partition_outbound,
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
     store_audience_transitions, validate_scoped_foreign_key_audiences,
     validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
