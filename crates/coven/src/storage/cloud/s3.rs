@@ -1187,6 +1187,29 @@ mod tests {
             .expect("build fake range response")
     }
 
+    /// A test home against a fake endpoint with the fixture credentials every
+    /// fake-server test uses; bucket, region, key prefix, and exact-slot
+    /// capability are the axes tests vary.
+    async fn test_home(
+        bucket: String,
+        region: &str,
+        endpoint: String,
+        prefix: Option<String>,
+        exact_slots: Option<crate::CustomS3ExactSlots>,
+    ) -> S3CloudHome {
+        S3CloudHome::new(
+            bucket,
+            region.to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            prefix,
+            exact_slots,
+        )
+        .await
+        .expect("construct test S3CloudHome")
+    }
+
     /// Bind, serve, and wire graceful shutdown for a fake S3 server — the
     /// scaffolding every fake endpoint shares; each test supplies its Router.
     async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>) {
@@ -1445,17 +1468,14 @@ mod tests {
                 }),
         )
         .await;
-        let home = S3CloudHome::new(
+        let home = test_home(
             bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            endpoint,
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
 
         let listing = home.list("objects/").await.expect("list objects");
 
@@ -1514,17 +1534,14 @@ mod tests {
                 },
             ))
             .await;
-        let home = S3CloudHome::new(
+        let home = test_home(
             bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            endpoint,
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
 
         home.put_object("mutable", b"first".to_vec())
             .await
@@ -1674,17 +1691,14 @@ mod tests {
                 }),
         )
         .await;
-        let home = S3CloudHome::new(
+        let home = test_home(
             bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            endpoint,
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
 
         let slot = ObjectSlot::logical("immutable".to_string()).unwrap();
         ExactSlotStorage::create_at(
@@ -1818,17 +1832,14 @@ mod tests {
                 .with_state((bucket.clone(), abort_seen.clone())),
         )
         .await;
-        let home = S3CloudHome::new(
+        let home = test_home(
             bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            endpoint,
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .unwrap();
+        .await;
         let sink = home
             .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
             .await
@@ -1855,17 +1866,14 @@ mod tests {
                 .with_state((bucket.clone(), abort_failures.clone())),
         )
         .await;
-        let home = S3CloudHome::new(
+        let home = test_home(
             bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            endpoint,
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
         let reader = crate::local_blob::PlaintextReader::from_test_reader(FailingBodyReader {
             emitted: false,
         });
@@ -1891,17 +1899,14 @@ mod tests {
 
     #[tokio::test]
     async fn exact_operations_reject_an_opaque_s3_locator() {
-        let home = S3CloudHome::new(
+        let home = test_home(
             "exact-locator-test".to_string(),
-            "us-east-1".to_string(),
-            Some("http://127.0.0.1:9".to_string()),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            "http://127.0.0.1:9".to_string(),
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
         let slot = ObjectSlot::opaque("protocol/copy".to_string(), "protocol/other".to_string())
             .expect("build opaque S3 locator");
 
@@ -1927,17 +1932,14 @@ mod tests {
     /// same deterministic rejection forever.
     #[tokio::test]
     async fn an_opaque_s3_locator_is_not_retryable() {
-        let home = S3CloudHome::new(
+        let home = test_home(
             "retryability-test".to_string(),
-            "us-east-1".to_string(),
-            Some("http://127.0.0.1:9".to_string()),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            "http://127.0.0.1:9".to_string(),
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct home");
+        .await;
         let slot = ObjectSlot::opaque("protocol/copy".to_string(), "protocol/other".to_string())
             .expect("build opaque S3 locator");
 
@@ -1957,17 +1959,14 @@ mod tests {
             ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
         };
 
-        let home = S3CloudHome::new(
+        let home = test_home(
             "bucket-a".to_string(),
-            "us-east-1".to_string(),
-            Some("https://objects.example:443".to_string()),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            "https://objects.example:443".to_string(),
             Some("stores/a/".to_string()),
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct custom S3 home");
+        .await;
 
         let binding = ExactSlotStorage::provider_binding(&home)
             .await
@@ -1994,17 +1993,14 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_rejects_a_custom_endpoint_with_a_base_path() {
-        let home = S3CloudHome::new(
+        let home = test_home(
             "bucket-a".to_string(),
-            "us-east-1".to_string(),
-            Some("https://objects.example/s3".to_string()),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            "https://objects.example/s3".to_string(),
             None,
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
-        .await
-        .expect("construct custom S3 home");
+        .await;
 
         let error = ExactSlotStorage::provider_binding(&home)
             .await
@@ -2073,17 +2069,14 @@ mod tests {
                         .with_state((bucket.clone(), abort_failures.clone())),
                 )
                 .await;
-                let home = S3CloudHome::new(
+                let home = test_home(
                     bucket,
-                    "us-east-1".to_string(),
-                    Some(endpoint),
-                    "access-key".to_string(),
-                    "secret-key".to_string(),
+                    "us-east-1",
+                    endpoint,
                     None,
                     Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
                 )
-                .await
-                .unwrap();
+                .await;
                 let sink = home
                     .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
                     .await
@@ -2127,17 +2120,7 @@ mod tests {
         })
         .await;
 
-        let home = S3CloudHome::new(
-            bucket,
-            "us-central1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("construct S3CloudHome");
+        let home = test_home(bucket, "us-central1", endpoint, None, None).await;
 
         let bytes = home
             .read_range(&key, 0, range_body.len() as u64)
@@ -2164,17 +2147,7 @@ mod tests {
         })
         .await;
 
-        let home = S3CloudHome::new(
-            bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("construct S3CloudHome");
+        let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
 
         let err = home
             .read_range(&key, 8, 16)
@@ -2196,17 +2169,7 @@ mod tests {
         })
         .await;
 
-        let home = S3CloudHome::new(
-            bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("construct S3CloudHome");
+        let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("object.bin");
         let slot = ObjectSlot::logical(key).unwrap();
@@ -2241,17 +2204,7 @@ mod tests {
         })
         .await;
 
-        let home = S3CloudHome::new(
-            bucket,
-            "us-east-1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("construct S3CloudHome");
+        let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("object.bin");
         tokio::fs::write(&destination, b"committed")
@@ -2306,17 +2259,7 @@ mod tests {
         let (endpoint, shutdown, request_count) =
             spawn_fake_s3_truncated_list_endpoint(bucket.clone()).await;
 
-        let home = S3CloudHome::new(
-            bucket,
-            "us-central1".to_string(),
-            Some(endpoint),
-            "access-key".to_string(),
-            "secret-key".to_string(),
-            None,
-            None,
-        )
-        .await
-        .expect("construct S3CloudHome");
+        let home = test_home(bucket, "us-central1", endpoint, None, None).await;
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("objects/"))
             .await
@@ -2338,17 +2281,14 @@ mod tests {
 
     #[tokio::test]
     async fn s3_revoke_access_reports_unsupported() {
-        let home = S3CloudHome::new(
+        let home = test_home(
             "bucket".to_string(),
-            "us-east-1".to_string(),
-            Some("http://127.0.0.1:9".to_string()),
-            "access-key".to_string(),
-            "secret-key".to_string(),
+            "us-east-1",
+            "http://127.0.0.1:9".to_string(),
             None,
             None,
         )
-        .await
-        .expect("construct S3CloudHome");
+        .await;
 
         let outcome = home
             .set_access(CloudAccessState::Absent {

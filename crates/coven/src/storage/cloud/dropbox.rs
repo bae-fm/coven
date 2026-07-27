@@ -1380,10 +1380,12 @@ mod tests {
         body: Vec<u8>,
     }
 
-    async fn immutable_copy_endpoint(
-        State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
+    /// Record one incoming request's path, `Dropbox-API-Arg` header, and body
+    /// into the shared log, returning the path for the endpoint to dispatch on.
+    async fn record_request(
+        requests: &Arc<Mutex<Vec<RecordedRequest>>>,
         request: Request<Body>,
-    ) -> Response<Body> {
+    ) -> String {
         let path = request.uri().path().to_string();
         let api_arg = request.headers().get("Dropbox-API-Arg").map(|value| {
             value
@@ -1403,6 +1405,14 @@ mod tests {
                 api_arg,
                 body,
             });
+        path
+    }
+
+    async fn immutable_copy_endpoint(
+        State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let path = record_request(&requests, request).await;
 
         match path.as_str() {
             "/sharing/share_folder" => Response::builder()
@@ -1565,22 +1575,7 @@ mod tests {
         State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
         request: Request<Body>,
     ) -> Response<Body> {
-        let path = request.uri().path().to_string();
-        let api_arg = request.headers().get("Dropbox-API-Arg").map(|value| {
-            value
-                .to_str()
-                .expect("Dropbox-API-Arg is UTF-8")
-                .to_string()
-        });
-        let body = to_bytes(request.into_body(), usize::MAX)
-            .await
-            .expect("read request body")
-            .to_vec();
-        requests.lock().unwrap().push(RecordedRequest {
-            path: path.clone(),
-            api_arg,
-            body,
-        });
+        let path = record_request(&requests, request).await;
         let body = match path.as_str() {
             "/files/get_metadata" => serde_json::json!({
                 ".tag": "folder",
