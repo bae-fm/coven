@@ -292,12 +292,13 @@ rebuild the deleted choice.
   routing graph, install retained replay authority, and commit as one database
   transaction.
 
-### Required before Circles are complete
+### Completion verification
 
-- complete the integration, failure-boundary, and data-integrity audit against
-  the verification matrix below;
-- update all Coven documentation to the finished API and protocol; and
-- update dependent applications to the finished API and verify them.
+- The integration, failure-boundary, and data-integrity matrix below passed
+  against the completed implementation.
+- The Coven website documents the implemented API and protocol.
+- `~/dev/bae` uses the completed Coven revision and its full workspace test
+  suite passes.
 
 ## Completion order
 
@@ -336,15 +337,16 @@ rebuild the deleted choice.
    transaction. Circle package, bootstrap-image, superseded-snapshot-generation,
    audience-blob-ciphertext, and beyond-epoch-cutoff reclamation use the shared
    Store reclaim pipeline.
-1. **In progress.** The application API is implemented: the `coven.circles()`
+1. **Complete.** The application API is implemented: the `coven.circles()`
    namespace (create, rename, add and remove member, resolve control, cancel and
    exclude-device on a close, delete, retry and discard operation, list, members,
    operations, close_status), the public derived `CircleState` mapped once from the current
    state, durable operation inspection with the typed block, read-only
    `close_status`, and the typed public `CircleError` mapping the internal typed
    refusals one-to-one with stable identifiers. Write-path status stays on
-   `WriteStatus`/`WriteBlock`. Finish integration tests, fault injection,
-   documentation, and dependent application updates.
+   `WriteStatus`/`WriteBlock`. Integration, fault-injection, repository, and
+   data-integrity gates pass; the website and `~/dev/bae` use this completed
+   shape.
 
 Each completed boundary updates this plan when implementation discovers a
 different invariant or representation. Status marks alone are not enough.
@@ -1357,16 +1359,14 @@ trait, API, fixture, or test may preserve it.
 
 ## Documentation and dependent applications
 
-When implementation and verification are complete:
-
-- update the Coven website with the one-protocol replication guarantees,
-  audience model, Circle lifecycle, offline status, privacy leakage, errors, and
-  code examples;
-- remove every coordinated-protocol reference from public documentation;
-- update `~/dev/bae` to the released Coven API and verify its build and tests;
-  and
-- audit other in-scope applications for row-identity, audience, blob, and
-  offline-status assumptions.
+- The Coven website describes the one-protocol replication guarantees,
+  audience model, Circle lifecycle, offline status, privacy leakage, errors,
+  and code examples.
+- Public documentation contains no coordinated-protocol description.
+- `~/dev/bae` pins the completed Coven revision; its build, runtime tests, CPU
+  tests, integration tests, and doctests pass.
+- `~/dev/bae` is the dependent application named by this plan. No additional
+  dependent application is part of this completion boundary.
 
 ## Completion condition
 
