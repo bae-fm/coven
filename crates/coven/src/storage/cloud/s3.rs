@@ -663,6 +663,66 @@ fn put_object_error(
 
 impl S3CloudHome {
     /// HeadBucket — cheap auth + existence check, no listing cost.
+    async fn create_at_slot(
+        &self,
+        slot: &ObjectSlot,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        require_logical_slot(slot, "S3")?;
+        self.append_create_only(slot.logical_key(), body, progress)
+            .await
+    }
+
+    async fn read_exact_to_file(
+        &self,
+        slot: &ObjectSlot,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        require_logical_slot(slot, "S3")?;
+        let full = self.full_key(slot.logical_key());
+        let key = slot.logical_key().to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let destination = destination.to_path_buf();
+        match AbortOnDropTask::new(s3_runtime().spawn(async move {
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&full)
+                .send()
+                .await
+                .map_err(|error| get_object_error(&key, error))?;
+            let stream =
+                futures_util::stream::unfold((response.body, key), |(mut body, key)| async move {
+                    body.next().await.map(|result| {
+                        let result = result
+                            .map_err(|error| body_read_error("read appended body", &key, error));
+                        (result, (body, key))
+                    })
+                });
+            super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
+            Ok::<(), super::CloudFileReadError>(())
+        }))
+        .wait()
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(super::CloudFileReadError::Source(
+                CloudHomeError::Transport(format!("S3 task aborted: {error}")),
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl CloudHome for S3CloudHome {
+    fn exact_slot_storage(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
+        self.exact_slots.then_some(self)
+    }
+
     async fn probe(&self) -> Result<(), CloudHomeError> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
@@ -717,17 +777,6 @@ impl S3CloudHome {
         MULTIPART_THRESHOLD as u64
     }
 
-    async fn create_at_slot(
-        &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
-        progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "S3")?;
-        self.append_create_only(slot.logical_key(), body, progress)
-            .await
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         let full = self.full_key(key);
         let key = key.to_string();
@@ -755,46 +804,6 @@ impl S3CloudHome {
             Ok(bytes)
         })
         .await
-    }
-
-    async fn read_exact_to_file(
-        &self,
-        slot: &ObjectSlot,
-        destination: &std::path::Path,
-    ) -> Result<(), super::CloudFileReadError> {
-        require_logical_slot(slot, "S3")?;
-        let full = self.full_key(slot.logical_key());
-        let key = slot.logical_key().to_string();
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        let destination = destination.to_path_buf();
-        match AbortOnDropTask::new(s3_runtime().spawn(async move {
-            let response = client
-                .get_object()
-                .bucket(&bucket)
-                .key(&full)
-                .send()
-                .await
-                .map_err(|error| get_object_error(&key, error))?;
-            let stream =
-                futures_util::stream::unfold((response.body, key), |(mut body, key)| async move {
-                    body.next().await.map(|result| {
-                        let result = result
-                            .map_err(|error| body_read_error("read appended body", &key, error));
-                        (result, (body, key))
-                    })
-                });
-            super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
-            Ok::<(), super::CloudFileReadError>(())
-        }))
-        .wait()
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(super::CloudFileReadError::Source(
-                CloudHomeError::Transport(format!("S3 task aborted: {error}")),
-            )),
-        }
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -977,53 +986,6 @@ impl S3CloudHome {
                 CloudAccessOutcome::Absent(RevokeOutcome::Unsupported)
             }
         })
-    }
-}
-
-#[async_trait]
-impl CloudHome for S3CloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        self.exact_slots.then_some(self)
-    }
-
-    async fn probe(&self) -> Result<(), CloudHomeError> {
-        S3CloudHome::probe(self).await
-    }
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        S3CloudHome::put_object(self, key, data).await
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
-        S3CloudHome::open_multipart(self, key, total_len).await
-    }
-    fn multipart_threshold(&self) -> u64 {
-        S3CloudHome::multipart_threshold(self)
-    }
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        S3CloudHome::read(self, key).await
-    }
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        S3CloudHome::read_range(self, key, start, end).await
-    }
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        S3CloudHome::list(self, prefix).await
-    }
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        S3CloudHome::delete(self, key).await
-    }
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        S3CloudHome::exists(self, key).await
-    }
-    async fn set_access(
-        &self,
-        desired: CloudAccessState,
-    ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        S3CloudHome::set_access(self, desired).await
     }
 }
 

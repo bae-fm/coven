@@ -328,58 +328,6 @@ impl OAuthRestHome for OneDriveCloudHome {
 }
 
 impl OneDriveCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let body = Bytes::from(data);
-        let url = format!("{}/content", self.item_path_url(key));
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .put(&url)
-                    .bearer_auth(token)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(body.clone())
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(classify_write_error(
-                status,
-                &http::body_text(resp).await,
-                key,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let upload_url = self
-            .create_upload_session(key, "replace", UploadSessionCompletion::Automatic)
-            .await?;
-        let key_owned = key.to_string();
-        let classify =
-            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
-        // OneDrive returns 202 Accepted for every non-final part.
-        Ok(Box::new(RangePutSink::new(
-            self.client().clone(),
-            upload_url,
-            202,
-            total_len,
-            ONEDRIVE_CHUNK_SIZE,
-            key.to_string(),
-            classify,
-            onedrive_upload_cancellation_succeeded,
-        )))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        ONEDRIVE_SIMPLE_PUT_MAX as u64
-    }
-
     async fn create_at_slot(
         &self,
         slot: &ObjectSlot,
@@ -459,10 +407,6 @@ impl OneDriveCloudHome {
         }
     }
 
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        rest_read(self, key).await
-    }
-
     async fn read_at_to_file(
         &self,
         slot: &ObjectSlot,
@@ -509,6 +453,71 @@ impl OneDriveCloudHome {
                 http::body_text(response).await
             )))
         }
+    }
+}
+
+#[async_trait]
+impl CloudHome for OneDriveCloudHome {
+    fn exact_slot_storage(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
+        Some(self)
+    }
+
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let body = Bytes::from(data);
+        let url = format!("{}/content", self.item_path_url(key));
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .put(&url)
+                    .bearer_auth(token)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(body.clone())
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(resp).await,
+                key,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        let upload_url = self
+            .create_upload_session(key, "replace", UploadSessionCompletion::Automatic)
+            .await?;
+        let key_owned = key.to_string();
+        let classify =
+            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
+        // OneDrive returns 202 Accepted for every non-final part.
+        Ok(Box::new(RangePutSink::new(
+            self.client().clone(),
+            upload_url,
+            202,
+            total_len,
+            ONEDRIVE_CHUNK_SIZE,
+            key.to_string(),
+            classify,
+            onedrive_upload_cancellation_succeeded,
+        )))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        ONEDRIVE_SIMPLE_PUT_MAX as u64
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        rest_read(self, key).await
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -634,49 +643,6 @@ impl OneDriveCloudHome {
                 Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
             }
         }
-    }
-}
-
-#[async_trait]
-impl CloudHome for OneDriveCloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        OneDriveCloudHome::put_object(self, key, data).await
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        OneDriveCloudHome::open_multipart(self, key, total_len).await
-    }
-    fn multipart_threshold(&self) -> u64 {
-        OneDriveCloudHome::multipart_threshold(self)
-    }
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        OneDriveCloudHome::read(self, key).await
-    }
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        OneDriveCloudHome::read_range(self, key, start, end).await
-    }
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        OneDriveCloudHome::list(self, prefix).await
-    }
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        OneDriveCloudHome::delete(self, key).await
-    }
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        OneDriveCloudHome::exists(self, key).await
-    }
-    async fn set_access(
-        &self,
-        desired: CloudAccessState,
-    ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        OneDriveCloudHome::set_access(self, desired).await
     }
 }
 

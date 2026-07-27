@@ -1090,93 +1090,6 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 }
 
 impl GoogleDriveCloudHome {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let media_body = Bytes::from(data);
-        let encoded = encode_key(key);
-        if let Some(file_id) = self.find_file_id(&encoded).await? {
-            self.upload_file_media(key, &file_id, media_body, "update")
-                .await?;
-        } else {
-            create_file_with_media(
-                key,
-                || self.create_file_for_key(key, &encoded),
-                |file_id| {
-                    let body = media_body.clone();
-                    async move { self.upload_file_media(key, &file_id, body, "create").await }
-                },
-                |file_id| async move { self.delete_created_file(key, &file_id).await },
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let encoded = encode_key(key);
-        let (session_url, created, op) = match self.find_file_id(&encoded).await? {
-            Some(file_id) => (
-                self.open_resumable_update_session(key, &file_id).await?,
-                None,
-                "update",
-            ),
-            None => {
-                let attempt = self.new_append_attempt(key).await?;
-                let session_url = match self.open_resumable_create_session(key, &attempt).await {
-                    Ok(session_url) => session_url,
-                    Err(operation) => {
-                        return match self
-                            .resolve_failed_append(key, &attempt, operation, false)
-                            .await
-                        {
-                            Err(error) => Err(error),
-                            Ok(file_id) => Err(CloudHomeError::Transport(format!(
-                            "open mutable Drive upload {key}: uncommitted session resolved as {}",
-                            file_id
-                        ))),
-                        }
-                    }
-                };
-                (
-                    session_url,
-                    Some(DriveFileIdentity {
-                        id: attempt.file_id,
-                        create_token: attempt.create_token,
-                    }),
-                    "create",
-                )
-            }
-        };
-        let key_owned = key.to_string();
-        let classify =
-            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
-        // Drive returns 308 Resume Incomplete for every non-final part.
-        let inner = RangePutSink::new(
-            self.client().clone(),
-            session_url,
-            308,
-            total_len,
-            GDRIVE_CHUNK_SIZE,
-            key.to_string(),
-            classify,
-            drive_upload_cancellation_succeeded,
-        );
-        Ok(Box::new(DriveMultipartSink {
-            home: self,
-            inner,
-            key: key.to_string(),
-            encoded,
-            created,
-        }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        GDRIVE_SIMPLE_UPLOAD_MAX as u64
-    }
-
     async fn create_at_slot(
         &self,
         slot: &ObjectSlot,
@@ -1326,6 +1239,102 @@ impl GoogleDriveCloudHome {
             Err(error) => Err(error),
         }
     }
+}
+
+#[async_trait]
+impl CloudHome for GoogleDriveCloudHome {
+    fn exact_slot_storage(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
+        Some(self)
+    }
+
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let media_body = Bytes::from(data);
+        let encoded = encode_key(key);
+        if let Some(file_id) = self.find_file_id(&encoded).await? {
+            self.upload_file_media(key, &file_id, media_body, "update")
+                .await?;
+        } else {
+            create_file_with_media(
+                key,
+                || self.create_file_for_key(key, &encoded),
+                |file_id| {
+                    let body = media_body.clone();
+                    async move { self.upload_file_media(key, &file_id, body, "create").await }
+                },
+                |file_id| async move { self.delete_created_file(key, &file_id).await },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        let encoded = encode_key(key);
+        let (session_url, created, op) = match self.find_file_id(&encoded).await? {
+            Some(file_id) => (
+                self.open_resumable_update_session(key, &file_id).await?,
+                None,
+                "update",
+            ),
+            None => {
+                let attempt = self.new_append_attempt(key).await?;
+                let session_url = match self.open_resumable_create_session(key, &attempt).await {
+                    Ok(session_url) => session_url,
+                    Err(operation) => {
+                        return match self
+                            .resolve_failed_append(key, &attempt, operation, false)
+                            .await
+                        {
+                            Err(error) => Err(error),
+                            Ok(file_id) => Err(CloudHomeError::Transport(format!(
+                            "open mutable Drive upload {key}: uncommitted session resolved as {}",
+                            file_id
+                        ))),
+                        }
+                    }
+                };
+                (
+                    session_url,
+                    Some(DriveFileIdentity {
+                        id: attempt.file_id,
+                        create_token: attempt.create_token,
+                    }),
+                    "create",
+                )
+            }
+        };
+        let key_owned = key.to_string();
+        let classify =
+            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
+        // Drive returns 308 Resume Incomplete for every non-final part.
+        let inner = RangePutSink::new(
+            self.client().clone(),
+            session_url,
+            308,
+            total_len,
+            GDRIVE_CHUNK_SIZE,
+            key.to_string(),
+            classify,
+            drive_upload_cancellation_succeeded,
+        );
+        Ok(Box::new(DriveMultipartSink {
+            home: self,
+            inner,
+            key: key.to_string(),
+            encoded,
+            created,
+        }))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        GDRIVE_SIMPLE_UPLOAD_MAX as u64
+    }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
@@ -1450,49 +1459,6 @@ impl GoogleDriveCloudHome {
                 Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
             }
         }
-    }
-}
-
-#[async_trait]
-impl CloudHome for GoogleDriveCloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        GoogleDriveCloudHome::put_object(self, key, data).await
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        GoogleDriveCloudHome::open_multipart(self, key, total_len).await
-    }
-    fn multipart_threshold(&self) -> u64 {
-        GoogleDriveCloudHome::multipart_threshold(self)
-    }
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        GoogleDriveCloudHome::read(self, key).await
-    }
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        GoogleDriveCloudHome::read_range(self, key, start, end).await
-    }
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        GoogleDriveCloudHome::list(self, prefix).await
-    }
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        GoogleDriveCloudHome::delete(self, key).await
-    }
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        GoogleDriveCloudHome::exists(self, key).await
-    }
-    async fn set_access(
-        &self,
-        desired: CloudAccessState,
-    ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        GoogleDriveCloudHome::set_access(self, desired).await
     }
 }
 
