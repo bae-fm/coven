@@ -31,10 +31,6 @@ use crate::sync::test_helpers::*;
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
-fn store_database(database: &Database) -> StoreDatabase {
-    StoreDatabase::new(database)
-}
-
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;

@@ -30,10 +30,6 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::{ProtocolObjectDomain, SyncStorage};
 use crate::sync::test_helpers::*;
 
-fn store_database(db: &crate::database::Database) -> crate::sync::store::StoreDatabase {
-    crate::sync::store::StoreDatabase::new(db)
-}
-
 fn exact_cache_path(
     store_dir: &crate::store_dir::StoreDir,
     reference: &crate::blob::RowBlobRef,
@@ -542,10 +538,6 @@ async fn pull_exact_store_into(
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
 /// host-provided · `CacheEager` (a cover — fetched into the cache on pull), hashed
 /// scheme.
-fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
-}
-
 fn photo_decl_with_blob_id_column() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_id_column("cloud_path")

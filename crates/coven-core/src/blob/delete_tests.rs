@@ -26,7 +26,8 @@ use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::StoreDatabase;
 use crate::sync::test_helpers::{
-    exec, open_test_db, open_test_db_with_blob, plant_blob_row, pubkey_hex, TestStore,
+    exact_tombstone_key, exec, open_test_db, open_test_db_with_blob, plaintext_cipher,
+    plant_blob_row, pubkey_hex, TestStore,
 };
 use rusqlite::OptionalExtension;
 
@@ -158,10 +159,6 @@ async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Opti
 }
 
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
-fn plaintext_cipher() -> RwLock<CloudCipher> {
-    RwLock::new(CloudCipher::Plaintext)
-}
-
 fn create_exact_blob<'a>(
     storage: &'a TestStore,
     namespace: &'a str,
@@ -399,13 +396,6 @@ async fn publish_exact_remote_blob_binding(
         .stored()
         .cloned()
         .expect("Remote row owns an exact stored blob reference")
-}
-
-fn exact_tombstone_key(stored: &crate::blob::locator::StoredBlobRef) -> String {
-    format!(
-        "blob_tombstones/{}",
-        crate::sync::remote_object::remote_object_id(stored.object())
-    )
 }
 
 /// Exact test storage holding a real two-member chain: `founder` (Owner) added

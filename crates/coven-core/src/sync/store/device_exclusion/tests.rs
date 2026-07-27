@@ -10,7 +10,8 @@ use crate::sync::store_commit::{
     StoreDeviceHead, StoreDeviceRegistrationRef,
 };
 use crate::sync::test_helpers::{
-    host_exec, install_active_device_fixture, open_test_db, temp_store_dir, TestStore,
+    host_exec, install_active_device_fixture, open_test_db, store_database, temp_store_dir,
+    TestStore,
 };
 use crate::{StoreDir, WriteId};
 
@@ -36,10 +37,6 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
         signer.clone(),
     )
     .expect("construct exclusion test storage")
-}
-
-fn store_database(db: &Database) -> StoreDatabase {
-    StoreDatabase::new(db)
 }
 
 async fn propose_device_exclusion(

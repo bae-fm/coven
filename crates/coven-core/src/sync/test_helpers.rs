@@ -2413,3 +2413,68 @@ pub async fn pull_into(
         .await
         .expect("pull exact test Store")
 }
+
+/// The Store view of a test database. Every sync test builds one; naming it here
+/// keeps the three test modules that used to declare it from drifting apart.
+#[cfg(test)]
+pub(crate) fn store_database(db: &Database) -> crate::sync::store::StoreDatabase {
+    crate::sync::store::StoreDatabase::new(db)
+}
+
+/// A plaintext cloud cipher — the default for tests that are not exercising
+/// sealing.
+#[cfg(test)]
+pub(crate) fn plaintext_cipher() -> std::sync::RwLock<crate::sync::cloud_storage::CloudCipher> {
+    std::sync::RwLock::new(crate::sync::cloud_storage::CloudCipher::Plaintext)
+}
+
+/// The host-provided, eagerly-cached photo blob declaration most blob tests use.
+#[cfg(test)]
+pub(crate) fn photo_decl() -> BlobDecl {
+    BlobDecl::new(
+        "photos",
+        crate::blob::Provenance::HostProvided,
+        crate::blob::CacheFill::CacheEager,
+    )
+}
+
+/// The notes schema with a remote-root parent, carrying `decl` on `note_photos`.
+#[cfg(test)]
+pub(crate) fn remote_root_db(decl: BlobDecl) -> Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+                .carries_blob(decl),
+        ],
+        test_migrations(),
+    )
+}
+
+/// The cloud key a tombstone for `stored` is written under.
+#[cfg(test)]
+pub(crate) fn exact_tombstone_key(stored: &crate::blob::locator::StoredBlobRef) -> String {
+    format!(
+        "blob_tombstones/{}",
+        crate::sync::remote_object::remote_object_id(stored.object())
+    )
+}
+
+/// Bind an already-present local file to a row's blob reference.
+#[cfg(test)]
+pub(crate) async fn register_external_blob(
+    db: &Database,
+    table: &str,
+    row_id: &str,
+    path: &std::path::Path,
+) {
+    let reference = db
+        .row_blob_ref(table, row_id)
+        .await
+        .expect("load exact Local row blob reference");
+    let path = path.to_path_buf();
+    db.call(move |conn| Database::register_external_blob_on(conn, &reference, &path))
+        .await
+        .expect("register exact external blob reference");
+}

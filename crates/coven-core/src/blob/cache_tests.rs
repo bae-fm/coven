@@ -20,9 +20,10 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
     capture_bytes, host_exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, plant_blob_row, plant_blob_row_with_size_hash,
-    pull_into, read_test_db, read_test_db_with_download_limit, set_blob_remote, temp_store_dir,
-    test_migrations, TestStore,
+    open_test_db_with_user_and_host_blobs, photo_decl, plant_blob_row,
+    plant_blob_row_with_size_hash, pull_into, read_test_db, read_test_db_with_download_limit,
+    register_external_blob, remote_root_db, set_blob_remote, temp_store_dir, test_migrations,
+    TestStore,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -163,22 +164,6 @@ fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
 
 /// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
 /// scope, host-provided · `CacheEager` (fetched into the cache on pull).
-fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
-}
-
-fn remote_root_db(decl: BlobDecl) -> Database {
-    open_test_db_schema(
-        vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(decl),
-        ],
-        test_migrations(),
-    )
-}
-
 fn plain_blob_db(decl: BlobDecl) -> Database {
     open_test_db_schema(
         vec![
@@ -318,17 +303,6 @@ async fn create_browsable_blob_object(
         .await
         .expect("create browsable blob");
     stored
-}
-
-async fn register_external_blob(db: &Database, table: &str, row_id: &str, path: &std::path::Path) {
-    let reference = db
-        .row_blob_ref(table, row_id)
-        .await
-        .expect("load exact Local row blob reference");
-    let path = path.to_path_buf();
-    db.call(move |conn| Database::register_external_blob_on(conn, &reference, &path))
-        .await
-        .expect("register exact external blob reference");
 }
 
 async fn install_exact_remote_blob(

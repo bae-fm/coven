@@ -38,9 +38,9 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::store::StoreDatabase;
 use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
-    host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
-    TestStore,
+    exact_tombstone_key, host_exec as exec, open_test_db, open_test_db_schema,
+    open_test_db_with_blob, open_test_db_with_user_and_host_blobs, plaintext_cipher, query_text,
+    register_external_blob, remote_root_db, row_exists, temp_store_dir, TestStore,
 };
 
 async fn make_remote(
@@ -148,18 +148,6 @@ fn cover_lazy_decl() -> BlobDecl {
         .with_cloud_path_column("cloud_path")
 }
 
-fn remote_root_db(decl: BlobDecl) -> Database {
-    open_test_db_schema(
-        vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(decl),
-        ],
-        test_migrations(),
-    )
-}
-
 fn scoped_blob_transition_db() -> Database {
     open_test_db_schema(
         vec![
@@ -221,10 +209,6 @@ async fn invite_and_activate_peer(
     .expect("activate peer Store device");
 }
 
-fn plaintext() -> RwLock<CloudCipher> {
-    RwLock::new(CloudCipher::Plaintext)
-}
-
 async fn photo_ref(db: &Database, id: &str) -> RowBlobRef {
     db.row_blob_ref("note_photos", id)
         .await
@@ -242,24 +226,6 @@ async fn remote_blob_exists(storage: &TestStore, reference: &RowBlobRef) -> bool
         Some(stored) => storage.verify_blob_object(stored).await.is_ok(),
         None => false,
     }
-}
-
-fn exact_tombstone_key(stored: &crate::blob::locator::StoredBlobRef) -> String {
-    format!(
-        "blob_tombstones/{}",
-        crate::sync::remote_object::remote_object_id(stored.object())
-    )
-}
-
-async fn register_external_blob(db: &Database, table: &str, row_id: &str, path: &std::path::Path) {
-    let reference = db
-        .row_blob_ref(table, row_id)
-        .await
-        .expect("load Local row blob reference");
-    let path = path.to_path_buf();
-    db.call(move |conn| Database::register_external_blob_on(conn, &reference, &path))
-        .await
-        .expect("register exact external blob reference");
 }
 
 async fn external_blob(
@@ -776,7 +742,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let kp_a = UserKeypair::generate();
     let db_a = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let hlc_a = Hlc::new("A".to_string());
     let (tmp_a, lib_a) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
@@ -910,7 +876,7 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
 async fn re_enqueue_updates_the_pending_upload_pin() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (tmp, lib) = temp_store_dir();
@@ -960,7 +926,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 async fn re_enqueue_updates_the_pending_upload_source_path() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (tmp, lib) = temp_store_dir();
@@ -1010,7 +976,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
 async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (tmp, lib) = temp_store_dir();
@@ -1071,7 +1037,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let kp_a = UserKeypair::generate();
         let db_a = open_test_db_with_blob(photo_decl());
         let storage = create_store(&db_a, kp_a.clone()).await;
-        let enc = plaintext();
+        let enc = plaintext_cipher();
         let kp_b = UserKeypair::generate();
         let hlc_a = Hlc::new("A".to_string());
         let hlc_b = Hlc::new("B".to_string());
@@ -1585,7 +1551,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let kp_a = UserKeypair::generate();
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let hlc_a = Hlc::new("A".to_string());
     let (tmp_a, lib_a) = temp_store_dir();
     let kp_b = UserKeypair::generate();
@@ -1742,7 +1708,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let storage = create_store(&db_a, UserKeypair::generate()).await;
     let exact_creates_before = storage.home.exact_create_count();
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp_a = storage.protocol_founder_keypair();
     let hlc_a = Hlc::new("A".to_string());
     let (_tmp_a, lib_a) = temp_store_dir();
@@ -1843,7 +1809,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
 async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (_tmp, lib) = temp_store_dir();
@@ -1977,7 +1943,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (_tmp, lib) = temp_store_dir();
@@ -2022,7 +1988,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
 async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (_tmp, lib) = temp_store_dir();
@@ -2108,7 +2074,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let kp_b = UserKeypair::generate();
     let db_a = remote_root_db(cover_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let hlc_a = Hlc::new("A".to_string());
     let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
@@ -3123,7 +3089,7 @@ async fn make_local_abort_then_retry_converges() {
 async fn round_trip_make_remote_make_local_make_remote() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext();
+    let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let (tmp, lib) = temp_store_dir();
