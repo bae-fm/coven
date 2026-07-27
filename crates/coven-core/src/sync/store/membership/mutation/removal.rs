@@ -25,6 +25,15 @@ use super::{
 
 /// Build a removal that revokes provider access, rotates the Store key, and
 /// publishes the signed membership change as one durable operation.
+///
+/// An Owner removal composes a Store candidate against this device's next stream
+/// position and returns it for staging; the turn that claimed the position is
+/// released with the plan, and the publication below takes its own. A writer that
+/// takes the position in between is not a lost operation: publication reads the
+/// occupant, verifies it, and returns a nonactivated candidate, which
+/// `execute_revoke_mutation` ends on — restoring provider access, deleting what
+/// the candidate published, and clearing the staged mutation, so the next removal
+/// composes at the position that follows.
 async fn build_revoke_mutation(
     storage: &dyn SyncStorage,
     database: &StoreDatabase,

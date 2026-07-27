@@ -85,7 +85,25 @@ pub(super) enum OwnerPromotionStaleEvidence {
     Candidate {
         nonactivation: crate::sync::remote_object::CandidateNonactivation,
         receipt: Box<OwnerPromotionFinalizationReceipt>,
+        /// Every object the lost candidate owns, so the deletion this state owes
+        /// is stated rather than re-derived: whoever next reads this journal —
+        /// the retry of this attempt, or the attempt that replaces it — finishes
+        /// an interrupted cleanup from the list the transition validated.
+        published: Vec<crate::sync::storage::ExactObjectRef>,
     },
+}
+
+pub(super) fn owner_promotion_published_objects(
+    candidate: &PreparedStoreOperationCommit,
+    transition: &PreparedMembershipTransition,
+    publication: &PreparedMembershipPublication,
+    wrapped_key: &PreparedWrappedStoreKey,
+) -> Result<Vec<crate::sync::storage::ExactObjectRef>, OwnerPromotionError> {
+    Ok(candidate
+        .merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
+        .iter()
+        .map(|remote| remote.object().clone())
+        .collect())
 }
 
 fn prepared_candidate_is_exact_request(
@@ -555,6 +573,7 @@ impl OwnerPromotionJournal {
                             OwnerPromotionStaleEvidence::Candidate {
                                 nonactivation,
                                 receipt,
+                                ..
                             },
                         ) => stale_candidate_evidence_matches(nonactivation, receipt, acceptance),
                         _ => false,
@@ -760,9 +779,10 @@ impl OwnerPromotionJournal {
             (
                 OwnerPromotionJournalState::MergeHeadPrepared {
                     acceptance,
+                    wrapped_key,
+                    transition,
                     publication,
                     candidate,
-                    ..
                 },
                 OwnerPromotionJournalState::Stale {
                     acceptance: successor,
@@ -777,12 +797,20 @@ impl OwnerPromotionJournal {
                         OwnerPromotionStaleEvidence::Candidate {
                             nonactivation,
                             receipt,
+                            published,
                         } if nonactivation_matches_candidate(candidate, nonactivation)
                             && receipt_matches_merge_preparation(
                                 receipt,
                                 candidate,
                                 publication,
                             )
+                            && owner_promotion_published_objects(
+                                candidate,
+                                transition,
+                                publication,
+                                wrapped_key,
+                            )
+                            .is_ok_and(|expected| expected == *published)
                     )
             }
             _ => false,

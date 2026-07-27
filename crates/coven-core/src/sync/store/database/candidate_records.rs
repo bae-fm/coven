@@ -27,6 +27,83 @@ pub(crate) struct CandidateCleanupObject {
     pub(crate) object: ExactObjectRef,
 }
 
+/// Record `nonactivation` against every object a losing candidate published, and
+/// return the ones whose durable state now names them for deletion. An object
+/// several candidates own stays until the last of them is nonactivated, so a
+/// caller can never delete an object another live candidate still needs. The
+/// candidate's own commit must reach a cleanup target: it is uploaded before the
+/// head that decides the position, so a candidate that lost that position always
+/// leaves it behind.
+pub(super) fn begin_candidate_nonactivation_targets_on(
+    tx: &rusqlite::Transaction<'_>,
+    candidate: &StoreBatchCommitRef,
+    objects: &[ExactObjectRef],
+    nonactivation: &crate::sync::remote_object::CandidateNonactivation,
+) -> Result<Vec<CandidateCleanupObject>, DbError> {
+    let mut unique = BTreeSet::new();
+    let mut cleanup = Vec::new();
+    for object in objects {
+        let object_id = remote_object_id(object);
+        if !unique.insert(object_id) {
+            return Err(DbError::Message(
+                "losing candidate repeats an exact owned object".to_string(),
+            ));
+        }
+        if let Some(target) =
+            begin_remote_candidate_nonactivation_on(tx, object_id, nonactivation.clone())?
+        {
+            cleanup.push(CandidateCleanupObject { object: target });
+        }
+    }
+    if !objects.contains(&candidate.object)
+        || !cleanup
+            .iter()
+            .any(|target| target.object == candidate.object)
+    {
+        return Err(DbError::Message(
+            "losing candidate has no exact commit cleanup target".to_string(),
+        ));
+    }
+    cleanup.sort_by(|left, right| left.object.cmp(&right.object));
+    Ok(cleanup)
+}
+
+/// The objects of an already-nonactivated candidate still awaiting deletion.
+/// Reading it again after each delete is what makes an interrupted cleanup
+/// resumable: every object has either a pending target or a completed cleanup,
+/// and anything else is a state this candidate never reached.
+pub(super) fn candidate_cleanup_targets_on(
+    conn: &Connection,
+    candidate: &StoreBatchCommitRef,
+    objects: &[ExactObjectRef],
+) -> Result<Vec<CandidateCleanupObject>, DbError> {
+    let mut unique = BTreeSet::new();
+    let mut cleanup = Vec::new();
+    for object in objects {
+        let object_id = remote_object_id(object);
+        if !unique.insert(object_id) {
+            return Err(DbError::Message(
+                "candidate cleanup repeats an exact object".to_string(),
+            ));
+        }
+        let remote = load_remote_object_on(conn, object_id)?;
+        if let Some(target) = remote.cleanup_target() {
+            cleanup.push(CandidateCleanupObject {
+                object: target.clone(),
+            });
+        } else if !remote
+            .candidate_cleanup_complete(candidate)
+            .map_err(|error| DbError::Message(error.to_string()))?
+        {
+            return Err(DbError::Message(format!(
+                "candidate object {object_id} has no cleanup decision"
+            )));
+        }
+    }
+    cleanup.sort_by(|left, right| left.object.cmp(&right.object));
+    Ok(cleanup)
+}
+
 pub(crate) fn parse_prepared_merge_candidate_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,

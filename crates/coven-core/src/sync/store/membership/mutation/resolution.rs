@@ -70,6 +70,14 @@ impl ResolveMutationPlan {
     }
 }
 
+/// Composes the resolution's Store candidate against this device's next stream
+/// position and returns it for staging; the turn that claimed the position is
+/// released with the plan, and the publication below takes its own. A writer that
+/// takes the position in between is not a lost operation: publication reads the
+/// occupant, verifies it, and returns a nonactivated candidate, which
+/// `execute_resolution_mutation` ends on — deleting what the candidate published
+/// and clearing the staged mutation, so the next resolution composes at the
+/// position that follows.
 async fn build_resolution_mutation(
     storage: &dyn SyncStorage,
     database: &StoreDatabase,

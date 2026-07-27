@@ -375,3 +375,201 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .is_err());
 }
+
+/// A promotion finalization composes its Store candidate against this device's
+/// next stream position, journals it as `MergeHeadPrepared`, and publishes after
+/// — the turn that claimed the position is released in between. A queued host
+/// write that drains in that window takes the position, and the journaled
+/// candidate is bound to that create-once head slot, so it can never activate
+/// there. Publication reads the occupant, verifies it is a real winner, and ends
+/// the attempt on that evidence: the journal advances to `Stale` instead of
+/// re-publishing a candidate that can never land, and the promoter's next attempt
+/// for the same target replaces the failed one and activates.
+#[tokio::test]
+async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() {
+    let owner_db = crate::sync::test_helpers::open_test_db();
+    let owner = UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &owner_db,
+        "owner-promotion-loses-its-position",
+        owner.clone(),
+    )
+    .await
+    .expect("create Merge Store");
+    let member = UserKeypair::generate();
+    let encryption = EncryptionService::from_key([42; 32]);
+    crate::sync::store::membership::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &owner,
+        &crate::sync::hlc::Hlc::new("owner-device".to_string()),
+        &keys::public_key_hex(&member),
+        None,
+        crate::sync::membership::MemberRole::Member,
+        &encryption,
+        store.storage.store_id(),
+        "Merge Store",
+        &StoreDatabase::new(&owner_db),
+    )
+    .await
+    .expect("invite Member identity");
+    let member_db = crate::sync::test_helpers::open_test_db();
+    crate::sync::test_helpers::install_active_device_fixture(
+        &store,
+        &owner_db,
+        &member_db,
+        &member,
+        "2026-07-20T00:00:00Z",
+    )
+    .await
+    .expect("activate Member device");
+    let owner_device_id = owner_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Owner device id")
+        .expect("Owner device id");
+    let member_device_id = member_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Member device id")
+        .expect("Member device id");
+    let (_, member_registration, _, _) =
+        crate::sync::store::operations::load_local_store_authority(
+            &StoreDatabase::new(&member_db),
+            &member_device_id,
+            &member,
+        )
+        .await
+        .expect("load Member registration");
+
+    let request = store
+        .loaded_store(&owner_db)
+        .await
+        .expect("load Owner Store")
+        .begin_owner_promotion(&owner_device_id, &owner, member_registration.clone())
+        .await
+        .expect("publish the promotion request");
+    let acceptance = store
+        .loaded_store(&member_db)
+        .await
+        .expect("load Member Store")
+        .accept_owner_promotion(&member_device_id, &member, request)
+        .await
+        .expect("accept the promotion");
+
+    // A queued host write composes against the same next position the
+    // finalization will, and takes it the moment it drains.
+    crate::sync::test_helpers::host_exec(
+        &owner_db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('contended-note', 'contended', NULL, 1, \
+                 '0000000001000-0000-owner', '2026-07-20')",
+    )
+    .await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let membership = crate::sync::store::pull::load_cycle_membership(
+        &store.storage,
+        &StoreDatabase::new(&owner_db),
+    )
+    .await
+    .expect("load the promoter's membership");
+    assert!(
+        Box::pin(crate::sync::store::preparation::prepare_store_write(
+            &StoreDatabase::new(&owner_db),
+            &store.storage,
+            &owner_device_id,
+            "2026-07-20T01:00:00Z",
+            &owner,
+            &store_dir,
+            &membership,
+        ))
+        .await
+        .expect("queue a host write at the contended position")
+    );
+
+    // Stop the finalization after it journals its composed candidate and before
+    // it publishes the head that would take the position.
+    store.home.fail_exact_create_before_call(5);
+    Box::pin(
+        store
+            .loaded_store(&owner_db)
+            .await
+            .expect("load Owner Store")
+            .finalize_owner_promotion(&owner_device_id, &owner, &encryption, acceptance.clone()),
+    )
+    .await
+    .expect_err("the interrupted finalization cannot publish its head");
+    let interrupted = StoreDatabase::new(&owner_db)
+        .load_owner_promotion_target(target_key(&member_registration).unwrap())
+        .await
+        .expect("load the interrupted promotion journal")
+        .expect("the interrupted promotion journal exists");
+    assert!(
+        matches!(
+            interrupted.state,
+            OwnerPromotionJournalState::MergeHeadPrepared { .. }
+        ),
+        "the interruption leaves a composed candidate bound to its position: {:?}",
+        interrupted.state,
+    );
+
+    assert_eq!(
+        Box::pin(crate::sync::store::publication::drain_store_writes(
+            &StoreDatabase::new(&owner_db),
+            &store.storage,
+        ))
+        .await
+        .expect("publish the queued host write"),
+        1,
+    );
+
+    let lost = Box::pin(
+        store
+            .loaded_store(&owner_db)
+            .await
+            .expect("load Owner Store")
+            .finalize_owner_promotion(&owner_device_id, &owner, &encryption, acceptance),
+    )
+    .await
+    .expect_err("a candidate whose position was taken can never activate");
+    assert!(
+        matches!(
+            &lost,
+            crate::sync::store::owner_promotion::OwnerPromotionError::Stale(reason)
+                if matches!(
+                    reason.as_ref(),
+                    crate::sync::store_commit::OwnerPromotionStaleReason::MergeActivationRejected
+                )
+        ),
+        "the finalization ends on the verified winner: {lost}",
+    );
+    let ended = StoreDatabase::new(&owner_db)
+        .load_owner_promotion_target(target_key(&member_registration).unwrap())
+        .await
+        .expect("load the ended promotion journal")
+        .expect("the ended promotion journal exists");
+    assert!(
+        matches!(ended.state, OwnerPromotionJournalState::Stale { .. }),
+        "the lost attempt is recorded stale rather than re-published: {:?}",
+        ended.state,
+    );
+
+    Box::pin(crate::sync::test_helpers::promote_active_member_fixture(
+        &store,
+        &owner_db,
+        &member_db,
+        &owner,
+        &member,
+        &encryption,
+    ))
+    .await
+    .expect("a fresh attempt replaces the stale one and activates");
+    assert!(load_current_merge_membership(
+        &StoreDatabase::new(&owner_db),
+        &store.storage,
+        &store.root
+    )
+    .await
+    .expect("load membership after the re-issued promotion")
+    .is_owner_now(&keys::public_key_hex(&member)));
+}

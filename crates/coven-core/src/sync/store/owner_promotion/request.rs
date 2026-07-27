@@ -181,6 +181,17 @@ impl Store {
                 };
                 match failed_attempt {
                     Some(previous) => {
+                        // The attempt being replaced may still owe deletions its
+                        // own retry would have finished. Nothing else names its
+                        // objects once this journal is gone, and its membership
+                        // slots are the ones this attempt composes into.
+                        if let OwnerPromotionJournalState::Stale { evidence, .. } = &previous.state
+                        {
+                            super::finalization::finish_stale_owner_promotion_cleanup(
+                                database, storage, evidence,
+                            )
+                            .await?;
+                        }
                         database
                             .replace_failed_owner_promotion_journal(previous, allocation)
                             .await?

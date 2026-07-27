@@ -1,3 +1,6 @@
+use super::candidate_records::{
+    begin_candidate_nonactivation_targets_on, candidate_cleanup_targets_on,
+};
 use super::*;
 use crate::database::*;
 use crate::sync::remote_object::RemoteObjectRecord;
@@ -598,33 +601,17 @@ impl StoreDatabase {
                         "membership candidate mutation changed before nonactivation".to_string(),
                     ));
                 }
-                let mut unique = BTreeSet::new();
-                let mut cleanup = Vec::new();
-                for object in candidate_objects.iter().chain(retained_authorities.iter()) {
-                    let object_id = remote_object_id(object);
-                    if !unique.insert(object_id) {
-                        return Err(DbError::Message(
-                            "membership nonactivation repeats an exact owned object".to_string(),
-                        ));
-                    }
-                    if let Some(target) = begin_remote_candidate_nonactivation_on(
-                        &tx,
-                        object_id,
-                        nonactivation.clone(),
-                    )? {
-                        cleanup.push(CandidateCleanupObject { object: target });
-                    }
-                }
-                if !candidate_objects.contains(&candidate.object)
-                    || !cleanup
-                        .iter()
-                        .any(|target| target.object == candidate.object)
-                {
-                    return Err(DbError::Message(
-                        "losing membership candidate has no exact commit cleanup target"
-                            .to_string(),
-                    ));
-                }
+                let owned = candidate_objects
+                    .iter()
+                    .chain(retained_authorities.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let cleanup = begin_candidate_nonactivation_targets_on(
+                    &tx,
+                    &candidate,
+                    &owned,
+                    &nonactivation,
+                )?;
                 let updated = tx
                     .execute(
                         "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
@@ -638,7 +625,6 @@ impl StoreDatabase {
                     ));
                 }
                 tx.commit().map_err(DbError::from)?;
-                cleanup.sort_by(|left, right| left.object.cmp(&right.object));
                 Ok(cleanup)
             })
             .await
@@ -829,31 +815,7 @@ impl StoreDatabase {
                         "membership mutation changed before candidate cleanup".to_string(),
                     ));
                 }
-                let mut unique = BTreeSet::new();
-                let mut cleanup = Vec::new();
-                for object in objects {
-                    let object_id = remote_object_id(&object);
-                    if !unique.insert(object_id) {
-                        return Err(DbError::Message(
-                            "membership cleanup repeats an exact candidate object".to_string(),
-                        ));
-                    }
-                    let remote = load_remote_object_on(conn, object_id)?;
-                    if let Some(target) = remote.cleanup_target() {
-                        cleanup.push(CandidateCleanupObject {
-                            object: target.clone(),
-                        });
-                    } else if !remote
-                        .candidate_cleanup_complete(&candidate)
-                        .map_err(|error| DbError::Message(error.to_string()))?
-                    {
-                        return Err(DbError::Message(format!(
-                            "membership candidate object {object_id} has no cleanup decision"
-                        )));
-                    }
-                }
-                cleanup.sort_by(|left, right| left.object.cmp(&right.object));
-                Ok(cleanup)
+                candidate_cleanup_targets_on(conn, &candidate, &objects)
             })
             .await
     }

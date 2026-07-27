@@ -205,6 +205,71 @@ impl StoreDatabase {
             .await
     }
 
+    /// End a promotion whose Store candidate lost its stream position: record the
+    /// nonactivation against every object that candidate published and advance the
+    /// journal onto its stale successor in one transaction, returning the objects
+    /// to delete. The candidate publishes its membership entry and head before the
+    /// Store head that decides the position, so those sit in create-once slots the
+    /// promoter's next attempt composes into; leaving them there would refuse every
+    /// later membership publication on that stream.
+    pub(in crate::sync::store) async fn end_nonactivated_owner_promotion_candidate(
+        &self,
+        transition: crate::sync::store::owner_promotion::OwnerPromotionJournalTransition,
+        candidate: crate::sync::store_commit::StoreBatchCommitRef,
+        objects: Vec<crate::sync::storage::ExactObjectRef>,
+        nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
+    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
+        if nonactivation
+            .candidate_reference()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != candidate
+        {
+            return Err(DbError::Message(
+                "verified nonactivation names another Owner-promotion candidate".to_string(),
+            ));
+        }
+        let nonactivation = nonactivation.into_durable();
+        let (journal_key, target_key, previous_value, next_value, remote_objects) =
+            transition.into_values();
+        self.database
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
+                    &tx,
+                    &candidate,
+                    &objects,
+                    &nonactivation,
+                )?;
+                Self::advance_owner_promotion_journal_on(
+                    &tx,
+                    journal_key,
+                    target_key,
+                    previous_value,
+                    next_value,
+                    remote_objects,
+                )?;
+                tx.commit().map_err(DbError::from)?;
+                Ok(cleanup)
+            })
+            .await
+    }
+
+    /// The published objects of a promotion candidate that already lost, still
+    /// awaiting deletion. An interrupted cleanup resumes through this: the stale
+    /// journal names the candidate, and each object's durable state says whether it
+    /// is still there.
+    pub(in crate::sync::store) async fn owner_promotion_candidate_cleanup_targets(
+        &self,
+        candidate: crate::sync::store_commit::StoreBatchCommitRef,
+        objects: Vec<crate::sync::storage::ExactObjectRef>,
+    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
+        self.database
+            .call(move |conn| {
+                super::candidate_records::candidate_cleanup_targets_on(conn, &candidate, &objects)
+            })
+            .await
+    }
+
     pub(in crate::sync::store) fn advance_owner_promotion_journal_on(
         tx: &rusqlite::Transaction<'_>,
         journal_key: String,

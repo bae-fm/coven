@@ -68,7 +68,10 @@ async fn invite_fixture_member(
     .expect("invite exact member")
 }
 
-async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
+async fn try_remove_fixture_member(
+    fixture: &MergeFixture,
+    member: &UserKeypair,
+) -> Result<String, MembershipOpsError> {
     let custody = TestCustody::default();
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [42; 32],
@@ -86,7 +89,12 @@ async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
         &fixture.database,
     )
     .await
-    .expect("remove exact member");
+}
+
+async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
+    try_remove_fixture_member(fixture, member)
+        .await
+        .expect("remove exact member");
 }
 
 fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
@@ -952,4 +960,124 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
     assert!(statuses
         .values()
         .all(|status| *status == MembershipProjectionStatus::Included));
+}
+
+/// A Store-activated removal composes its candidate against this device's next
+/// stream position, stages the mutation durably, then publishes — releasing the
+/// turn that claimed the position in between. A queued host write that drains in
+/// that window takes the position, and the staged candidate is bound to that
+/// create-once head slot, so it can never activate there. Publication reads the
+/// occupant, verifies it is a real winner, and ends the removal on that evidence:
+/// the staged mutation is cleared rather than retried against a position that is
+/// gone, and the initiator's next removal composes at the position that follows.
+#[tokio::test]
+async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
+    let fixture = merge_fixture("removal-loses-its-position").await;
+    let encryption = EncryptionService::from_key([42; 32]);
+    let member = UserKeypair::generate();
+    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+    let member_db = open_test_db();
+    install_active_device_fixture(
+        &fixture.store,
+        &fixture.db,
+        &member_db,
+        &member,
+        "2026-07-21T00:00:00Z",
+    )
+    .await
+    .expect("activate the member's device");
+    Box::pin(promote_active_member_fixture(
+        &fixture.store,
+        &fixture.db,
+        &member_db,
+        &fixture.owner,
+        &member,
+        &encryption,
+    ))
+    .await
+    .expect("promote the member to Owner");
+
+    // A queued host write composes against the same next position the removal
+    // will, and takes it the moment it drains.
+    crate::sync::test_helpers::host_exec(
+        &fixture.db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('contended-note', 'contended', NULL, 1, \
+                 '0000000001000-0000-owner', '2026-07-21')",
+    )
+    .await;
+    let device_id = fixture
+        .db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read the owner device id")
+        .expect("the owner has an active device");
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let membership =
+        crate::sync::store::pull::load_cycle_membership(&fixture.store.storage, &fixture.database)
+            .await
+            .expect("load the owner's membership");
+    assert!(
+        Box::pin(crate::sync::store::preparation::prepare_store_write(
+            &fixture.database,
+            &fixture.store.storage,
+            &device_id,
+            "2026-07-21T01:00:00Z",
+            &fixture.owner,
+            &store_dir,
+            &membership,
+        ))
+        .await
+        .expect("queue a host write at the contended position")
+    );
+
+    // Stop the removal before it publishes anything, leaving its candidate
+    // durable and bound to the position it composed against.
+    fixture.store.home.fail_exact_create_before_call(1);
+    Box::pin(try_remove_fixture_member(&fixture, &member))
+        .await
+        .expect_err("the interrupted removal cannot publish its membership authority");
+    assert!(
+        fixture
+            .database
+            .outbound_membership_mutation()
+            .await
+            .expect("read the staged removal")
+            .is_some(),
+        "the interrupted removal stays durable",
+    );
+
+    assert_eq!(
+        Box::pin(crate::sync::store::publication::drain_store_writes(
+            &fixture.database,
+            &fixture.store.storage,
+        ))
+        .await
+        .expect("publish the queued host write"),
+        1,
+    );
+
+    let lost = Box::pin(try_remove_fixture_member(&fixture, &member))
+        .await
+        .expect_err("a candidate whose position was taken can never activate");
+    assert!(
+        lost.to_string().contains("did not activate"),
+        "the removal ends on the verified winner: {lost}",
+    );
+    assert!(
+        fixture
+            .database
+            .outbound_membership_mutation()
+            .await
+            .expect("read the cleared removal")
+            .is_none(),
+        "the lost removal is cleared rather than left staged against a position that is gone",
+    );
+
+    Box::pin(try_remove_fixture_member(&fixture, &member))
+        .await
+        .expect("the re-issued removal publishes at the position that follows");
+    assert!(!load_fixture(&fixture)
+        .await
+        .can_write_now(&pubkey_hex(&member)));
 }

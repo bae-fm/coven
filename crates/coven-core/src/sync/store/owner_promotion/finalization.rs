@@ -17,8 +17,9 @@ use crate::sync::wrapped_store_key::PreparedWrappedStoreKey;
 
 use super::authority::load_current_merge_membership;
 use super::journal::{
-    advance_owner_promotion_journal, OwnerPromotionFinalizationReceipt, OwnerPromotionJournal,
-    OwnerPromotionJournalPredecessor, OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
+    advance_owner_promotion_journal, owner_promotion_published_objects,
+    OwnerPromotionFinalizationReceipt, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
+    OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
 };
 use super::OwnerPromotionError;
 
@@ -127,11 +128,7 @@ impl Store {
                         MergeHeadPublication::DurablyComplete { membership } => {
                             return Ok(membership);
                         }
-                        MergeHeadPublication::Stale {
-                            journal: next,
-                            reason,
-                        } => {
-                            advance_owner_promotion_journal(database, previous, next).await?;
+                        MergeHeadPublication::Ended { reason } => {
                             return Err(OwnerPromotionError::Stale(Box::new(reason)));
                         }
                     }
@@ -317,6 +314,14 @@ fn prepare_merge_owner_promotion_finalization<'a>(
     })
 }
 
+/// Publish the promotion's membership authority and compose the Store candidate
+/// that activates it, journaled as `MergeHeadPrepared` for the publication that
+/// follows. The turn that claimed the stream position is released with the plan,
+/// so a writer can take that position before the publication runs; the candidate
+/// is then bound to a head slot it can never take, and the publication ends the
+/// attempt on the verified winner. Everything composed here — the membership
+/// entry and head above all — sits in create-once slots the promoter's next
+/// attempt composes into, which is why ending the attempt deletes them.
 fn prepare_merge_store_candidate<'a>(
     database: &'a StoreDatabase,
     storage: &'a dyn SyncStorage,
@@ -416,8 +421,10 @@ enum MergeHeadPublication {
     DurablyComplete {
         membership: StoreMembershipStateRef,
     },
-    Stale {
-        journal: OwnerPromotionJournal,
+    /// The candidate lost its Store position. Its journal already rests on the
+    /// stale state and its published objects are already deleted, because both
+    /// belong to the step that read the winner.
+    Ended {
         reason: OwnerPromotionStaleReason,
     },
 }
@@ -588,6 +595,12 @@ fn activate_owner_promotion_merge_head<'a>(
             }
             StoreOperationPublicationOutcome::NonactivatedCandidate { nonactivation, .. } => {
                 let reason = OwnerPromotionStaleReason::MergeActivationRejected;
+                let published = owner_promotion_published_objects(
+                    &receipt_candidate,
+                    &transition,
+                    &publication,
+                    &wrapped_key,
+                )?;
                 let next = OwnerPromotionJournal {
                     promotion_id: previous.promotion_id,
                     target: previous.target.clone(),
@@ -595,18 +608,26 @@ fn activate_owner_promotion_merge_head<'a>(
                         acceptance: *acceptance,
                         reason: reason.clone(),
                         evidence: Box::new(OwnerPromotionStaleEvidence::Candidate {
-                            nonactivation: nonactivation.into_durable(),
+                            nonactivation: (*nonactivation).clone().into_durable(),
                             receipt: Box::new(OwnerPromotionFinalizationReceipt {
                                 candidate: receipt_candidate,
                                 publication,
                             }),
+                            published: published.clone(),
                         }),
                     },
                 };
-                Ok(MergeHeadPublication::Stale {
-                    journal: next,
-                    reason,
-                })
+                let journal_transition = previous.transition_to(&next, Vec::new())?;
+                let targets = database
+                    .end_nonactivated_owner_promotion_candidate(
+                        journal_transition,
+                        candidate_ref,
+                        published,
+                        *nonactivation,
+                    )
+                    .await?;
+                delete_promotion_candidate_objects(database, storage, targets).await?;
+                Ok(MergeHeadPublication::Ended { reason })
             }
             StoreOperationPublicationOutcome::Nonactivated(_) => {
                 Err(OwnerPromotionError::Protocol(
@@ -618,6 +639,46 @@ fn activate_owner_promotion_merge_head<'a>(
             )),
         }
     })
+}
+
+async fn delete_promotion_candidate_objects(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    targets: Vec<crate::database::CandidateCleanupObject>,
+) -> Result<(), OwnerPromotionError> {
+    for target in targets {
+        crate::sync::store_objects::delete_exact_object(storage, &target.object)
+            .await
+            .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+        database
+            .mark_candidate_cleanup_absent(target.object)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete whatever a lost candidate still has in storage. The stale state names
+/// the candidate and the objects it published, and each object's durable record
+/// says whether it is still there, so running this again after an interrupted
+/// deletion resumes it and running it on a finished one does nothing.
+pub(super) async fn finish_stale_owner_promotion_cleanup(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    evidence: &OwnerPromotionStaleEvidence,
+) -> Result<(), OwnerPromotionError> {
+    let OwnerPromotionStaleEvidence::Candidate {
+        receipt, published, ..
+    } = evidence
+    else {
+        return Ok(());
+    };
+    let targets = database
+        .owner_promotion_candidate_cleanup_targets(
+            receipt.candidate.reference.clone(),
+            published.clone(),
+        )
+        .await?;
+    delete_promotion_candidate_objects(database, storage, targets).await
 }
 
 enum OwnerPromotionResumeOutcome {
@@ -771,8 +832,11 @@ fn resume_owner_promotion_finalization<'a>(
                 OwnerPromotionJournalState::Finalized { membership, .. } => {
                     return Ok(OwnerPromotionResumeOutcome::Complete(membership));
                 }
-                OwnerPromotionJournalState::Stale { reason, .. } => {
-                    return Err(OwnerPromotionError::Stale(Box::new(reason)))
+                OwnerPromotionJournalState::Stale {
+                    reason, evidence, ..
+                } => {
+                    finish_stale_owner_promotion_cleanup(database, storage, &evidence).await?;
+                    return Err(OwnerPromotionError::Stale(Box::new(reason)));
                 }
                 OwnerPromotionJournalState::Allocated
                 | OwnerPromotionJournalState::RequestPrepared { .. }
