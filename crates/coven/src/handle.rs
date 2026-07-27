@@ -884,13 +884,17 @@ impl CovenHandle {
 
     /// The cloud object key a blob's bytes live at, derived under the connected
     /// home's path scheme (`Hashed` → `{namespace}/{ab}/{cd}/{id}`, `Plain` →
-    /// `{namespace}/{cloud_path}`). coven owns this derivation — the host passes a
-    /// [`BlobRef`] and never reconstructs the cloud layout. The host enqueues a
-    /// blob's cloud removal under this key (its delete drains to a tombstone; see
-    /// [`crate::blob::delete`]), and a test asserts an upload's key matches the
-    /// read key with it. A `Plain` home whose `cloud_path` is absent, or does not
-    /// name the blob it carries, is a surfaced error — see
-    /// [`CloudSyncStorage::blob_key`].
+    /// `{namespace}/{cloud_path}`).
+    ///
+    /// Read-only: coven owns this derivation and every operation that needs a key
+    /// derives its own (a delete resolves it from the stored ref), so nothing a
+    /// host calls takes one back. It exists so a host can *observe* the key coven
+    /// would use — asserting an upload landed where a read looks for it, or
+    /// naming an object in a diagnostic — without reimplementing the layout and
+    /// drifting from it.
+    ///
+    /// A `Plain` home whose `cloud_path` is absent, or does not name the blob it
+    /// carries, is a surfaced error — see [`CloudSyncStorage::blob_key`].
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         let active_loop = self
             .sync_manager()
