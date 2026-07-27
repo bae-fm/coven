@@ -1013,10 +1013,6 @@ pub enum StoreReclaimError {
         "active Store device {device_id:?} for member {member:?} has no exact acknowledgement"
     )]
     MissingAcknowledgement { member: String, device_id: String },
-    #[error(
-        "Store device {device_id:?} acknowledgement author differs from its activated registration"
-    )]
-    AckAuthorMismatch { device_id: String },
     #[error("active member {member:?} device {ack_device_id:?} has no acknowledgement covering exact snapshot commit {snapshot_commit}")]
     StaleAcknowledgement {
         member: String,

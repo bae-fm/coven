@@ -1046,8 +1046,6 @@ pub enum CircleRosterError {
     PrunedAuthorStream,
     #[error("Circle roster sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
-    #[error("Circle roster resolution activation requires a fresh persisted author stream")]
-    ResolutionActivationRequiresFreshStream,
     #[error("Circle roster has an unresolved semantic conflict")]
     Conflict,
     #[error("Circle roster conflict is missing its exact signed raw heads")]

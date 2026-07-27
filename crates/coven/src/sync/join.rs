@@ -73,8 +73,6 @@ pub enum BootstrapError {
     CancelledJoinCleanup { store_id: String, failures: String },
     #[error("provider: {0}")]
     Provider(String),
-    #[error("membership: {0}")]
-    Membership(String),
     #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]
     ExactSlotsUnavailable { provider: crate::CloudProvider },
     #[error("database: {0}")]

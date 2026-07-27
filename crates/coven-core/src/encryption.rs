@@ -559,8 +559,6 @@ impl SealedBlobOpener {
 
 #[derive(Error, Debug)]
 pub enum EncryptionError {
-    #[error("Encryption failed: {0}")]
-    Encryption(String),
     #[error("Decryption failed: {0}")]
     Decryption(String),
     #[error("Key management error: {0}")]

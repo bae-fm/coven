@@ -4173,8 +4173,6 @@ pub fn recipient_slot_with_peer(
 pub enum CircleTransitionError {
     #[error("circle name cannot be empty")]
     EmptyName,
-    #[error("circle Store membership reference does not hash the supplied member state")]
-    MembershipStateMismatch,
     #[error("circle creator is not a current Store writer")]
     AuthorNotStoreWriter,
     #[error("circle operation author is not a current Circle Owner")]
@@ -4183,8 +4181,6 @@ pub enum CircleTransitionError {
     InvalidCurrentState,
     #[error("circle transition sequence overflow")]
     SequenceOverflow,
-    #[error("circle creator Store grant does not match the Store policy")]
-    MembershipGrantPolicy,
     #[error("circle recipient has an invalid Ed25519 public key: {0}")]
     InvalidRecipient(String),
     #[error("circle member is not a current Store member: {0}")]

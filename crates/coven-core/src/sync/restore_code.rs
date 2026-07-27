@@ -163,8 +163,6 @@ pub enum RestoreCodeError {
         "A signing key in this restore code is invalid. Regenerate it on the source device. ({0})"
     )]
     InvalidSigningKey(String),
-    #[error("The activated device continuation in this restore code is invalid. Regenerate it on the source device. ({0})")]
-    InvalidContinuationAuthority(String),
     #[error("The Owner recovery authority in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidRecoveryAuthority(String),
     #[error("The founder key in this restore code is invalid. Regenerate it on the source device. ({0})")]

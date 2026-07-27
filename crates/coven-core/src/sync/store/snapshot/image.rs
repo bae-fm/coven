@@ -51,8 +51,6 @@ pub enum SnapshotError {
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
     StoreObject(#[source] crate::sync::store_objects::StoreObjectError),
-    #[error("decryption failed: {0}")]
-    Decryption(String),
     /// No synced tables were registered, so we cannot determine which tables
     /// are safe to share. Emitting a snapshot here would either leak every
     /// local-only table or clear the whole DB — both wrong, so we refuse.
@@ -83,13 +81,6 @@ pub enum SnapshotError {
     },
     #[error("snapshot blob preflight failed: {0}")]
     PublishBlobs(String),
-    #[error("failed to check remote blob {namespace}/{id}: {source}")]
-    PublishBlobRemoteCheck {
-        namespace: String,
-        id: String,
-        #[source]
-        source: StorageError,
-    },
     #[error("snapshot bootstrap belongs to store {bound:?}, not {requested:?}")]
     BootstrapStoreMismatch { bound: String, requested: String },
     #[error(

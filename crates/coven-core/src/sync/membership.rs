@@ -598,8 +598,6 @@ pub enum MembershipError {
     PrunedAuthorStream,
     #[error("membership author stream exhausted its sequence space")]
     SequenceExhausted,
-    #[error("membership author has no reusable stream; a fresh persisted stream is required")]
-    MissingAuthorStream,
     #[error("membership resolution activation entry {0} is invalid")]
     InvalidResolutionActivation(usize),
     #[error("membership resolution activation requires a fresh persisted author stream")]

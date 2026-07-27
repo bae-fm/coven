@@ -15,21 +15,6 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
-    #[error(
-        "stale membership head for {author}: committed through seq {committed}, \
-         cannot write seq {attempted}"
-    )]
-    StaleMembershipHead {
-        author: String,
-        committed: u64,
-        attempted: u64,
-    },
-    #[error("{operation} failed: {original}; rollback failed: {rollback}")]
-    Rollback {
-        operation: &'static str,
-        original: String,
-        rollback: String,
-    },
     #[error("User {0} is not a current member")]
     NotAMember(String),
     #[error("Cannot revoke the last owner of a store")]
