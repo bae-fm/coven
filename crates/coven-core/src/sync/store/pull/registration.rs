@@ -88,10 +88,9 @@ pub(crate) fn load_device_join_cleanup_activation<'a>(
     activation: &'a super::device_join::DeviceJoinCleanupActivation,
 ) -> StorePullFuture<'a, LoadedDeviceJoinCleanupActivation> {
     Box::pin(async move {
-        let root_value = load_store_protocol_root(storage, root).await?.value;
-        let verified_commit =
-            load_verified_commit_at_root(storage, root, &root_value, &activation.activation)
-                .await?;
+        let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+        let root_value = commit_verifier.verified_root().clone();
+        let verified_commit = commit_verifier.load_ref(&activation.activation).await?;
         if verified_commit.value().device_join_cleanup_receipts()
             != std::slice::from_ref(&activation.receipt)
         {
@@ -261,11 +260,11 @@ pub(crate) async fn retain_activated_acknowledgement(
 async fn validate_commit_reclaim_authorization(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimAuthorizationRef,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -296,29 +295,13 @@ async fn validate_commit_reclaim_authorization(
     let target = evidence.claim.target();
     match target.activation() {
         super::store_reclaim::ReclaimActivation::Commit(activating_commit) => {
-            Box::pin(validate_commit_activated_reclaim_target(
-                storage,
-                root,
-                root_value,
-                commit,
-                &target,
-                activating_commit,
-            ))
-            .await
+            validate_commit_activated_reclaim_target(&target, activating_commit, accepted)
         }
         super::store_reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
             validate_circle_snapshot_activated_reclaim_target(&target, &activation)
         }
         super::store_reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
-            Box::pin(validate_package_bound_reclaim_target(
-                storage,
-                root,
-                root_value,
-                commit,
-                &target,
-                &activation,
-            ))
-            .await
+            validate_package_bound_reclaim_target(&target, &activation, accepted)
         }
     }
 }
@@ -331,13 +314,10 @@ async fn validate_commit_reclaim_authorization(
 /// the audience must be the one the package addresses. Reading the bindings
 /// themselves requires the package's audience key, which a Store member outside a
 /// Circle does not hold; the Owner re-reads them before authorizing any delete.
-async fn validate_package_bound_reclaim_target(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    commit: &StoreBatchCommit,
+fn validate_package_bound_reclaim_target(
     target: &super::store_reclaim::ReclaimTarget,
     activation: &super::store_reclaim::PackageBlobBindingActivation<'_>,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let super::store_reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
         return Err(RegistrationLoadError::Invalid(
@@ -345,26 +325,23 @@ async fn validate_package_bound_reclaim_target(
         ));
     };
     let expected = activation.activation.clone();
-    let activating = Box::pin(predecessor_commit_matching_at_root(
-        storage,
-        root,
-        root_value,
-        &commit.order,
-        Box::new(move |candidate| candidate.reference() == &expected),
-    ))
-    .await?
-    .ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "reclaim evidence blob activation is absent from predecessor history".to_string(),
-        )
-    })?;
+    let activating = accepted
+        .find(|candidate, _| candidate == &expected)
+        .map_err(registration_attempt_error)?
+        .ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "reclaim evidence blob activation is absent from predecessor history".to_string(),
+            )
+        })?;
     let names_package = match activation.package {
         super::store_reclaim::AudienceBlobBindingPackage::Store(package) => {
-            activating.value().store_package() == Some(package)
+            activating.verified.value().store_package() == Some(package)
         }
-        super::store_reclaim::AudienceBlobBindingPackage::Circle(package) => {
-            activating.value().circle_packages().contains(package)
-        }
+        super::store_reclaim::AudienceBlobBindingPackage::Circle(package) => activating
+            .verified
+            .value()
+            .circle_packages()
+            .contains(package),
     };
     if !names_package {
         return Err(RegistrationLoadError::Invalid(
@@ -382,37 +359,32 @@ async fn validate_package_bound_reclaim_target(
 /// Bind a reclaim target to the retained Store commit that published it: the
 /// commit must sit in this device's predecessor history and its body must name the
 /// exact object the evidence authorizes deleting.
-async fn validate_commit_activated_reclaim_target(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    commit: &StoreBatchCommit,
+fn validate_commit_activated_reclaim_target(
     target: &super::store_reclaim::ReclaimTarget,
     activating_commit: &StoreBatchCommitRef,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let expected = activating_commit.clone();
-    let activation = Box::pin(predecessor_commit_matching_at_root(
-        storage,
-        root,
-        root_value,
-        &commit.order,
-        Box::new(move |candidate| candidate.reference() == &expected),
-    ))
-    .await?
-    .ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "reclaim evidence package activation is absent from predecessor history".to_string(),
-        )
-    })?;
+    let activation = accepted
+        .find(|candidate, _| candidate == &expected)
+        .map_err(registration_attempt_error)?
+        .ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "reclaim evidence package activation is absent from predecessor history"
+                    .to_string(),
+            )
+        })?;
     let names_target = match target {
         super::store_reclaim::ReclaimTarget::StorePackage(store) => {
-            activation.value().store_package() == Some(&store.package)
+            activation.verified.value().store_package() == Some(&store.package)
         }
         super::store_reclaim::ReclaimTarget::CirclePackage(circle) => activation
+            .verified
             .value()
             .circle_packages()
             .contains(&circle.package),
         super::store_reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
+            .verified
             .value()
             .circle_controls()
             .iter()
@@ -481,11 +453,11 @@ fn validate_circle_snapshot_activated_reclaim_target(
 async fn validate_commit_reclaim_receipt(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimReceiptRef,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -518,15 +490,10 @@ async fn validate_commit_reclaim_receipt(
                 .to_string(),
         ));
     }
-    if Box::pin(predecessor_commit_matching_at_root(
-        storage,
-        root,
-        root_value,
-        &commit.order,
-        Box::new(|candidate| candidate.value().reclaim_authorization() == Some(&authorization)),
-    ))
-    .await?
-    .is_none()
+    if accepted
+        .find(|_, candidate| candidate.reclaim_authorization() == Some(&authorization))
+        .map_err(registration_attempt_error)?
+        .is_none()
     {
         return Err(RegistrationLoadError::Invalid(
             "reclaim receipt authorization is absent from predecessor history".to_string(),
@@ -564,11 +531,11 @@ pub(super) async fn load_commit_registrations_with_root(
         Box::pin(validate_commit_reclaim_authorization(
             storage,
             root,
-            root_value,
             commit,
             reference,
             activating_author,
             predecessor,
+            accepted,
         ))
         .await?;
     }
@@ -576,11 +543,11 @@ pub(super) async fn load_commit_registrations_with_root(
         Box::pin(validate_commit_reclaim_receipt(
             storage,
             root,
-            root_value,
             commit,
             reference,
             activating_author,
             predecessor,
+            accepted,
         ))
         .await?;
     }

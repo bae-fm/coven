@@ -651,24 +651,19 @@ pub(crate) async fn predecessor_commit_matching(
     order: &super::store_commit::StoreCommitOrder,
     matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
-    let root_value = load_store_protocol_root(storage, root)
+    let mut commit_verifier = StoreCommitVerifier::new(storage, root)
         .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
-    Box::pin(predecessor_commit_matching_at_root(
-        storage,
-        root,
-        &root_value,
+        .map_err(RegistrationLoadError::Object)?;
+    Box::pin(predecessor_commit_matching_with_verifier(
+        &mut commit_verifier,
         order,
         matches,
     ))
     .await
 }
 
-pub(super) async fn predecessor_commit_matching_at_root(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
+async fn predecessor_commit_matching_with_verifier(
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     order: &super::store_commit::StoreCommitOrder,
     mut matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
@@ -683,7 +678,8 @@ pub(super) async fn predecessor_commit_matching_at_root(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let commit = load_verified_commit_at_root(storage, root, root_value, &reference)
+        let commit = commit_verifier
+            .load_ref(&reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
         if matches(&commit) {
