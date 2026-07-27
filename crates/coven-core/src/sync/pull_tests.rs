@@ -1432,7 +1432,6 @@ fn sign_exact_commit_with_package(
             device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),
             device_join_cleanup_receipts: graph.commit.device_join_cleanup_receipts().to_vec(),
             provider_access_grants: graph.commit.provider_access_grants().to_vec(),
-            provider_access_withdrawals: graph.commit.provider_access_withdrawals().to_vec(),
             device_registrations: graph.commit.device_registrations().to_vec(),
             device_exclusion_proposals: graph.commit.device_exclusion_proposals().to_vec(),
             device_exclusion_outcomes: graph.commit.device_exclusion_outcomes().to_vec(),

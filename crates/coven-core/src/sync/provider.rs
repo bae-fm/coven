@@ -25,7 +25,6 @@ const CROSS_CHALLENGE_DOMAIN: &[u8] = b"coven.provider-cross-principal-challenge
 const CROSS_RESPONSE_DOMAIN: &[u8] = b"coven.provider-cross-principal-response.v1\0";
 const PAYLOAD_DOMAIN: &[u8] = b"coven.provider-probe-payload.v1\0";
 const MEMBER_ACCESS_GRANT_DOMAIN: &[u8] = b"coven.provider-member-access-grant.v1\0";
-const MEMBER_ACCESS_WITHDRAWAL_DOMAIN: &[u8] = b"coven.provider-member-access-withdrawal.v1\0";
 pub const PROBE_PAYLOAD_LEN: usize = 256;
 pub const PROBE_RANGE_START: u64 = 31;
 pub const PROBE_RANGE_END: u64 = 173;
@@ -1039,127 +1038,6 @@ impl ProviderAccessWithdrawal {
         } else {
             invalid("provider access withdrawal differs from the stored authority locator")
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMemberProviderAccessWithdrawalReceipt {
-    pub grant: StoreMemberProviderAccessGrantRef,
-    pub withdrawal: ProviderAccessWithdrawal,
-    pub administrator_grant: ProviderAdminGrantId,
-    pub administrator: StoreDeviceRegistrationRef,
-    pub signature: String,
-}
-
-#[derive(Serialize)]
-struct StoreMemberProviderAccessWithdrawalSignedFields<'a> {
-    grant: &'a StoreMemberProviderAccessGrantRef,
-    withdrawal: &'a ProviderAccessWithdrawal,
-    administrator_grant: &'a ProviderAdminGrantId,
-    administrator: &'a StoreDeviceRegistrationRef,
-}
-
-impl StoreMemberProviderAccessWithdrawalReceipt {
-    pub fn signed(
-        grant: StoreMemberProviderAccessGrantRef,
-        withdrawal: ProviderAccessWithdrawal,
-        administrator_grant: ProviderAdminGrantId,
-        administrator: StoreDeviceRegistrationRef,
-        administrator_registration: &StoreDeviceRegistration,
-        administrator_signer: &UserKeypair,
-    ) -> Result<Self, ProviderProbeError> {
-        administrator
-            .verify_registration(administrator_registration)
-            .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
-        if crate::keys::public_key_hex(administrator_signer)
-            != administrator_registration.device_signing_pubkey
-        {
-            return invalid("provider access withdrawal signer is not the administrator device");
-        }
-        withdrawal.validate()?;
-        let mut receipt = Self {
-            grant,
-            withdrawal,
-            administrator_grant,
-            administrator,
-            signature: String::new(),
-        };
-        receipt.signature = hex::encode(
-            administrator_signer
-                .sign(ObjectHash::digest(&receipt.canonical_signed_bytes()).as_bytes()),
-        );
-        Ok(receipt)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            MEMBER_ACCESS_WITHDRAWAL_DOMAIN,
-            &StoreMemberProviderAccessWithdrawalSignedFields {
-                grant: &self.grant,
-                withdrawal: &self.withdrawal,
-                administrator_grant: &self.administrator_grant,
-                administrator: &self.administrator,
-            },
-        )
-    }
-
-    pub fn receipt_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self)
-            .expect("provider member access withdrawal serialization cannot fail")
-    }
-
-    pub fn verify(
-        &self,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<(), ProviderProbeError> {
-        self.administrator
-            .verify_registration(administrator)
-            .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
-        self.withdrawal.validate()?;
-        if !crate::keys::verify_signature_hex(
-            &administrator.device_signing_pubkey,
-            &self.signature,
-            self.receipt_hash().as_bytes(),
-        ) {
-            return invalid("provider access withdrawal signature is invalid");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreMemberProviderAccessWithdrawalReceiptRef {
-    pub grant_id: ProviderAccessGrantId,
-    pub receipt_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-impl StoreMemberProviderAccessWithdrawalReceiptRef {
-    pub fn from_receipt(
-        receipt: &StoreMemberProviderAccessWithdrawalReceipt,
-        object: ExactObjectRef,
-    ) -> Self {
-        Self {
-            grant_id: receipt.grant.grant_id.clone(),
-            receipt_hash: receipt.receipt_hash(),
-            object,
-        }
-    }
-
-    pub fn verify(
-        &self,
-        receipt: &StoreMemberProviderAccessWithdrawalReceipt,
-    ) -> Result<(), ProviderProbeError> {
-        if self.grant_id != receipt.grant.grant_id || self.receipt_hash != receipt.receipt_hash() {
-            return invalid("provider access withdrawal reference differs from its signed receipt");
-        }
-        Ok(())
     }
 }
 

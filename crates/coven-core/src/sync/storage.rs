@@ -30,7 +30,6 @@ pub(crate) enum ProtectedObjectDomain {
     StoreReclaimAuthorization,
     StoreReclaimReceipt,
     ProviderAccessGrant,
-    ProviderAccessWithdrawal,
     OwnerRecoveryNode,
     StoreSnapshotMeta,
     StoreSnapshotImage,
@@ -308,18 +307,6 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
-            Self::ProviderAccessWithdrawal => ProtocolObjectMetadata {
-                aad_label: b"provider-access-withdrawal",
-                path: ProtocolPathRule::Exact(&[ExactPathShape {
-                    component_count: 4,
-                    fixed_components: &[
-                        (0, "store-v1"),
-                        (1, "provider-access"),
-                        (2, "withdrawals"),
-                    ],
-                }]),
-                extension: ".json",
-            },
             Self::OwnerRecoveryNode => ProtocolObjectMetadata {
                 aad_label: b"owner-recovery-node",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -580,8 +567,6 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimReceipt);
     pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
-    pub const ProviderAccessWithdrawal: SignedStoreProtocolObjectDomain =
-        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessWithdrawal);
     pub const OwnerRecoveryNode: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::OwnerRecoveryNode);
     pub const StoreSnapshotMeta: SignedStoreProtocolObjectDomain =
@@ -1687,11 +1672,6 @@ mod tests {
                 domain: ProtectedObjectDomain::ProviderAccessGrant,
                 valid: &["store-v1/provider-access/grants/grant"],
                 cross_domain: "store-v1/provider-access/withdrawals/grant",
-            },
-            DomainPathCase {
-                domain: ProtectedObjectDomain::ProviderAccessWithdrawal,
-                valid: &["store-v1/provider-access/withdrawals/grant"],
-                cross_domain: "store-v1/provider-access/grants/grant",
             },
             DomainPathCase {
                 domain: ProtectedObjectDomain::OwnerRecoveryNode,

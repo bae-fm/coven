@@ -591,8 +591,6 @@ pub(crate) mod storage {
             }
         }
     }
-
-    pub(crate) mod local;
 }
 
 pub(crate) mod sync {
@@ -800,7 +798,6 @@ pub use storage::cloud::{
     create_cloud_home,
     s3::S3CloudHome,
 };
-pub use storage::local::BlobStore;
 pub use sync::device_join_transport::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
     DeviceJoinTransportOutcome,

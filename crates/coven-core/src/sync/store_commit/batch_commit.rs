@@ -168,14 +168,6 @@ impl StoreBatchCommit {
         })
     }
 
-    pub fn provider_access_withdrawals(
-        &self,
-    ) -> &[crate::sync::provider::StoreMemberProviderAccessWithdrawalReceiptRef] {
-        self.operations().map_or(&[], |operations| {
-            operations.provider_access_withdrawals.as_slice()
-        })
-    }
-
     pub fn device_registrations(&self) -> &[ActivatedStoreDeviceRegistrationRef] {
         match &self.body {
             StoreCommitBody::Operations(operations) => operations.device_registrations.as_slice(),
@@ -342,7 +334,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -387,7 +378,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations,
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -530,7 +520,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -576,7 +565,6 @@ impl StoreBatchCommit {
                 device_join_outcomes,
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations,
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -624,7 +612,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -669,7 +656,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: receipts,
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -715,7 +701,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: proposals,
                 device_exclusion_outcomes: outcomes,
@@ -740,9 +725,6 @@ impl StoreBatchCommit {
         device_state: StoreDeviceStateRef,
         membership_authority: StoreOperationMembershipAuthority,
         provider_access_grants: Vec<crate::sync::provider::StoreMemberProviderAccessGrantRef>,
-        provider_access_withdrawals: Vec<
-            crate::sync::provider::StoreMemberProviderAccessWithdrawalReceiptRef,
-        >,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         Self::signed_operations(
@@ -763,7 +745,6 @@ impl StoreBatchCommit {
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants,
-                provider_access_withdrawals,
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -810,7 +791,6 @@ impl StoreBatchCommit {
             device_join_outcomes,
             device_join_cleanup_receipts,
             provider_access_grants,
-            provider_access_withdrawals,
             device_registrations,
             device_exclusion_proposals,
             device_exclusion_outcomes,
@@ -850,7 +830,7 @@ impl StoreBatchCommit {
         validate_device_join_attempt_decision_refs(&device_join_attempt_decisions)?;
         validate_device_join_outcome_refs(&device_join_outcomes)?;
         validate_device_join_cleanup_receipt_refs(&device_join_cleanup_receipts)?;
-        validate_provider_access_refs(&provider_access_grants, &provider_access_withdrawals)?;
+        validate_provider_access_refs(&provider_access_grants)?;
         validate_device_registration_refs(&device_registrations)?;
         validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
         validate_stream_activations(
@@ -897,7 +877,6 @@ impl StoreBatchCommit {
             device_join_outcomes,
             device_join_cleanup_receipts,
             provider_access_grants,
-            provider_access_withdrawals,
             device_registrations,
             device_exclusion_proposals,
             device_exclusion_outcomes,
@@ -1188,10 +1167,7 @@ fn validate_commit_body(
             validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
             validate_device_join_cleanup_receipt_refs(&operations.device_join_cleanup_receipts)?;
-            validate_provider_access_refs(
-                &operations.provider_access_grants,
-                &operations.provider_access_withdrawals,
-            )?;
+            validate_provider_access_refs(&operations.provider_access_grants)?;
             validate_device_registration_refs(&operations.device_registrations)?;
             validate_device_exclusion_refs(
                 &operations.device_exclusion_proposals,

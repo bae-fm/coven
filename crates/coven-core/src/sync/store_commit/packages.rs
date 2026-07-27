@@ -635,8 +635,6 @@ pub struct StoreCommitOperations {
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
     pub device_join_cleanup_receipts: Vec<crate::sync::store::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::sync::provider::StoreMemberProviderAccessGrantRef>,
-    pub provider_access_withdrawals:
-        Vec<crate::sync::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
@@ -659,7 +657,6 @@ impl StoreCommitOperations {
             && self.device_join_outcomes.is_empty()
             && self.device_join_cleanup_receipts.is_empty()
             && self.provider_access_grants.is_empty()
-            && self.provider_access_withdrawals.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
             && self.device_exclusion_outcomes.is_empty()
@@ -675,7 +672,6 @@ impl StoreCommitOperations {
             && self.device_join_outcomes.is_empty()
             && self.device_join_cleanup_receipts.is_empty()
             && self.provider_access_grants.is_empty()
-            && self.provider_access_withdrawals.is_empty()
             && self.device_registrations.is_empty()
             && self.device_exclusion_proposals.is_empty()
             && self.device_exclusion_outcomes.is_empty()
@@ -712,8 +708,6 @@ pub struct StoreCommitOperationsInput<'a> {
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
     pub device_join_cleanup_receipts: Vec<crate::sync::store::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::sync::provider::StoreMemberProviderAccessGrantRef>,
-    pub provider_access_withdrawals:
-        Vec<crate::sync::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
     pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,

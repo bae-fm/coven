@@ -290,14 +290,6 @@ impl CovenBuilder {
         self
     }
 
-    pub fn cloudkit_ops(
-        mut self,
-        ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
-    ) -> Self {
-        self.cloudkit_ops = Some(ops);
-        self
-    }
-
     pub fn apply_cloudkit_ops(
         mut self,
         ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,

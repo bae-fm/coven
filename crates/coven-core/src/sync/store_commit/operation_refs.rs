@@ -140,21 +140,8 @@ pub(super) fn validate_device_join_cleanup_receipt_refs(
 
 pub(super) fn validate_provider_access_refs(
     grants: &[crate::sync::provider::StoreMemberProviderAccessGrantRef],
-    withdrawals: &[crate::sync::provider::StoreMemberProviderAccessWithdrawalReceiptRef],
 ) -> Result<(), StoreProtocolError> {
-    if grants.windows(2).any(|pair| pair[0] >= pair[1])
-        || withdrawals.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(StoreProtocolError::ProviderAccessMismatch);
-    }
-    let granted = grants
-        .iter()
-        .map(|reference| &reference.grant_id)
-        .collect::<BTreeSet<_>>();
-    if withdrawals
-        .iter()
-        .any(|reference| granted.contains(&reference.grant_id))
-    {
+    if grants.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StoreProtocolError::ProviderAccessMismatch);
     }
     Ok(())

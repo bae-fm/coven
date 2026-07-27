@@ -657,12 +657,6 @@ impl CovenHandle {
         Ok(keyring.fingerprint())
     }
 
-    /// Remove the master key from custody — a host's lock/sign-out flow. `Ok`
-    /// whether or not one was established.
-    pub fn forget_master_key(&self) -> Result<(), KeyError> {
-        self.key_custody.forget()
-    }
-
     /// The established master key's fingerprint, or `None` if custody has
     /// never had one established (or is locked, for a policy where that's
     /// representable).
@@ -1119,12 +1113,6 @@ impl CovenHandle {
         self.db().set_cache_budget(namespace, max_bytes).await
     }
 
-    pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
-        crate::keys::identity_public_key(self.identity_custody.as_ref())
-            .map(|opt| opt.map(hex::encode))
-            .map_err(SyncError::from)
-    }
-
     /// Generate a restore code, seeded with the store's current membership-head
     /// floor read from the cloud. Requires a connected provider: unlike the old,
     /// storage-free version of this call, minting a trustworthy floor is a
@@ -1389,25 +1377,6 @@ impl CovenHandle {
                 cancellation,
                 revocation_executor,
                 executor_grant,
-            )
-            .await?)
-    }
-
-    pub async fn cleanup_cancelled_device_join(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        administrator_terminal: crate::ProviderAdminJoinTerminal,
-        joiner_terminal: crate::JoinerJoinTerminal,
-    ) -> Result<crate::DeviceJoinCleanupReceipt, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        Ok(self
-            .device_join_store()
-            .await?
-            .prepare_device_join_cleanup(
-                &signer,
-                cancellation,
-                administrator_terminal,
-                joiner_terminal,
             )
             .await?)
     }
@@ -2653,24 +2622,6 @@ mod tests {
         );
     }
 
-    /// `forget_master_key` removes an established key, and is `Ok` whether or
-    /// not one was established — a host's lock/sign-out flow.
-    #[tokio::test]
-    async fn forget_master_key_clears_an_established_key_and_is_idempotent() {
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let handle = test_handle("lib-forget-master-key", store_dir, db);
-
-        assert!(handle.master_key_fingerprint().unwrap().is_some());
-        handle
-            .forget_master_key()
-            .expect("forget an established key");
-        assert!(handle.master_key_fingerprint().unwrap().is_none());
-        handle
-            .forget_master_key()
-            .expect("forgetting an already-absent key is not an error");
-    }
-
     // =========================================================================
     // Identity lifecycle
     // =========================================================================
@@ -2722,11 +2673,6 @@ mod tests {
             .initialize_identity()
             .expect("the first call establishes an identity");
         assert!(!pubkey.is_empty());
-        assert_eq!(
-            handle.get_user_pubkey().unwrap(),
-            Some(pubkey),
-            "get_user_pubkey reflects what initialize_identity just established",
-        );
 
         let error = handle
             .initialize_identity()
@@ -2767,8 +2713,6 @@ mod tests {
             pubkey_a, pubkey_b,
             "two stores on one device must not share an identity",
         );
-        assert_eq!(handle_a.get_user_pubkey().unwrap(), Some(pubkey_a));
-        assert_eq!(handle_b.get_user_pubkey().unwrap(), Some(pubkey_b));
     }
 
     // =========================================================================

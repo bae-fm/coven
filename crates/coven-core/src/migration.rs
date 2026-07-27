@@ -13,8 +13,6 @@
 //! commit only when their final routing contract exactly matches the pinned
 //! contract. Coven's bookkeeping tables are not part of this ladder.
 
-use std::borrow::Cow;
-
 use rusqlite::Connection;
 use tracing::{info, warn};
 
@@ -26,7 +24,7 @@ pub struct Migration {
     /// that does not start at 1 is a startup error, not a silent skip.
     pub version: u32,
     /// Recorded in logs, e.g. "initial", "add_album_disc_count".
-    pub name: Cow<'static, str>,
+    pub name: &'static str,
     pub up: MigrationStep,
 }
 
@@ -42,7 +40,7 @@ type MigrationFn = Box<dyn Fn(&Connection) -> Result<(), DbError> + Send + Sync>
 pub enum MigrationStep {
     /// A DDL batch (`CREATE` / `ALTER` / `CREATE INDEX`), e.g. `include_str!` of a
     /// `.sql` file.
-    Sql(Cow<'static, str>),
+    Sql(&'static str),
     /// Table rebuilds and backfills that DDL alone cannot express. Invoked at most
     /// once (only when its version is above the on-disk one). All pending steps
     /// share the open transaction, so a failed step or routing validation rolls
@@ -55,17 +53,8 @@ impl Migration {
     pub fn sql(version: u32, name: &'static str, sql: &'static str) -> Self {
         Migration {
             version,
-            name: Cow::Borrowed(name),
-            up: MigrationStep::Sql(Cow::Borrowed(sql)),
-        }
-    }
-
-    /// A migration whose `up` is a runtime-provided DDL batch.
-    pub fn sql_owned(version: u32, name: String, sql: String) -> Self {
-        Migration {
-            version,
-            name: Cow::Owned(name),
-            up: MigrationStep::Sql(Cow::Owned(sql)),
+            name,
+            up: MigrationStep::Sql(sql),
         }
     }
 
@@ -77,7 +66,7 @@ impl Migration {
     {
         Migration {
             version,
-            name: Cow::Borrowed(name),
+            name,
             up: MigrationStep::Run(Box::new(f)),
         }
     }
@@ -125,7 +114,7 @@ pub enum MigrationError {
     #[error("migration {version} ({name}) failed: {source}")]
     Failed {
         version: u32,
-        name: Cow<'static, str>,
+        name: &'static str,
         source: DbError,
     },
     /// Reading or writing `user_version`, or the `BEGIN`/`COMMIT` around a step,
@@ -154,7 +143,7 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<u32
             rollback_after_failure(conn, m, "migration step");
             return Err(MigrationError::Failed {
                 version: m.version,
-                name: m.name.clone(),
+                name: m.name,
                 source,
             });
         }
@@ -164,11 +153,7 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<u32
         }
         conn.execute_batch("COMMIT")
             .map_err(|e| MigrationError::Ledger(DbError::from(e)))?;
-        info!(
-            version = m.version,
-            name = m.name.as_ref(),
-            "applied migration"
-        );
+        info!(version = m.version, name = m.name, "applied migration");
     }
 
     read_user_version(conn)
@@ -193,7 +178,7 @@ pub(crate) fn run_migrations_in_transaction(
         if let Err(source) = apply_step(conn, &migration.up) {
             return Err(MigrationError::Failed {
                 version: migration.version,
-                name: migration.name.clone(),
+                name: migration.name,
                 source,
             });
         }
@@ -279,7 +264,7 @@ fn rollback_after_failure(conn: &Connection, m: &Migration, stage: &str) {
     if let Err(rb) = conn.execute_batch("ROLLBACK") {
         warn!(
             version = m.version,
-            name = m.name.as_ref(),
+            name = m.name,
             stage,
             error = %rb,
             "rollback after a failed migration also failed"
@@ -339,19 +324,6 @@ mod tests {
         for t in ["a", "b", "c"] {
             assert!(table_exists(&conn, t), "table {t} should exist");
         }
-    }
-
-    #[test]
-    fn owned_sql_migration_applies() {
-        let conn = Connection::open_in_memory().expect("open");
-        let migrations = vec![Migration::sql_owned(
-            1,
-            "owned".to_string(),
-            "CREATE TABLE owned (id TEXT PRIMARY KEY)".to_string(),
-        )];
-        let version = run_migrations(&conn, &migrations).expect("run migrations");
-        assert_eq!(version, 1);
-        assert!(table_exists(&conn, "owned"));
     }
 
     #[test]
@@ -417,7 +389,7 @@ mod tests {
                 version: 2,
                 name,
                 ..
-            } if name.as_ref() == "boom"
+            } if name == "boom"
         ));
         assert_eq!(
             user_version(&conn),

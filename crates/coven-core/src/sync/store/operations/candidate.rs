@@ -49,7 +49,6 @@ pub(crate) async fn prepare_store_operation_candidate_common(
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
@@ -72,7 +71,6 @@ pub(crate) async fn prepare_store_operation_candidate_common(
                 plan.device_state.clone(),
                 plan.membership_authority.clone(),
                 vec![grant],
-                Vec::new(),
                 &plan.device_signer,
             )
         }
@@ -233,7 +231,6 @@ pub(crate) async fn prepare_store_operation_candidate_common(
                 device_join_outcomes: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
                 device_exclusion_proposals: Vec::new(),
                 device_exclusion_outcomes: Vec::new(),
