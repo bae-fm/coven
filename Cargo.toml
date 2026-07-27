@@ -36,3 +36,9 @@ opt-level = 1
 # test-thread stack just as it did for coven-core.
 [profile.test.package.coven]
 opt-level = 1
+
+# Tests drive the complete signing, hashing, encryption, and SQLite paths.
+# Optimize their third-party implementations so test runtime measures Coven's
+# behavior rather than debug builds of those dependencies.
+[profile.test.package."*"]
+opt-level = 3
