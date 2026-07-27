@@ -7617,16 +7617,19 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
 }
 
 /// A hash-linked membership chain detects a missing MIDDLE entry via `previous_hash`,
-/// but nothing points forward to a missing TAIL entry, so a listing that omits a
-/// committed `Remove` still hash-links cleanly and reads the removed member as
-/// current. The owner removes the member at (owner, 3) and publishes a head
-/// covering it, but the LIST that rebuilds the chain omits that key while a keyed
-/// GET still serves it — the same eventual-consistency gap a legitimate lagging
-/// Add exploits, except here the lagging object is the one that revokes, not the
-/// one that grants. The removed member's changeset, naming its now-superseded
-/// (owner, 2) Add as its grant, must still be judged against the full,
-/// head-committed chain (which the keyed GET recovers) and refused — not against
-/// whatever a bare listing happens to hash-link into.
+/// but nothing points forward to a missing TAIL entry, so a chain reload whose
+/// successor-slot walk stops at an absent slot still hash-links cleanly and reads
+/// the removed member as current. The owner removes the member at (owner, 3) and
+/// publishes a head covering it; a puller learns the full chain while the provider
+/// serves everything. Then the provider lags: the slot holding the Remove's head
+/// reads as absent — indistinguishable from "never published" — while every keyed
+/// exact read still serves. The removed member's changeset, naming its
+/// now-superseded (owner, 2) Add as its grant, must still be refused: the chain
+/// load fails loud when its walk regresses below the durable cursor the earlier
+/// pull committed — a shorter chain is indistinguishable from tampering — and
+/// once the provider catches up, the changeset is refused as unauthorized.
+/// Knowledge of a committed removal never regresses to whatever a truncated walk
+/// happens to hash-link into.
 #[tokio::test]
 async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let owner = UserKeypair::generate();
@@ -7655,11 +7658,22 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
             "2026-03-01T00:03:00Z".to_string(),
         )
         .expect("active Owner removes membership grant");
+    let remove_coord = remove_member.coord();
     publish_exact_membership_entry(&storage, &mut chain, remove_member, &owner).await;
 
+    // The puller learns the full chain, Remove included, while the provider
+    // still serves everything.
+    let db2 = open_test_db();
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let (_temp, store_dir) = temp_store_dir();
+    let (_, first) = pull_into(&db2, &storage, &store_dir).await;
+    assert_eq!(first.changesets_applied, 0);
+
     // The removed member authors a changeset stamping their old grant (owner, 2),
-    // which looks like a legitimate lagging Add if the reload is judged against a
-    // plain listing instead of the committed chain.
+    // which looks like a legitimate lagging Add if the reload is judged against
+    // the truncated walk instead of what the puller already committed.
     let cs = capture_bytes(
         &db1,
         &[
@@ -7678,16 +7692,59 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     .await;
     let stream_id = commit_stream_id(&reference);
 
-    let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    // The provider now lags: the slot holding the Remove's head reads as absent,
+    // while keyed exact reads still serve every object.
+    let hidden = chain
+        .head_ref_for_stream(
+            &remove_coord.author_pubkey,
+            &remove_coord.author_owner_grant,
+            remove_coord.stream_id,
+        )
+        .expect("published Remove head")
+        .object
+        .slot()
+        .logical_key()
+        .strip_suffix(".json")
+        .expect("membership head slot key has a .json suffix")
+        .to_string();
+    struct LaggingHeadSlot {
+        hidden: String,
+    }
+    #[async_trait]
+    impl StorageInterceptor for LaggingHeadSlot {
+        async fn before_protocol_read(
+            &self,
+            read: ProtocolRead,
+            semantic_prefix: &str,
+        ) -> Result<(), crate::sync::storage::StorageError> {
+            if read == ProtocolRead::Slot && semantic_prefix == self.hidden {
+                return Err(crate::sync::storage::StorageError::NotFound(format!(
+                    "lagging provider omits {semantic_prefix}"
+                )));
+            }
+            Ok(())
+        }
+    }
+    let lagging = InterceptedStorage::new(&*storage.storage, LaggingHeadSlot { hidden });
+
+    // The lagging view is refused outright: the walk comes up shorter than the
+    // durable cursor the first pull committed, and a shorter chain is
+    // indistinguishable from tampering, so the load fails loud instead of
+    // re-admitting whatever the truncated walk hash-links into.
+    let store_db2 = crate::sync::store::StoreDatabase::new(&db2);
+    let error = crate::sync::store::load_cycle_membership(&lagging, &store_db2)
         .await
-        .unwrap();
+        .expect_err("a chain regressing below the durable cursor is refused");
+    assert!(
+        format!("{error:?}").contains("regressed below its durable cursor"),
+        "unexpected refusal: {error:?}"
+    );
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
-
-    // Not applied: the removed member is not re-admitted by the lagging listing.
-    // Surfaced as rejected-unauthorized and the position advances so the device is
-    // not stuck on it.
+    // Once the provider catches up, the full chain is visible again and the
+    // removed member's changeset is refused as unauthorized — surfaced, with the
+    // position advanced so the device is not stuck on it.
+    let (updated, result) = pull_into(&db2, &storage, &store_dir).await;
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(unauthorized_positions(&result).len(), 1);
