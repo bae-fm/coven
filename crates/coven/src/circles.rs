@@ -4,7 +4,7 @@
 //! delegates to the sync manager and maps internal refusals to [`CircleError`].
 
 use coven_core::{
-    Circle, CircleCloseStatus, CircleControlCoord, CircleId, CircleMemberInfo,
+    Circle, CircleCloseStatus, CircleControlCoord, CircleEpochCloseId, CircleId, CircleMemberInfo,
     CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleRole, StoreDeviceId,
 };
 
@@ -64,6 +64,17 @@ pub enum CircleError {
         circle_id: CircleId,
         device_id: StoreDeviceId,
     },
+    /// The chosen control branch starts an epoch close. Resolve the conflict to
+    /// an active branch before starting a close.
+    #[error("circle {circle_id} control conflict must resolve to an active branch")]
+    ResolveToClosingBranch { circle_id: CircleId },
+    /// This device was excluded from an epoch close and must reset from a
+    /// successor bootstrap before it can continue.
+    #[error("device was excluded from circle {circle_id} close {close_id} and must reset")]
+    ExcludedDeviceMustReset {
+        circle_id: CircleId,
+        close_id: CircleEpochCloseId,
+    },
     /// Retry was requested for a durable operation that is not blocked.
     #[error("circle operation {operation_id} is not blocked")]
     NotBlocked { operation_id: CircleOperationId },
@@ -116,6 +127,16 @@ impl From<CircleOperationError> for CircleError {
             } => Self::DeviceNotACloseParticipant {
                 circle_id,
                 device_id,
+            },
+            CircleOperationError::ResolveToClosingBranch { circle_id } => {
+                Self::ResolveToClosingBranch { circle_id }
+            }
+            CircleOperationError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            } => Self::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
             },
             CircleOperationError::NotBlocked { operation_id } => Self::NotBlocked { operation_id },
             CircleOperationError::DiscardRequiresNonactivation { operation_id } => {
@@ -298,6 +319,11 @@ mod tests {
             .expect("a 64-character hexadecimal device id")
     }
 
+    fn close_id(byte: u8) -> CircleEpochCloseId {
+        serde_json::from_str(&format!("\"{}\"", format!("{byte:02x}").repeat(32)))
+            .expect("a 64-character hexadecimal close id")
+    }
+
     /// Each internal refusal maps to its public variant, carrying the identifiers a
     /// caller needs. Covers the named refusal set: rename-on-deleted,
     /// resolve-on-nonconflicted, cancel-without-close, exclude-non-participant, and
@@ -373,6 +399,27 @@ mod tests {
                 if mapped == operation_id
         ));
 
+        let close_id = close_id(0xab);
+        let excluded_reset: CircleError = CircleOperationError::ExcludedDeviceMustReset {
+            circle_id: circle,
+            close_id,
+        }
+        .into();
+        assert!(matches!(
+            excluded_reset,
+            CircleError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id: mapped
+            } if circle_id == circle && mapped == close_id
+        ));
+
+        let closing_resolution: CircleError =
+            CircleOperationError::ResolveToClosingBranch { circle_id: circle }.into();
+        assert!(matches!(
+            closing_resolution,
+            CircleError::ResolveToClosingBranch { circle_id } if circle_id == circle
+        ));
+
         // The channel-closed plumbing variants collapse to LoopNotRunning; other
         // internal failures collapse to the Protocol catch-all.
         let closed: CircleError = CircleOperationError::CommandChannelClosed.into();
@@ -386,6 +433,7 @@ mod tests {
     #[test]
     fn no_public_error_display_names_removed_protocol_vocabulary() {
         let circle = circle_id(2);
+        let close_id = close_id(0xab);
         let displays = [
             CircleError::NotConfigured.to_string(),
             CircleError::LoopNotRunning.to_string(),
@@ -404,6 +452,12 @@ mod tests {
             CircleError::DeviceNotACloseParticipant {
                 circle_id: circle,
                 device_id: device_id(3),
+            }
+            .to_string(),
+            CircleError::ResolveToClosingBranch { circle_id: circle }.to_string(),
+            CircleError::ExcludedDeviceMustReset {
+                circle_id: circle,
+                close_id,
             }
             .to_string(),
             CircleError::Identity("locked".to_string()).to_string(),

@@ -228,9 +228,17 @@ operation id, its Circle, its
 circles.retry_operation(op_id).await?;
 ```
 
-There is no discard on this namespace: a Circle operation is retried until it
-activates or is superseded by a verified successor. Discarding an ordinary
-*host write* that a Circle refused is separate, on
+An initiator can discard an operation only after Coven verifies that its
+candidate can never activate:
+
+```rust
+circles.discard_operation(op_id).await?;
+```
+
+If permanent nonactivation is not proven,
+[`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
+`DiscardRequiresNonactivation` and leaves the durable operation intact.
+Discarding an ordinary *host write* that a Circle refused is separate, on
 [`WriteStatus`](#offline-and-blocked-writes).
 
 ### Control conflicts
@@ -385,8 +393,14 @@ stable public variant carrying the ids a caller needs:
 - `Deleted { circle_id }` — the Circle terminated in a deletion.
 - `NoCloseToCancel` / `NoCloseToExclude` / `DeviceNotACloseParticipant` — the
   epoch-close refusals.
+- `ResolveToClosingBranch { circle_id }` — conflict resolution selected a
+  branch that starts an epoch close instead of an active branch.
+- `ExcludedDeviceMustReset { circle_id, close_id }` — this device was excluded
+  from the close and must reset from a successor bootstrap.
 - `NotBlocked { operation_id }` / `Blocked { circle_id, block }` — the durable
   operation refusals.
+- `DiscardRequiresNonactivation { operation_id }` — Coven cannot prove the
+  candidate permanently unable to activate, so it remains durable.
 - `Identity(..)` — the local signing identity is not established.
 - `Protocol(..)` — an internal protocol or database failure with no distinct
   public category.

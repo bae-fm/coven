@@ -2,11 +2,9 @@
 
 ## Status
 
-Planned. Implements the `plans/circles.md` "Application API" and "Errors"
-sections: the `coven.circles()` surface, the public derived `CircleState`,
-the operation-inspection surface, and typed public errors with stable
-identifiers. This is the funnel task: it touches only public surface and
-mapping — every protocol mechanism it exposes is already on main.
+Implemented. The `coven.circles()` namespace, public derived `CircleState`,
+operation-inspection surface, close-status inspection, recovery commands, and
+typed public errors with stable identifiers are on `main`.
 
 ## What exists (the substrate, all merged)
 
@@ -45,15 +43,16 @@ coven.circles().cancel_close(id).await?;
 coven.circles().exclude_close_device(id, device).await?;
 coven.circles().delete(id).await?;
 coven.circles().retry_operation(operation_id).await?;
+coven.circles().discard_operation(operation_id).await?;
 coven.circles().list().await?;                 // Vec<Circle>
 coven.circles().members(id).await?;
 coven.circles().operations().await?;           // inspection, typed blocks
 ```
 
-The existing flat `*_circle` methods on `Handle` move into the namespace
-(callers update — greenfield, no deprecated aliases). `discard_operation`
-is NOT added here; it lands with the verified-nonactivation work that
-implements it (no pre-scaffolded method).
+The existing flat `*_circle` methods on `Handle` moved into the namespace
+(callers updated — greenfield, no deprecated aliases). `discard_operation`
+requires verified permanent nonactivation and leaves the operation durable when
+that proof is absent.
 
 ### 2. Public `CircleState`
 
@@ -119,22 +118,22 @@ No error exposes a removed protocol shape (grep-verified in tests).
 variant for every category that has an internal typed producer today:
 browsable-storage, rotation-required, conflicted, deleted, not-conflicted,
 chosen-branch-not-retained, no-close-to-cancel, no-close-to-exclude,
-device-not-a-close-participant, not-blocked, and blocked (with the
-`CircleOperationBlock`). The remaining plan-listed categories — nonexistent,
-inactive, and closing Circle, and stale epoch — have no internal typed refusal
-producing them yet; they surface today through the `Protocol` catch-all. Adding a
-public variant with no producer would be pre-scaffolding, so each such variant
-lands with the internal refusal that raises it. `excluded-device-must-reset` is
-likewise deferred: it is not a `CircleOperationError` variant today and lands with
-the excluded-device bootstrap-reset work. `add_member` refusals surface typed like
-every sibling: `SyncComponents::add_circle_member` returns `CircleOperationError`
-directly (not `SyncCycleFailure`), so browsable-storage, rotation-required,
-deleted, and conflicted reach `CircleError` with their ids.
+device-not-a-close-participant, resolve-to-closing-branch,
+excluded-device-must-reset, not-blocked, discard-requires-nonactivation, and
+blocked (with the `CircleOperationBlock`). The remaining plan-listed
+categories — nonexistent, inactive, and closing Circle, and stale epoch — have
+no internal typed refusal producing them yet; they surface through the
+`Protocol` catch-all. Adding a public variant with no producer would be
+pre-scaffolding, so each such variant lands with the internal refusal that
+raises it. `add_member` refusals surface typed like every sibling:
+`SyncComponents::add_circle_member` returns `CircleOperationError` directly
+(not `SyncCycleFailure`), so browsable-storage, rotation-required, deleted, and
+conflicted reach `CircleError` with their ids.
 
 ### 5. Docs pass on the public items
 
-Every public item gets a doc comment stating its invariant plainly (the
-site/docs update is the separate final-wave task; this is rustdoc only).
+Every public item has a doc comment stating its invariant plainly. The Circle
+site guide documents the same operation and error surface.
 
 ## Tests
 
@@ -154,6 +153,4 @@ site/docs update is the separate final-wave task; this is rustdoc only).
 
 ## Out of scope
 
-- `discard_operation` (lands with verified-nonactivation discard).
-- site/docs and `~/dev/bae` (final wave).
 - FFI/bindings (none exist in-repo).
