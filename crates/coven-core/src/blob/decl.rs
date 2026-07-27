@@ -624,10 +624,18 @@ impl BlobDecls {
         namespace: &str,
         blob_id: &str,
     ) -> Result<Option<(String, String)>, BlobDeclError> {
-        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+        let Some((table, tb)) = self.table_for_namespace(namespace) else {
             return Ok(None);
         };
         Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
+    }
+
+    /// The one `(table, declaration)` whose blob namespace is `namespace`, or
+    /// `None` when no declared table owns it. The namespace is part of a blob's
+    /// address, so this resolves the carrying table without scanning every
+    /// blob-bearing table's rows.
+    fn table_for_namespace(&self, namespace: &str) -> Option<(&String, &TableBlob)> {
+        self.tables.iter().find(|(_, tb)| tb.namespace == namespace)
     }
 
     /// Whether a live row still needs the logical-id-keyed local source for this
@@ -639,11 +647,7 @@ impl BlobDecls {
         namespace: &str,
         blob_id: &str,
     ) -> Result<bool, BlobDeclError> {
-        let Some((table, blob)) = self
-            .tables
-            .iter()
-            .find(|(_, blob)| blob.namespace == namespace)
-        else {
+        let Some((table, blob)) = self.table_for_namespace(namespace) else {
             return Ok(false);
         };
         let sql = format!(
@@ -678,11 +682,7 @@ impl BlobDecls {
         namespace: &str,
         blob_id: &str,
     ) -> Result<bool, BlobDeclError> {
-        let Some((table, blob)) = self
-            .tables
-            .iter()
-            .find(|(_, blob)| blob.namespace == namespace)
-        else {
+        let Some((table, blob)) = self.table_for_namespace(namespace) else {
             return Ok(false);
         };
         let sql = format!(
@@ -707,11 +707,7 @@ impl BlobDecls {
         blob_id: &str,
         locator_hash: crate::sync::store_commit::ObjectHash,
     ) -> Result<bool, BlobDeclError> {
-        let Some((table, blob)) = self
-            .tables
-            .iter()
-            .find(|(_, blob)| blob.namespace == namespace)
-        else {
+        let Some((table, blob)) = self.table_for_namespace(namespace) else {
             return Ok(false);
         };
         let sql = format!(

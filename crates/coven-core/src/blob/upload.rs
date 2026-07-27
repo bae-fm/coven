@@ -340,13 +340,17 @@ async fn upload_entry(
         }
         Ok(_) => {}
         Err(error) => {
-            let message = error.to_string();
-            record_failure(db, &entry, &file_id, &message, now, observer).await;
-            return EntryOutcome::NotUploaded(UploadFailure {
-                entry_id: entry.id,
-                object_key: upload_label(&entry),
-                cause: UploadFailureCause::Local(message),
-            });
+            let label = upload_label(&entry);
+            return local_upload_failed(
+                db,
+                &entry,
+                &file_id,
+                now,
+                observer,
+                label,
+                error.to_string(),
+            )
+            .await;
         }
     }
 
@@ -379,12 +383,11 @@ async fn upload_entry(
                             row.blob().namespace,
                             row.blob().id
                         );
-                        record_failure(db, &entry, &file_id, &message, now, observer).await;
-                        return EntryOutcome::NotUploaded(UploadFailure {
-                            entry_id: entry.id,
-                            object_key: upload_label(&entry),
-                            cause: UploadFailureCause::Local(message),
-                        });
+                        let label = upload_label(&entry);
+                        return local_upload_failed(
+                            db, &entry, &file_id, now, observer, label, message,
+                        )
+                        .await;
                     };
                     BlobLocator::browsable(
                         row.blob().namespace.clone(),
@@ -399,13 +402,17 @@ async fn upload_entry(
             let locator = match locator {
                 Ok(locator) => locator,
                 Err(error) => {
-                    let message = error.to_string();
-                    record_failure(db, &entry, &file_id, &message, now, observer).await;
-                    return EntryOutcome::NotUploaded(UploadFailure {
-                        entry_id: entry.id,
-                        object_key: upload_label(&entry),
-                        cause: UploadFailureCause::Local(message),
-                    });
+                    let label = upload_label(&entry);
+                    return local_upload_failed(
+                        db,
+                        &entry,
+                        &file_id,
+                        now,
+                        observer,
+                        label,
+                        error.to_string(),
+                    )
+                    .await;
                 }
             };
             let spool_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
@@ -439,13 +446,17 @@ async fn upload_entry(
                 )
                 .await
             {
-                let message = error.to_string();
-                record_failure(db, &entry, &file_id, &message, now, observer).await;
-                return EntryOutcome::NotUploaded(UploadFailure {
-                    entry_id: entry.id,
-                    object_key: stored.object().slot().logical_key().to_string(),
-                    cause: UploadFailureCause::Local(message),
-                });
+                let object_key = stored.object().slot().logical_key().to_string();
+                return local_upload_failed(
+                    db,
+                    &entry,
+                    &file_id,
+                    now,
+                    observer,
+                    object_key,
+                    error.to_string(),
+                )
+                .await;
             }
             set_upload_state(
                 &mut entry,
@@ -461,31 +472,24 @@ async fn upload_entry(
             authority: package_authority,
             stored,
             spool_path,
-        } => {
-            if package_authority != crate::sync::audience_package::PackageAudience::Store {
-                let message = "make_remote upload has non-Store package authority".to_string();
-                record_failure(db, &entry, &file_id, &message, now, observer).await;
-                return EntryOutcome::NotUploaded(UploadFailure {
-                    entry_id: entry.id,
-                    object_key: upload_label(&entry),
-                    cause: UploadFailureCause::Local(message),
-                });
-            }
-            (stored, spool_path)
         }
-        OutboxUploadState::Created {
+        | OutboxUploadState::Created {
             authority: package_authority,
             stored,
             spool_path,
         } => {
             if package_authority != crate::sync::audience_package::PackageAudience::Store {
-                let message = "make_remote upload has non-Store package authority".to_string();
-                record_failure(db, &entry, &file_id, &message, now, observer).await;
-                return EntryOutcome::NotUploaded(UploadFailure {
-                    entry_id: entry.id,
-                    object_key: upload_label(&entry),
-                    cause: UploadFailureCause::Local(message),
-                });
+                let label = upload_label(&entry);
+                return local_upload_failed(
+                    db,
+                    &entry,
+                    &file_id,
+                    now,
+                    observer,
+                    label,
+                    "make_remote upload has non-Store package authority".to_string(),
+                )
+                .await;
             }
             (stored, spool_path)
         }
@@ -514,13 +518,17 @@ async fn upload_entry(
             return upload_failed(db, &entry, &file_id, now, observer, error).await;
         }
         if let Err(error) = db.mark_cloud_upload_created(&entry).await {
-            let message = error.to_string();
-            record_failure(db, &entry, &file_id, &message, now, observer).await;
-            return EntryOutcome::NotUploaded(UploadFailure {
-                entry_id: entry.id,
-                object_key: stored.object().slot().logical_key().to_string(),
-                cause: UploadFailureCause::Local(message),
-            });
+            let object_key = stored.object().slot().logical_key().to_string();
+            return local_upload_failed(
+                db,
+                &entry,
+                &file_id,
+                now,
+                observer,
+                object_key,
+                error.to_string(),
+            )
+            .await;
         }
         set_upload_state(
             &mut entry,
@@ -540,13 +548,17 @@ async fn upload_entry(
         if let Err(error) =
             crate::blob::cache::populate_pinned(store_dir, &stored, &source_path).await
         {
-            let message = format!("pin uploaded blob: {error}");
-            record_failure(db, &entry, &file_id, &message, now, observer).await;
-            return EntryOutcome::NotUploaded(UploadFailure {
-                entry_id: entry.id,
-                object_key: stored.object().slot().logical_key().to_string(),
-                cause: UploadFailureCause::Local(message),
-            });
+            let object_key = stored.object().slot().logical_key().to_string();
+            return local_upload_failed(
+                db,
+                &entry,
+                &file_id,
+                now,
+                observer,
+                object_key,
+                format!("pin uploaded blob: {error}"),
+            )
+            .await;
         }
     }
 
@@ -593,13 +605,17 @@ async fn upload_entry(
             .await
         }
         Err(error) => {
-            let message = error.to_string();
-            record_failure(db, &entry, &file_id, &message, now, observer).await;
-            EntryOutcome::NotUploaded(UploadFailure {
-                entry_id: entry.id,
-                object_key: stored.object().slot().logical_key().to_string(),
-                cause: UploadFailureCause::Local(message),
-            })
+            let object_key = stored.object().slot().logical_key().to_string();
+            local_upload_failed(
+                db,
+                &entry,
+                &file_id,
+                now,
+                observer,
+                object_key,
+                error.to_string(),
+            )
+            .await
         }
     }
 }
@@ -691,6 +707,27 @@ fn upload_label(entry: &OutboxEntry) -> String {
         },
         OutboxOperation::Delete { stored } => stored.object().slot().logical_key().to_string(),
     }
+}
+
+/// Record a local (non-storage) failure against the entry and report it as
+/// not-uploaded. The sibling of [`upload_failed`] for failures minted on this
+/// device — a missing readable path, a database write, a pin — where there is
+/// no [`StorageError`](crate::sync::storage::StorageError) to carry.
+async fn local_upload_failed(
+    db: &Database,
+    entry: &OutboxEntry,
+    file_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    observer: Option<&dyn BlobTransitionObserver>,
+    object_key: String,
+    message: String,
+) -> EntryOutcome {
+    record_failure(db, entry, file_id, &message, now, observer).await;
+    EntryOutcome::NotUploaded(UploadFailure {
+        entry_id: entry.id,
+        object_key,
+        cause: UploadFailureCause::Local(message),
+    })
 }
 
 async fn upload_failed(

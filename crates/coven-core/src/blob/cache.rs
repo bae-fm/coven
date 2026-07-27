@@ -95,7 +95,7 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
-use crate::blob::{Provenance, RowBlobAuthority, RowBlobRef};
+use crate::blob::{BlobRef, Provenance, RowBlobAuthority, RowBlobRef};
 use crate::database::{Database, DbError};
 use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::storage::{StorageError, SyncStorage};
@@ -510,17 +510,7 @@ pub(crate) async fn read_blob(
         // Local + host-provided: the local store is the ONLY copy (a Local blob has no
         // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
         BlobSource::LocalStore => {
-            let path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-            match crate::local_blob::exists(&path).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(BlobCacheError::NoLocalCopy {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                    });
-                }
-                Err(error) => return Err(BlobCacheError::Io(error)),
-            }
+            let path = require_local_store_path(store_dir, blob).await?;
             read_exact_local_file(&path, reference).await
         }
     }?;
@@ -709,17 +699,7 @@ pub(crate) async fn open_blob_stream(
         // Local + host-provided: the local store is the ONLY copy (a Local blob has no
         // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
         BlobSource::LocalStore => {
-            let path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-            match crate::local_blob::exists(&path).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(BlobCacheError::NoLocalCopy {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                    });
-                }
-                Err(error) => return Err(BlobCacheError::Io(error)),
-            }
+            let path = require_local_store_path(store_dir, blob).await?;
             open_local_file(&path).await
         }
     }?;
@@ -906,18 +886,8 @@ pub(crate) async fn materialize_row_blob(
             validate_row_reference(db, reference).await
         }
         BlobSource::LocalStore => {
-            let blob = reference.blob();
-            let path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-            match crate::local_blob::exists(&path).await {
-                Ok(true) => verify_exact_local_file(&path, reference).await?,
-                Ok(false) => {
-                    return Err(BlobCacheError::NoLocalCopy {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                    });
-                }
-                Err(error) => return Err(BlobCacheError::Io(error)),
-            }
+            let path = require_local_store_path(store_dir, reference.blob()).await?;
+            verify_exact_local_file(&path, reference).await?;
             validate_row_reference(db, reference).await
         }
     }
@@ -1230,6 +1200,25 @@ fn resolve_source(reference: &RowBlobRef) -> Result<BlobSource, BlobCacheError> 
                 Provenance::HostProvided => BlobSource::LocalStore,
             })
         }
+    }
+}
+
+/// The local-store path of a Local host-provided blob, failing loud when the
+/// file is absent: the local store is the ONLY copy (a Local blob has no cloud
+/// copy), so a miss is corruption, not a cache miss to refetch. A failed
+/// existence check (broken filesystem) surfaces as I/O, never as absence.
+async fn require_local_store_path(
+    store_dir: &StoreDir,
+    blob: &BlobRef,
+) -> Result<std::path::PathBuf, BlobCacheError> {
+    let path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+    match crate::local_blob::exists(&path).await {
+        Ok(true) => Ok(path),
+        Ok(false) => Err(BlobCacheError::NoLocalCopy {
+            namespace: blob.namespace.clone(),
+            id: blob.id.clone(),
+        }),
+        Err(error) => Err(BlobCacheError::Io(error)),
     }
 }
 
