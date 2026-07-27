@@ -678,9 +678,7 @@ impl ReclaimEvidence {
     }
 
     pub fn verify(&self) -> Result<(), StoreProtocolError> {
-        if self.version != STORE_PROTOCOL_VERSION {
-            return Err(StoreProtocolError::UnsupportedVersion(self.version));
-        }
+        crate::sync::store_commit::require_version(self.version)?;
         self.claim.validate()?;
         if !keys::verify_signature_hex(
             &self.author_pubkey,
@@ -822,9 +820,7 @@ impl ReclaimAuthorization {
     }
 
     pub fn verify(&self, owner_pubkey: &str) -> Result<(), StoreProtocolError> {
-        if self.version != STORE_PROTOCOL_VERSION {
-            return Err(StoreProtocolError::UnsupportedVersion(self.version));
-        }
+        crate::sync::store_commit::require_version(self.version)?;
         if !keys::verify_signature_hex(
             owner_pubkey,
             &self.signature,
@@ -916,12 +912,10 @@ impl ReclaimReceipt {
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         executor.verify_registration(executor_registration)?;
-        if executor_registration.store_root.store_root_hash != store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: store_root_hash,
-                actual: executor_registration.store_root.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            store_root_hash,
+            executor_registration.store_root.store_root_hash,
+        )?;
         if keys::public_key_hex(signer) != executor_registration.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
@@ -962,16 +956,12 @@ impl ReclaimReceipt {
     }
 
     pub fn verify(&self, executor: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        if self.version != STORE_PROTOCOL_VERSION {
-            return Err(StoreProtocolError::UnsupportedVersion(self.version));
-        }
+        crate::sync::store_commit::require_version(self.version)?;
         self.executor.verify_registration(executor)?;
-        if executor.store_root.store_root_hash != self.store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: self.store_root_hash,
-                actual: executor.store_root.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            self.store_root_hash,
+            executor.store_root.store_root_hash,
+        )?;
         if !keys::verify_signature_hex(
             &executor.device_signing_pubkey,
             &self.signature,

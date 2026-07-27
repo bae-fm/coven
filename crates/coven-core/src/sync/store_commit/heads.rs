@@ -95,12 +95,10 @@ impl StoreDeviceHead {
         let head: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(head.version)?;
-        if head.store_root_hash != expected_store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: expected_store_root_hash,
-                actual: head.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            expected_store_root_hash,
+            head.store_root_hash,
+        )?;
         head.author_registration
             .verify_registration(expected_registration)?;
         if &head.commit != expected_ref {

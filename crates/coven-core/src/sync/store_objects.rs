@@ -135,7 +135,10 @@ fn decode_protocol_object<T: serde::de::DeserializeOwned>(
 
 /// Reject an object that names a different Store root than the one it was read
 /// under.
-fn verify_store_root(expected: ObjectHash, actual: ObjectHash) -> Result<(), StoreProtocolError> {
+pub(crate) fn verify_store_root(
+    expected: ObjectHash,
+    actual: ObjectHash,
+) -> Result<(), StoreProtocolError> {
     if actual != expected {
         return Err(StoreProtocolError::StoreRootMismatch { expected, actual });
     }

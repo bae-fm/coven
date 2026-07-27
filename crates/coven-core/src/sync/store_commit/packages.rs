@@ -279,12 +279,7 @@ impl OwnerPromotionRequest {
     ) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
         self.promoter_registration.verify_registration(promoter)?;
-        if self.store_root_hash != root.store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: root.store_root_hash,
-                actual: self.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(root.store_root_hash, self.store_root_hash)?;
         if promoter.store_root != *root
             || promoter.author_pubkey == self.member_pubkey
             || self.member_pubkey.is_empty()

@@ -128,12 +128,7 @@ impl StoreProtocolRoot {
     pub fn parse_pinned(bytes: &[u8], expected: &StoreRootRef) -> Result<Self, StoreProtocolError> {
         let store_protocol_root = Self::parse(bytes)?;
         let actual_hash = store_protocol_root.object_hash();
-        if actual_hash != expected.store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: expected.store_root_hash,
-                actual: actual_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(expected.store_root_hash, actual_hash)?;
         let actual_root_id = store_protocol_root.descriptor.store_root_id();
         if actual_root_id != expected.store_root_id {
             return Err(StoreProtocolError::StoreRootIdMismatch {

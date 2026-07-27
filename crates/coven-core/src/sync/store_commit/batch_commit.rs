@@ -978,12 +978,10 @@ impl StoreBatchCommit {
         author: &StoreDeviceRegistration,
     ) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
-        if self.store_root_hash != expected_store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: expected_store_root_hash,
-                actual: self.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            expected_store_root_hash,
+            self.store_root_hash,
+        )?;
         let stream_id = commit_stream_id(expected_coord);
         if self.order.seq() != expected_coord.sequence() {
             return Err(StoreProtocolError::RelocatedSlot {
@@ -1142,12 +1140,10 @@ fn validate_commit_envelope(
     if let Some(authority) = membership_authority {
         validate_membership_authority(authority)?;
     }
-    if store_root_hash != author.store_root.store_root_hash {
-        return Err(StoreProtocolError::StoreRootMismatch {
-            expected: store_root_hash,
-            actual: author.store_root.store_root_hash,
-        });
-    }
+    crate::sync::store_objects::verify_store_root(
+        store_root_hash,
+        author.store_root.store_root_hash,
+    )?;
     Ok(())
 }
 
@@ -1234,12 +1230,10 @@ pub(super) fn validate_stream_activations(
     let mut stream_ids = BTreeSet::new();
     let mut first_slots = BTreeSet::new();
     for activation in activations {
-        if activation.store_root_hash() != store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: store_root_hash,
-                actual: activation.store_root_hash(),
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            store_root_hash,
+            activation.store_root_hash(),
+        )?;
         let owner_promotion = control.is_some();
         if activation.author_registration() != author && !owner_promotion {
             return Err(StoreProtocolError::Malformed(

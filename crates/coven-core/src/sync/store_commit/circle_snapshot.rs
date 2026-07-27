@@ -172,12 +172,10 @@ impl CircleSnapshotMeta {
         let meta: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(meta.version)?;
-        if meta.store_root_hash != expected_store_root_hash {
-            return Err(StoreProtocolError::StoreRootMismatch {
-                expected: expected_store_root_hash,
-                actual: meta.store_root_hash,
-            });
-        }
+        crate::sync::store_objects::verify_store_root(
+            expected_store_root_hash,
+            meta.store_root_hash,
+        )?;
         meta.author_registration.verify_registration(author)?;
         if meta.generation != expected.generation {
             return Err(StoreProtocolError::RelocatedSlot {

@@ -390,7 +390,7 @@ pub(crate) fn domain_json(domain: &[u8], value: &impl Serialize) -> Vec<u8> {
     bytes
 }
 
-pub(super) fn require_version(version: u32) -> Result<(), StoreProtocolError> {
+pub(crate) fn require_version(version: u32) -> Result<(), StoreProtocolError> {
     if version == STORE_PROTOCOL_VERSION {
         Ok(())
     } else {
