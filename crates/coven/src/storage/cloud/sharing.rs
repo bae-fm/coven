@@ -208,11 +208,6 @@ mod tests {
         Arc<Mutex<Vec<String>>>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake permissions endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let state = FakePermissionsState {
             requests: requests.clone(),
@@ -225,15 +220,7 @@ mod tests {
             .fallback(fake_permissions_endpoint)
             .with_state(state);
 
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("fake permissions endpoint failed");
-        });
-
+        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
         (endpoint, requests, shutdown_tx)
     }
 

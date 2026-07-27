@@ -1461,25 +1461,11 @@ mod tests {
         Arc<Mutex<Vec<RecordedRequest>>>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Dropbox endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let app = Router::new()
             .fallback(immutable_copy_endpoint)
             .with_state(requests.clone());
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx
-                        .await
-                        .expect("receive Dropbox endpoint shutdown");
-                })
-                .await
-                .expect("Dropbox endpoint failed");
-        });
+        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
         (
             home().with_endpoints(endpoint.clone(), endpoint),
             requests,
@@ -1630,23 +1616,11 @@ mod tests {
         Arc<Mutex<Vec<RecordedRequest>>>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Dropbox endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let app = Router::new()
             .fallback(binding_and_close_endpoint)
             .with_state(requests.clone());
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive endpoint shutdown");
-                })
-                .await
-                .expect("Dropbox endpoint failed");
-        });
+        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
         (
             home().with_endpoints(endpoint.clone(), endpoint),
             requests,

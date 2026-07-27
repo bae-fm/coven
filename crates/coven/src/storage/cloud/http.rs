@@ -133,3 +133,29 @@ pub(super) async fn exists_from_response(
 pub(super) fn range_content_header(start: u64, end: u64, total: u64) -> String {
     format!("bytes {start}-{end}/{total}")
 }
+
+/// Bind an ephemeral loopback port, serve `app` on it, and hand back the
+/// endpoint plus the trigger that stops it.
+///
+/// Dropping the sender stops the server too, so a test that forgets to send is
+/// still torn down. This is `spawn_fake_s3` generalised — every backend's test
+/// module had grown its own copy of the same bind-format-spawn dance.
+#[cfg(test)]
+pub(super) async fn spawn_test_server(
+    app: axum::Router,
+) -> (String, tokio::sync::oneshot::Sender<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test endpoint");
+    let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("test endpoint failed");
+    });
+    (endpoint, shutdown_tx)
+}

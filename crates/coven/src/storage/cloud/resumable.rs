@@ -350,23 +350,10 @@ mod tests {
     }
 
     async fn spawn_incomplete_upload_endpoint() -> (String, tokio::sync::oneshot::Sender<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind upload endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let app = Router::new().fallback(incomplete_upload_endpoint);
-
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive upload endpoint shutdown");
-                })
-                .await
-                .expect("upload endpoint failed");
-        });
-
-        (endpoint, shutdown_tx)
+        crate::storage::cloud::http::spawn_test_server(
+            Router::new().fallback(incomplete_upload_endpoint),
+        )
+        .await
     }
 
     async fn successful_upload_endpoint() -> Response<Body> {
@@ -377,20 +364,10 @@ mod tests {
     }
 
     async fn spawn_successful_upload_endpoint() -> (String, tokio::sync::oneshot::Sender<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind upload endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            axum::serve(listener, Router::new().fallback(successful_upload_endpoint))
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive upload endpoint shutdown");
-                })
-                .await
-                .expect("upload endpoint failed");
-        });
-        (endpoint, shutdown_tx)
+        crate::storage::cloud::http::spawn_test_server(
+            Router::new().fallback(successful_upload_endpoint),
+        )
+        .await
     }
 
     async fn failed_upload_endpoint(
@@ -418,23 +395,11 @@ mod tests {
 
     async fn spawn_failed_upload_endpoint(
     ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind upload endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let delete_count = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .fallback(failed_upload_endpoint)
             .with_state(delete_count.clone());
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive upload endpoint shutdown");
-                })
-                .await
-                .expect("upload endpoint failed");
-        });
+        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
         (endpoint, delete_count, shutdown_tx)
     }
 
@@ -466,26 +431,13 @@ mod tests {
 
     async fn spawn_failed_upload_and_cancel_endpoint() -> (String, tokio::sync::oneshot::Sender<()>)
     {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind upload endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let delete_count = Arc::new(AtomicUsize::new(0));
-        tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .fallback(failed_upload_and_cancel_endpoint)
-                    .with_state(delete_count),
-            )
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.expect("receive upload endpoint shutdown");
-            })
-            .await
-            .expect("upload endpoint failed");
-        });
-        (endpoint, shutdown_tx)
+        crate::storage::cloud::http::spawn_test_server(
+            Router::new()
+                .fallback(failed_upload_and_cancel_endpoint)
+                .with_state(delete_count),
+        )
+        .await
     }
 
     #[tokio::test]

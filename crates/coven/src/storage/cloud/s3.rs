@@ -1190,23 +1190,10 @@ mod tests {
     /// Bind, serve, and wire graceful shutdown for a fake S3 server — the
     /// scaffolding every fake endpoint shares; each test supplies its Router.
     async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake S3 endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.layer(axum::extract::DefaultBodyLimit::disable()),
-            )
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.expect("receive fake S3 shutdown");
-            })
-            .await
-            .expect("fake S3 endpoint failed");
-        });
-        (endpoint, shutdown_tx)
+        crate::storage::cloud::http::spawn_test_server(
+            app.layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .await
     }
 
     async fn spawn_fake_s3_endpoint(

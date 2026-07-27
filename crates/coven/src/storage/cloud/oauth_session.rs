@@ -300,13 +300,8 @@ mod tests {
     async fn spawn_status_server(
         responses: Vec<(u16, Option<u64>)>,
     ) -> (String, Arc<AtomicUsize>, oneshot::Sender<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind status server");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let hits = Arc::new(AtomicUsize::new(0));
         let plan = Arc::new(responses);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handler_hits = hits.clone();
         let app = Router::new().fallback(move || {
@@ -326,14 +321,7 @@ mod tests {
                 builder.body(Body::from("body")).expect("build response")
             }
         });
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("status server serves");
-        });
+        let (url, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
         (url, hits, shutdown_tx)
     }
 
