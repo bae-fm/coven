@@ -302,12 +302,7 @@ pub(crate) fn previous_row_blob_for_write_on(
 ) -> Result<Option<StoreWriteRemoteBlob>, DbError> {
     if let Some(handoff) = created_upload_handoff_on(conn, table, row_id, column, row_stamp)? {
         let locator = handoff.stored.locator();
-        if locator.namespace() != blob.namespace
-            || locator.blob_id() != blob.id
-            || locator.plaintext_size() != plaintext_size
-            || locator.plaintext_hash() != plaintext_hash
-            || locator.scope().is_some_and(|scope| scope != &blob.scope)
-        {
+        if !crate::blob::locator_describes_row(locator, blob, plaintext_size, plaintext_hash) {
             return Err(DbError::Message(format!(
                 "created upload {table}/{row_id}/{column} at {row_stamp} differs from its captured row"
             )));
@@ -343,12 +338,7 @@ pub(crate) fn previous_row_blob_for_write_on(
     }
     let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
         .map_err(|error| DbError::Message(format!("prior row blob locator: {error}")))?;
-    if locator.namespace() != blob.namespace
-        || locator.blob_id() != blob.id
-        || locator.plaintext_size() != plaintext_size
-        || locator.plaintext_hash() != plaintext_hash
-        || locator.scope().is_some_and(|scope| scope != &blob.scope)
-    {
+    if !crate::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash) {
         return Ok(None);
     }
     if locator.audience() != authority.remote_audience() {

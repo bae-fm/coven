@@ -162,14 +162,12 @@ pub(super) fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<O
             } = &state
             {
                 let locator = stored.locator();
-                if locator.namespace() != reference.blob().namespace
-                    || locator.blob_id() != reference.blob().id
-                    || locator.plaintext_size() != reference.plaintext_size()
-                    || locator.plaintext_hash() != reference.plaintext_hash()
-                    || locator
-                        .scope()
-                        .is_some_and(|scope| scope != &reference.blob().scope)
-                {
+                if !crate::blob::locator_describes_row(
+                    locator,
+                    reference.blob(),
+                    reference.plaintext_size(),
+                    reference.plaintext_hash(),
+                ) {
                     return Err(invalid(
                         6,
                         "prepared upload differs from its exact row version".to_string(),

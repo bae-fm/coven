@@ -462,6 +462,28 @@ impl RowBlobAuthority {
     }
 }
 
+/// Whether `locator` describes exactly the row version it was minted for.
+///
+/// A stored blob's locator carries the namespace, id, plaintext size and hash,
+/// and encryption scope of the row it was sealed from. Anything that hands a
+/// `StoredBlobRef` and a row to each other checks this before trusting the pair.
+///
+/// [`RowBlobRef::new`] enforces the same facts and more, one field at a time so
+/// it can name which one diverged; this is the yes-or-no form for callers that
+/// answer a mismatch their own way.
+pub(crate) fn locator_describes_row(
+    locator: &locator::BlobLocator,
+    blob: &BlobRef,
+    plaintext_size: u64,
+    plaintext_hash: crate::sync::store_commit::ObjectHash,
+) -> bool {
+    locator.namespace() == blob.namespace
+        && locator.blob_id() == blob.id
+        && locator.plaintext_size() == plaintext_size
+        && locator.plaintext_hash() == plaintext_hash
+        && locator.scope().is_none_or(|scope| scope == &blob.scope)
+}
+
 impl RowBlobRef {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(

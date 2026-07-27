@@ -98,14 +98,12 @@ impl Database {
             ));
         }
         let locator = stored.locator();
-        if locator.namespace() != row.blob().namespace
-            || locator.blob_id() != row.blob().id
-            || locator.plaintext_size() != row.plaintext_size()
-            || locator.plaintext_hash() != row.plaintext_hash()
-            || locator
-                .scope()
-                .is_some_and(|scope| scope != &row.blob().scope)
-        {
+        if !crate::blob::locator_describes_row(
+            locator,
+            row.blob(),
+            row.plaintext_size(),
+            row.plaintext_hash(),
+        ) {
             return Err(DbError::Message(
                 "prepared blob differs from its exact Local row version".to_string(),
             ));
