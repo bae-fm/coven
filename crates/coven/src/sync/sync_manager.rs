@@ -318,11 +318,11 @@ impl SyncManager {
         let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
 
         // Initialize sync loop. The synced-table set is owned by the Database, so
-        // init_sync reads it from there rather than from a separately-held copy.
-        // Sync is enabled here, so `None` means a real startup failure (no synced
-        // tables, storage/keypair/auth/membership bootstrap) that init_sync already
-        // logged — surface it so the caller never installs a manager whose loop
-        // never started.
+        // init_sync_over_storage reads it from there rather than from a
+        // separately-held copy. Sync is enabled here, so `None` means a real
+        // startup failure (no synced tables, storage/keypair/auth/membership
+        // bootstrap) that init_sync_over_storage already logged — surface it so
+        // the caller never installs a manager whose loop never started.
         //
         // Connect never mints a device identity: a locked agent with no
         // identity established must fail here with `KeyError::NoDeviceIdentity`,
@@ -391,7 +391,7 @@ impl SyncManager {
     /// home IS the enablement, there are no real credentials to check — installs
     /// the home, builds a [`CloudSyncStorage`] over it under the supplied `cipher`
     /// (and the config's blob-path scheme), runs the same bootstrap
-    /// [`init_sync`](crate::sync::cycle::init_sync) does via
+    /// [`start_sync`](Self::start_sync) does via
     /// [`init_sync_over_storage`](crate::sync::cycle::init_sync_over_storage), and
     /// starts the loop. A bootstrap failure is an `Err`, the same fail-loud
     /// discipline `start_sync` keeps — and commit-whole: the home and loop handle

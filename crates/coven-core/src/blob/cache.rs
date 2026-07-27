@@ -554,7 +554,7 @@ pub async fn is_pinned(
 /// locator ⇒ the bytes live in the cloud fronted by the device cache, so the first
 /// legitimate probe checks the exact locator's pinned path then cache path for a per-device cache
 /// copy and serves a hit. A miss resolves the blob's scope to its encryption key,
-/// downloads + decrypts it via [`SyncStorage::get_blob`], writes the
+/// downloads + decrypts it via [`SyncStorage::stage_verified_blob_plaintext`], writes the
 /// whole blob to its locator-keyed cache path (evictable — a fetch-on-read populates the evictable
 /// cache, never the kept folder), and returns the bytes it just fetched. Later cache
 /// hits verify the file size and hash against the row before trusting it. The read reports
