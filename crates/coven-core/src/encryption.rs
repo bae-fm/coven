@@ -1806,7 +1806,7 @@ mod tests {
     /// re-derived at test time on purpose: a fixture that regenerates would
     /// still pass against a changed format and pin nothing.
     #[test]
-    fn sealed_app_data_v1_fixture_still_opens() {
+    fn sealed_app_data_v1_fixture_opens() {
         let sealed = hex::decode(APP_DATA_V1_FIXTURE_HEX).expect("the fixture is valid hex");
 
         assert_eq!(sealed[0], APP_DATA_SEAL_VERSION, "a version-1 payload");
@@ -1817,7 +1817,7 @@ mod tests {
 
         let opened = EncryptionService::from_key(test_key())
             .open_app_data(&sealed, APP_DATA_V1_FIXTURE_AAD)
-            .expect("the pinned v1 payload must keep opening");
+            .expect("the pinned v1 payload opens");
 
         assert_eq!(opened, APP_DATA_V1_FIXTURE_PLAINTEXT);
     }

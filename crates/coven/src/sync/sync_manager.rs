@@ -686,9 +686,9 @@ impl SyncManager {
     /// floor from the cloud and mint the code from it, so the restorer can seed
     /// its watermark from mint-time
     /// state rather than accepting any signed head as a fresh device would
-    /// otherwise have to. Requires a connected provider — unlike the old,
-    /// storage-free `generate_restore_code`, minting a trustworthy floor is a
-    /// network read, not a pure function of local config and keyring state.
+    /// otherwise have to. Requires a connected provider because minting a
+    /// trustworthy floor is a network read, not a pure function of local config
+    /// and keyring state.
     pub(crate) async fn generate_restore_code(&self) -> Result<String, SyncError> {
         let active_loop = self.sync_loop_handle();
         let config = active_loop

@@ -574,14 +574,11 @@ async fn restore_rejects_traversal_lid_at_decode() {
     }
 }
 
-/// A completed store already present locally is the data — re-running a restore
-/// for it adds nothing, and the old code would delete its database and blobs
-/// during the failure-cleanup once the snapshot download failed. The restore
-/// refuses up front with a typed error naming the store and leaves the existing
-/// files untouched. "Completed" is what the saved `config.yaml` marks: the guard
+/// A completed store already present locally is the data, so restore refuses up
+/// front with a typed error naming the store and leaves the existing files
+/// untouched. "Completed" is what the saved `config.yaml` marks: the guard
 /// dispatches on that marker, so the store carries one here. The endpoint is
-/// unreachable so that, absent the guard, execution would reach the snapshot
-/// download and the destructive cleanup — the guard stops it first.
+/// unreachable to prove the guard stops before snapshot download or cleanup.
 #[tokio::test]
 async fn restore_refuses_when_completed_store_exists_and_leaves_it_untouched() {
     let encoded = restore_code_with_sid("abc-123");

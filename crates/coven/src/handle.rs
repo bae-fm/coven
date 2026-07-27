@@ -1089,12 +1089,11 @@ impl CovenHandle {
     }
 
     /// Generate a restore code, seeded with the store's current membership-head
-    /// floor read from the cloud. Requires a connected provider: unlike the old,
-    /// storage-free version of this call, minting a trustworthy floor is a
-    /// network read, not a pure function of local config and keyring state — a
-    /// restore code minted without one would carry no protection against a
-    /// storage provider replaying an older, otherwise validly signed membership
-    /// state to the device that redeems it.
+    /// floor read from the cloud. Requires a connected provider because minting
+    /// a trustworthy floor is a network read, not a pure function of local
+    /// config and keyring state — a restore code minted without one would carry
+    /// no protection against a storage provider replaying an older, otherwise
+    /// validly signed membership state to the device that redeems it.
     pub async fn generate_restore_code(&self) -> Result<String, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.generate_restore_code().await
@@ -1644,8 +1643,7 @@ mod tests {
         );
         // A provider is selected but its bucket is unset, so the read path cannot
         // build sync storage. That is a configuration fault the user must fix — it
-        // must reach the caller as StorageSetup, not be mislabeled as a disk I/O
-        // error the way the old catch-all Io variant did.
+        // must reach the caller as StorageSetup, not be mislabeled as disk I/O.
         config.cloud_home.provider = Some(CloudProvider::S3);
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
         let handle = CovenHandle::new(

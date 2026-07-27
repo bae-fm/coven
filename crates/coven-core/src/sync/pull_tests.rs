@@ -7328,14 +7328,12 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
     );
 }
 
-/// Issue #84 — the membership-propagation lag, the core bug. A member's signed
-/// changeset is pulled BEFORE the LIST that rebuilds the chain shows the Add that
-/// authorizes them (membership entries and changesets are separate, unordered
-/// object streams). The cycle-start chain does not authorize the member, so the
-/// old code skipped the changeset and advanced the position — losing it forever.
-/// Now the changeset carries the coordinate of its authorizing entry; a direct,
-/// read-after-write-consistent GET resolves that entry even though the LIST lags,
-/// and the changeset applies. It must NOT be lost.
+/// A member's signed changeset may be pulled before the listing that rebuilds
+/// the chain shows the entry that authorizes it: membership entries and
+/// changesets are separate, unordered object streams. The changeset carries
+/// the coordinate of its authorizing entry, so an exact read resolves that
+/// entry even while the listing lags. The changeset remains pending until it
+/// can apply; its stream position never advances over missing authority.
 #[tokio::test]
 async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let owner = UserKeypair::generate();

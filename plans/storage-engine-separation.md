@@ -21,6 +21,10 @@ This ownership work completes the Store foundation required by
 
 - Complete: the Serial protocol, policy selector, coordination capability, and
   alternate wire/database state are absent.
+- Complete: built-in providers supply create-once exact object slots. Custom
+  S3 requires the explicit `standard_conditional_requests` assertion and uses
+  `If-None-Match: *` for immutable creation; this is object-slot collision
+  protection, not mutable global-head coordination.
 - Complete: `sync::store::Store` is the one concrete protocol owner; operation
   planning, candidate publication, abandonment, package preparation, snapshots,
   acknowledgements, and registration live below it.
@@ -171,8 +175,8 @@ protocol directly, and every Store operation enters the concrete Store owner.
 
 ## Boundary laws
 
-- no `Serial`, `WritePolicy`, coordinated-head, conditional-write, or
-  provisional-branch production type remains;
+- no `Serial`, `WritePolicy`, coordinated-head, conditional mutable global-head
+  advance, or provisional-branch production type remains;
 - no global-head coordination storage trait, capability probe, configuration,
   error, mock, or provider implementation remains; create-once exact object
   slots remain required for immutable publication;
@@ -361,7 +365,7 @@ commits wholly or rolls back.
    cleanup, and final local reversal into the loaded Store.
 1. **Complete.** Move snapshot cadence, authorization, capture, retry, Store
    publication, and Circle publication behind the loaded Store.
-1. **In progress.** Run boundary searches, focused failure-injection tests,
+1. **Complete.** Run boundary searches, focused failure-injection tests,
    strict lint, repository hooks, and manual rules review; then update dependent
    plans to the sealed one-protocol shape.
 
@@ -382,7 +386,7 @@ rg -n '\bSerial\b|WritePolicy|write_policy|coordinated[_ -]head|conditional head
 rg "Option<&.*Coordination|coordination: Option|StoreOperationPreparation|StoreOperationPublicationMode" \
   crates/coven-core/src
 rg 'crate::sync::store::(database|membership|operations|snapshot)::' \
-  crates/coven-core/src/sync --glob '!crates/coven-core/src/sync/store/**'
+  crates/coven-core/src/sync --glob '!**/store/**'
 rg 'crate::sync::store_pull|sync::store_pull' crates
 
 cargo fmt --all -- --check
