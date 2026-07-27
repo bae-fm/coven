@@ -1169,7 +1169,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self.verified_root
     }
 
-    fn into_history(self) -> VerifiedMergeHistory {
+    pub(super) fn into_history(self) -> VerifiedMergeHistory {
         self.history
     }
 

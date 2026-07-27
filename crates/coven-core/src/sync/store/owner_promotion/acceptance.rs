@@ -61,7 +61,7 @@ impl Store {
                     .to_string(),
             ));
         }
-        let activation =
+        let verified_activation =
             crate::sync::store::find_owner_promotion_request_activation(storage, &root, &request)
                 .await
                 .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
@@ -106,15 +106,20 @@ impl Store {
         };
         let acceptance = OwnerPromotionAcceptance::signed(
             request.clone(),
-            activation,
+            verified_activation.activation().clone(),
             anchors,
             &registration,
             identity,
         )
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        crate::sync::store::verify_owner_promotion_acceptance(storage, &root, &acceptance)
-            .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        crate::sync::store::verify_owner_promotion_acceptance_from_request_activation(
+            storage,
+            &root,
+            &acceptance,
+            verified_activation,
+        )
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let journal = OwnerPromotionJournal {
             promotion_id: request.promotion_id,
             target: request.member_registration.clone(),

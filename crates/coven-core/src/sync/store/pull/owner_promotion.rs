@@ -1,10 +1,23 @@
 use super::*;
 
+pub(in crate::sync::store) struct VerifiedOwnerPromotionRequestActivation {
+    activation: super::store_commit::OwnerPromotionRequestActivation,
+    history: VerifiedMergeHistory,
+}
+
+impl VerifiedOwnerPromotionRequestActivation {
+    pub(in crate::sync::store) fn activation(
+        &self,
+    ) -> &super::store_commit::OwnerPromotionRequestActivation {
+        &self.activation
+    }
+}
+
 pub(in crate::sync::store) async fn find_request_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
-) -> Result<super::store_commit::OwnerPromotionRequestActivation, StorePullError> {
+) -> Result<VerifiedOwnerPromotionRequestActivation, StorePullError> {
     let promoter = load_registration_ref(storage, root, &request.promoter_registration).await?;
     request
         .verify(root, &promoter.value)
@@ -37,7 +50,11 @@ pub(in crate::sync::store) async fn find_request_activation(
             "Owner-promotion request has more than one Merge activation".to_string(),
         ));
     }
-    Ok(super::store_commit::OwnerPromotionRequestActivation { commit, head })
+    history_verifier.verify_refs([commit.clone()]).await?;
+    Ok(VerifiedOwnerPromotionRequestActivation {
+        activation: super::store_commit::OwnerPromotionRequestActivation { commit, head },
+        history: history_verifier.into_history(),
+    })
 }
 
 pub(in crate::sync::store) async fn verify_acceptance(
@@ -58,6 +75,26 @@ pub(in crate::sync::store) async fn verify_acceptance(
         root,
         acceptance,
         &history_verifier.history().commits,
+    )
+    .await
+}
+
+pub(in crate::sync::store) async fn verify_acceptance_from_request_activation(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    acceptance: &super::store_commit::OwnerPromotionAcceptance,
+    verified: VerifiedOwnerPromotionRequestActivation,
+) -> Result<(), StorePullError> {
+    if acceptance.activation != verified.activation {
+        return Err(StorePullError::Database(
+            "Owner-promotion acceptance names another request activation".to_string(),
+        ));
+    }
+    verify_merge_owner_promotion_acceptance_with_history(
+        storage,
+        root,
+        acceptance,
+        &verified.history.commits,
     )
     .await
 }
@@ -104,15 +141,26 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
         activation_commit,
     )
     .await?;
-    let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
-        storage,
-        root,
-        &request.promoter_registration,
-        &promoter.value,
-        Some(activation_commit),
-    )
-    .await
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let verified = verified_commits.get(activation_commit).ok_or_else(|| {
+        StorePullError::Database(
+            "Owner-promotion request activation is absent from its verified history".to_string(),
+        )
+    })?;
+    let verified_announcement_commits = verified_commits
+        .iter()
+        .map(|(reference, commit)| (reference.clone(), commit.verified.clone()))
+        .collect();
+    let (_, exact_head) =
+        crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
+            storage,
+            root,
+            &request.promoter_registration,
+            &promoter.value,
+            &verified.verified,
+            &verified_announcement_commits,
+        )
+        .await
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
     if opened.value != head
         || head.head_hash() != activation_head.head_hash
         || head.commit != *activation_commit
@@ -122,11 +170,6 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
             "Owner-promotion request is not activated by its exact Merge head".to_string(),
         ));
     }
-    let verified = verified_commits.get(activation_commit).ok_or_else(|| {
-        StorePullError::Database(
-            "Owner-promotion request activation is absent from its verified history".to_string(),
-        )
-    })?;
     let verified_commit = verified.verified.value();
     if verified_commit.owner_promotion_request() != Some(request)
         || verified_commit.membership_state != request.predecessor_membership

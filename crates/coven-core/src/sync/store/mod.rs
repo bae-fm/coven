@@ -562,12 +562,23 @@ pub(crate) fn materialize_device_join_activation<'a>(
 
 pub(crate) struct VerifiedOwnerPromotionAcceptance;
 
-pub(crate) async fn find_owner_promotion_request_activation(
+pub(in crate::sync::store) async fn find_owner_promotion_request_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
-) -> Result<super::store_commit::OwnerPromotionRequestActivation, pull::StorePullError> {
+) -> Result<pull::VerifiedOwnerPromotionRequestActivation, pull::StorePullError> {
     pull::find_owner_promotion_request_activation(storage, root, request).await
+}
+
+pub(in crate::sync::store) async fn verify_owner_promotion_acceptance_from_request_activation(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    acceptance: &super::store_commit::OwnerPromotionAcceptance,
+    verified: pull::VerifiedOwnerPromotionRequestActivation,
+) -> Result<VerifiedOwnerPromotionAcceptance, pull::StorePullError> {
+    pull::verify_acceptance_from_request_activation(storage, root, acceptance, verified)
+        .await
+        .map(|()| VerifiedOwnerPromotionAcceptance)
 }
 
 pub(crate) async fn verify_owner_promotion_acceptance(

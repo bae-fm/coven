@@ -131,6 +131,7 @@ pub(crate) use membership_control::*;
 pub(in crate::sync::store) use owner_promotion::{
     find_request_activation as find_owner_promotion_request_activation,
     verify_acceptance as verify_owner_promotion_acceptance,
+    verify_acceptance_from_request_activation, VerifiedOwnerPromotionRequestActivation,
 };
 pub(in crate::sync::store) use provider_access::verify_accepted_provider_access_activation;
 pub(in crate::sync::store) use registration::RegistrationLoadError;

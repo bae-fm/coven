@@ -9,6 +9,90 @@ use super::authority::{load_current_merge_membership, target_key};
 use super::journal::OwnerPromotionJournalState;
 
 #[tokio::test]
+async fn accepting_owner_promotion_authenticates_request_activation_once() {
+    let owner_db = crate::sync::test_helpers::open_test_db();
+    let owner = UserKeypair::generate();
+    let store = crate::sync::test_helpers::TestStore::create(
+        &owner_db,
+        "owner-promotion-verification",
+        owner.clone(),
+    )
+    .await
+    .expect("create Owner-promotion verification Store");
+    let member = UserKeypair::generate();
+    let encryption = EncryptionService::from_key([42; 32]);
+    crate::sync::store::membership::invite_member(
+        &store.storage,
+        store.home.as_ref(),
+        &owner,
+        &crate::sync::hlc::Hlc::new("owner-promotion-verification".to_string()),
+        &keys::public_key_hex(&member),
+        None,
+        crate::sync::membership::MemberRole::Member,
+        &encryption,
+        store.storage.store_id(),
+        "Owner promotion verification",
+        &StoreDatabase::new(&owner_db),
+    )
+    .await
+    .expect("invite Owner-promotion candidate");
+    let member_db = crate::sync::test_helpers::open_test_db();
+    crate::sync::test_helpers::install_active_device_fixture(
+        &store,
+        &owner_db,
+        &member_db,
+        &member,
+        "2026-07-27T00:00:00Z",
+    )
+    .await
+    .expect("activate Owner-promotion candidate device");
+    let owner_device_id = owner_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Owner device id")
+        .expect("Owner device id");
+    let member_device_id = member_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Member device id")
+        .expect("Member device id");
+    let (_, member_registration, _, _) =
+        crate::sync::store::operations::load_local_store_authority(
+            &StoreDatabase::new(&member_db),
+            &member_device_id,
+            &member,
+        )
+        .await
+        .expect("load Owner-promotion candidate registration");
+    let request = store
+        .loaded_store(&owner_db)
+        .await
+        .expect("load Owner Store")
+        .begin_owner_promotion(&owner_device_id, &owner, member_registration)
+        .await
+        .expect("publish Owner-promotion request");
+    let activation = StoreDatabase::new(&owner_db)
+        .latest_local_store_position()
+        .await
+        .expect("load Owner-promotion request activation")
+        .expect("Owner-promotion request activation");
+    let audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(
+        std::slice::from_ref(&activation),
+    );
+
+    let acceptance = store
+        .loaded_store(&member_db)
+        .await
+        .expect("load Member Store")
+        .accept_owner_promotion(&member_device_id, &member, request)
+        .await
+        .expect("accept Owner promotion");
+
+    assert_eq!(acceptance.activation.commit, activation);
+    audit.assert_each_verified_once();
+}
+
+#[tokio::test]
 async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     let founder_db = crate::sync::test_helpers::open_test_db();
     let founder = UserKeypair::generate();
