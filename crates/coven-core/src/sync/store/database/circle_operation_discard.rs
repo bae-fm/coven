@@ -35,6 +35,11 @@ struct CircleOperationCandidate {
     bootstrap_blobs: Vec<ExactObjectRef>,
 }
 
+pub(in crate::sync::store) struct CircleOperationDiscardCandidate {
+    pub(in crate::sync::store) candidate: crate::database::BlockedMergeCandidate,
+    pub(in crate::sync::store) revoked_grant: Option<crate::sync::membership::MembershipGrantId>,
+}
+
 fn circle_operation_candidate_on(
     conn: &Connection,
     operation: &PreparedCircleOperation,
@@ -93,20 +98,35 @@ fn circle_operation_candidate_on(
 }
 
 impl StoreDatabase {
-    /// The candidate a Circle operation would activate, in the shape the generic
-    /// proof primitives ([`excluded_candidate_nonactivation`]) consume.
+    /// The candidate a Circle operation would activate, plus the exact grant
+    /// named by its durable authority-loss block when one exists.
     ///
-    /// [`excluded_candidate_nonactivation`]: crate::sync::store::abandonment
-    pub(in crate::sync::store) async fn circle_operation_blocked_candidate(
+    /// The candidate and block are read from one journal row in one database
+    /// call, so discard never combines proof inputs from different operation
+    /// states.
+    pub(in crate::sync::store) async fn circle_operation_discard_candidate(
         &self,
         operation_id: &CircleOperationId,
-    ) -> Result<crate::database::BlockedMergeCandidate, crate::DbError> {
+    ) -> Result<CircleOperationDiscardCandidate, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.database
             .call(move |conn| {
                 let journal = load_discardable_operation_on(conn, &operation_id)?;
                 let candidate = circle_operation_candidate_on(conn, journal.operation())?;
-                Ok(blocked_merge_candidate_from_prepared(candidate.candidate))
+                let revoked_grant = match journal.state() {
+                    crate::sync::circle::CircleOperationState::Blocked {
+                        block:
+                            crate::sync::circle::CircleOperationBlock::AuthorityLost { grant_id },
+                    } => Some(grant_id),
+                    crate::sync::circle::CircleOperationState::Pending
+                    | crate::sync::circle::CircleOperationState::WaitingForCloseResponses
+                    | crate::sync::circle::CircleOperationState::Finalizing
+                    | crate::sync::circle::CircleOperationState::Discarding => None,
+                };
+                Ok(CircleOperationDiscardCandidate {
+                    candidate: blocked_merge_candidate_from_prepared(candidate.candidate),
+                    revoked_grant,
+                })
             })
             .await
     }

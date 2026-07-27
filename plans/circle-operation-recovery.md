@@ -2,13 +2,14 @@
 
 ## Status
 
-Implemented, except membership-revocation as a discard proof form (§3) and the
-finalization-preparation audit (§4). Closes the durable-operation exit gaps from
+Implemented, except the finalization-preparation audit (§4). Closes the
+durable-operation exit gaps from
 `plans/circles.md`: typed block reasons (`Blocked(CircleOperationBlock)`), "retry
 an operation idempotently", and "replace or discard only with verified
 nonactivation". The block reason is the typed `CircleOperationBlock`; a blocked
 operation retries from its captured phase; and an operation whose successor slot
-was claimed by a different verified winner (or whose author was excluded) is
+was claimed by a different verified winner, whose author was excluded, or whose
+exact Store membership grant was revoked by an accepted Store commit is
 discarded — its candidate-exclusive objects exact-deleted with absence verified
 and its journal row cleared, resumable from a durable `Discarding` state.
 
@@ -18,9 +19,9 @@ Discard reuses the Merge candidate-abandonment object-graph machine verbatim
 the durable home parameterized: a Merge candidate lives in
 `store_writes.prepared`, a Circle operation in the `circle_operations` journal.
 Unlike Merge, discard never publishes an abandonment commit to race for the
-slot — it is invoked after the slot is resolved, so it observes the winner (or
-author exclusion) directly and records the nonactivation, which is the same proof
-the Merge `Lost` outcome records.
+slot — it is invoked only after a permanent result is directly provable, so it
+observes the winner, author exclusion, or accepted grant revocation and records
+the nonactivation, which is the same proof the Merge `Lost` outcome records.
 
 ## Design
 
@@ -58,7 +59,7 @@ twice converges because publication is already per-step idempotent.
 ### 3. Discard with verified permanent nonactivation
 
 `Store::discard_circle_operation(operation_id)`: legal only with proof the
-prepared activation can never win. Two proof forms are implemented
+prepared activation can never win. Three proof forms are implemented
 (`abandonment.rs::discard_candidate_nonactivation`):
 
 - the prepared device-stream successor slot holds a **different verified
@@ -67,16 +68,20 @@ prepared activation can never win. Two proof forms are implemented
   candidate is bound to that create-once slot and can never take it, whatever
   the author's status; or
 - the author was permanently **excluded** (registration revoked), covered by
-  `excluded_candidate_nonactivation`.
-
-Membership-revocation as a discard proof form is not yet wired (it is produced
-only for terminal Merge cleanup today, not by the discard proof driver).
+  `excluded_candidate_nonactivation`; or
+- an accepted Store commit names a resolved membership state that tombstones
+  the candidate's exact Store membership grant, and the commit's predecessor
+  cut does not cover the candidate. The durable `AuthorityLost` block supplies
+  that exact grant. The discard driver considers only locally retained,
+  verified Store materializations and then re-verifies the witness's exact
+  accepted head, replayed history, membership state, grant record, candidate
+  authority, and predecessor cut before recording nonactivation.
 
 Unlike Merge abandonment, discard never publishes an abandonment commit to
-race for the slot: it runs after the slot is already resolved, so it observes
-the outcome directly. The recorded nonactivation is the exact same proof the
-Merge `Lost` outcome records once its abandonment commit loses — discard just
-skips the doomed publication. With proof, discard reuses the
+race for the slot: it runs after nonactivation is already provable, so it
+observes the outcome directly. The recorded nonactivation is the exact same
+proof the Merge `Lost` outcome records once its abandonment commit loses —
+discard skips the doomed publication. With proof, discard reuses the
 candidate-abandonment object-graph machine
 (`begin_blocked_merge_candidate_nonactivation_on`,
 `merge_candidate_cleanup_targets_on`, and the per-object cleanup transitions),
@@ -130,11 +135,14 @@ resume with identical object keys).
    discard succeeds; candidate-exclusive objects exact-deleted with
    absence verified; the winner's shared objects untouched; journal
    cleared.
-4. Kill during finalization at every boundary (before payload record,
+4. Revoke the operation author's exact Store membership grant through an
+   accepted Store commit whose predecessor cut excludes the candidate →
+   discard succeeds and clears the journal.
+5. Kill during finalization at every boundary (before payload record,
    between record and first upload, between uploads, after uploads before
    activation) → resume produces byte-identical objects; storage holds no
    object outside the journal's manifest at any point.
-5. Retry idempotence: double retry, retry-of-active-operation refusal.
+6. Retry idempotence: double retry, retry-of-active-operation refusal.
 
 ## Out of scope
 

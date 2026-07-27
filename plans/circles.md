@@ -319,7 +319,9 @@ rebuild the deleted choice.
    durable-first so a restart resumes them byte-identically as their exact
    settlement kind, and discards an operation only with a verified
    permanent-nonactivation proof — a different verified winner already holds the
-   candidate's successor slot, or the author was excluded — exact-deleting the
+   candidate's successor slot, the author was excluded, or an accepted Store
+   commit tombstones the candidate's exact Store membership grant with a
+   predecessor cut that excludes the candidate — exact-deleting the
    candidate-exclusive objects and clearing the journal row, resumable from a
    durable `Discarding` state. The excluded-device bootstrap reset and
    publication gate are implemented: a pull detects the local device's exclusion

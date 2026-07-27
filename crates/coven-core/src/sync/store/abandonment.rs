@@ -302,12 +302,15 @@ async fn finish_merge_abandonment(
 /// observes the outcome directly. A different verified winner occupying the
 /// successor slot is a standalone proof (the candidate is bound to that
 /// create-once slot and can never take it), independent of the author's status.
-/// Falling back to the author-exclusion proof covers a slot the author was
-/// excluded from before anyone claimed it.
+/// Author exclusion covers a slot the author was excluded from before anyone
+/// claimed it. An accepted Store commit whose membership state tombstones the
+/// candidate's exact grant and whose predecessor cut excludes the candidate is
+/// the membership-revocation proof.
 pub(crate) async fn discard_candidate_nonactivation(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     candidate: &crate::database::BlockedMergeCandidate,
+    revoked_grant: Option<&crate::sync::membership::MembershipGrantId>,
 ) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
     let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StoreError::InvalidOutbound("discard candidate has no Store root".to_string())
@@ -337,7 +340,97 @@ pub(crate) async fn discard_candidate_nonactivation(
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         ));
     }
-    excluded_candidate_nonactivation(database, storage, candidate).await
+    if let Some(nonactivation) =
+        excluded_candidate_nonactivation(database, storage, candidate).await?
+    {
+        return Ok(Some(nonactivation));
+    }
+    let Some(revoked_grant) = revoked_grant else {
+        return Ok(None);
+    };
+    membership_revocation_candidate_nonactivation(
+        database,
+        storage,
+        &root,
+        revoked_grant,
+        candidate,
+    )
+    .await
+}
+
+async fn membership_revocation_candidate_nonactivation(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    revoked_grant: &crate::sync::membership::MembershipGrantId,
+    candidate: &crate::database::BlockedMergeCandidate,
+) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
+    let expected_stream = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+        root.store_root_hash,
+        &candidate.commit.value.author_registration,
+        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+    );
+    let candidate_sequence = candidate.head.value.commit.coord.sequence();
+    for witness in database.retained_merge_replay_inputs().await? {
+        let predecessor_cut = witness
+            .commit()
+            .order
+            .predecessor_cut()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        if predecessor_cut
+            .commits()
+            .get(&expected_stream)
+            .is_some_and(|covered| candidate_sequence <= covered.coord.sequence())
+        {
+            continue;
+        }
+        let membership = crate::sync::store::pull::load_merge_predecessor_membership(
+            storage,
+            root,
+            &witness.commit().membership_state,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::sync::store::pull::RegistrationLoadError::Object(error) => {
+                StoreError::Object(error)
+            }
+            crate::sync::store::pull::RegistrationLoadError::Invalid(error) => {
+                StoreError::Database(error)
+            }
+        })?;
+        let crate::sync::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        else {
+            continue;
+        };
+        if !matches!(
+            resolved.grants.get(revoked_grant),
+            Some(crate::sync::causal_grants::GrantState::Tombstoned { .. })
+        ) {
+            continue;
+        }
+        let activation_head = crate::sync::store_commit::StoreDeviceHeadRef {
+            head_hash: witness.activation_head().head_hash(),
+            object: witness.activation_head_object().clone(),
+        };
+        return Box::pin(
+            crate::sync::store::pull::verify_membership_grant_revocation_nonactivation(
+                storage,
+                root,
+                revoked_grant,
+                &witness.commit().membership_state,
+                witness.commit_ref(),
+                &activation_head,
+                &candidate.head.value.commit,
+                &candidate.commit.value,
+                &candidate.head.value,
+                &candidate.head.object,
+            ),
+        )
+        .await
+        .map(Some)
+        .map_err(StoreError::from);
+    }
+    Ok(None)
 }
 
 pub(crate) async fn excluded_candidate_nonactivation(

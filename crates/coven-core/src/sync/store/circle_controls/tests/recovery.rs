@@ -4,7 +4,9 @@ use super::*;
 /// member's grant so publishing it blocks under lost authority.
 struct RevokedOperation {
     db: Database,
+    owner_db: Database,
     store: TestStore,
+    founder: UserKeypair,
     successor: UserKeypair,
     operation_id: CircleOperationId,
     author_grant_id: crate::sync::membership::MembershipGrantId,
@@ -13,6 +15,7 @@ struct RevokedOperation {
 async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     let db = open_test_db();
     let founder = UserKeypair::generate();
+    let founder_pubkey = keys::public_key_hex(&founder);
     let store = create_test_store_in_its_own_task(&db, name, &founder).await;
     let successor = UserKeypair::generate();
     let successor_pubkey = keys::public_key_hex(&successor);
@@ -42,6 +45,20 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     )
     .await
     .expect("activate successor device");
+    let exact_membership = crate::sync::store::membership::load_current_exact_chain(
+        &store.storage,
+        &store.root,
+        Some(&founder_pubkey),
+        Some(&StoreDatabase::new(&successor_db)),
+    )
+    .await
+    .expect("load the operation author's exact Store grant");
+    let [author_grant_id] = exact_membership
+        .active_grant_ids(&successor_pubkey)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("operation author has one active Store grant");
     let successor_device_id = local_device_id(&successor_db).await;
     // The member device is the one that authors and publishes; drive everything
     // through its database so its local membership view governs authority.
@@ -55,7 +72,6 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     )
     .await
     .expect("prepare operation while authorized");
-    let author_grant_id = journal.operation().creation.control.value.author_grant_id();
     let operation_id = journal.operation_id.clone();
     StoreDatabase::new(&successor_db)
         .insert_circle_operation(journal)
@@ -83,7 +99,9 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
 
     RevokedOperation {
         db: successor_db,
+        owner_db: db,
         store,
+        founder,
         successor,
         operation_id,
         author_grant_id,
@@ -203,7 +221,21 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let circle_id = journal.circle_id();
     let expected_control = journal.operation().creation.control.coord.clone();
     let expected_commit_object = journal.operation().commit_ref.object.clone();
-    let author_grant_id = journal.operation().creation.control.value.author_grant_id();
+    let founder_pubkey = keys::public_key_hex(&founder);
+    let exact_membership = crate::sync::store::membership::load_current_exact_chain(
+        &store.storage,
+        &store.root,
+        Some(&founder_pubkey),
+        Some(&StoreDatabase::new(&db)),
+    )
+    .await
+    .expect("load the founder's exact Store grant");
+    let [author_grant_id] = exact_membership
+        .active_grant_ids(&founder_pubkey)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("founder has one active Store grant");
     StoreDatabase::new(&db)
         .insert_circle_operation(journal)
         .await
@@ -274,6 +306,90 @@ async fn discard_without_nonactivation_proof_is_refused() {
         "a refused discard leaves the operation durable"
     );
     let _ = signer;
+}
+
+/// An accepted Store commit names the membership transition that revokes the
+/// exact grant which signed the operation, and its predecessor cut excludes the
+/// operation's candidate. After the removed author pulls that public witness,
+/// discard verifies it, retires the candidate graph, and clears the journal.
+#[tokio::test]
+async fn discard_after_membership_revocation_witness_cleans_the_operation() {
+    let revoked = prepare_and_revoke_operation("recovery-discard-revocation").await;
+    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+        .await
+        .expect("resume blocks the revoked operation");
+
+    let changeset = crate::sync::test_helpers::capture_bytes(
+        &revoked.owner_db,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
+                     '0000000001004-0000-founder', '2026-01-01')",
+        ],
+    )
+    .await;
+    StoreDatabase::new(&revoked.owner_db)
+        .enqueue_store_changeset_for_test(changeset)
+        .await
+        .expect("enqueue the membership-revocation witness");
+    let owner_device_id = local_device_id(&revoked.owner_db).await;
+    let (_owner_temp, owner_store_dir) = temp_store_dir();
+    let owner_authorization =
+        crate::sync::store::Store::authorize_borrowed(&revoked.store.storage, &revoked.owner_db)
+            .await
+            .expect("authorize the revocation witness");
+    assert!(
+        owner_authorization
+            .prepare_pending_store_write(
+                &owner_device_id,
+                "0000000001004-0000-founder",
+                &revoked.founder,
+                &owner_store_dir,
+            )
+            .await
+            .expect("prepare the membership-revocation witness"),
+        "membership revocation must be named by a Store commit"
+    );
+    assert_eq!(
+        owner_authorization
+            .drain_store_writes()
+            .await
+            .expect("publish the membership-revocation witness"),
+        1,
+        "one accepted Store commit must witness the membership revocation"
+    );
+
+    let member_store = revoked
+        .store
+        .loaded_store(&revoked.db)
+        .await
+        .expect("load removed member Store");
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    let pull = member_store
+        .authorize()
+        .await
+        .expect("authorize removed member Store pull")
+        .pull(&member_store_dir, &revoked.successor, None)
+        .await
+        .expect("pull the accepted membership-revocation witness");
+    assert!(
+        pull.held_positions.is_empty(),
+        "membership-revocation witness must materialize: {:?}",
+        pull.held_positions
+    );
+
+    discard_circle_operation(&revoked.db, &revoked.store.storage, &revoked.operation_id)
+        .await
+        .expect("the accepted membership revocation permits discard");
+
+    assert!(
+        StoreDatabase::new(&revoked.db)
+            .circle_operation(&revoked.operation_id)
+            .await
+            .expect("read discarded operation")
+            .is_none(),
+        "discard clears the revoked author's journal row"
+    );
 }
 
 /// A different verified winner claims the operation's device-stream successor

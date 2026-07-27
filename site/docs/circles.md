@@ -235,9 +235,13 @@ candidate can never activate:
 circles.discard_operation(op_id).await?;
 ```
 
-If permanent nonactivation is not proven,
+Discard succeeds only after Coven verifies that the exact prepared Store commit
+can never activate: another verified commit owns its successor slot, the
+author's device was excluded before that slot, or an accepted Store commit
+revoked the exact Store membership grant that authorized it without covering
+the candidate in its predecessor history. Without one of those proofs,
 [`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
-`DiscardRequiresNonactivation` and leaves the durable operation intact.
+`DiscardRequiresNonactivation` and leaves the durable operation unchanged.
 Discarding an ordinary *host write* that a Circle refused is separate, on
 [`WriteStatus`](#offline-and-blocked-writes).
 

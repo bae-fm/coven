@@ -833,12 +833,15 @@ impl Store {
                 CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
             })?;
         if !journal.is_discarding() {
-            let candidate = database
-                .circle_operation_blocked_candidate(operation_id)
+            let discard_candidate = database
+                .circle_operation_discard_candidate(operation_id)
                 .await?;
             let Some(nonactivation) = Box::pin(
                 crate::sync::store::abandonment::discard_candidate_nonactivation(
-                    database, storage, &candidate,
+                    database,
+                    storage,
+                    &discard_candidate.candidate,
+                    discard_candidate.revoked_grant.as_ref(),
                 ),
             )
             .await?
