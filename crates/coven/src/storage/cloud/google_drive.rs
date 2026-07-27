@@ -129,14 +129,11 @@ pub(crate) struct GoogleDriveCloudHome {
     session: OAuthSession,
 }
 
+/// One Drive file named by the provider id it was given and the create token
+/// this device stamped on it, whether the name came back from a create response
+/// or from listing the folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DriveFileIdentity {
-    id: String,
-    create_token: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CreatedDriveFile {
     id: String,
     create_token: String,
 }
@@ -263,7 +260,7 @@ impl GoogleDriveCloudHome {
         &self,
         key: &str,
         encoded: &str,
-    ) -> Result<CreatedDriveFile, CloudHomeError> {
+    ) -> Result<DriveFileIdentity, CloudHomeError> {
         let create_token = uuid::Uuid::new_v4().to_string();
         let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
         let resp = self
@@ -298,7 +295,7 @@ impl GoogleDriveCloudHome {
             |file_id| async move { self.delete_created_file(key, &file_id).await },
         )
         .await
-        .map(|id| CreatedDriveFile { id, create_token })
+        .map(|id| DriveFileIdentity { id, create_token })
     }
 
     async fn create_file_for_key(
@@ -314,13 +311,10 @@ impl GoogleDriveCloudHome {
         &self,
         key: &str,
         encoded: &str,
-        created: CreatedDriveFile,
+        created: DriveFileIdentity,
     ) -> Result<String, CloudHomeError> {
         let files = self.list_file_identities(encoded).await?;
-        if !files
-            .iter()
-            .any(|file| file.id == created.id && file.create_token == created.create_token)
-        {
+        if !files.contains(&created) {
             return Err(CloudHomeError::Transport(format!(
                 "create {key}: created file {} with token {} was not returned by duplicate check",
                 created.id, created.create_token
@@ -918,7 +912,7 @@ struct DriveMultipartSink<'a> {
     inner: RangePutSink,
     key: String,
     encoded: String,
-    created: Option<CreatedDriveFile>,
+    created: Option<DriveFileIdentity>,
 }
 
 #[async_trait]
@@ -1148,7 +1142,7 @@ impl GoogleDriveCloudHome {
                 };
                 (
                     session_url,
-                    Some(CreatedDriveFile {
+                    Some(DriveFileIdentity {
                         id: attempt.file_id,
                         create_token: attempt.create_token,
                     }),
