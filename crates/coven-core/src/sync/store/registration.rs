@@ -1844,10 +1844,11 @@ mod tests {
         )
         .await;
 
-        crate::sync::store::database::StoreDatabase::new(&db)
-            .materialized_frontier()
+        db.call(|conn| StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop))
             .await
-            .expect_err("tampered retained recovery registration bytes must fail");
+            .expect_err(
+                "tampered retained recovery registration bytes must fail durable history verification",
+            );
     }
 
     #[tokio::test]
@@ -1860,10 +1861,11 @@ mod tests {
         )
         .await;
 
-        crate::sync::store::database::StoreDatabase::new(&db)
-            .materialized_frontier()
+        db.call(|conn| StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop))
             .await
-            .expect_err("tampered retained recovery registration authority must fail");
+            .expect_err(
+                "tampered retained recovery registration authority must fail durable history verification",
+            );
     }
 
     #[tokio::test]

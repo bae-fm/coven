@@ -2226,10 +2226,12 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
     ));
     replace_stored_remote_object(&target, &second_package.object, &missing).await;
-    assert!(store_database(&target)
-        .materialized_frontier()
+    assert!(target
+        .call(|conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        })
         .await
-        .expect_err("missing replay pin must invalidate materialization")
+        .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
         .contains("retained-replay ownership index"));
     replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
@@ -2254,10 +2256,12 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         ),
     );
     replace_stored_remote_object(&target, &second_package.object, &tampered).await;
-    assert!(store_database(&target)
-        .materialized_frontier()
+    assert!(target
+        .call(|conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        })
         .await
-        .expect_err("tampered replay pin must invalidate materialization")
+        .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
         .contains("retained-replay ownership index"));
     replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
@@ -2312,10 +2316,12 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure")
     );
-    assert!(store_database(&target)
-        .materialized_frontier()
+    assert!(target
+        .call(|conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        })
         .await
-        .expect_err("invented replay pin must invalidate materialization")
+        .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()
         .contains("ownership differs from its exact object closure"));
 }
