@@ -8,14 +8,17 @@ pub(in crate::sync::store) fn verify_device_join_cleanup_activation<'a>(
     activation: LoadedDeviceJoinCleanupActivation,
 ) -> StorePullFuture<'a, crate::sync::store::JoinerJoinTerminal> {
     Box::pin(async move {
-        let membership =
-            load_merge_predecessor_membership(storage, root, &activation.commit.membership_state)
-                .await
-                .map_err(|error| match error {
-                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-                })?;
-        if !membership.is_owner_now(&activation.author.author_pubkey) {
+        let membership = load_merge_predecessor_membership(
+            storage,
+            root,
+            &activation.verified_commit.value().membership_state,
+        )
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+        if !membership.is_owner_now(&activation.verified_commit.author().author_pubkey) {
             return Err(StorePullError::Database(
                 "device join cleanup activation author is not an active Merge Owner".to_string(),
             ));

@@ -514,14 +514,16 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .await
         .expect("read exclusion activation position")
         .expect("exclusion activation position exists");
-    let (activation_commit, _) =
-        crate::sync::store::pull::load_commit_with_author(&store.storage, &store.root, &activation)
+    let activation_commit =
+        crate::sync::store::pull::load_verified_commit(&store.storage, &store.root, &activation)
             .await
             .expect("load exclusion activation commit");
     assert!(activation_commit
+        .value()
         .device_exclusion_outcomes()
         .contains(&StoreDeviceExclusionOutcomeRef::Excluded(exclusion.clone())));
     let replay_cut = activation_commit
+        .value()
         .order
         .predecessor_cut()
         .expect("read exclusion activation predecessor");
@@ -530,7 +532,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         &store.root,
         &replay_cut,
         &activation,
-        &activation_commit.membership_state,
+        &activation_commit.value().membership_state,
     )
     .await
     .expect("prepare post-snapshot exclusion replay");

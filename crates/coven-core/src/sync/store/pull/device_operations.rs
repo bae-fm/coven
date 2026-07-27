@@ -75,21 +75,22 @@ async fn predecessor_acknowledgement_activation(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let (commit, _) = load_commit_with_author(storage, root, &reference)
+        let commit = load_verified_commit(storage, root, &reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        if commit.acknowledgement() == Some(expected) {
+        if commit.value().acknowledgement() == Some(expected) {
             let predecessor_cut = commit
+                .value()
                 .order
                 .predecessor_cut()
                 .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-            return Ok(commit.author_registration == expected.registration
+            return Ok(commit.value().author_registration == expected.registration
                 && ack.registration == expected.registration
                 && ack.store_cut == predecessor_cut
-                && ack.device_state == commit.device_state);
+                && ack.device_state == commit.value().device_state);
         }
-        pending.extend(commit.order.predecessor);
-        pending.extend(commit.order.dependencies.into_values());
+        pending.extend(commit.value().order.predecessor.iter().cloned());
+        pending.extend(commit.value().order.dependencies.values().cloned());
     }
     Ok(false)
 }

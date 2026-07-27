@@ -724,10 +724,11 @@ async fn load_commit(
     fixture: &EffectiveAccessFixture,
     reference: &StoreBatchCommitRef,
 ) -> StoreBatchCommit {
-    load_commit_with_author(&fixture.store.storage, &fixture.store.root, reference)
+    load_verified_commit(&fixture.store.storage, &fixture.store.root, reference)
         .await
         .expect("load effective-access commit")
-        .0
+        .value()
+        .clone()
 }
 
 #[test]
@@ -1725,10 +1726,11 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("load earlier Owner position")
         .expect("earlier Owner published the membership control");
-    let (earlier_value, _) = load_commit_with_author(&store.storage, &store.root, &earlier_control)
+    let earlier_value = load_verified_commit(&store.storage, &store.root, &earlier_control)
         .await
         .expect("load traversal-earlier control");
-    let Some(crate::sync::store_commit::StoreControl { transition }) = earlier_value.control()
+    let Some(crate::sync::store_commit::StoreControl { transition }) =
+        earlier_value.value().control()
     else {
         panic!("earlier Owner position is not a Merge membership control");
     };
@@ -1795,12 +1797,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later Owner position")
         .expect("later Owner published the data commit");
 
-    let (later_value, _) = load_commit_with_author(&store.storage, &store.root, &later_commit)
+    let later_value = load_verified_commit(&store.storage, &store.root, &later_commit)
         .await
         .expect("load later concurrent commit");
-    let later_predecessors = commit_predecessor_references(&later_value);
+    let later_predecessors = commit_predecessor_references(later_value.value());
     assert!(!later_predecessors.contains(&earlier_control));
-    let signed_membership = &later_value.membership_state;
+    let signed_membership = &later_value.value().membership_state;
     assert!(!signed_membership
         .heads
         .iter()

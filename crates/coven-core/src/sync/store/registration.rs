@@ -1651,14 +1651,14 @@ mod tests {
             .expect("load materialized Store frontier")
             .into_values()
         {
-            let (commit, _) = crate::sync::store::pull::load_commit_with_author(
+            let commit = crate::sync::store::pull::load_verified_commit(
                 &store.storage,
                 &store.root,
                 &reference,
             )
             .await
             .expect("load materialized recovery commit");
-            if commit.author_registration == registration {
+            if commit.value().author_registration == registration {
                 return (store, db, registration, reference);
             }
         }

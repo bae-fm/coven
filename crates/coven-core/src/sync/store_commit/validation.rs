@@ -164,16 +164,6 @@ impl VerifiedStoreBatchCommit {
     pub(crate) fn author(&self) -> &StoreDeviceRegistration {
         &self.author
     }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        StoreBatchCommitRef,
-        StoreBatchCommit,
-        StoreDeviceRegistration,
-    ) {
-        (self.reference, self.value, self.author)
-    }
 }
 
 pub fn store_protocol_root_logical_key() -> &'static str {

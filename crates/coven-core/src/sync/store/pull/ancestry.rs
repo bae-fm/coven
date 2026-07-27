@@ -54,13 +54,13 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 }
 
-pub(crate) async fn load_commit_with_author(
+pub(crate) async fn load_verified_commit(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     reference: &StoreBatchCommitRef,
-) -> Result<(StoreBatchCommit, StoreDeviceRegistration), StoreObjectError> {
+) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
     let root_value = load_store_protocol_root(storage, root).await?.value;
-    load_commit_with_author_at_root(storage, root, &root_value, reference).await
+    load_verified_commit_at_root(storage, root, &root_value, reference).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,15 +83,12 @@ pub(crate) async fn commit_position_covers(
     }
     let mut cursor = covering.clone();
     while cursor.coord.sequence() > covered.coord.sequence() {
-        let (commit, _) = load_commit_with_author(storage, root, &cursor).await?;
-        cursor =
-            commit
-                .order
-                .predecessor()
-                .cloned()
-                .ok_or(CommitCoverageError::MissingAncestry {
-                    commit_hash: cursor.commit_hash,
-                })?;
+        let commit = load_verified_commit(storage, root, &cursor).await?;
+        cursor = commit.value().order.predecessor().cloned().ok_or(
+            CommitCoverageError::MissingAncestry {
+                commit_hash: cursor.commit_hash,
+            },
+        )?;
     }
     Ok(cursor == *covered)
 }
@@ -184,19 +181,6 @@ pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
             .verify(&verified_root, owner, &administrator)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         Ok(LoadedDeviceJoinAttemptEvidence { attempt })
-    })
-}
-
-pub(crate) fn load_commit_with_author_at_root<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    root_value: &'a super::store_commit::StoreProtocolRoot,
-    reference: &'a StoreBatchCommitRef,
-) -> super::store_objects::StoreObjectFuture<'a, (StoreBatchCommit, StoreDeviceRegistration)> {
-    Box::pin(async move {
-        let verified = load_verified_commit_at_root(storage, root, root_value, reference).await?;
-        let (_, commit, author) = verified.into_parts();
-        Ok((commit, author))
     })
 }
 

@@ -104,7 +104,7 @@ impl ReclaimJourneyFixture {
 
         let mut packages = Vec::new();
         for activation in activations {
-            let (commit, _) = crate::sync::store::pull::load_commit_with_author(
+            let commit = crate::sync::store::pull::load_verified_commit(
                 &store.storage,
                 &store.root,
                 &activation,
@@ -112,6 +112,7 @@ impl ReclaimJourneyFixture {
             .await
             .expect("load package activation");
             let package = commit
+                .value()
                 .store_package()
                 .expect("activation carries a Store package")
                 .clone();
@@ -582,7 +583,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .publish_changeset("founder", 1, &changeset, db.schema_version())
         .await
         .expect("publish target package activation");
-    let (target_commit, _) = crate::sync::store::pull::load_commit_with_author(
+    let target_commit = crate::sync::store::pull::load_verified_commit(
         &store.storage,
         &store.root,
         &target_activation,
@@ -590,6 +591,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     .await
     .expect("load target activation");
     let target_package = target_commit
+        .value()
         .store_package()
         .expect("target activation carries a Store package")
         .clone();

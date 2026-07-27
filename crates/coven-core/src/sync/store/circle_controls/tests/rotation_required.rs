@@ -658,15 +658,14 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         crate::WriteStatus::Published(position) => position.commit,
         status => panic!("formerly blocked write must publish under the successor: {status:?}"),
     };
-    let published_commit = crate::sync::store::pull::load_commit_with_author(
+    let published_commit = crate::sync::store::pull::load_verified_commit(
         &fixture.store.storage,
         &fixture.store.root,
         &published,
     )
     .await
-    .expect("load the successor-epoch commit")
-    .0;
-    let [circle_package] = published_commit.circle_packages() else {
+    .expect("load the successor-epoch commit");
+    let [circle_package] = published_commit.value().circle_packages() else {
         panic!("the successor-epoch write carries exactly one Circle package");
     };
     assert_eq!(circle_package.control, successor.control.coord);
@@ -2591,15 +2590,14 @@ async fn publish_covered_circle_package(
         crate::WriteStatus::Published(position) => position.commit,
         status => panic!("the Circle write must publish: {status:?}"),
     };
-    let package_commit = crate::sync::store::pull::load_commit_with_author(
+    let package_commit = crate::sync::store::pull::load_verified_commit(
         &fixture.store.storage,
         &fixture.store.root,
         &published,
     )
     .await
-    .expect("load the Circle package commit")
-    .0;
-    let [circle_package] = package_commit.circle_packages() else {
+    .expect("load the Circle package commit");
+    let [circle_package] = package_commit.value().circle_packages() else {
         panic!("the Circle write carries exactly one Circle package");
     };
     let circle_package = circle_package.clone();

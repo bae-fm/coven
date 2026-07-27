@@ -153,8 +153,8 @@ pub(crate) async fn load_applicable_circle_packages(
                     reference.circle_id
                 )));
             };
-            let (historical_commit, historical_author) =
-                super::load_commit_with_author(storage, root, &historical_commit_ref)
+            let historical_commit =
+                super::load_verified_commit(storage, root, &historical_commit_ref)
                     .await
                     .map_err(|error| {
                         PullCircleActivationError::Invalid(format!(
@@ -168,8 +168,8 @@ pub(crate) async fn load_applicable_circle_packages(
                     storage,
                     root,
                     &historical_commit_ref,
-                    &historical_commit,
-                    &historical_author,
+                    historical_commit.value(),
+                    historical_commit.author(),
                     &historical.reference,
                     &historical.control,
                     &keyring,

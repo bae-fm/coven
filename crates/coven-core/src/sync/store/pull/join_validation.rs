@@ -643,15 +643,14 @@ fn predecessor_contains_join_attempt(
         .map_err(registration_attempt_error)
 }
 
-type PredecessorCommitPredicate<'a> =
-    Box<dyn FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool + Send + 'a>;
+type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) async fn predecessor_commit_matching(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     order: &super::store_commit::StoreCommitOrder,
     matches: PredecessorCommitPredicate<'_>,
-) -> Result<Option<(StoreBatchCommitRef, StoreBatchCommit)>, RegistrationLoadError> {
+) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
     let root_value = load_store_protocol_root(storage, root)
         .await
         .map_err(RegistrationLoadError::Object)?
@@ -672,7 +671,7 @@ pub(super) async fn predecessor_commit_matching_at_root(
     root_value: &super::store_commit::StoreProtocolRoot,
     order: &super::store_commit::StoreCommitOrder,
     mut matches: PredecessorCommitPredicate<'_>,
-) -> Result<Option<(StoreBatchCommitRef, StoreBatchCommit)>, RegistrationLoadError> {
+) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
     let mut pending = order
         .predecessor
         .iter()
@@ -684,14 +683,14 @@ pub(super) async fn predecessor_commit_matching_at_root(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let (commit, _) = load_commit_with_author_at_root(storage, root, root_value, &reference)
+        let commit = load_verified_commit_at_root(storage, root, root_value, &reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        if matches(&reference, &commit) {
-            return Ok(Some((reference, commit)));
+        if matches(&commit) {
+            return Ok(Some(commit));
         }
-        pending.extend(commit.order.predecessor);
-        pending.extend(commit.order.dependencies.into_values());
+        pending.extend(commit.value().order.predecessor.iter().cloned());
+        pending.extend(commit.value().order.dependencies.values().cloned());
     }
     Ok(None)
 }

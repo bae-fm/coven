@@ -136,13 +136,12 @@ pub(crate) async fn publish_device_provider_challenge(
         DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
             let exact = administrator_exact.ok_or(DeviceJoinError::ExactSlotStorageRequired)?;
             let context = cross_challenge_context(&bootstrap.request.approval.request);
-            let (_, activation_author) =
-                Box::pin(crate::sync::store::pull::load_commit_with_author(
-                    storage,
-                    &offer.store_root,
-                    &bootstrap.publication_authorization.attempt_activation,
-                ))
-                .await?;
+            let activation = Box::pin(crate::sync::store::pull::load_verified_commit(
+                storage,
+                &offer.store_root,
+                &bootstrap.publication_authorization.attempt_activation,
+            ))
+            .await?;
             let authorization = DeviceJoinChallengePublicationAuthorization {
                 attempt: bootstrap.publication_authorization.attempt.clone(),
                 attempt_activation: bootstrap
@@ -159,7 +158,7 @@ pub(crate) async fn publish_device_provider_challenge(
                 &context,
                 &offer.provider,
                 &owner,
-                &activation_author,
+                activation.author(),
                 &administrator.device_signing_pubkey,
             ))
             .await

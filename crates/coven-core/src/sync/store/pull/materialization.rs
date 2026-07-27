@@ -241,11 +241,11 @@ async fn reference_is_materialized(
                 },
             ));
         }
-        let (commit, _) = match load_commit_with_author(storage, root, &cursor).await {
+        let verified_commit = match load_verified_commit(storage, root, &cursor).await {
             Ok(commit) => commit,
             Err(error) => return Ok(MaterializedCheck::Held(held_object_error(error))),
         };
-        let Some(predecessor) = commit.order.predecessor() else {
+        let Some(predecessor) = verified_commit.value().order.predecessor() else {
             return Ok(MaterializedCheck::Missing);
         };
         cursor = predecessor.clone();

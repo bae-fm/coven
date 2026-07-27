@@ -78,8 +78,7 @@ fn predecessor_verifies_provider_administrator_grant(
 }
 
 pub(crate) struct LoadedDeviceJoinCleanupActivation {
-    pub(crate) commit: StoreBatchCommit,
-    pub(crate) author: StoreDeviceRegistration,
+    pub(crate) verified_commit: VerifiedStoreBatchCommit,
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
 }
 
@@ -90,25 +89,31 @@ pub(crate) fn load_device_join_cleanup_activation<'a>(
 ) -> StorePullFuture<'a, LoadedDeviceJoinCleanupActivation> {
     Box::pin(async move {
         let root_value = load_store_protocol_root(storage, root).await?.value;
-        let (commit, author) =
-            load_commit_with_author_at_root(storage, root, &root_value, &activation.activation)
+        let verified_commit =
+            load_verified_commit_at_root(storage, root, &root_value, &activation.activation)
                 .await?;
-        if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
+        if verified_commit.value().device_join_cleanup_receipts()
+            != std::slice::from_ref(&activation.receipt)
+        {
             return Err(StorePullError::Database(
                 "device join cleanup activation does not contain its exact sole receipt"
                     .to_string(),
             ));
         }
-        let receipts =
-            load_commit_join_cleanup_receipts(storage, root, &root_value, &commit, &author)
-                .await
-                .map_err(|error| match error {
-                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-                })?;
+        let receipts = load_commit_join_cleanup_receipts(
+            storage,
+            root,
+            &root_value,
+            verified_commit.value(),
+            verified_commit.author(),
+        )
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
         Ok(LoadedDeviceJoinCleanupActivation {
-            commit,
-            author,
+            verified_commit,
             receipts,
         })
     })
@@ -340,12 +345,12 @@ async fn validate_package_bound_reclaim_target(
         ));
     };
     let expected = activation.activation.clone();
-    let (_, activating) = Box::pin(predecessor_commit_matching_at_root(
+    let activating = Box::pin(predecessor_commit_matching_at_root(
         storage,
         root,
         root_value,
         &commit.order,
-        Box::new(move |candidate, _| candidate == &expected),
+        Box::new(move |candidate| candidate.reference() == &expected),
     ))
     .await?
     .ok_or_else(|| {
@@ -355,10 +360,10 @@ async fn validate_package_bound_reclaim_target(
     })?;
     let names_package = match activation.package {
         super::store_reclaim::AudienceBlobBindingPackage::Store(package) => {
-            activating.store_package() == Some(package)
+            activating.value().store_package() == Some(package)
         }
         super::store_reclaim::AudienceBlobBindingPackage::Circle(package) => {
-            activating.circle_packages().contains(package)
+            activating.value().circle_packages().contains(package)
         }
     };
     if !names_package {
@@ -391,7 +396,7 @@ async fn validate_commit_activated_reclaim_target(
         root,
         root_value,
         &commit.order,
-        Box::new(move |candidate, _| candidate == &expected),
+        Box::new(move |candidate| candidate.reference() == &expected),
     ))
     .await?
     .ok_or_else(|| {
@@ -401,13 +406,14 @@ async fn validate_commit_activated_reclaim_target(
     })?;
     let names_target = match target {
         super::store_reclaim::ReclaimTarget::StorePackage(store) => {
-            activation.1.store_package() == Some(&store.package)
+            activation.value().store_package() == Some(&store.package)
         }
-        super::store_reclaim::ReclaimTarget::CirclePackage(circle) => {
-            activation.1.circle_packages().contains(&circle.package)
-        }
+        super::store_reclaim::ReclaimTarget::CirclePackage(circle) => activation
+            .value()
+            .circle_packages()
+            .contains(&circle.package),
         super::store_reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
-            .1
+            .value()
             .circle_controls()
             .iter()
             .flat_map(|control| control.objects.access.iter())
@@ -517,7 +523,7 @@ async fn validate_commit_reclaim_receipt(
         root,
         root_value,
         &commit.order,
-        Box::new(|_, candidate| candidate.reclaim_authorization() == Some(&authorization)),
+        Box::new(|candidate| candidate.value().reclaim_authorization() == Some(&authorization)),
     ))
     .await?
     .is_none()

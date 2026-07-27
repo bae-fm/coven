@@ -78,13 +78,14 @@ impl AuthorizedStore<'_> {
                 .local_store_root_ref()
                 .await?
                 .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-            let (activation_commit, activation_author) =
-                crate::sync::store::pull::load_commit_with_author(
-                    self.storage(),
-                    &root,
-                    &activation_commit_ref,
-                )
-                .await?;
+            let activation = crate::sync::store::pull::load_verified_commit(
+                self.storage(),
+                &root,
+                &activation_commit_ref,
+            )
+            .await?;
+            let activation_commit = activation.value();
+            let activation_author = activation.author();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(
                     "Circle {} closing state differs from its activating Store commit",
@@ -117,8 +118,8 @@ impl AuthorizedStore<'_> {
                 self.storage(),
                 &root,
                 &activation_commit_ref,
-                &activation_commit,
-                &activation_author,
+                activation_commit,
+                activation_author,
                 reference,
                 &current.control,
                 keyring,

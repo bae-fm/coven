@@ -1118,9 +1118,10 @@ async fn resolve_circle_stream_authority(
             storage,
             root,
             &commit.order,
-            Box::new(|reference, predecessor| {
-                reference == &activating_commit
+            Box::new(|predecessor| {
+                predecessor.reference() == &activating_commit
                     && predecessor
+                        .value()
                         .stream_activations()
                         .binary_search(&activation)
                         .is_ok()

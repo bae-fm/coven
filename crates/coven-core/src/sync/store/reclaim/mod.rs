@@ -1317,10 +1317,11 @@ async fn prepare_audience_blob_reclaim_authorizations(
         // not which commit. Probe only that dimension.
         let mut binding = None;
         for owner in &owners {
-            let (commit, _) = super::pull::load_commit_with_author(storage, root, owner)
+            let commit = super::pull::load_verified_commit(storage, root, owner)
                 .await
                 .map_err(StoreReclaimError::Object)?;
-            if let Some(package) = audience_blob_binding_package(&commit, blob.locator().audience())
+            if let Some(package) =
+                audience_blob_binding_package(commit.value(), blob.locator().audience())
             {
                 binding = Some((package, owner.clone()));
                 break;
@@ -1716,17 +1717,18 @@ async fn exact_circle_package_targets(
             if targets.contains_key(&reference) {
                 break;
             }
-            let (commit, _) = super::pull::load_commit_with_author(storage, root, &reference)
+            let commit = super::pull::load_verified_commit(storage, root, &reference)
                 .await
                 .map_err(StoreReclaimError::Object)?;
             if let Some(package) = commit
+                .value()
                 .circle_packages()
                 .iter()
                 .find(|package| package.circle_id == circle_id)
             {
                 targets.insert(reference.clone(), package.clone());
             }
-            cursor = commit.order.predecessor().cloned();
+            cursor = commit.value().order.predecessor().cloned();
         }
     }
     Ok(targets.into_iter().collect())
@@ -2464,9 +2466,8 @@ async fn verify_store_package_reclaim_claim(
                 .to_string(),
         ));
     }
-    let (commit, _) =
-        super::pull::load_commit_with_author(storage, root, &claim.target.activation).await?;
-    if commit.store_package() != Some(&claim.target.package)
+    let commit = super::pull::load_verified_commit(storage, root, &claim.target.activation).await?;
+    if commit.value().store_package() != Some(&claim.target.package)
         || !snapshot_covers_target(
             storage,
             root,
@@ -2647,9 +2648,11 @@ async fn verify_circle_package_snapshot_coverage_claim(
                 .to_string(),
         ));
     }
-    let (commit, _) =
-        super::pull::load_commit_with_author(storage, root, &claim.target.activation).await?;
-    if !commit.circle_packages().contains(&claim.target.package)
+    let commit = super::pull::load_verified_commit(storage, root, &claim.target.activation).await?;
+    if !commit
+        .value()
+        .circle_packages()
+        .contains(&claim.target.package)
         || !snapshot_covers_target(storage, root, cut, &claim.target.activation).await?
     {
         return Err(StoreReclaimError::Authorization(
@@ -3263,13 +3266,13 @@ async fn exact_package_targets(
             if targets.contains_key(&reference) {
                 break;
             }
-            let (commit, _) = super::pull::load_commit_with_author(storage, root, &reference)
+            let commit = super::pull::load_verified_commit(storage, root, &reference)
                 .await
                 .map_err(StoreReclaimError::Object)?;
-            if let Some(package) = commit.store_package().cloned() {
+            if let Some(package) = commit.value().store_package().cloned() {
                 targets.insert(reference.clone(), package);
             }
-            cursor = commit.order.predecessor().cloned();
+            cursor = commit.value().order.predecessor().cloned();
         }
     }
     Ok(targets.into_iter().collect())
