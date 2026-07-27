@@ -188,12 +188,12 @@ impl LoadedMergePredecessorMemberships {
 
 impl AuthorizedStore<'_> {
     pub(crate) async fn pull(
-        &self,
+        &mut self,
         store_dir: &StoreDir,
         identity: &UserKeypair,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
-        pull_store_commits(
+        let result = pull_store_commits(
             self.database(),
             self.db().synced_tables(),
             self.storage(),
@@ -204,7 +204,9 @@ impl AuthorizedStore<'_> {
             routing_encryption,
         )
         .await
-        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))
+        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+        self.refresh_membership().await?;
+        Ok(result)
     }
 
     pub(crate) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {

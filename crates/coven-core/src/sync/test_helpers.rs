@@ -1593,10 +1593,11 @@ pub async fn promote_active_member_fixture(
         .await
         .map_err(|error| format!("finalize Owner promotion: {error}"))?;
     let (_temp, store_dir) = temp_store_dir();
-    let pull = member_store
+    let mut authorized_member_store = member_store
         .authorize()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let pull = authorized_member_store
         .pull(&store_dir, member, None)
         .await
         .map_err(|error| error.to_string())?;

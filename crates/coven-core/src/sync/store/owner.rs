@@ -478,6 +478,11 @@ impl AuthorizedStore<'_> {
         &self.membership
     }
 
+    pub(super) async fn refresh_membership(&mut self) -> Result<(), SyncCycleFailure> {
+        self.membership = load_authorized_membership(&self.access).await?;
+        Ok(())
+    }
+
     pub(crate) fn storage(&self) -> &dyn SyncStorage {
         self.access.storage
     }
@@ -603,6 +608,13 @@ pub(crate) async fn anchor_owner_membership(
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
+    let membership = load_authorized_membership(&access).await?;
+    Ok(AuthorizedStore { access, membership })
+}
+
+async fn load_authorized_membership(
+    access: &StoreAccess<'_>,
+) -> Result<crate::sync::membership::MembershipChain, SyncCycleFailure> {
     let crate::sync::store::pull::CycleMembership {
         chain,
         pinned_owner,
@@ -622,5 +634,5 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
             );
         }
     };
-    Ok(AuthorizedStore { access, membership })
+    Ok(membership)
 }

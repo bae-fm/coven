@@ -379,7 +379,7 @@ async fn run_single_sync_cycle_with_authorization(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: AuthorizedStore<'_>,
+    mut authorization: AuthorizedStore<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let prepared = match Box::pin(prepare_cycle_before_pull(
         hlc,

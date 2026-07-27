@@ -5845,6 +5845,109 @@ async fn member_device_does_not_create_a_snapshot() {
 }
 
 #[tokio::test]
+async fn pull_refreshes_snapshot_authority_before_publication() {
+    use crate::sync::membership::MemberRole;
+
+    let founder = UserKeypair::generate();
+    let founder_db = open_test_db();
+    let storage = cycle_test_store(&founder_db, &founder).await;
+    let successor_owner = UserKeypair::generate();
+    let encryption = EncryptionService::from_key([64; 32]);
+    crate::sync::store::invite_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        &founder,
+        &Hlc::new("founder".to_string()),
+        &pubkey_hex(&successor_owner),
+        None,
+        MemberRole::Member,
+        &encryption,
+        "test-lib",
+        "Test Store",
+        &StoreDatabase::new(&founder_db),
+    )
+    .await
+    .expect("invite successor Owner");
+    let successor_db = open_test_db();
+    install_active_device_fixture(
+        &storage,
+        &founder_db,
+        &successor_db,
+        &successor_owner,
+        "2026-07-26T00:00:00Z",
+    )
+    .await
+    .expect("activate successor Owner device");
+    promote_active_member_fixture(
+        &storage,
+        &founder_db,
+        &successor_db,
+        &founder,
+        &successor_owner,
+        &encryption,
+    )
+    .await
+    .expect("promote successor Owner");
+
+    let founder_store = storage
+        .loaded_store(&founder_db)
+        .await
+        .expect("load founder Store");
+    let mut authorized = founder_store
+        .authorize()
+        .await
+        .expect("authorize founder before removal");
+
+    let custody = TestCustody::default();
+    let cipher = RwLock::new(CloudCipher::Encrypted(encryption.clone()));
+    crate::sync::store::remove_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        &successor_owner,
+        &Hlc::new("successor-owner".to_string()),
+        &pubkey_hex(&founder),
+        &encryption,
+        &custody,
+        &cipher,
+        &PendingRotation::none(),
+        &StoreDatabase::new(&successor_db),
+    )
+    .await
+    .expect("remove founder after cycle authorization");
+
+    let (_temp, store_dir) = temp_store_dir();
+    let founder_device_id = founder_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("load founder device id")
+        .expect("active founder device id");
+    authorized
+        .pull(&store_dir, &founder, Some(&encryption))
+        .await
+        .expect("pull founder removal");
+    authorized
+        .publish_due_snapshots(
+            &founder_device_id,
+            &store_dir,
+            &founder,
+            "2026-07-26T01:00:00Z",
+            Some(&encryption),
+            false,
+        )
+        .await
+        .expect("evaluate snapshot after pull");
+
+    assert!(
+        StoreDatabase::new(&founder_db)
+            .latest_local_store_snapshot()
+            .await
+            .expect("read founder snapshot state")
+            .is_none(),
+        "a removed Owner must not publish from pre-pull membership authority",
+    );
+}
+
+#[tokio::test]
 async fn same_principal_device_join_completes_on_the_runtime_stack() {
     use crate::sync::membership::MemberRole;
 

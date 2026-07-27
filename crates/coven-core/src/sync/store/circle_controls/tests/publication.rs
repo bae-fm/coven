@@ -4293,7 +4293,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .await
         .expect("activate the Circle epoch close");
     let (_temp, respond_dir) = temp_store_dir();
-    let member =
+    let mut member =
         crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
             .await
             .expect("authorize responding member Store");
@@ -4592,7 +4592,7 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
 /// Pull the epoch close onto the silent participant's device, then publish its
 /// own device-signed close response from that device.
 async fn silent_publish_response(fixture: &SilentParticipantClose) {
-    let authorized =
+    let mut authorized =
         crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
             .await
             .expect("authorize silent participant Store");

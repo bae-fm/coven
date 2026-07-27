@@ -194,7 +194,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     );
 
     let (_store_temp, store_dir) = temp_store_dir();
-    let authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+    let mut authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
         .await
         .expect("authorize Store pull");
     let pull = authorized_store
