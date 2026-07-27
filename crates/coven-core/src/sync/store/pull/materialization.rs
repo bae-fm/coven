@@ -895,11 +895,8 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         super::replay::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
     }
     let store_transaction = crate::sync::store::database::StoreDatabaseTransaction::new(conn);
-    store_transaction.record_verified_circle_activations(
-        commit,
-        commit_ref,
-        circle_activations.circles(),
-    )?;
+    store_transaction
+        .record_verified_circle_activations(&verified_commit, circle_activations.circles())?;
     // A Circle whose winning control chain is now Deleted prunes its rows,
     // routes, and blob bindings like an inactive recipient, and drops its live
     // access/roster/metadata caches; the authority spine is retained above.
@@ -1043,8 +1040,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     }
     let verified = VerifiedMergeMaterialization::verify(
         &root,
-        commit,
-        commit_ref,
+        &verified_commit,
         &registrations,
         &device_operations,
         &circle_activations,
@@ -1060,8 +1056,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         commit_ref,
         &membership_remote_objects,
     )?;
-    let retained = store_transaction
-        .record_operation_verified_merge_materialization(verified, &verified_commit)?;
+    let retained = store_transaction.record_verified_merge_materialization(verified)?;
     Ok(AppliedMergeMaterialization {
         outcome: ApplyOutcome::Applied(returned_changes),
         max_updated_at: changeset_max,

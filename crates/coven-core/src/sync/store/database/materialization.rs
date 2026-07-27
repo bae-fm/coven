@@ -27,11 +27,6 @@ use crate::sync::store_commit::{
     VerifiedStoreDeviceOperations,
 };
 
-enum MaterializationCommitAuthority<'a> {
-    StoredBytes,
-    Operation(&'a VerifiedStoreBatchCommit),
-}
-
 impl StoreDatabase {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
@@ -136,8 +131,7 @@ impl StoreDatabase {
                 let activation = &prepared.activation;
                 let materialization = VerifiedMergeMaterialization::verify(
                     &root,
-                    commit,
-                    &prepared.reference,
+                    &prepared.commit,
                     &prepared.registrations,
                     &prepared.device_operations,
                     &circle_activations,
@@ -149,10 +143,7 @@ impl StoreDatabase {
                     None,
                 )?;
                 StoreDatabaseTransaction::new(&tx)
-                    .record_operation_verified_merge_materialization(
-                        materialization,
-                        &prepared.commit,
-                    )?;
+                    .record_verified_merge_materialization(materialization)?;
             }
             tx.commit().map_err(DbError::from)
         })
@@ -161,8 +152,7 @@ impl StoreDatabase {
 
     pub(in crate::sync::store) async fn complete_owner_recovery(
         &self,
-        commit: StoreBatchCommit,
-        commit_ref: StoreBatchCommitRef,
+        verified_commit: VerifiedStoreBatchCommit,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
         history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
@@ -174,15 +164,15 @@ impl StoreDatabase {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let root = required_store_root_authority_on(&tx)?;
                 let registrations = vec![(registration, authority)];
+                let commit = verified_commit.value();
                 crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,
-                    &commit,
+                    commit,
                     &registrations,
                 )?;
                 StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
                     &root,
-                    &commit,
-                    &commit_ref,
+                    &verified_commit,
                     &registrations,
                     &activation_head,
                     &activation_head_object,
@@ -200,8 +190,7 @@ impl StoreDatabaseTransaction<'_, '_> {
     pub(in crate::sync::store) fn record_materialized_merge_commit(
         &self,
         root: &crate::sync::store_commit::StoreRootRef,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
+        verified_commit: &VerifiedStoreBatchCommit,
         registrations: &[(
             StoreDeviceRegistration,
             crate::sync::store_commit::StoreDeviceRegistrationActivation,
@@ -212,14 +201,15 @@ impl StoreDatabaseTransaction<'_, '_> {
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<(), DbError> {
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let circle_activations = VerifiedCircleActivations::none(commit, commit_ref)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let materialization = VerifiedMergeMaterialization::verify(
             root,
-            commit,
-            commit_ref,
+            verified_commit,
             registrations,
             &device_operations,
             &circle_activations,
@@ -230,46 +220,17 @@ impl StoreDatabaseTransaction<'_, '_> {
             packages,
             package_application,
         )?;
-        self.record_verified_merge_materialization(materialization)
+        self.record_verified_merge_materialization(materialization)?;
+        Ok(())
     }
 
     pub(in crate::sync::store) fn record_verified_merge_materialization(
         &self,
         materialization: VerifiedMergeMaterialization<'_>,
-    ) -> Result<(), DbError> {
-        self.record_verified_merge_materialization_with_authority(
-            materialization,
-            MaterializationCommitAuthority::StoredBytes,
-        )
-        .map(drop)
-    }
-
-    pub(in crate::sync::store) fn record_operation_verified_merge_materialization(
-        &self,
-        materialization: VerifiedMergeMaterialization<'_>,
-        verified_commit: &VerifiedStoreBatchCommit,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.record_verified_merge_materialization_with_authority(
-            materialization,
-            MaterializationCommitAuthority::Operation(verified_commit),
-        )?
-        .ok_or_else(|| {
-            DbError::Message(
-                "operation-verified Merge materialization did not retain its verified input"
-                    .to_string(),
-            )
-        })
-    }
-
-    fn record_verified_merge_materialization_with_authority(
-        &self,
-        materialization: VerifiedMergeMaterialization<'_>,
-        authority: MaterializationCommitAuthority<'_>,
-    ) -> Result<Option<OwnedVerifiedMergeMaterialization>, DbError> {
         let conn = self.transaction;
         self.record_author_exclusion_activations(
-            materialization.commit(),
-            materialization.commit_ref(),
+            materialization.verified_commit(),
             materialization.device_operations(),
             materialization.activation_head(),
             materialization.activation_head_object(),
@@ -296,24 +257,11 @@ impl StoreDatabaseTransaction<'_, '_> {
                     .to_string(),
             ));
         }
-        let (retained_commit_ref, retained) = match authority {
-            MaterializationCommitAuthority::StoredBytes => (
-                crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
-                    conn,
-                    &materialization,
-                )?,
-                None,
-            ),
-            MaterializationCommitAuthority::Operation(verified_commit) => {
-                let (key, retained) = crate::sync::store::database::StoreDatabase::
-                    retain_merge_materialization_with_verified_commit_on(
-                        conn,
-                        &materialization,
-                        verified_commit,
-                    )?;
-                (key, Some(retained))
-            }
-        };
+        let (retained_commit_ref, retained) =
+            crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
+                conn,
+                &materialization,
+            )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
             conn,
             materialization.commit_ref(),
@@ -328,8 +276,7 @@ impl StoreDatabaseTransaction<'_, '_> {
         )
         .map_err(store_reclaim_journal_error)?;
         self.record_materialized_commit_with_device_operations(
-            materialization.commit(),
-            materialization.commit_ref(),
+            materialization.verified_commit(),
             materialization.device_operations(),
             materialization.circle_activations().stream_activations(),
             &retained_commit_ref,
@@ -463,17 +410,15 @@ impl StoreDatabaseTransaction<'_, '_> {
 
     fn record_materialized_commit_with_device_operations(
         &self,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
+        verified_commit: &VerifiedStoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
         stream_activations: &VerifiedStreamActivations,
         retention: &RetainedMergeMaterializationKey,
         activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         let stored_registration: String = conn
             .query_row(
                 "SELECT registration_object FROM store_device_registration_activations \
@@ -614,17 +559,15 @@ impl StoreDatabaseTransaction<'_, '_> {
 
     fn record_author_exclusion_activations(
         &self,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
+        verified_commit: &VerifiedStoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
         let root = required_store_root_authority_on(conn)?;
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         if commit.store_root_hash != root.store_root_hash
             || activation_head.author_registration != commit.author_registration
             || activation_head.commit != *commit_ref
@@ -730,19 +673,17 @@ impl StoreDatabaseTransaction<'_, '_> {
 
     pub(in crate::sync::store) fn record_verified_circle_activations(
         &self,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
+        verified_commit: &VerifiedStoreBatchCommit,
         activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         let conn = self.transaction;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         if activations.len() != commit.circle_controls().len() {
             return Err(DbError::Message(
                 "verified circle activations do not cover every control reference".to_string(),
             ));
         }
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
         let stream_id = commit_ref.coord.stream_id.to_string();
         let seq = Database::sequence_to_sqlite(&stream_id, commit_ref.coord.sequence())?;
         for activation in activations {

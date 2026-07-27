@@ -1316,6 +1316,13 @@ mod tests {
             exact_logical_object(first_commit_path, &commit.to_bytes()),
         )
         .expect("reference first Store commit");
+        let verified_commit = super::super::store_commit::VerifiedStoreBatchCommit::parse(
+            &commit.to_bytes(),
+            store_root_hash,
+            &commit_ref,
+            &device.registration,
+        )
+        .expect("authenticate first Store commit");
         let own_access = creation
             .access
             .iter()
@@ -1335,13 +1342,11 @@ mod tests {
             }),
         };
         let db = super::super::test_helpers::open_test_db();
-        let first_commit = commit.clone();
-        let first_commit_ref = commit_ref.clone();
+        let first_commit = verified_commit.clone();
         db.call(move |conn| {
             crate::sync::store::record_verified_circle_activations_for_test(
                 conn,
                 &first_commit,
-                &first_commit_ref,
                 &[verified],
             )
         })
@@ -1473,12 +1478,18 @@ mod tests {
             exact_logical_object(second_commit_path, &second_commit.to_bytes()),
         )
         .expect("reference second Store commit");
+        let second_commit = super::super::store_commit::VerifiedStoreBatchCommit::parse(
+            &second_commit.to_bytes(),
+            store_root_hash,
+            &second_commit_ref,
+            &device.registration,
+        )
+        .expect("authenticate second Store commit");
         let error = db
             .call(move |conn| {
                 crate::sync::store::record_verified_circle_activations_for_test(
                     conn,
                     &second_commit,
-                    &second_commit_ref,
                     &[crate::sync::store::VerifiedCircleReference {
                         reference: second_reference,
                         circle_id: creation.circle_id,

@@ -1538,19 +1538,6 @@ impl StoreDatabase {
     pub(crate) fn retain_merge_materialization_on(
         conn: &rusqlite::Transaction<'_>,
         materialization: &VerifiedMergeMaterialization<'_>,
-    ) -> Result<RetainedMergeMaterializationKey, DbError> {
-        let (key, _) = Self::retain_merge_materialization_with_authority_on(
-            conn,
-            materialization,
-            RetainedCommitAuthority::StoredBytes,
-        )?;
-        Ok(key)
-    }
-
-    pub(crate) fn retain_merge_materialization_with_verified_commit_on(
-        conn: &rusqlite::Transaction<'_>,
-        materialization: &VerifiedMergeMaterialization<'_>,
-        verified_commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<
         (
             RetainedMergeMaterializationKey,
@@ -1561,7 +1548,7 @@ impl StoreDatabase {
         Self::retain_merge_materialization_with_authority_on(
             conn,
             materialization,
-            RetainedCommitAuthority::Operation(verified_commit),
+            RetainedCommitAuthority::Operation(materialization.verified_commit()),
         )
     }
 

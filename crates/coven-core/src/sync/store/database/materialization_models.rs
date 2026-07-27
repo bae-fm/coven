@@ -165,8 +165,7 @@ pub(crate) struct RetainedMergeMaterializationKey {
 }
 
 pub(crate) struct VerifiedMergeMaterialization<'a> {
-    commit: &'a StoreBatchCommit,
-    commit_ref: &'a StoreBatchCommitRef,
+    verified_commit: &'a crate::sync::store_commit::VerifiedStoreBatchCommit,
     device_operations: &'a VerifiedStoreDeviceOperations,
     circle_activations: &'a VerifiedCircleActivations,
     activation_head: &'a StoreDeviceHead,
@@ -220,8 +219,7 @@ impl OwnedVerifiedMergeMaterialization {
     ) -> Result<Self, DbError> {
         VerifiedMergeMaterialization::verify(
             &root,
-            verified_commit.value(),
-            verified_commit.reference(),
+            &verified_commit,
             &registrations,
             &device_operations,
             &circle_activations,
@@ -314,11 +312,15 @@ impl OwnedVerifiedMergeMaterialization {
 
 impl<'a> VerifiedMergeMaterialization<'a> {
     pub(crate) fn commit(&self) -> &StoreBatchCommit {
-        self.commit
+        self.verified_commit.value()
     }
 
     pub(crate) fn commit_ref(&self) -> &StoreBatchCommitRef {
-        self.commit_ref
+        self.verified_commit.reference()
+    }
+
+    pub(crate) fn verified_commit(&self) -> &crate::sync::store_commit::VerifiedStoreBatchCommit {
+        self.verified_commit
     }
 
     pub(crate) fn registrations(
@@ -366,8 +368,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
 
     pub(crate) fn verify(
         root: &crate::sync::store_commit::StoreRootRef,
-        commit: &'a StoreBatchCommit,
-        commit_ref: &'a StoreBatchCommitRef,
+        verified_commit: &'a crate::sync::store_commit::VerifiedStoreBatchCommit,
         registrations: &'a [(
             StoreDeviceRegistration,
             crate::sync::store_commit::StoreDeviceRegistrationActivation,
@@ -381,13 +382,13 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         packages: &'a [AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<Self, DbError> {
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         history_summary
             .validate_shape()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        if commit.store_root_hash != root.store_root_hash
+        if verified_commit.store_root_hash() != root.store_root_hash
+            || commit.store_root_hash != root.store_root_hash
             || history_summary.store_root_hash != root.store_root_hash
             || history_summary.digest() != activation_head.history_summary
             || history_summary.causal_cut.get(&commit_ref.coord) != Some(commit_ref)
@@ -409,8 +410,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
             .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(Self {
-            commit,
-            commit_ref,
+            verified_commit,
             device_operations,
             circle_activations,
             activation_head,

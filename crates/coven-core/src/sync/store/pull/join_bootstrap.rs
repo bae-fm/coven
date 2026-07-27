@@ -317,8 +317,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let materialization = VerifiedMergeMaterialization::verify(
                 &root,
-                &commit,
-                &commit_ref,
+                &verified_commit,
                 &registrations,
                 &device_operations,
                 &circle_activations,
@@ -330,10 +329,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 None,
             )?;
             crate::sync::store::database::StoreDatabaseTransaction::new(&tx)
-                .record_operation_verified_merge_materialization(
-                    materialization,
-                    &verified_commit,
-                )?;
+                .record_verified_merge_materialization(materialization)?;
             tx.commit().map_err(DbError::from)
         })
         .await?;

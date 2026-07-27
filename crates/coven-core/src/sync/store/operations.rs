@@ -543,8 +543,7 @@ pub(crate) fn publish<'a>(
             }
             let materialization = VerifiedMergeMaterialization::verify(
                 &root,
-                &commit,
-                &recorded_ref,
+                &verified_commit,
                 &registrations,
                 &device_operations,
                 &circle_activations,

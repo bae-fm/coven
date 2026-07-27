@@ -211,7 +211,6 @@ impl StoreDatabase {
                     StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
                         &root,
                         &authority.commit,
-                        &accepted,
                         &[],
                         &authority.head,
                         authority.head_prepared.reference(),
@@ -321,14 +320,12 @@ impl StoreDatabase {
                     &synced_tables,
                     &write_id,
                     &commit_value,
-                    &accepted,
                     local_cleanup,
                     &[head_object_id],
                 )?;
                 StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
                     &root,
                     &commit_value,
-                    &accepted,
                     &[],
                     &head_value,
                     head.prepared().reference(),

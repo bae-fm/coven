@@ -228,14 +228,12 @@ impl StoreDatabase {
         gates: &Gates,
         synced_tables: &[SyncedTable],
         write_id: &WriteId,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
+        verified_commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
         local_cleanup: StoreBatchLocalCleanup,
         additional_object_ids: &[ObjectHash],
     ) -> Result<Vec<AudiencePackage>, DbError> {
-        commit_ref
-            .verify_commit(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
         let remaining_spools: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM store_write_blobs

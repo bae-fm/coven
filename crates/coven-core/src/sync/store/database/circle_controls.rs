@@ -435,7 +435,6 @@ impl StoreDatabase {
                     let materialization = VerifiedMergeMaterialization::verify(
                         &root,
                         &commit,
-                        &operation.commit_ref,
                         &[],
                         &device_operations,
                         &verified,
@@ -489,7 +488,6 @@ impl StoreDatabase {
                 )?;
                 store_transaction.record_verified_circle_activations(
                     &commit,
-                    &operation.commit_ref,
                     &[activation],
                 )?;
                 // A deletion the local device authored prunes its own

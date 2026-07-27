@@ -1135,6 +1135,13 @@ pub async fn recover_owner_device(
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let verified_commit = crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+        &commit.to_bytes(),
+        root.store_root_hash,
+        &commit_ref,
+        &registration,
+    )
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let state_after = predecessor_state
         .activate_registration(
             registration_ref.clone(),
@@ -1215,8 +1222,7 @@ pub async fn recover_owner_device(
         .map_err(StoreObjectError::from)?;
     database
         .complete_owner_recovery(
-            commit,
-            commit_ref,
+            verified_commit,
             head,
             head_prepared.reference().clone(),
             history.summary,

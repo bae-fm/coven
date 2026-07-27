@@ -200,16 +200,12 @@ impl StoreDatabase {
 #[cfg(test)]
 pub(in crate::sync) fn record_verified_circle_activations_for_test(
     connection: &rusqlite::Connection,
-    commit: &crate::sync::store_commit::StoreBatchCommit,
-    commit_ref: &crate::sync::store_commit::StoreBatchCommitRef,
+    commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
 ) -> Result<(), DbError> {
     let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-    StoreDatabaseTransaction::new(&transaction).record_verified_circle_activations(
-        commit,
-        commit_ref,
-        activations,
-    )?;
+    StoreDatabaseTransaction::new(&transaction)
+        .record_verified_circle_activations(commit, activations)?;
     transaction.commit().map_err(DbError::from)
 }
 
