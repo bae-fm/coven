@@ -2478,3 +2478,265 @@ pub(crate) async fn register_external_blob(
         .await
         .expect("register exact external blob reference");
 }
+
+/// Which protocol read an interceptor hook is running ahead of.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtocolRead {
+    Object,
+    Slot,
+    PreparedSlot,
+}
+
+/// Test-side observation of a [`SyncStorage`] call.
+///
+/// Every hook runs before the wrapped storage does the work, and returning `Err`
+/// fails the call without reaching it. All hooks default to doing nothing, so an
+/// interceptor states only the operations its test is about — which is the point:
+/// a test that intercepts two reads should not also have to restate the sixteen
+/// operations it does not care about.
+#[cfg(test)]
+#[async_trait::async_trait]
+pub(crate) trait StorageInterceptor: Send + Sync {
+    async fn before_protocol_create(
+        &self,
+        _prepared: &crate::sync::storage::PreparedExactObject,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+
+    async fn before_protocol_read(
+        &self,
+        _read: ProtocolRead,
+        _semantic_prefix: &str,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+
+    async fn before_blob_allocate(&self) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+
+    async fn before_blob_prepare(&self) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+
+    async fn before_blob_create(&self) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+
+    async fn before_blob_stage(&self) -> Result<(), crate::sync::storage::StorageError> {
+        Ok(())
+    }
+}
+
+/// A [`SyncStorage`] that forwards every call to `inner`, giving `interceptor`
+/// its chance first.
+#[cfg(test)]
+pub(crate) struct InterceptedStorage<'a, I: StorageInterceptor> {
+    inner: &'a dyn crate::sync::storage::SyncStorage,
+    interceptor: I,
+}
+
+#[cfg(test)]
+impl<'a, I: StorageInterceptor> InterceptedStorage<'a, I> {
+    pub(crate) fn new(inner: &'a dyn crate::sync::storage::SyncStorage, interceptor: I) -> Self {
+        Self { inner, interceptor }
+    }
+
+    pub(crate) fn interceptor(&self) -> &I {
+        &self.interceptor
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl<I: StorageInterceptor> crate::sync::storage::SyncStorage for InterceptedStorage<'_, I> {
+    fn store_blob_protection(
+        &self,
+    ) -> Result<crate::sync::storage::BlobSpoolProtection, crate::sync::storage::StorageError> {
+        self.inner.store_blob_protection()
+    }
+
+    async fn provider_binding(
+        &self,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, crate::sync::storage::StorageError>
+    {
+        self.inner.provider_binding().await
+    }
+
+    async fn allocate_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        semantic_prefix: &str,
+        extension: &str,
+    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
+        self.inner
+            .allocate_protocol_slot(context, semantic_prefix, extension)
+            .await
+    }
+
+    fn prepare_protocol_object(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+        data: Vec<u8>,
+    ) -> Result<crate::sync::storage::PreparedExactObject, crate::sync::storage::StorageError> {
+        self.inner
+            .prepare_protocol_object(context, slot, semantic_prefix, data)
+    }
+
+    async fn create_protocol_object(
+        &self,
+        prepared: &crate::sync::storage::PreparedExactObject,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.interceptor.before_protocol_create(prepared).await?;
+        self.inner.create_protocol_object(prepared).await
+    }
+
+    async fn read_protocol_object(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        object: &crate::sync::storage::ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, crate::sync::storage::StorageError> {
+        self.interceptor
+            .before_protocol_read(ProtocolRead::Object, semantic_prefix)
+            .await?;
+        self.inner
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
+    async fn read_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, crate::sync::storage::ExactObjectRef), crate::sync::storage::StorageError>
+    {
+        self.interceptor
+            .before_protocol_read(ProtocolRead::Slot, semantic_prefix)
+            .await?;
+        self.inner
+            .read_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn read_prepared_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<
+        (Vec<u8>, crate::sync::storage::PreparedExactObject),
+        crate::sync::storage::StorageError,
+    > {
+        self.interceptor
+            .before_protocol_read(ProtocolRead::PreparedSlot, semantic_prefix)
+            .await?;
+        self.inner
+            .read_prepared_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn delete_protocol_object(
+        &self,
+        object: &crate::sync::storage::ExactObjectRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.delete_protocol_object(object).await
+    }
+
+    async fn allocate_blob_slot(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
+        self.interceptor.before_blob_allocate().await?;
+        self.inner.allocate_blob_slot(locator, authority).await
+    }
+
+    async fn seal_blob_to_spool(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        plaintext_file: &std::path::Path,
+        spool_file: &std::path::Path,
+    ) -> Result<crate::sync::storage::BlobSpoolWrite, crate::sync::storage::StorageError> {
+        self.inner
+            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
+            .await
+    }
+
+    async fn prepare_blob_object(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        slot: crate::storage::cloud::ObjectSlot,
+        stored_file: &std::path::Path,
+    ) -> Result<crate::blob::locator::StoredBlobRef, crate::sync::storage::StorageError> {
+        self.interceptor.before_blob_prepare().await?;
+        self.inner
+            .prepare_blob_object(locator, authority, slot, stored_file)
+            .await
+    }
+
+    async fn create_blob_object_from_file(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        stored_file: &std::path::Path,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.interceptor.before_blob_create().await?;
+        self.inner
+            .create_blob_object_from_file(blob, authority, stored_file, progress)
+            .await
+    }
+
+    async fn verify_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.verify_blob_object(blob).await
+    }
+
+    async fn stage_exact_blob_download(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        dest: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
+        self.interceptor.before_blob_stage().await?;
+        self.inner.stage_exact_blob_download(blob, dest).await
+    }
+
+    async fn stage_verified_blob_plaintext(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        dest: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
+        self.interceptor.before_blob_stage().await?;
+        self.inner
+            .stage_verified_blob_plaintext(blob, protection, dest)
+            .await
+    }
+
+    async fn open_blob_range_reader(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, crate::sync::storage::StorageError>
+    {
+        self.inner.open_blob_range_reader(blob, protection).await
+    }
+
+    async fn delete_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.delete_blob_object(blob).await
+    }
+}

@@ -284,15 +284,13 @@ async fn run_cycle_with_storage(
     .map_err(|error| error.to_string())
 }
 
-struct MembershipReadCounter<'a> {
-    inner: &'a crate::sync::cloud_storage::CloudSyncStorage,
+struct MembershipReadCounter {
     reads: std::sync::atomic::AtomicUsize,
 }
 
-impl<'a> MembershipReadCounter<'a> {
-    fn new(inner: &'a crate::sync::cloud_storage::CloudSyncStorage) -> Self {
+impl MembershipReadCounter {
+    fn new() -> Self {
         Self {
-            inner,
             reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -303,184 +301,18 @@ impl<'a> MembershipReadCounter<'a> {
 }
 
 #[async_trait::async_trait]
-impl SyncStorage for MembershipReadCounter<'_> {
-    fn store_blob_protection(
+impl crate::sync::test_helpers::StorageInterceptor for MembershipReadCounter {
+    async fn before_protocol_read(
         &self,
-    ) -> Result<crate::sync::storage::BlobSpoolProtection, crate::sync::storage::StorageError> {
-        self.inner.store_blob_protection()
-    }
-
-    async fn provider_binding(
-        &self,
-    ) -> Result<crate::sync::storage::ResolvedProviderBinding, crate::sync::storage::StorageError>
-    {
-        self.inner.provider_binding().await
-    }
-
-    async fn allocate_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
+        read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-        extension: &str,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
-        self.inner
-            .allocate_protocol_slot(context, semantic_prefix, extension)
-            .await
-    }
-
-    fn prepare_protocol_object(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-        data: Vec<u8>,
-    ) -> Result<crate::sync::storage::PreparedExactObject, crate::sync::storage::StorageError> {
-        self.inner
-            .prepare_protocol_object(context, slot, semantic_prefix, data)
-    }
-
-    async fn create_protocol_object(
-        &self,
-        prepared: &crate::sync::storage::PreparedExactObject,
     ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner.create_protocol_object(prepared).await
-    }
-
-    async fn read_protocol_object(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        object: &crate::sync::storage::ExactObjectRef,
-        semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::sync::storage::StorageError> {
-        self.inner
-            .read_protocol_object(context, object, semantic_prefix)
-            .await
-    }
-
-    async fn read_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::sync::storage::ExactObjectRef), crate::sync::storage::StorageError>
-    {
-        if semantic_prefix.starts_with("store-v1/membership/heads/") {
+        if read != crate::sync::test_helpers::ProtocolRead::Object
+            && semantic_prefix.starts_with("store-v1/membership/heads/")
+        {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        self.inner
-            .read_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn read_prepared_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<
-        (Vec<u8>, crate::sync::storage::PreparedExactObject),
-        crate::sync::storage::StorageError,
-    > {
-        if semantic_prefix.starts_with("store-v1/membership/heads/") {
-            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        self.inner
-            .read_prepared_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn delete_protocol_object(
-        &self,
-        object: &crate::sync::storage::ExactObjectRef,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner.delete_protocol_object(object).await
-    }
-
-    async fn allocate_blob_slot(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
-        self.inner.allocate_blob_slot(locator, authority).await
-    }
-
-    async fn seal_blob_to_spool(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        protection: crate::sync::storage::BlobSpoolProtection,
-        plaintext_file: &std::path::Path,
-        spool_file: &std::path::Path,
-    ) -> Result<crate::sync::storage::BlobSpoolWrite, crate::sync::storage::StorageError> {
-        self.inner
-            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
-            .await
-    }
-
-    async fn prepare_blob_object(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        slot: crate::storage::cloud::ObjectSlot,
-        stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, crate::sync::storage::StorageError> {
-        self.inner
-            .prepare_blob_object(locator, authority, slot, stored_file)
-            .await
-    }
-
-    async fn create_blob_object_from_file(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        stored_file: &std::path::Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner
-            .create_blob_object_from_file(blob, authority, stored_file, progress)
-            .await
-    }
-
-    async fn verify_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner.verify_blob_object(blob).await
-    }
-
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
-        self.inner.stage_exact_blob_download(blob, dest).await
-    }
-
-    async fn stage_verified_blob_plaintext(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::sync::storage::BlobSpoolProtection,
-        dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
-        self.inner
-            .stage_verified_blob_plaintext(blob, protection, dest)
-            .await
-    }
-
-    async fn open_blob_range_reader(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::sync::storage::BlobSpoolProtection,
-    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, crate::sync::storage::StorageError>
-    {
-        self.inner.open_blob_range_reader(blob, protection).await
-    }
-
-    async fn delete_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner.delete_blob_object(blob).await
+        Ok(())
     }
 }
 
@@ -1459,7 +1291,10 @@ async fn one_cycle_loads_exact_membership_once() {
         })
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    let counter = MembershipReadCounter::new(&storage.storage);
+    let counter = crate::sync::test_helpers::InterceptedStorage::new(
+        &storage.storage,
+        MembershipReadCounter::new(),
+    );
     run_cycle_with_storage(
         &counter,
         &storage,
@@ -1474,7 +1309,7 @@ async fn one_cycle_loads_exact_membership_once() {
     .await
     .expect("B's cycle");
     assert_eq!(
-        counter.reads(),
+        counter.interceptor().reads(),
         chain.entries().len() + stream_count,
         "one cycle reads every exact membership head and each stream's terminal empty slot once",
     );
