@@ -1717,15 +1717,10 @@ mod tests {
 
     #[tokio::test]
     async fn authoritative_listing_rejects_a_repeated_cursor() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Dropbox endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let server = tokio::spawn(async move {
-            axum::serve(listener, Router::new().fallback(repeated_cursor_endpoint))
-                .await
-                .expect("Dropbox endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new().fallback(repeated_cursor_endpoint),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
 
         let result = tokio::time::timeout(
@@ -1737,7 +1732,7 @@ mod tests {
         .expect_err("repeated cursor must refuse authoritative coverage");
 
         assert!(result.to_string().contains("repeated"), "{result}");
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     /// `join_info()` (what `grant_access` returns to a newly-added member) must

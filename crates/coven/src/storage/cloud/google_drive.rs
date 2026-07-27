@@ -1855,18 +1855,10 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_create_rejects_a_non_utf8_location_header() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Drive endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().fallback(malformed_location_endpoint),
-            )
-            .await
-            .expect("Drive endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new().fallback(malformed_location_endpoint),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
         let attempt = DriveAppendAttempt {
             file_id: "generated-id".to_string(),
@@ -1882,7 +1874,7 @@ mod tests {
             error.to_string().contains("invalid Location header"),
             "{error}"
         );
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     struct FailingMultipartBodyReader {
@@ -2198,18 +2190,10 @@ mod tests {
 
     #[tokio::test]
     async fn file_identity_listing_rejects_a_repeated_page_token() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Drive endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().fallback(repeated_file_identity_page_endpoint),
-            )
-            .await
-            .expect("Drive endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new().fallback(repeated_file_identity_page_endpoint),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
 
         let error = home
@@ -2218,7 +2202,7 @@ mod tests {
             .expect_err("repeated identity page token must fail");
 
         assert!(error.to_string().contains("repeated"), "{error}");
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     async fn shared_drive_listing_endpoint(
@@ -2254,19 +2238,13 @@ mod tests {
 
     #[tokio::test]
     async fn exact_slot_identity_lookup_includes_shared_drives() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Drive endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let app = Router::new()
-            .fallback(shared_drive_listing_endpoint)
-            .with_state(requests.clone());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("Drive endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new()
+                .fallback(shared_drive_listing_endpoint)
+                .with_state(requests.clone()),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
 
         home.list_file_identities(&encode_key("protocol/copy"))
@@ -2280,7 +2258,7 @@ mod tests {
         assert!(query.contains("includeItemsFromAllDrives=true"), "{query}");
         assert!(!query.contains("restrictToMyDrive"), "{query}");
         drop(requests);
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     async fn generated_id_collision_endpoint(
@@ -2312,22 +2290,13 @@ mod tests {
 
     #[tokio::test]
     async fn generated_id_collision_preserves_the_pre_existing_file() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Drive endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = requests.clone();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .fallback(generated_id_collision_endpoint)
-                    .with_state(state),
-            )
-            .await
-            .expect("Drive endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new()
+                .fallback(generated_id_collision_endpoint)
+                .with_state(requests.clone()),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
 
         let slot = home
@@ -2352,7 +2321,7 @@ mod tests {
                 .any(|request| request.starts_with("DELETE ")),
             "collision deleted a pre-existing file"
         );
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[derive(Clone, Default)]
@@ -2427,22 +2396,13 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_exact_create_preserves_the_logical_key_matched_commit() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind Drive endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let state = AmbiguousCreateState::default();
-        let server_state = state.clone();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new()
-                    .fallback(ambiguous_create_endpoint)
-                    .with_state(server_state),
-            )
-            .await
-            .expect("Drive endpoint failed");
-        });
+        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+            Router::new()
+                .fallback(ambiguous_create_endpoint)
+                .with_state(state.clone()),
+        )
+        .await;
         let home = home().with_endpoints(endpoint.clone(), endpoint);
 
         let slot = home
@@ -2471,7 +2431,7 @@ mod tests {
                 .any(|request| request.starts_with("DELETE ")),
             "ambiguous committed file was deleted"
         );
-        server.abort();
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[test]
