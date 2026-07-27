@@ -452,3 +452,187 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
 
     assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
 }
+
+/// A roster conflict resolution lives at `circles/…/roster/resolutions/…`, a path
+/// the roster entry-and-head domain does not accept, so it seals and opens only
+/// under its own domain — and its own domain accepts nothing else. That domain is
+/// what separates the resolution from the entries and heads it is read alongside:
+/// the associated data is `store root hash || domain label || semantic prefix`, so
+/// no roster object of one kind opens where another kind is read, whatever slot its
+/// bytes are moved to. Behind that, the two plaintexts have disjoint required
+/// fields and refuse unknown ones, so a member who can seal — the one party the
+/// sealing context does not stop — still cannot pass an entry off as a resolution.
+#[tokio::test]
+async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
+    let db = open_test_db();
+    let (store, signer, journal) =
+        persist_merge_operation(&db, "circle-roster-kind-crossing").await;
+    let author = keys::public_key_hex(&signer);
+    let access = journal
+        .operation()
+        .creation
+        .access
+        .iter()
+        .find(|access| access.leaf.value.recipient_pubkey == author)
+        .expect("founder access");
+    let CircleAccessDisposition::Active { keyring, .. } = &access.leaf.value.disposition else {
+        panic!("founder access must be active")
+    };
+    let encryption = EncryptionService::from(
+        MasterKeyring::from_serialized(keyring).expect("parse founder Circle keyring"),
+    );
+    let circle_id = journal.circle_id();
+    let commit = journal.commit().expect("parse Circle commit");
+    let store_root_hash = commit.store_root_hash;
+    let entry_context = ProtocolObjectContext::circle(
+        store_root_hash,
+        ProtocolObjectDomain::CircleRoster,
+        encryption.clone(),
+    );
+    let resolution_context = ProtocolObjectContext::circle(
+        store_root_hash,
+        ProtocolObjectDomain::CircleRosterResolution,
+        encryption.clone(),
+    );
+    let [control] = commit.circle_controls() else {
+        panic!("Circle operation must carry one control")
+    };
+    let (entry_coord, entry_object) = control
+        .objects()
+        .roster_entries
+        .iter()
+        .next()
+        .map(|(coord, object)| (coord.clone(), object.clone()))
+        .expect("founder graph carries a roster entry");
+    let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
+        circle_id,
+        coord: &entry_coord,
+    });
+    let entry_prepared = journal
+        .operation()
+        .prepared_objects
+        .get("roster-entry")
+        .expect("the operation carries its sealed roster entry");
+    assert_eq!(entry_prepared.reference(), &entry_object);
+    store
+        .storage
+        .create_protocol_object(entry_prepared)
+        .await
+        .expect("publish the founder roster entry");
+    let entry_plaintext = store
+        .storage
+        .read_protocol_object(&entry_context, &entry_object, &entry_prefix)
+        .await
+        .expect("open the founder roster entry where it belongs");
+
+    let resolution = crate::sync::circle_roster::CircleRosterConflictResolution {
+        version: crate::sync::store_commit::STORE_PROTOCOL_VERSION,
+        store_root_hash,
+        circle_id,
+        conflict_hash: ObjectHash::digest(b"roster kind crossing conflict"),
+        conflicting_heads: Vec::new(),
+        retired_owner_grants: Default::default(),
+        resolver_pubkey: author.clone(),
+        resolver_branch_heads: Vec::new(),
+        replacement_grant: crate::sync::membership::MembershipGrantId(ObjectHash::digest(
+            b"roster kind crossing grant",
+        )),
+        signature: String::new(),
+    };
+    let resolution_plaintext =
+        serde_json::to_vec(&resolution).expect("serialize the roster resolution");
+    let resolution_ref = crate::sync::circle_roster::CircleRosterConflictResolutionRef {
+        conflict_hash: resolution.conflict_hash,
+        resolver_pubkey: author,
+        resolution_hash: ObjectHash::digest(&resolution_plaintext),
+    };
+    let resolution_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
+        circle_id,
+        resolution: &resolution_ref,
+    });
+    let resolution_slot = store
+        .storage
+        .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
+        .await
+        .expect("allocate the roster resolution slot");
+    let resolution_object = store
+        .storage
+        .prepare_protocol_object(
+            &resolution_context,
+            resolution_slot,
+            &resolution_prefix,
+            resolution_plaintext.clone(),
+        )
+        .expect("seal the roster resolution");
+    store
+        .storage
+        .create_protocol_object(&resolution_object)
+        .await
+        .expect("publish the roster resolution");
+    assert_eq!(
+        store
+            .storage
+            .read_protocol_object(
+                &resolution_context,
+                resolution_object.reference(),
+                &resolution_prefix
+            )
+            .await
+            .expect("open the roster resolution where it belongs"),
+        resolution_plaintext,
+    );
+
+    // Neither domain accepts the other's path at all.
+    store
+        .storage
+        .allocate_protocol_slot(&entry_context, &resolution_prefix, ".json")
+        .await
+        .expect_err("the roster entry domain must refuse a resolution path");
+    store
+        .storage
+        .allocate_protocol_slot(&resolution_context, &entry_prefix, ".json")
+        .await
+        .expect_err("the roster resolution domain must refuse an entry path");
+
+    // And each kind's sealed bytes, moved into the other kind's slot, no longer
+    // match the associated data they were sealed under.
+    for (sealed_from, target_context, target_prefix) in [
+        (
+            entry_object.slot().clone(),
+            &resolution_context,
+            resolution_prefix.clone(),
+        ),
+        (
+            resolution_object.reference().slot().clone(),
+            &entry_context,
+            entry_prefix.clone(),
+        ),
+    ] {
+        let sealed = store
+            .home
+            .stored_exact_bytes(&sealed_from)
+            .expect("read the sealed bytes to move");
+        let moved_slot = store
+            .home
+            .insert_exact_object(&format!("{target_prefix}.json"), sealed.clone());
+        let moved =
+            ExactObjectRef::new(moved_slot, sealed.len() as u64, ObjectHash::digest(&sealed));
+        let error = store
+            .storage
+            .read_protocol_object(target_context, &moved, &target_prefix)
+            .await
+            .expect_err("sealed roster bytes must not open under another kind");
+        assert!(
+            matches!(error, crate::sync::storage::StorageError::Decryption(_)),
+            "moving roster bytes across kinds must fail the sealing context: {error}",
+        );
+    }
+
+    // The plaintexts themselves, for the member who seals correctly.
+    serde_json::from_slice::<crate::sync::circle_roster::CircleRosterConflictResolution>(
+        &entry_plaintext,
+    )
+    .expect_err("a roster entry must not parse as a roster resolution");
+    serde_json::from_slice::<crate::sync::circle_roster::CircleRosterEntry>(&resolution_plaintext)
+        .expect_err("a roster resolution must not parse as a roster entry");
+}

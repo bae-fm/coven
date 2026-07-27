@@ -249,9 +249,14 @@ async fn load_circle_roster_resolutions(
                 reference.resolution_hash
             ))
         })?;
+        // A resolution's own domain, not the entry-and-head domain the rest of this
+        // module reads under: the sealing context is
+        // `store root hash || domain label || semantic prefix`, and the roster
+        // domain's path rule accepts entry and head paths only, so a resolution
+        // sealed or opened under it is refused before any bytes are read.
         let context = ProtocolObjectContext::circle(
             store_root_hash,
-            ProtocolObjectDomain::CircleRoster,
+            ProtocolObjectDomain::CircleRosterResolution,
             encryption.clone(),
         );
         let prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
