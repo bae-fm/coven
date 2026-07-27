@@ -72,6 +72,18 @@ impl CausalAssignment for CircleRole {
     }
 }
 
+impl causal_grants::CausalHistoryEntry for CircleRosterEntry {
+    type Coord = CircleRosterCoord;
+
+    fn coord(&self) -> Self::Coord {
+        self.coord()
+    }
+
+    fn dependencies(&self) -> &[Self::Coord] {
+        &self.dependencies
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleAuthorStreamKey {
@@ -1642,7 +1654,7 @@ impl CircleRosterChain {
         };
         let resolved = self.resolved_with(resolutions)?;
         let grants = resolved.grants.clone();
-        let included = circle_history_closure(&self.entries, &effective_frontier);
+        let included = causal_grants::history_closure(&self.entries, &effective_frontier);
         let mut resolution_refs = self
             .resolution_checkpoint
             .as_ref()
@@ -1693,37 +1705,19 @@ impl CircleRosterChain {
     }
 
     pub fn author_heads(&self) -> Vec<CircleRosterCoord> {
-        self.frontier_from_entries(self.entries.iter())
+        causal_grants::stream_frontier(self.entries.iter().map(CircleRosterEntry::coord))
     }
 
     pub fn effective_frontier(&self) -> Vec<CircleRosterCoord> {
         let Some(reduced) = &self.reduced else {
             return Vec::new();
         };
-        self.frontier_from_entries(
+        causal_grants::stream_frontier(
             self.entries
                 .iter()
-                .filter(|entry| reduced.includes_coord(&entry.coord())),
+                .map(CircleRosterEntry::coord)
+                .filter(|coord| reduced.includes_coord(coord)),
         )
-    }
-
-    fn frontier_from_entries<'a>(
-        &self,
-        entries: impl Iterator<Item = &'a CircleRosterEntry>,
-    ) -> Vec<CircleRosterCoord> {
-        let mut heads = BTreeMap::<CircleAuthorStreamKey, CircleRosterCoord>::new();
-        for entry in entries {
-            let coord = entry.coord();
-            heads
-                .entry(coord.stream_key())
-                .and_modify(|current| {
-                    if coord.seq > current.seq {
-                        *current = coord.clone();
-                    }
-                })
-                .or_insert(coord);
-        }
-        heads.into_values().collect()
     }
 
     fn active_grants(&self, member_pubkey: &str) -> BTreeSet<MembershipGrantId> {
@@ -1943,27 +1937,6 @@ impl CircleRosterChain {
         )?;
         Ok(entry)
     }
-}
-
-fn circle_history_closure(
-    entries: &[CircleRosterEntry],
-    frontier: &[CircleRosterCoord],
-) -> BTreeSet<CircleRosterCoord> {
-    let by_coord = entries
-        .iter()
-        .map(|entry| (entry.coord(), entry))
-        .collect::<BTreeMap<_, _>>();
-    let mut pending = frontier.iter().cloned().collect::<BTreeSet<_>>();
-    let mut included = BTreeSet::new();
-    while let Some(coord) = pending.pop_first() {
-        if !included.insert(coord.clone()) {
-            continue;
-        }
-        if let Some(entry) = by_coord.get(&coord) {
-            pending.extend(entry.dependencies.iter().cloned());
-        }
-    }
-    included
 }
 
 fn exact_circle_head_refs(

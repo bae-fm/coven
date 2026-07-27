@@ -300,6 +300,27 @@ pub(crate) trait CausalCoordinate: Clone + Debug + Eq + Ord {
     fn entry_hash(&self) -> ObjectHash;
 }
 
+/// The greatest coordinate each author stream reaches across `coords`.
+///
+/// Streams are keyed by [`CausalCoordinate::stream_key`]; within a stream the
+/// highest sequence wins, and the first of an equal pair is kept.
+pub(crate) fn stream_frontier<C: CausalCoordinate>(coords: impl IntoIterator<Item = C>) -> Vec<C> {
+    let mut heads = BTreeMap::<C::StreamKey, C>::new();
+    for coord in coords {
+        match heads.entry(coord.stream_key()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(coord);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if coord.seq() > slot.get().seq() {
+                    slot.insert(coord);
+                }
+            }
+        }
+    }
+    heads.into_values().collect()
+}
+
 pub(crate) fn common_frontier<C: CausalCoordinate>(frontiers: &[&[C]]) -> Vec<C> {
     let Some(first) = frontiers.first() else {
         return Vec::new();
@@ -331,6 +352,40 @@ pub(crate) fn common_frontier<C: CausalCoordinate>(frontiers: &[&[C]]) -> Vec<C>
 
 pub(crate) trait CausalAssignment: Clone + Debug + Eq {
     fn is_owner(&self) -> bool;
+}
+
+/// One signed entry of a causal history, viewed as a node of the dependency
+/// graph: where it sits, and which coordinates it names as its predecessors.
+pub(crate) trait CausalHistoryEntry {
+    type Coord: CausalCoordinate;
+
+    fn coord(&self) -> Self::Coord;
+    fn dependencies(&self) -> &[Self::Coord];
+}
+
+/// Every coordinate reachable from `frontier` by walking dependencies.
+///
+/// A coordinate with no entry in `entries` is included but not walked through —
+/// a frontier may name coordinates a checkpoint has already absorbed.
+pub(crate) fn history_closure<E: CausalHistoryEntry>(
+    entries: &[E],
+    frontier: &[E::Coord],
+) -> BTreeSet<E::Coord> {
+    let by_coord = entries
+        .iter()
+        .map(|entry| (entry.coord(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = frontier.iter().cloned().collect::<BTreeSet<_>>();
+    let mut included = BTreeSet::new();
+    while let Some(coord) = pending.pop_first() {
+        if !included.insert(coord.clone()) {
+            continue;
+        }
+        if let Some(entry) = by_coord.get(&coord) {
+            pending.extend(entry.dependencies().iter().cloned());
+        }
+    }
+    included
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1123,22 +1178,13 @@ fn frontier_with_checkpoint<C: CausalCoordinate, A: CausalAssignment>(
     indices: impl IntoIterator<Item = usize>,
     checkpoint_heads: &[C],
 ) -> Vec<C> {
-    let mut heads = checkpoint_heads
-        .iter()
-        .map(|coord| (coord.stream_key(), coord.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for index in indices {
-        let coord = &entries[index].coord;
-        heads
-            .entry(coord.stream_key())
-            .and_modify(|head| {
-                if coord.seq() > head.seq() {
-                    *head = coord.clone();
-                }
-            })
-            .or_insert_with(|| coord.clone());
-    }
-    heads.into_values().collect()
+    stream_frontier(
+        checkpoint_heads.iter().cloned().chain(
+            indices
+                .into_iter()
+                .map(|index| entries[index].coord.clone()),
+        ),
+    )
 }
 
 fn revocation_cycle_conflict<C: CausalCoordinate, A: CausalAssignment>(

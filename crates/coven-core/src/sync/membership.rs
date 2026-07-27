@@ -290,6 +290,18 @@ struct StoreAssignment {
     provider_account_email: Option<String>,
 }
 
+impl causal_grants::CausalHistoryEntry for MembershipEntry {
+    type Coord = MembershipCoord;
+
+    fn coord(&self) -> Self::Coord {
+        self.coord()
+    }
+
+    fn dependencies(&self) -> &[Self::Coord] {
+        &self.dependencies
+    }
+}
+
 impl CausalAssignment for StoreAssignment {
     fn is_owner(&self) -> bool {
         self.role.is_owner()
@@ -1520,7 +1532,7 @@ impl MembershipChain {
         }) = self.status()
         {
             for branch in maximal_valid_branches {
-                included.extend(membership_history_closure(
+                included.extend(causal_grants::history_closure(
                     &self.entries,
                     &branch.effective_frontier,
                 ));
@@ -1911,7 +1923,7 @@ impl MembershipChain {
                         return false;
                     };
                     wrapped_key.generation >= rotation_generation
-                        && membership_history_closure(&self.entries, &creation.dependencies)
+                        && causal_grants::history_closure(&self.entries, &creation.dependencies)
                             .contains(rotation_coord)
                 });
             if !covered_by_later_grant {
@@ -1972,15 +1984,16 @@ impl MembershipChain {
     /// Raw signed coverage: the greatest loaded coordinate in every stream,
     /// including suffixes removed by causal pruning.
     pub fn author_heads(&self) -> Vec<MembershipCoord> {
-        self.frontier_from_coords(self.coords.iter())
+        causal_grants::stream_frontier(self.coords.iter().cloned())
     }
 
     /// Effective authoring frontier after causal pruning.
     pub fn effective_frontier(&self) -> Vec<MembershipCoord> {
-        self.frontier_from_coords(
+        causal_grants::stream_frontier(
             self.coords
                 .iter()
-                .filter(|coord| self.included.contains(*coord)),
+                .filter(|coord| self.included.contains(*coord))
+                .cloned(),
         )
     }
 
@@ -1990,24 +2003,6 @@ impl MembershipChain {
                 .resolution_refs()
                 .iter()
                 .all(|reference| self.resolution_refs().binary_search(reference).is_ok())
-    }
-
-    fn frontier_from_coords<'a>(
-        &self,
-        coords: impl Iterator<Item = &'a MembershipCoord>,
-    ) -> Vec<MembershipCoord> {
-        let mut heads = BTreeMap::<MembershipStreamKey, MembershipCoord>::new();
-        for coord in coords {
-            heads
-                .entry(coord.stream_key())
-                .and_modify(|current| {
-                    if coord.seq > current.seq {
-                        *current = coord.clone();
-                    }
-                })
-                .or_insert_with(|| coord.clone());
-        }
-        heads.into_values().collect()
     }
 
     pub(crate) fn stream_tip(
@@ -3264,7 +3259,7 @@ impl MembershipChain {
                 resolution.replacement_membership.clone(),
             );
         }
-        let included = membership_history_closure(&self.entries, &effective_frontier);
+        let included = causal_grants::history_closure(&self.entries, &effective_frontier);
         let mut resolution_refs = self
             .resolution_checkpoint
             .as_ref()
@@ -3368,7 +3363,7 @@ fn validate_membership_retirement_barriers(
                 .expect("unequal retirement and barrier grant sets have a difference");
             return Err(MembershipError::InvalidOwnerRevocationBarrier { index, grant });
         }
-        let included = membership_history_closure(entries, &entry.dependencies);
+        let included = causal_grants::history_closure(entries, &entry.dependencies);
         let causal_past = entries
             .iter()
             .filter(|candidate| included.contains(&candidate.coord()))
@@ -3418,7 +3413,7 @@ fn validate_membership_wrapped_keys(
     checkpoint: Option<&MembershipResolutionCheckpoint>,
 ) -> Result<(), MembershipError> {
     for (index, entry) in entries.iter().enumerate() {
-        let included = membership_history_closure(entries, &entry.dependencies);
+        let included = causal_grants::history_closure(entries, &entry.dependencies);
         let causal_generation = membership_causal_generation(entries, &entry.dependencies);
         let references = match &entry.change {
             MembershipChange::SetMember {
@@ -3499,7 +3494,7 @@ fn membership_causal_generation(
     entries: &[MembershipEntry],
     dependencies: &[MembershipCoord],
 ) -> u64 {
-    let included = membership_history_closure(entries, dependencies);
+    let included = causal_grants::history_closure(entries, dependencies);
     entries
         .iter()
         .filter(|candidate| included.contains(&candidate.coord()))
@@ -3585,7 +3580,7 @@ fn validate_provider_admin_controls(
         else {
             continue;
         };
-        let included = membership_history_closure(entries, &entry.dependencies);
+        let included = causal_grants::history_closure(entries, &entry.dependencies);
         let causal_past = entries
             .iter()
             .filter(|candidate| included.contains(&candidate.coord()))
@@ -3621,27 +3616,6 @@ fn validate_provider_admin_controls(
         }
     }
     Ok(())
-}
-
-fn membership_history_closure(
-    entries: &[MembershipEntry],
-    frontier: &[MembershipCoord],
-) -> BTreeSet<MembershipCoord> {
-    let by_coord = entries
-        .iter()
-        .map(|entry| (entry.coord(), entry))
-        .collect::<BTreeMap<_, _>>();
-    let mut pending = frontier.iter().cloned().collect::<BTreeSet<_>>();
-    let mut included = BTreeSet::new();
-    while let Some(coord) = pending.pop_first() {
-        if !included.insert(coord.clone()) {
-            continue;
-        }
-        if let Some(entry) = by_coord.get(&coord) {
-            pending.extend(entry.dependencies.iter().cloned());
-        }
-    }
-    included
 }
 
 fn normalize_store_membership(
