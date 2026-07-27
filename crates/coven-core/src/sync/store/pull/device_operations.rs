@@ -58,8 +58,7 @@ async fn resolve_device_state(
 }
 
 async fn predecessor_acknowledgement_activation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     order: &super::store_commit::StoreCommitOrder,
     expected: &super::store_commit::StoreAckRef,
     ack: &super::store_commit::StoreAck,
@@ -75,7 +74,8 @@ async fn predecessor_acknowledgement_activation(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let commit = load_verified_commit(storage, root, &reference)
+        let commit = commit_verifier
+            .load_ref(&reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
         if commit.value().acknowledgement() == Some(expected) {
@@ -97,6 +97,7 @@ async fn predecessor_acknowledgement_activation(
 
 async fn verify_merge_device_exclusion_proof(
     resolver: &DeviceStateResolver<'_>,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -146,7 +147,7 @@ async fn verify_merge_device_exclusion_proof(
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
-        if !predecessor_acknowledgement_activation(storage, root, &commit.order, reference, &ack)
+        if !predecessor_acknowledgement_activation(commit_verifier, &commit.order, reference, &ack)
             .await?
         {
             return Err(RegistrationLoadError::Invalid(
@@ -233,6 +234,7 @@ async fn verify_merge_device_exclusion_proof(
 
 pub(crate) async fn load_commit_device_operations(
     resolver: Option<&DeviceStateResolver<'_>>,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -337,6 +339,7 @@ pub(crate) async fn load_commit_device_operations(
                 })?;
                 verify_merge_device_exclusion_proof(
                     resolver,
+                    commit_verifier,
                     storage,
                     root,
                     commit,

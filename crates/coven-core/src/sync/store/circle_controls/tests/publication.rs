@@ -1413,6 +1413,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .expect("load pre-close Circle package commit");
     let package_author = package_commit.author();
     let package_commit = package_commit.value();
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+            .await
+            .expect("create Store commit verifier");
     assert_eq!(package_commit.circle_packages().len(), 1);
     let historical_locator = crate::blob::locator::BlobLocator::opaque(
         "files",
@@ -1473,6 +1477,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .contains(&keys::public_key_hex(&signer)));
     let loaded_packages = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
+        &mut commit_verifier,
         &store.storage,
         &store.root,
         &package_commit_ref,
@@ -1815,6 +1820,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     store.home.clear_exact_reads();
     let accepted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
+        &mut commit_verifier,
         &store.storage,
         &store.root,
         &package_commit_ref,
@@ -1855,6 +1861,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     store.home.clear_exact_reads();
     let omitted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
+        &mut commit_verifier,
         &store.storage,
         &store.root,
         &beyond_cutoff,
@@ -1881,6 +1888,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     store.home.clear_exact_reads();
     let collision = crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
+        &mut commit_verifier,
         &store.storage,
         &store.root,
         &cutoff_collision,
@@ -2050,6 +2058,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let omitted_by_candidate_successor =
         match crate::sync::store::pull::load_applicable_circle_packages(
             &StoreDatabase::new(&candidate_base_database),
+            &mut commit_verifier,
             &store.storage,
             &store.root,
             &candidate_commit_ref,

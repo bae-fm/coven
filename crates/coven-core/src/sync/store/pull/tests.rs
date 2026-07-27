@@ -1880,9 +1880,12 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let target = crate::sync::test_helpers::open_test_db();
     let target_database = StoreDatabase::new(&target);
 
+    let mut commit_verifier = StoreCommitVerifier::new(&store.storage, &store.root)
+        .await
+        .expect("create Store commit verifier");
     let readiness = readiness(
         &target_database,
-        &store.storage,
+        &mut commit_verifier,
         &store.root,
         &coverage,
         &frontier,

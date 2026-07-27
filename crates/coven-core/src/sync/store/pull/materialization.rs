@@ -37,7 +37,7 @@ pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
 
 pub(crate) async fn readiness(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     root: &StoreRootRef,
     coverage: &super::store_commit::CommitFrontier,
     frontier: &BTreeMap<String, StoreBatchCommitRef>,
@@ -50,7 +50,11 @@ pub(crate) async fn readiness(
     if let Some(current) = frontier.get(&stream_id) {
         if commit_ref.coord.sequence() <= current.coord.sequence() {
             match reference_is_materialized(
-                database, storage, root, coverage, &stream_id, commit_ref,
+                database,
+                commit_verifier,
+                coverage,
+                &stream_id,
+                commit_ref,
             )
             .await?
             {
@@ -156,8 +160,7 @@ pub(crate) async fn readiness(
         let required_stream = required_stream.to_string();
         match reference_is_materialized(
             database,
-            storage,
-            root,
+            commit_verifier,
             coverage,
             &required_stream,
             required_ref,
@@ -191,8 +194,7 @@ pub(crate) async fn readiness(
 
 async fn reference_is_materialized(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     coverage: &super::store_commit::CommitFrontier,
     stream_id: &str,
     reference: &StoreBatchCommitRef,
@@ -241,7 +243,7 @@ async fn reference_is_materialized(
                 },
             ));
         }
-        let verified_commit = match load_verified_commit(storage, root, &cursor).await {
+        let verified_commit = match commit_verifier.load_ref(&cursor).await {
             Ok(commit) => commit,
             Err(error) => return Ok(MaterializedCheck::Held(held_object_error(error))),
         };
@@ -260,8 +262,15 @@ pub(crate) async fn verify_merge_commit_currently_materialized(
 ) -> Result<(), StorePullError> {
     let stream_id = reference.coord.stream_id.to_string();
     let coverage = database.snapshot_coverage_frontier().await?;
-    match reference_is_materialized(database, storage, root, &coverage, &stream_id, reference)
-        .await?
+    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+    match reference_is_materialized(
+        database,
+        &mut commit_verifier,
+        &coverage,
+        &stream_id,
+        reference,
+    )
+    .await?
     {
         MaterializedCheck::Yes => Ok(()),
         MaterializedCheck::Missing => Err(StorePullError::Database(
@@ -275,6 +284,7 @@ pub(crate) async fn verify_merge_commit_currently_materialized(
 
 pub(super) async fn apply_candidate(
     database: &StoreDatabase,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     store_dir: &StoreDir,
@@ -372,6 +382,7 @@ pub(super) async fn apply_candidate(
     }
     let circle_packages = match load_applicable_circle_packages(
         database,
+        commit_verifier,
         storage,
         root,
         commit_ref,

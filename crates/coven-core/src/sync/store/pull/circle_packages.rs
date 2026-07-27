@@ -41,6 +41,7 @@ pub(crate) async fn load_circle_payload_activations(
 
 pub(crate) async fn load_applicable_circle_packages(
     database: &StoreDatabase,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -153,15 +154,15 @@ pub(crate) async fn load_applicable_circle_packages(
                     reference.circle_id
                 )));
             };
-            let historical_commit =
-                super::load_verified_commit(storage, root, &historical_commit_ref)
-                    .await
-                    .map_err(|error| {
-                        PullCircleActivationError::Invalid(format!(
-                            "load Circle {} historical package control: {error}",
-                            reference.circle_id
-                        ))
-                    })?;
+            let historical_commit = commit_verifier
+                .load_ref(&historical_commit_ref)
+                .await
+                .map_err(|error| {
+                    PullCircleActivationError::Invalid(format!(
+                        "load Circle {} historical package control: {error}",
+                        reference.circle_id
+                    ))
+                })?;
             let roster_chain =
                 crate::sync::store::circle_controls::activation::load_circle_control_roster_chain(
                     database,

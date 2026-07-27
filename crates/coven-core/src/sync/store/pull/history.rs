@@ -1313,6 +1313,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             };
             let operations = Box::pin(load_commit_device_operations(
                 Some(&resolver),
+                &mut self.commit_verifier,
                 storage,
                 root,
                 &commit,

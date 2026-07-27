@@ -527,7 +527,7 @@ pub fn pull_store_commits<'a>(
                     .await?;
                 match readiness(
                     database,
-                    storage,
+                    history_verifier.commit_verifier(),
                     &root,
                     &coverage,
                     &frontier,
@@ -559,6 +559,7 @@ pub fn pull_store_commits<'a>(
                         })?;
                         match Box::pin(apply_candidate(
                             database,
+                            history_verifier.commit_verifier(),
                             storage,
                             &root,
                             store_dir,

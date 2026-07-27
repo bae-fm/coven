@@ -23,8 +23,10 @@ pub(crate) async fn load_local_commit_device_operations(
     }
     verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
     let resolver = DeviceStateResolver::Database(database);
+    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
     Box::pin(load_commit_device_operations(
         Some(&resolver),
+        &mut commit_verifier,
         storage,
         root,
         commit,
