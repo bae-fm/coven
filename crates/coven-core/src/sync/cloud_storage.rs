@@ -652,7 +652,7 @@ impl PendingRotation {
     }
 }
 
-/// The `protocol_state` key for the serialized [`RotationGate`]. Restored before
+/// The `protocol_state` key for the serialized `RotationGate`. Restored before
 /// the first cycle so a restart cannot forget an unfinished candidate or an
 /// unadopted committed rotation and resume sealing under an unauthorized key.
 pub const ROTATION_GATE_STATE_KEY: &str = "rotation_gate";

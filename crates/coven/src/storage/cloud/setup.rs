@@ -28,7 +28,7 @@ fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<()
 /// tokens to the keyring. Returns the folder id for the host to persist in its
 /// own config (coven never writes the host's config).
 ///
-/// Drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
+/// Drives coven's localhost-callback OAuth flow (`authorize_provider`),
 /// which binds a TCP port and opens the system browser. Gated on
 /// `oauth-providers`.
 #[cfg(feature = "oauth-providers")]

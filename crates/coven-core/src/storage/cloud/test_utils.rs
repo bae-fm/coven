@@ -284,7 +284,7 @@ impl InMemoryCloudHome {
     }
 
     /// Fail the `nth` (1-based) delete of an object among `slots`, counting only
-    /// deletes of those objects, then disarm. Unlike [`fail_exact_delete_on_call`],
+    /// deletes of those objects, then disarm. Unlike `fail_exact_delete_on_call`,
     /// which counts every exact delete (probes, candidate cleanup), this counts
     /// only the identities that matter, so "fail the 2nd package delete" lands
     /// deterministically however many unrelated deletes interleave and whatever

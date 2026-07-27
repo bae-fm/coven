@@ -76,7 +76,7 @@ pub async fn store(
 
 /// Read a host-provided blob from the local store, or `None` when no file is stored
 /// there. For a host-provided Local or PendingRemote blob, absence is fail-loud
-/// corruption to [`cache::read_blob`](super::cache::read_blob).
+/// corruption to the cache layer's `read_blob`.
 pub async fn read(
     store_dir: &StoreDir,
     namespace: &str,

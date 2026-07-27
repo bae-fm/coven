@@ -3,7 +3,7 @@
 //! [`SyncedTable`] is how a host declares which tables participate in changeset
 //! sync and what `(table, id)` means for each one. The set is no longer a
 //! process-global: the host passes it to
-//! [`crate::CovenBuilder::synced_tables`], and coven owns it for the lifetime of
+//! `CovenBuilder::synced_tables`, and coven owns it for the lifetime of
 //! the connection and hands it to each journaled write's capture session, the
 //! gate, and apply.
 
@@ -193,7 +193,7 @@ fn optional_changeset_id(
 }
 
 /// A table that participates in changeset sync, declared at startup by the host
-/// and passed to [`crate::CovenBuilder::synced_tables`].
+/// and passed to `CovenBuilder::synced_tables`.
 ///
 /// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
 /// peers. [`SyncedTable::remote_root`] keeps that whole-table row sync and also
@@ -230,7 +230,7 @@ fn optional_changeset_id(
 /// set the host declares on the builder are local-only and never synced — that is
 /// also the mechanism for keeping device-local state (per-device pin/cache
 /// columns, local paths) out of sync: put it in a table you don't declare. An
-/// empty set is rejected by [`super::cycle::init_sync`].
+/// empty set is rejected when sync starts.
 ///
 /// The required [`RowIdentity`] defines which ids may name rows. Use
 /// [`RowIdentity::IndependentUuid`] for independently created rows and

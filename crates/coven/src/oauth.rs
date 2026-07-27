@@ -664,7 +664,7 @@ fn oauth_config_for_provider(
 /// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive support
 /// OAuth; other providers return an error.
 ///
-/// Uses [`authorize`]'s localhost-callback flow; gated on `oauth-providers`.
+/// Uses `authorize`'s localhost-callback flow; gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
 pub async fn authorize_provider(
     provider: crate::config::CloudProvider,

@@ -237,7 +237,7 @@ impl StoreDir {
     /// member to `{namespace}/{self}/`. Only the *cloud* key carries it; the local
     /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}` layout because it is
     /// per-device. `namespace` and `uploader` are validated as single path tokens;
-    /// the id must be indexable (see [`Self::id_shard`]).
+    /// the id must be indexable (see `id_shard`).
     pub fn uploader_hashed_key(
         namespace: &str,
         uploader: &str,

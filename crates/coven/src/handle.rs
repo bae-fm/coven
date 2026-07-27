@@ -389,7 +389,7 @@ impl CovenHandle {
             .map_err(crate::CovenError::from)
     }
 
-    /// Build the [`SyncManager`] for a connected cloud provider, start its sync
+    /// Build the sync manager for a connected cloud provider, start its sync
     /// loop, and install it. Returns the started manager, or an error if the cloud
     /// home fails to build — in which case nothing is installed, so the handle
     /// never holds a manager that reports success with nothing started.
@@ -463,20 +463,20 @@ impl CovenHandle {
         Ok(manager)
     }
 
-    /// Test-only: connect a started [`SyncManager`] over an injected [`CloudHome`]
+    /// Test-only: connect a started sync manager over an injected [`CloudHome`]
     /// instead of one built from [`Config`], so a host's integration tests drive
     /// the real make-Remote / make-Local / upload-drain and read paths over a mock
     /// cloud with no live provider.
     ///
     /// The test counterpart of [`connect_sync`](Self::connect_sync): it stands the
     /// manager over `home`/`cipher` through
-    /// [`SyncManager::start_sync_with_home`], starts the loop, and installs it with
+    /// `SyncManager::start_sync_with_home`, starts the loop, and installs it with
     /// the same start-before-install discipline — a failed connect leaves the
     /// handle home-less rather than holding a manager whose loop never started.
     /// The injected `cipher` is the at-rest protection directly — the manager's
     /// custody is never consulted on this path.
     ///
-    /// The read path needs no separate hook: [`blob_storage`](Self::blob_storage)
+    /// The read path needs no separate hook: `blob_storage`
     /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
     /// wraps the injected `home`, so [`read_blob`](Self::read_blob) /
     /// [`pin`](Self::pin) resolve a Remote miss against the same test home the
@@ -501,7 +501,7 @@ impl CovenHandle {
     /// cipher like [`connect_sync_with_test_home`](Self::connect_sync_with_test_home).
     ///
     /// Where that method injects the cipher and never touches custody, this drives
-    /// [`SyncManager::start_sync_with_test_home_custody`], which unlocks the master
+    /// `SyncManager::start_sync_with_test_home_custody`, which unlocks the master
     /// keyring through the store's custody exactly as `start_sync` would — so a
     /// test can establish a key, connect over a mock home, and prove the traffic
     /// is sealed under that key. An opaque home with no key established fails
@@ -521,7 +521,7 @@ impl CovenHandle {
         Ok(())
     }
 
-    /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
+    /// Start (or restart) the sync loop of the installed sync manager. A no-op
     /// when no provider is connected — a home-less store has nothing to start.
     /// Errors if the installed manager's cloud home fails to build.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
@@ -558,7 +558,7 @@ impl CovenHandle {
     }
 
     /// Disconnect the provider entirely: stop the loop and drop the installed
-    /// [`SyncManager`]. The store becomes home-less until the next
+    /// sync manager. The store becomes home-less until the next
     /// [`connect_sync`](Self::connect_sync).
     ///
     /// Carries the same purge as [`stop_sync`](Self::stop_sync) (dropping the
@@ -591,7 +591,7 @@ impl CovenHandle {
             .is_some_and(|manager| manager.is_sync_ready())
     }
 
-    /// Whether a [`SyncManager`] is installed — a provider is connected. Distinct
+    /// Whether a sync manager is installed — a provider is connected. Distinct
     /// from [`is_syncing`](Self::is_syncing), which additionally requires the loop
     /// to be running: this is the predicate a host uses for "has a cloud home"
     /// without the loop-ready condition.

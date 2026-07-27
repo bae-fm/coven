@@ -266,7 +266,7 @@ pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> 
     keyring_core::Entry::new(keyring_service()?, account).map_err(map_keyring_error)
 }
 
-/// Test-only: reaches [`entry_for`] across the crate boundary. Exists so an
+/// Test-only: reaches `entry_for` across the crate boundary. Exists so an
 /// integration test can install a specific keyring store and assert which
 /// entry-construction path the chokepoint took, without re-implementing its
 /// dispatch.
@@ -501,7 +501,7 @@ impl StoreKeys {
     /// — read from the same keyring service and access policy as coven's own
     /// key material. `None` if never set. [`KeyError::InvalidSecretName`] if
     /// `name` collides with one of coven's own reserved slot names, is
-    /// empty, or contains `:` (see [`validate_host_secret_name`]).
+    /// empty, or contains `:` (see `validate_host_secret_name`).
     pub fn get_host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
         validate_host_secret_name(name)?;
         read(&self.host_secret_slot(name))

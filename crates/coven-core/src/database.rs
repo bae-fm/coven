@@ -5,8 +5,8 @@
 //! changeset capture and apply — runs against that one connection, so access is
 //! serialized.
 //!
-//! Hosts open coven with [`crate::Coven::builder`] and run app SQL through
-//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
+//! Hosts open coven with `Coven::builder` and run app SQL through
+//! `CovenHandle::sql` or `CovenHandle::write`.
 
 pub(crate) use crate::database::blob_records::{
     load_activated_registration_on, remote_audience_to_db,

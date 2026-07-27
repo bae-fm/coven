@@ -34,7 +34,7 @@
 //! plus the blob's intrinsic **provenance**, not "is there a local file here." Coven
 //! resolves the blob's backing row (found in the table its `namespace` declares) up
 //! to its gated root or remote root (see
-//! [`Gates::root_kept_of`](crate::sync::gate::Gates::root_kept_of)), then dispatches:
+//! `Gates::root_kept_of`, then dispatches:
 //!
 //! - **Remote** with an exact locator ⇒ the bytes live in the cloud fronted by
 //!   the device cache. The first legitimate probe runs per-device cache
@@ -51,11 +51,11 @@
 //!   fail-loud corruption ([`BlobCacheError::NoLocalCopy`]). Neither falls through to
 //!   the cloud: a Local blob has no cloud copy.
 //!
-//! [`read_blob`] returns the entire blob in one call; [`open_blob_stream`] returns a
+//! `read_blob` returns the entire blob in one call; `open_blob_stream` returns a
 //! [`BlobStream`] a host reads ranges from while streaming or seeking. Both resolve
 //! the source the same way, and each verifies what its own shape allows:
 //!
-//! - [`read_blob`] reads every byte, so it checks the plaintext's size and content
+//! - `read_blob` reads every byte, so it checks the plaintext's size and content
 //!   hash against the exact row-bound locator — including on a **cache hit**. That
 //!   check is not about cloud authenticity, which the AEAD already settled when the
 //!   bytes were fetched: a cache file is unsealed plaintext sitting on local disk,
@@ -63,7 +63,7 @@
 //!   refuse a file that rotted, was truncated by a partial write, or was edited.
 //!   It is free here precisely because this read touches every byte anyway. A cloud
 //!   miss fetches + decrypts the exact object once and populates `cache/`.
-//! - [`open_blob_stream`] costs each range its own bytes, so it cannot make that
+//! - `open_blob_stream` costs each range its own bytes, so it cannot make that
 //!   check — re-hashing per range is the whole-file scan the stream exists to
 //!   avoid. A **local** source (including a cache hit) is read plain: its current
 //!   bytes are the answer to a read of it, and the one place a blob's bytes are
@@ -73,7 +73,7 @@
 //!   header framing the blob, so a chunk that opens is authentic and verification
 //!   is per chunk rather than per object. A blob stored in the clear (a browsable
 //!   home) has no tags to check a range against, so it takes the whole-object path
-//!   instead — see [`open_blob_stream`].
+//!   instead — see `open_blob_stream`.
 //!
 //! A local stream holds the file it opened for its whole life. That is a property,
 //! not an optimization — a path can be swapped between two reads, a descriptor
@@ -85,7 +85,7 @@
 //! pressure from a big one (`release_files`). A namespace's budget counts **only**
 //! the files under `cache/<namespace>/` — `pinned/` is structurally exempt, and
 //! `storage/local` (the local store) is never walked at all. After every populate
-//! into a namespace ([`read_blob`]'s miss-write and [`write_blob`]),
+//! into a namespace (`read_blob`'s miss-write and `write_blob`),
 //! [`evict_to_budget`] sums that namespace's `cache/<namespace>/` files and, if their
 //! total exceeds its budget, deletes the oldest by modification time until the total
 //! is back under it — touching only that namespace's subtree. Modification time is
@@ -141,7 +141,7 @@ pub enum BlobCacheError {
     /// refused before any path is built (the same gate the pull runs).
     Path(PathTokenError),
     /// A cloud read failed: the blob isn't in the cloud, or the backend errored
-    /// (surfaced from [`SyncStorage::get_blob`]).
+    /// (surfaced from the exact blob operations on `SyncStorage`).
     Storage(StorageError),
     /// A Remote blob's bytes were needed from the cloud but no cloud home is
     /// connected, so there is no storage to fetch them from. A home-less store
@@ -461,12 +461,12 @@ pub(crate) async fn populate_pinned_from_file(
 /// check existence (broken filesystem) is surfaced, never collapsed into `None`. Two
 /// callers share this probe:
 ///
-/// - [`read_remote_whole`]: the Remote read's cache-hit check — a hit serves the file,
+/// - `read_remote_whole`: the Remote read's cache-hit check — a hit serves the file,
 ///   a `None` means fetch from the cloud and populate the cache.
 /// - the inline push's crash-recovery read of a host-provided blob whose local-store
 ///   copy a prior cycle already moved into the cache. The push's primary read is from
 ///   the local store ([`local_files::read`](super::local_files::read)); this is the
-///   fallback, and a `None` from both tells the push the blob is not ready, so it
+///   recovery read, and a `None` from both tells the push the blob is not ready, so it
 ///   aborts rather than publishing a row whose blob never reached the cloud.
 pub async fn read_staged(
     store_dir: &StoreDir,
@@ -1105,7 +1105,7 @@ pub(crate) async fn pin_one(
 /// the cache copy stays (still readable) but is now evictable. Not a delete.
 ///
 /// A pin keeps a specific Remote blob's cache copy from eviction; unpin reverses it
-/// regardless of the blob's [`CacheFill`] — a `CacheEager` blob lands in the
+/// regardless of the blob's [`CacheFill`](crate::blob::CacheFill) — a `CacheEager` blob lands in the
 /// evictable cache on pull (it is not auto-pinned), so unpinning one that was never
 /// pinned is simply a no-op (it is already as-evictable-as-it-gets).
 pub async fn unpin(
@@ -1161,7 +1161,7 @@ pub async fn clear_cache(store_dir: &StoreDir) -> Result<(), BlobCacheError> {
 /// (`storage/cache/<namespace>/`) until its total size is back within that
 /// namespace's [`Database::get_cache_budget`] budget. The cache layer's per-namespace
 /// size enforcement, run synchronously after every populate into that namespace
-/// ([`read_blob`]'s miss-write, [`write_blob`]).
+/// (`read_blob`'s miss-write, `write_blob`).
 ///
 /// Each namespace evicts independently against its own budget, walking **only** its
 /// own subtree: evicting `release_files` (big) never touches `covers` (a small

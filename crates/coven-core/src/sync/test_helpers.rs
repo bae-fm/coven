@@ -796,7 +796,7 @@ pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
 }
 
 /// Open a read-test [`Database`] whose `note_photos` child carries a blob in
-/// `namespace`, so [`crate::blob::cache::read_blob`]'s locality dispatch can resolve a
+/// `namespace`, so `read_blob`'s locality dispatch can resolve a
 /// blob in that namespace up to its gated `notes` root. The decl's namespace MUST
 /// match the blobs the test reads (the read path resolves the carrying table from the
 /// blob's namespace); its provenance/fill don't matter to that resolution (the read
@@ -834,7 +834,7 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
     db
 }
 
-/// Plant the backing row [`crate::blob::cache::read_blob`] resolves a blob's locality
+/// Plant the backing row `read_blob` resolves a blob's locality
 /// from: a gated `notes` root with `shared = remote` and a `note_photos` child whose
 /// id is `blob_id`, carrying `bytes`'s length and content hash so a download of those
 /// exact bytes verifies. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);

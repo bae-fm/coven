@@ -132,11 +132,11 @@ pub fn content_hash(plaintext: &[u8]) -> String {
 }
 
 /// An incremental SHA-256 over a blob's plaintext, so the streaming download path
-/// verifies a large blob's content hash without ever holding the whole plaintext
-/// in memory — feed each decrypted chunk to [`update`](Self::update) as it is read,
-/// then [`verify`](Self::verify) against the row's hash before the bytes are
-/// committed to the cache. The hex-encoded digest matches [`content_hash`] over the
-/// same bytes.
+/// verifies a blob's content hash without holding the whole plaintext in memory:
+/// feed each decrypted chunk to [`update`](Self::update), call
+/// [`finish`](Self::finish), and compare the returned digest with the row's hash
+/// before committing the bytes to the cache. The hex-encoded digest matches
+/// [`content_hash`] over the same bytes.
 pub struct ContentHasher(Sha256);
 
 impl ContentHasher {
@@ -162,8 +162,8 @@ impl Default for ContentHasher {
 }
 
 /// How many blob transfers coven runs at once in each of its two transfer loops:
-/// the upload drain ([`upload::drain_uploads`]) and the pin/download loop
-/// ([`cache::pin`]). An open-time blob-engine tunable the host sets on the builder,
+/// the upload drain ([`upload::drain_uploads`]) and the pin/download loop. An
+/// open-time blob-engine tunable the host sets on the builder,
 /// carried on [`Database`](crate::database::Database) alongside the other open-time
 /// blob config and read back by each loop, which holds `&Database`.
 ///
@@ -311,7 +311,7 @@ pub enum CacheFill {
 ///
 /// - [`Replaceable`](Self::Replaceable) — the row may be repointed, so the *key* must
 ///   move with the blob: a readable `cloud_path` has to name its blob
-///   ([`crate::blob::decl::cloud_path_names_blob`]), and a replacement then writes a new
+///   (`cloud_path_names_blob`), and a replacement then writes a new
 ///   object beside the one it replaces instead of over it.
 /// - [`WriteOnce`](Self::WriteOnce) — the row is never repointed, so the object at its
 ///   key is written once and there is nothing to protect it from. Its path is free to be

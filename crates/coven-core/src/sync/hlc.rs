@@ -219,7 +219,7 @@ impl Hlc {
     /// already-stored applied row and lose LWW to it.
     ///
     /// Monotonic: a `remote` ahead of the current state becomes the state floor;
-    /// one behind it is ignored. Either way the next [`now`] outranks `remote`.
+    /// one behind it is ignored. Either way the next [`Self::now`] outranks `remote`.
     pub fn advance_past(&self, remote: &Timestamp) {
         let wall = (self.wall_clock)();
         let mut state = self.state.lock().unwrap();
@@ -250,13 +250,13 @@ impl Hlc {
 
 /// A cloneable handle that mints `_updated_at` register values from a shared
 /// [`Hlc`] — the register-stamping capability, sliced off the whole
-/// [`crate::sync::sync_manager::SyncManager`].
+/// sync manager.
 ///
 /// coven creates this handle during open and injects it into the write path
-/// before any [`crate::sync::sync_manager::SyncManager`] exists. The manager,
+/// before any sync manager exists. The manager,
 /// built later, borrows the same `Arc<Hlc>`: coven advances that clock past every
 /// pulled row, and because the stamper shares the instance, that advance reaches
-/// every [`crate::SqlContext::stamp`] call, so a later local write never
+/// every `SqlContext::stamp` call, so a later local write never
 /// sorts behind a pulled row and loses last-writer-wins. Every clone shares one
 /// `Arc<Hlc>`, so coven's seeding and advance-on-pull are reflected in every
 /// stamp.

@@ -52,7 +52,7 @@ pub(crate) mod join_code {
     pub(crate) use coven_core::join_code::*;
 
     /// Build a join request carrying a freshly minted pending identity (see
-    /// [`crate::keys::mint_pending_identity`]) — the joiner sends its public
+    /// `mint_pending_identity`) — the joiner sends its public
     /// key before it learns which store the invite names, so the keypair is
     /// generated now and held under a pending slot keyed by that public key.
     /// Completing the join with [`crate::DeviceJoinClient`] (constructed with

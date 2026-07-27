@@ -1,11 +1,11 @@
 //! Apply a changeset to the connection, resolving conflicts as each row lands.
 //!
 //! Two stages. First a column-level three-way premerge
-//! ([`premerge_losing_update_columns`]): when an incoming UPDATE loses row
+//! (`premerge_losing_update_columns`): when an incoming UPDATE loses row
 //! arbitration, the columns it moved away from a base the local row still holds
 //! are folded into the local row, so concurrent edits to *different* columns of
 //! one row both survive. Then the changeset is applied with
-//! [`arbitrate_row_conflict`] as the conflict handler, which picks the winning row
+//! `arbitrate_row_conflict` as the conflict handler, which picks the winning row
 //! by `_updated_at` (remove-wins for deletes, a future-skew bound on the
 //! comparison) for every collision the premerge did not already fold in.
 //!
@@ -107,7 +107,7 @@ impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
 /// changeset and don't already hold a schema (tests, snapshot round-trips).
 ///
 /// `receiver_wall_ms` is the receiver's current wall-clock millis, against which
-/// a grossly-future incoming `_updated_at` is refused (see [`arbitrate_row_conflict`]).
+/// a grossly-future incoming `_updated_at` is refused (see `arbitrate_row_conflict`).
 #[cfg(any(test, feature = "test-utils"))]
 pub fn resolve_and_apply_changeset(
     conn: &Connection,
@@ -121,7 +121,7 @@ pub fn resolve_and_apply_changeset(
 
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
 /// [`TableSchema`]: a column-level premerge of losing UPDATEs
-/// ([`premerge_losing_update_columns`]) followed by an apply whose conflict
+/// (`premerge_losing_update_columns`) followed by an apply whose conflict
 /// closure arbitrates every remaining row collision.
 ///
 /// The schema's per-table `_updated_at` column index map is derived once (from
@@ -135,7 +135,7 @@ pub fn resolve_and_apply_changeset(
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
-/// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
+/// a grossly-future incoming `_updated_at` (see `arbitrate_row_conflict`).
 pub fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],

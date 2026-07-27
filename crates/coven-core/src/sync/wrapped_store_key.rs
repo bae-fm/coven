@@ -30,7 +30,7 @@ pub struct WrappedStoreKey {
     pub generation: u64,
     /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the store key.
     pub sealed: String,
-    /// Hex-encoded detached signature over [`WrappedKeyFields`], produced by the owner.
+    /// Hex-encoded detached signature over `WrappedKeyFields`, produced by the owner.
     pub signature: String,
 }
 

@@ -373,12 +373,12 @@ impl CovenBuilder {
 
     /// Open the store read-only for a same-store secondary reader: a separate
     /// process (or a second handle) that must read rows and blobs while another
-    /// handle holds the full [`open`](Self::open). Returns a [`CovenReadHandle`],
+    /// handle holds the full [`open`](Self::open). Returns a [`crate::CovenReadHandle`],
     /// whose surface is reads only — SQL queries and blob reads — with no write,
     /// sync, migration, or stamp API by construction.
     ///
     /// Unlike [`open`](Self::open) this takes no store lock (see
-    /// [`StoreOpenGuard`]): it succeeds while a writer holds the exclusive lock,
+    /// `StoreOpenGuard`): it succeeds while a writer holds the exclusive lock,
     /// and any number of read-only opens coexist. It opens a `SQLITE_OPEN_READONLY`
     /// connection against the schema on disk, running no migration ladder — but it
     /// refuses a db a newer binary migrated past what this binary supports

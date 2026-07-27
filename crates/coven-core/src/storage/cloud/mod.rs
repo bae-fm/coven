@@ -612,7 +612,7 @@ impl BlobBody {
 }
 
 /// The one per-provider streaming-upload surface: a session that accepts ordered
-/// parts and commits. The central [`write_blob`] driver opens one of these for a
+/// parts and commits. The central `write_blob` driver opens one of these for a
 /// large blob and pumps [`BlobBody`] parts into it — no backend writes its own
 /// upload loop, collect, or progress call.
 #[async_trait]
@@ -803,7 +803,7 @@ pub trait CloudHome: Send + Sync {
     fn multipart_threshold(&self) -> u64;
 
     /// Write a sized [`BlobBody`] to `key`. Not overridden — the central
-    /// [`write_blob`] driver picks single-request vs multipart and pumps the
+    /// `write_blob` driver picks single-request vs multipart and pumps the
     /// parts, reporting cumulative bytes through `progress` for the per-file bar.
     async fn write(
         &self,

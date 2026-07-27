@@ -64,7 +64,7 @@ pub enum BlobDeclError {
     },
     /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path does not
     /// name the blob it carries, so the row's next blob would be keyed at this blob's
-    /// cloud object and overwrite it. See [`cloud_path_names_blob`].
+    /// cloud object and overwrite it. See `cloud_path_names_blob`.
     CloudPathNotKeyedByBlob {
         table: String,
         blob_id: String,

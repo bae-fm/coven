@@ -5,10 +5,9 @@
 //! `outbound_membership_mutation`, `outbound_store_snapshot`,
 //! `local_blob_refs`, `local_cleanup_intents`, exact prepared Store objects, and
 //! row-bound blob locators — all
-//! created STRICT by [`apply_coven_schema`], which coven
+//! created STRICT by `apply_coven_schema`, which coven
 //! runs against the connection it owns during open. The host does not implement
-//! any of this; app SQL goes through [`crate::CovenHandle::sql`] or
-//! [`crate::CovenHandle::write`].
+//! any of this; app SQL goes through `CovenHandle::sql` or `CovenHandle::write`.
 
 macro_rules! coven_tables {
     ($visit:ident) => {

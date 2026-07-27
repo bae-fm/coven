@@ -90,7 +90,7 @@ enum ExistingTombstone {
 /// signed record that a blob was deleted, plus when, so a GC pass can reclaim the
 /// blob once the convergence grace has passed.
 ///
-/// `author_pubkey`/`signature` cover the [`BlobTombstoneFields`] canonical payload
+/// `author_pubkey`/`signature` cover the `BlobTombstoneFields` canonical payload
 /// — including the exact stored reference (the slot the tombstone lives under
 /// and the provider object it authorizes deleting) and `deleted_at` (so the age
 /// can't be forged to dodge or shorten the grace). The GC verifies this
@@ -117,7 +117,7 @@ pub struct BlobTombstoneJson {
     pub deleted_at: String,
     /// Hex-encoded Ed25519 public key of the device that wrote this tombstone.
     pub author_pubkey: String,
-    /// Hex-encoded detached signature over [`BlobTombstoneFields`].
+    /// Hex-encoded detached signature over `BlobTombstoneFields`.
     pub signature: String,
 }
 
@@ -245,8 +245,8 @@ async fn write_signed_tombstone(
 /// the outbox row. The blob itself is **not** deleted here — [`gc_tombstones`]
 /// reclaims it once the tombstone has aged past [`BLOB_TOMBSTONE_GRACE`].
 ///
-/// The host enqueues a delete via [`crate::database::Database::enqueue_delete`];
-/// this records that intent durably in the cloud as a tombstone so every device
+/// Coven records a delete intent atomically with the row or blob transition;
+/// the drain records that intent durably in the cloud as a tombstone so every device
 /// converges on the deletion, rather than deleting the blob out from under a peer
 /// that hasn't pulled the row removal yet.
 ///
@@ -427,7 +427,7 @@ async fn record_outbox_failure(
 /// authentic `deleted_at`, so members with different settings simply GC on their
 /// own schedules and the earliest-configured one erases first.
 ///
-/// For each tombstone under [`TOMBSTONE_PREFIX`], in order:
+/// For each tombstone under `TOMBSTONE_PREFIX`, in order:
 /// 1. Open it under the cipher and parse it. An object we can't open or parse is a
 ///    foreign store's (a shared bucket) or corrupt — skip it.
 /// 2. Verify its signature under *this* store's id (binds the author, exact stored
