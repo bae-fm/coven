@@ -1358,22 +1358,29 @@ impl GoogleDriveCloudHome {
             "{}/files/{}/permissions?fields=permissions(id,emailAddress,role),nextPageToken&supportsAllDrives=true",
             self.drive_api, self.folder_id
         );
+        let email_of =
+            |permission: &serde_json::Value| permission["emailAddress"].as_str().map(String::from);
+        let next_page = |page: &serde_json::Value| drive_permissions_next_page_url(&list_url, page);
+        let delete_url = |permission_id: &str| {
+            format!(
+                "{}/files/{}/permissions/{}?supportsAllDrives=true",
+                self.drive_api, self.folder_id, permission_id
+            )
+        };
+        let is_writer =
+            |permission: &serde_json::Value| permission["role"].as_str() == Some("writer");
         match desired {
             CloudAccessState::Present { .. } => {
-                let list_url_for_next = list_url.clone();
                 let current = sharing::permission_by_email(
                     &self.session,
                     email,
                     &list_url,
                     "permissions",
-                    &|permission| permission["emailAddress"].as_str().map(String::from),
-                    &move |page| drive_permissions_next_page_url(&list_url_for_next, page),
+                    &email_of,
+                    &next_page,
                 )
                 .await?;
-                if current
-                    .as_ref()
-                    .is_some_and(|permission| permission["role"].as_str() == Some("writer"))
-                {
+                if current.as_ref().is_some_and(is_writer) {
                     return Ok(CloudAccessOutcome::Present(
                         CloudHomeJoinInfo::GoogleDrive {
                             folder_id: self.folder_id.clone(),
@@ -1381,21 +1388,14 @@ impl GoogleDriveCloudHome {
                     ));
                 }
                 if current.is_some() {
-                    let next_base = list_url.clone();
-                    let folder_id = self.folder_id.clone();
                     sharing::ensure_absent_by_email(
                         &self.session,
                         email,
                         &list_url,
                         "permissions",
-                        |permission| permission["emailAddress"].as_str().map(String::from),
-                        |permission_id| {
-                            format!(
-                                "{}/files/{}/permissions/{}?supportsAllDrives=true",
-                                self.drive_api, folder_id, permission_id
-                            )
-                        },
-                        move |page| drive_permissions_next_page_url(&next_base, page),
+                        &email_of,
+                        &delete_url,
+                        &next_page,
                     )
                     .await?;
                 }
@@ -1416,20 +1416,16 @@ impl GoogleDriveCloudHome {
                     })
                     .await?;
                 ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
-                let next_base = list_url.clone();
                 let verified = sharing::permission_by_email(
                     &self.session,
                     email,
                     &list_url,
                     "permissions",
-                    &|permission| permission["emailAddress"].as_str().map(String::from),
-                    &move |page| drive_permissions_next_page_url(&next_base, page),
+                    &email_of,
+                    &next_page,
                 )
                 .await?;
-                if verified
-                    .as_ref()
-                    .is_none_or(|permission| permission["role"].as_str() != Some("writer"))
-                {
+                if !verified.as_ref().is_some_and(is_writer) {
                     return Err(CloudHomeError::Transport(format!(
                         "writer permission for {email} is not visible after creation"
                     )));
@@ -1441,21 +1437,14 @@ impl GoogleDriveCloudHome {
                 ))
             }
             CloudAccessState::Absent { .. } => {
-                let next_base = list_url.clone();
-                let folder_id = self.folder_id.clone();
                 sharing::ensure_absent_by_email(
                     &self.session,
                     email,
                     &list_url,
                     "permissions",
-                    |permission| permission["emailAddress"].as_str().map(String::from),
-                    |permission_id| {
-                        format!(
-                            "{}/files/{}/permissions/{}?supportsAllDrives=true",
-                            self.drive_api, folder_id, permission_id
-                        )
-                    },
-                    move |page| drive_permissions_next_page_url(&next_base, page),
+                    &email_of,
+                    &delete_url,
+                    &next_page,
                 )
                 .await?;
                 Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))

@@ -552,6 +552,12 @@ impl OneDriveCloudHome {
                 .as_str()
                 .map(std::string::ToString::to_string))
         };
+        let delete_url = |permission_id: &str| format!("{perms_url}/{permission_id}");
+        let can_write = |permission: &serde_json::Value| {
+            permission["roles"]
+                .as_array()
+                .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("write")))
+        };
         match desired {
             CloudAccessState::Present { .. } => {
                 let current = sharing::permission_by_email(
@@ -563,25 +569,20 @@ impl OneDriveCloudHome {
                     &next_page,
                 )
                 .await?;
-                if current.as_ref().is_some_and(|permission| {
-                    permission["roles"].as_array().is_some_and(|roles| {
-                        roles.iter().any(|role| role.as_str() == Some("write"))
-                    })
-                }) {
+                if current.as_ref().is_some_and(can_write) {
                     return Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::OneDrive {
                         drive_id: self.drive_id.clone(),
                         folder_id: self.folder_id.clone(),
                     }));
                 }
                 if current.is_some() {
-                    let delete_base = perms_url.clone();
                     sharing::ensure_absent_by_email(
                         &self.session,
                         &email,
                         &perms_url,
                         "value",
                         &email_of,
-                        |permission_id| format!("{delete_base}/{permission_id}"),
+                        &delete_url,
                         &next_page,
                     )
                     .await?;
@@ -609,11 +610,7 @@ impl OneDriveCloudHome {
                     &next_page,
                 )
                 .await?;
-                if !verified.as_ref().is_some_and(|permission| {
-                    permission["roles"].as_array().is_some_and(|roles| {
-                        roles.iter().any(|role| role.as_str() == Some("write"))
-                    })
-                }) {
+                if !verified.as_ref().is_some_and(can_write) {
                     return Err(CloudHomeError::Transport(format!(
                         "write permission for {email} is not visible after creation"
                     )));
@@ -624,14 +621,13 @@ impl OneDriveCloudHome {
                 }))
             }
             CloudAccessState::Absent { .. } => {
-                let delete_base = perms_url.clone();
                 sharing::ensure_absent_by_email(
                     &self.session,
                     &email,
                     &perms_url,
                     "value",
                     &email_of,
-                    |permission_id| format!("{delete_base}/{permission_id}"),
+                    &delete_url,
                     &next_page,
                 )
                 .await?;
