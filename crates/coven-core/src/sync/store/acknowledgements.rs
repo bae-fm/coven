@@ -607,16 +607,17 @@ impl AuthorizedStore<'_> {
                 {
                     continue;
                 }
-                pull::verify_snapshot_for_acknowledgement(self.storage(), root, &snapshot)
-                    .await
-                    .map_err(|error| {
-                        crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(
-                            error.to_string(),
-                        )
-                    })?;
                 candidates.push(snapshot);
             }
         }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        pull::verify_snapshots_for_acknowledgement(self.storage(), root, &candidates)
+            .await
+            .map_err(|error| {
+                crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
+            })?;
         Ok(
             crate::sync::store::snapshot::select_maximal_store_snapshot(candidates).map(
                 |snapshot| crate::sync::store_commit::StoreSnapshotLocator {

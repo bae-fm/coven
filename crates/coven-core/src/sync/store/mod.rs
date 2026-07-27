@@ -474,12 +474,12 @@ pub(crate) async fn verify_store_snapshot_stability(
 }
 
 #[cfg(test)]
-pub(crate) async fn verify_store_snapshot_for_acknowledgement_for_test(
+pub(crate) async fn verify_store_snapshots_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    snapshot: &crate::database::PublishedStoreSnapshot,
+    snapshots: &[crate::database::PublishedStoreSnapshot],
 ) -> Result<(), pull::StorePullError> {
-    pull::verify_snapshot_for_acknowledgement(storage, root, snapshot).await
+    pull::verify_snapshots_for_acknowledgement(storage, root, snapshots).await
 }
 
 pub(crate) fn load_verified_device_join_attempt_ref<'a>(

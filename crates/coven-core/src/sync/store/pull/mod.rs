@@ -145,7 +145,7 @@ pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge
 use replay::{replay_merge_device_history, verified_terminal_merge_retractions};
 pub(crate) use retained_authority::*;
 pub(in crate::sync::store) use snapshot_authority::{
-    verify_snapshot_for_acknowledgement, verify_snapshot_stability,
+    verify_snapshot_stability, verify_snapshots_for_acknowledgement,
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate;
