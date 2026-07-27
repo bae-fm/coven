@@ -2,13 +2,14 @@
 
 ## Status
 
-Planned. Coven's device join is a three-role handshake (Owner, Provider
+Built. Coven's device join is a three-role handshake (Owner, Provider
 Administrator, Joiner) whose nine happy-path artifacts
-(`DeviceJoinAction::Transfer*`) coven hands to the host to deliver. Today
-every host must build its own delivery. This adds the default transport to
-coven itself — artifacts carried as sealed create-once objects in the
-store's cloud home — while keeping the raw `DeviceJoinAction` surface for
-hosts that want a different channel (QR-only, local network, relay).
+(`DeviceJoinAction::Transfer*`) coven hands to the host to deliver. Hosts
+no longer have to build their own delivery: the storage-mediated transport
+ships as `sync::store::device_join_transport` (the slots and their
+create-once publication) and `sync::device_join_transport` (the facade
+drivers hosts call), with the raw `DeviceJoinAction` surface kept for hosts
+that want a different channel (QR-only, local network, relay).
 
 The offer is NOT carried by this transport: it travels out of band as the
 host's join code (bae: a QR the joiner scans). The offer bundle is what

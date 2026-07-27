@@ -14,9 +14,8 @@ use crate::sync::storage::{
     ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding, SyncStorage,
 };
 use crate::sync::store_commit::{
-    DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
-    ObjectHash, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreRootRef,
+    DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
 };
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";
@@ -425,13 +424,6 @@ pub enum DeviceJoinChallengePublicationProgress {
     Published {
         authorization: DeviceJoinChallengePublicationAuthorization,
     },
-    ProducerClosed {
-        authorization: DeviceJoinChallengePublicationAuthorization,
-    },
-    CancelledBeforeCreate {
-        authorization: DeviceJoinChallengePublicationAuthorization,
-        cancellation: DeviceJoinOutcomeRef,
-    },
 }
 
 #[async_trait]
@@ -442,25 +434,12 @@ pub trait DeviceJoinChallengePublicationJournal: Send + Sync {
     ) -> Result<DeviceJoinChallengePublicationRecord, StorageError>;
 
     /// Atomically claims publication for these exact signed facts. An exact
-    /// replay of an existing `Published` claim succeeds; a producer closure or
-    /// cancellation claim rejects publication.
+    /// replay of an existing `Published` claim succeeds; a claim naming a
+    /// different authorization is rejected.
     async fn claim_published(
         &self,
         authorization: &DeviceJoinChallengePublicationAuthorization,
         challenge: &CrossPrincipalProbeChallenge,
-    ) -> Result<(), StorageError>;
-
-    async fn close_published(
-        &self,
-        authorization: &DeviceJoinChallengePublicationAuthorization,
-        challenge: &CrossPrincipalProbeChallenge,
-    ) -> Result<(), StorageError>;
-
-    async fn cancel_before_create(
-        &self,
-        authorization: &DeviceJoinChallengePublicationAuthorization,
-        challenge: &CrossPrincipalProbeChallenge,
-        cancellation: &DeviceJoinOutcomeRef,
     ) -> Result<(), StorageError>;
 }
 
@@ -483,31 +462,6 @@ impl DeviceJoinChallengePublicationJournal for crate::sync::store::StoreDatabase
         self.publish_device_join_challenge(authorization.clone(), challenge.clone())
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))
-    }
-
-    async fn close_published(
-        &self,
-        authorization: &DeviceJoinChallengePublicationAuthorization,
-        challenge: &CrossPrincipalProbeChallenge,
-    ) -> Result<(), StorageError> {
-        self.close_published_device_join_challenge(authorization.clone(), challenge.clone())
-            .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
-    }
-
-    async fn cancel_before_create(
-        &self,
-        authorization: &DeviceJoinChallengePublicationAuthorization,
-        challenge: &CrossPrincipalProbeChallenge,
-        cancellation: &DeviceJoinOutcomeRef,
-    ) -> Result<(), StorageError> {
-        self.cancel_unpublished_device_join_challenge(
-            authorization.clone(),
-            challenge.clone(),
-            cancellation.clone(),
-        )
-        .await
-        .map_err(|error| StorageError::Storage(error.to_string()))
     }
 }
 
