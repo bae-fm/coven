@@ -275,10 +275,9 @@ mod tests {
             )
             .await
             .expect("load provider administrator registration");
-        let audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(&[approval
-            .access_grant
-            .activation
-            .clone()]);
+        let audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(
+            std::slice::from_ref(&approval.access_grant.activation),
+        );
 
         crate::sync::store::verify_accepted_provider_access_activation(
             store.storage.as_ref(),
