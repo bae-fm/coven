@@ -66,10 +66,7 @@ impl ReclaimJourneyFixture {
         )
         .await
         .expect("load Store membership");
-        let chain = membership
-            .chain
-            .clone()
-            .expect("initialized Store has membership");
+        let chain = membership.clone();
         crate::sync::test_helpers::publish_snapshot_fixture(
             &store.storage,
             &store.root,
@@ -216,10 +213,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
     )
     .await
     .expect("load Store membership");
-    let chain = membership
-        .chain
-        .as_ref()
-        .expect("initialized Store has membership");
+    let chain = &membership;
     crate::sync::test_helpers::publish_snapshot_fixture(
         &store.storage,
         &store.root,
@@ -607,10 +601,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     )
     .await
     .expect("load reclaim membership");
-    let chain = membership
-        .chain
-        .as_ref()
-        .expect("initialized Store has membership");
+    let chain = &membership;
     crate::sync::test_helpers::publish_snapshot_fixture(
         &store.storage,
         &store.root,

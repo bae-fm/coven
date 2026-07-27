@@ -204,9 +204,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         &crate::sync::store::database::StoreDatabase::new(&owner_db),
     ))
     .await
-    .expect("load post-exclusion snapshot membership")
-    .chain
-    .expect("post-exclusion snapshot has membership authority");
+    .expect("load post-exclusion snapshot membership");
     let live_evidence = owner_db
         .call(|connection| {
             connection
@@ -1069,10 +1067,7 @@ async fn materialize_surviving_owner_commit(
             "2026-07-18T01:00:30Z",
             signer,
             store_dir,
-            owner_membership
-                .chain
-                .as_ref()
-                .expect("owner Merge membership chain"),
+            &owner_membership,
         ))
         .await
         .expect("prepare surviving owner commit")
@@ -1095,10 +1090,7 @@ async fn materialize_surviving_owner_commit(
         &store.storage,
         store.root.store_root_hash,
         store_dir,
-        peer_membership
-            .chain
-            .as_ref()
-            .expect("opened peer Store has membership"),
+        &peer_membership,
         None,
         None,
     ))
@@ -1157,10 +1149,7 @@ async fn assert_terminal_merge_transaction_rollback(
         &store.storage,
         store.root.store_root_hash,
         store_dir,
-        membership
-            .chain
-            .as_ref()
-            .expect("opened Store has membership"),
+        &membership,
         None,
         None,
     ))
@@ -1291,10 +1280,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             "2026-07-18T01:01:00Z",
             &signer,
             &store_dir,
-            membership
-                .chain
-                .as_ref()
-                .expect("peer Merge membership chain"),
+            &membership,
         ))
         .await
         .expect("prepare excluded peer candidate")
@@ -1449,10 +1435,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             &store.storage,
             store.root.store_root_hash,
             &store_dir,
-            membership
-                .chain
-                .as_ref()
-                .expect("opened Store has membership"),
+            &membership,
             None,
             None,
         ))
@@ -2539,10 +2522,7 @@ async fn pull_peer_exclusion(
         &store.storage,
         store.root.store_root_hash,
         store_dir,
-        membership
-            .chain
-            .as_ref()
-            .expect("opened Store has membership"),
+        &membership,
         None,
         None,
     ))
@@ -2956,10 +2936,7 @@ async fn prepare_transfer_candidate(
             "2026-07-18T00:02:00Z",
             signer,
             &store_dir,
-            membership
-                .chain
-                .as_ref()
-                .expect("transfer Merge membership chain"),
+            &membership,
         ))
         .await
         .expect("prepare transfer candidate")
@@ -3015,10 +2992,7 @@ async fn stage_uploaded_proposal(
     let plan = crate::sync::store::operations::prepare_plan(
         &store_database(db),
         storage,
-        membership
-            .chain
-            .as_ref()
-            .expect("resolved Merge membership"),
+        &membership,
         &device_id,
         signer,
     )

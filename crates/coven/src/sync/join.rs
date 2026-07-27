@@ -812,9 +812,7 @@ impl DeviceJoinClient {
             &join.storage,
             self.code.store_root.store_root_hash,
             &store_dir,
-            membership.chain.as_ref().ok_or_else(|| {
-                BootstrapError::Membership("membership is unresolved".to_string())
-            })?,
+            &membership,
             None,
             Some(&routing_encryption),
         ))
@@ -1195,10 +1193,7 @@ pub(crate) async fn open_db_and_pull(
         storage,
         store_root.store_root_hash,
         store_dir,
-        membership
-            .chain
-            .as_ref()
-            .ok_or_else(|| BootstrapError::Membership("membership is unresolved".to_string()))?,
+        &membership,
         None,
         routing_encryption,
     ))
@@ -1264,15 +1259,12 @@ pub(crate) async fn open_db_and_pull(
     }
 
     if let Some((authority, identity_signer)) = owner_recovery {
-        let membership = membership.chain.as_ref().ok_or_else(|| {
-            BootstrapError::Membership("Owner recovery requires resolved membership".to_string())
-        })?;
         Box::pin(crate::sync::store::recover_owner_device(
             &database,
             storage,
             identity_signer,
             authority,
-            membership,
+            &membership,
         ))
         .await?;
     }

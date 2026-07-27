@@ -33,9 +33,7 @@ async fn ensure_not_rotation_required(
                 "load Store membership for Circle rotation check: {error}"
             ))
         })?;
-    let chain = membership
-        .chain
-        .ok_or(CircleOperationError::MissingState("Store membership chain"))?;
+    let chain = membership;
     let active_store_members = chain
         .current_members()
         .into_iter()

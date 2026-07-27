@@ -524,10 +524,7 @@ async fn pull_exact_store_into(
         storage,
         root.store_root_hash,
         store_dir,
-        membership
-            .chain
-            .as_ref()
-            .expect("opened Store has membership"),
+        &membership,
         None,
         Some(&routing_encryption),
     )
@@ -6831,10 +6828,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     )
     .await
     .expect("accept and persist the complete multi-author chain");
-    assert!(!initial
-        .chain
-        .expect("listed membership chain")
-        .can_write_now(&removed_member_pubkey));
+    assert!(!initial.can_write_now(&removed_member_pubkey));
 
     PersistedCycleRemoval {
         storage,
@@ -6857,13 +6851,15 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
     .expect("empty LIST must use the persisted author floors");
 
     assert_eq!(
-        recovered.pinned_owner.as_deref(),
+        fixture
+            .db
+            .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
+            .await
+            .expect("read persisted owner pin")
+            .as_deref(),
         Some(fixture.founder_pubkey.as_str())
     );
-    assert!(!recovered
-        .chain
-        .expect("persisted membership chain")
-        .can_write_now(&fixture.removed_member_pubkey));
+    assert!(!recovered.can_write_now(&fixture.removed_member_pubkey));
 }
 
 #[tokio::test]
@@ -6878,13 +6874,15 @@ async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
     .expect("an unpinned prior chain must not fall open on an empty LIST");
 
     assert_eq!(
-        recovered.pinned_owner.as_deref(),
+        fixture
+            .db
+            .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
+            .await
+            .expect("read installed owner pin")
+            .as_deref(),
         Some(fixture.founder_pubkey.as_str())
     );
-    assert!(!recovered
-        .chain
-        .expect("persisted membership chain")
-        .can_write_now(&fixture.removed_member_pubkey));
+    assert!(!recovered.can_write_now(&fixture.removed_member_pubkey));
 }
 
 #[tokio::test]
@@ -6973,10 +6971,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         &storage.storage,
         storage.store_root_hash(),
         &store_dir,
-        cycle_membership
-            .chain
-            .as_ref()
-            .expect("opened Store has membership"),
+        &cycle_membership,
         None,
         None,
     )

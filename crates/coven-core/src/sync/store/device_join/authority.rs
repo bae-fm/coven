@@ -35,7 +35,7 @@ pub(crate) async fn load_current_device_join_authorization(
     let membership = crate::sync::store::pull::load_cycle_membership(storage, database)
         .await
         .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-    membership.chain.ok_or(DeviceJoinError::MembershipConflict)
+    Ok(membership)
 }
 
 pub(super) async fn load_local_store_root(

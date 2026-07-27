@@ -104,10 +104,7 @@ async fn persist_candidate(
     let plan = crate::sync::store::operations::prepare_plan(
         &database,
         storage,
-        membership
-            .chain
-            .as_ref()
-            .expect("resolved Merge membership"),
+        &membership,
         &device_id,
         signer,
     )
@@ -175,10 +172,7 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
     let competing_plan = Box::pin(crate::sync::store::operations::prepare_plan(
         &database,
         &storage,
-        membership
-            .chain
-            .as_ref()
-            .expect("resolved Merge membership"),
+        &membership,
         &device_id,
         &signer,
     ))

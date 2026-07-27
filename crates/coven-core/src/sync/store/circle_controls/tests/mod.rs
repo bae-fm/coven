@@ -283,9 +283,7 @@ async fn publish_competing_store_head(
         .expect("publish competing package");
     let membership = crate::sync::store::pull::load_cycle_membership(storage.as_ref(), &database)
         .await
-        .expect("load competing commit membership")
-        .chain
-        .expect("test Store has membership");
+        .expect("load competing commit membership");
     let predecessor = membership
         .write_grant_authority(&registration.author_pubkey)
         .expect("competing author has an active write grant");

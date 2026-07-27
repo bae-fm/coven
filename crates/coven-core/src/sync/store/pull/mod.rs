@@ -113,7 +113,7 @@ pub(crate) use support::{
 };
 pub use support::{
     load_cycle_membership, BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures,
-    CycleMembership, PullError,
+    PullError,
 };
 
 pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence;

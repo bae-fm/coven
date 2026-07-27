@@ -284,8 +284,6 @@ async fn active_store_members(fixture: &RotationFixture) -> BTreeSet<String> {
     .await
     .expect("load cycle membership");
     membership
-        .chain
-        .expect("membership chain")
         .current_members()
         .into_iter()
         .map(|(pubkey, _)| pubkey)
@@ -1172,9 +1170,7 @@ async fn setup_active_member_circle_snapshot(
     let membership =
         crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
             .await
-            .expect("load membership for snapshot restore")
-            .chain
-            .expect("membership chain");
+            .expect("load membership for snapshot restore");
 
     ActiveMemberCircleSnapshot {
         db,
@@ -1552,9 +1548,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     let membership =
         crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
             .await
-            .expect("load membership for snapshot restore")
-            .chain
-            .expect("membership chain");
+            .expect("load membership for snapshot restore");
     let destination = tempfile::tempdir().expect("snapshot restore destination");
     let database_path = destination.path().join("store.db");
     let bootstrap = crate::sync::store::bootstrap_from_snapshot(
@@ -1856,9 +1850,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let membership =
         crate::sync::store::pull::load_cycle_membership(&store.storage, &StoreDatabase::new(&db))
             .await
-            .expect("load membership for snapshot restore")
-            .chain
-            .expect("membership chain");
+            .expect("load membership for snapshot restore");
     let destination = tempfile::tempdir().expect("standalone-restore destination");
     let database_path = destination.path().join("store.db");
     let bootstrap = crate::sync::store::bootstrap_from_snapshot(

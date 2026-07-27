@@ -1631,9 +1631,7 @@ mod tests {
             &crate::sync::store::database::StoreDatabase::new(&db),
         )
         .await
-        .expect("load exact membership")
-        .chain
-        .expect("resolved founder membership");
+        .expect("load exact membership");
         let authority = founder_recovery_authority(&store);
         let database = StoreDatabase::new(&db);
         let registration = recover_owner_device(
@@ -1785,9 +1783,7 @@ mod tests {
             &crate::sync::store::database::StoreDatabase::new(&db),
         )
         .await
-        .expect("load exact membership")
-        .chain
-        .expect("resolved founder membership");
+        .expect("load exact membership");
         let authority = founder_recovery_authority(&store);
         let database = StoreDatabase::new(&db);
         let registration = recover_owner_device(
@@ -1883,9 +1879,7 @@ mod tests {
                 &crate::sync::store::database::StoreDatabase::new(&db),
             )
             .await
-            .expect("load exact membership")
-            .chain
-            .expect("resolved founder membership");
+            .expect("load exact membership");
             let authority = founder_recovery_authority(&store);
             let database = StoreDatabase::new(&db);
             store.home.fail_exact_create_before_call(failed_call);

@@ -1272,9 +1272,7 @@ pub async fn initialize_store_fixture(
         .await?;
     let membership = crate::sync::store::load_cycle_membership(storage, &database)
         .await
-        .map_err(|error| error.to_string())?
-        .chain
-        .ok_or_else(|| "initialized test Store has no membership chain".to_string())?;
+        .map_err(|error| error.to_string())?;
     Ok((root, membership))
 }
 
@@ -2327,10 +2325,7 @@ impl TestStore {
         );
         ensure.await?;
         let load = crate::sync::store::load_cycle_membership(&self.storage, &database);
-        load.await
-            .map_err(|error| error.to_string())?
-            .chain
-            .ok_or_else(|| "opened test Store has no membership chain".to_string())
+        load.await.map_err(|error| error.to_string())
     }
 
     pub async fn publish_pending(

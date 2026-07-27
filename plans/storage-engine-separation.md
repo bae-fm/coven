@@ -106,7 +106,9 @@ This ownership work completes the Store foundation required by
   authority or reaching into Store database state. A successful pull advances
   the authorized Store's membership from the membership controls it verified
   and materialized, without a second storage traversal, so a removal discovered
-  by pull cannot leave snapshot or write authority stale.
+  by pull cannot leave snapshot or write authority stale. Membership loading
+  returns the required owner-anchored chain directly; there is no optional
+  pre-initialization membership result.
 - Complete: the loaded Store owns remote blocked-write discard through
   abandonment, cleanup, and the final atomic local reversal. The application
   handle retains the offline local-only discard attempt, but it neither

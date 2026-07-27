@@ -2226,9 +2226,7 @@ mod tests {
         let membership =
             crate::sync::store::pull::load_cycle_membership(storage, &store_database(db))
                 .await
-                .expect("load snapshot test membership")
-                .chain
-                .expect("snapshot test membership exists");
+                .expect("load snapshot test membership");
         (root.object_hash(), device_id.to_string(), membership)
     }
 

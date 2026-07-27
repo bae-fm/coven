@@ -617,24 +617,7 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
 async fn load_authorized_membership(
     access: &StoreAccess<'_>,
 ) -> Result<crate::sync::membership::MembershipChain, SyncCycleFailure> {
-    let crate::sync::store::pull::CycleMembership {
-        chain,
-        pinned_owner,
-    } = crate::sync::store::pull::load_cycle_membership(access.storage, &access.database)
+    crate::sync::store::pull::load_cycle_membership(access.storage, &access.database)
         .await
-        .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
-    let membership = match (pinned_owner, chain) {
-        (Some(_), Some(chain)) => chain,
-        (None, _) => {
-            return Err("authorized cycle has no pinned membership founder"
-                .to_string()
-                .into());
-        }
-        (Some(owner), None) => {
-            return Err(
-                format!("owner {owner} is pinned but the cycle has no membership chain").into(),
-            );
-        }
-    };
-    Ok(membership)
+        .map_err(|error| SyncCycleFailure::operation("load membership chain", error))
 }

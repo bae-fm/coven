@@ -29,9 +29,7 @@ async fn one_retained_checkpoint() -> (
         &crate::sync::store::database::StoreDatabase::new(&db),
     )
     .await
-    .expect("load checkpoint membership")
-    .chain
-    .expect("Merge Store has membership");
+    .expect("load checkpoint membership");
     crate::sync::test_helpers::host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -415,8 +413,6 @@ async fn current_membership(database: &Database, storage: &dyn SyncStorage) -> M
     load_cycle_membership(storage, &StoreDatabase::new(database))
         .await
         .expect("load current Store membership")
-        .chain
-        .expect("initialized Store has a membership chain")
 }
 
 struct EffectiveAccessFixture {
@@ -1538,10 +1534,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &store.storage,
         store.root.store_root_hash,
         &candidate_store_dir,
-        candidate_membership
-            .chain
-            .as_ref()
-            .expect("candidate membership chain exists"),
+        &candidate_membership,
         Some(&candidate),
         None,
     ))
@@ -1560,9 +1553,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &crate::sync::store::database::StoreDatabase::new(earlier_db),
     )
     .await
-    .expect("load earlier Owner membership")
-    .chain
-    .expect("initialized Store has membership");
+    .expect("load earlier Owner membership");
     let _rotated = crate::sync::store::membership::revoke_member_durable(
         &store.storage,
         store.home.as_ref(),
@@ -1610,10 +1601,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     )
     .await
     .expect("load membership containing the concurrent control");
-    let caller_membership = later_membership
-        .chain
-        .as_ref()
-        .expect("initialized Store has membership");
+    let caller_membership = &later_membership;
     let earlier_head_ref = caller_membership
         .head_refs()
         .iter()
@@ -1640,10 +1628,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         "2026-07-21T00:02:00Z",
         later_owner,
         &later_store_dir,
-        later_membership
-            .chain
-            .as_ref()
-            .expect("later Merge membership chain"),
+        &later_membership,
     )
     .await
     .expect("prepare later concurrent write"));

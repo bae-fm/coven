@@ -105,10 +105,6 @@ async fn gc_tombstones_as(
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect();
-    let membership = membership
-        .chain
-        .as_ref()
-        .ok_or_else(|| "tombstone GC test Store has no membership chain".to_string())?;
     gc_tombstones(
         db,
         cloud_home,
@@ -117,7 +113,7 @@ async fn gc_tombstones_as(
         store_id,
         self_pubkey,
         &activated_uploaders,
-        membership,
+        &membership,
         clock,
         grace,
     )

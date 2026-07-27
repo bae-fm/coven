@@ -2670,9 +2670,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
     let membership =
         crate::sync::store::load_cycle_membership(&storage.storage, &store_database(&db))
             .await
-            .expect("load exact founder membership")
-            .chain
-            .expect("Store has membership");
+            .expect("load exact founder membership");
     assert!(
         membership.is_founded_by(&owner_pk),
         "the persisted chain is founded by the owner",
@@ -2876,9 +2874,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         &store_database(&db),
     )
     .await
-    .expect("load exact founder membership")
-    .chain
-    .expect("Store has membership");
+    .expect("load exact founder membership");
     protocol_root
         .descriptor
         .validate_merge_founder_entry(

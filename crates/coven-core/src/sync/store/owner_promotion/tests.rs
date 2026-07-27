@@ -84,10 +84,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         &store.storage,
         store.root.store_root_hash,
         &store_dir,
-        membership
-            .chain
-            .as_ref()
-            .expect("opened Store has membership"),
+        &membership,
         Some(&second_owner),
         None,
     )

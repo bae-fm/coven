@@ -138,9 +138,7 @@ async fn published_history(
         &crate::sync::store::StoreDatabase::new(&db),
     )
     .await
-    .expect("load Merge membership")
-    .chain
-    .expect("Merge membership chain");
+    .expect("load Merge membership");
     let (temp, store_dir) = temp_store_dir();
     for sequence in 1..=history_length {
         publish_note(&db, &store, &device_id, &store_dir, sequence).await;
@@ -641,9 +639,7 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         &crate::sync::store::StoreDatabase::new(&db),
     )
     .await
-    .expect("load snapshot membership")
-    .chain
-    .expect("Merge snapshot has membership");
+    .expect("load snapshot membership");
     let directory = tempfile::tempdir().expect("create snapshot image directory");
     let snapshot_dir = directory.path().to_path_buf();
     let synced_tables = db.synced_tables().to_vec();

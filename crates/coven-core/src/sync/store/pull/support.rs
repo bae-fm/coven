@@ -12,35 +12,14 @@ use crate::sync::hlc::Timestamp;
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::SyncStorage;
 
-/// The membership state one sync cycle judges every authorization against, loaded
-/// and anchored once at the top of the cycle and threaded to the pull, the
-/// write-grant binding, the snapshot-authorization decision, and the tombstone GC.
-/// Loading it once (instead of each of those sites re-listing and re-downloading
-/// the chain) both saves the round-trips and — more importantly — makes every
-/// authorization decision in the cycle judge the *same* chain state, so two reads
-/// can't disagree mid-cycle. Because [`load_anchored_chain`] writes the reader's
-/// per-author-stream head watermark, loading once also writes each watermark once.
-///
-/// [`load_anchored_chain`]: crate::sync::store::membership::load_anchored_chain
-pub struct CycleMembership {
-    /// The owner-anchored, committed chain. `None` is representable for
-    /// pre-initialization bootstrap callers; initialized cycles always carry one.
-    pub chain: Option<MembershipChain>,
-    /// The store's pinned owner (issue #102). `None` only before initialization.
-    /// An owner-pinned store that fails to produce a valid chain aborts the load,
-    /// so `Some(owner)` here always travels with `Some(chain)`.
-    pub pinned_owner: Option<String>,
-}
-
-/// Load and anchor the cycle's membership chain once. Every successful listing
-/// is validated; a loader error aborts regardless of owner pin because an
-/// unpinned database may already have accepted author floors. Only the loader's
-/// explicit `Ok(None)` represents an unpinned pre-initialization read. LIST
-/// transport errors retain their separate pinned/unpinned classification.
+/// Load and anchor the membership chain. Every successful listing is validated;
+/// a loader error aborts because the database may already have accepted author
+/// floors. The Store root supplies the founder when the database has not pinned
+/// one yet, and loading the chain persists that owner anchor.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     database: &crate::sync::store::database::StoreDatabase,
-) -> Result<CycleMembership, PullError> {
+) -> Result<MembershipChain, PullError> {
     let db = database.sqlite();
     let pinned_owner = db
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
@@ -58,20 +37,14 @@ pub async fn load_cycle_membership(
     let owner = pinned_owner
         .clone()
         .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
-    let chain = crate::sync::store::membership::load_and_persist_owner_anchor(
-        storage, &root, &owner, database,
-    )
-    .await
-    .map_err(|error| match error {
-        crate::sync::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
-            PullError::MembershipLoad(error)
-        }
-        _ => PullError::MembershipTampered(error.to_string()),
-    })?;
-    Ok(CycleMembership {
-        chain: Some(chain),
-        pinned_owner: Some(owner),
-    })
+    crate::sync::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, database)
+        .await
+        .map_err(|error| match error {
+            crate::sync::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
+                PullError::MembershipLoad(error)
+            }
+            _ => PullError::MembershipTampered(error.to_string()),
+        })
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
