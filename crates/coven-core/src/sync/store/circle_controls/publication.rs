@@ -39,21 +39,28 @@ pub(super) async fn publish_circle_operation(
     }
     let creation = journal.operation().creation.clone();
     let store_root_hash = creation.control.value.store_root_hash;
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+    if root.store_root_hash != store_root_hash {
+        return Err(CircleOperationError::InvalidState(
+            "Circle commit names a different Store root".to_string(),
+        ));
+    }
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
     let circle_encryption = EncryptionService::from(
         MasterKeyring::from_serialized(&creation.keyring)
             .map_err(|error| CircleOperationError::Journal(format!("circle keyring: {error}")))?,
     );
-    let commit = journal.commit()?;
-    let author = database
-        .activated_store_device_registration(commit.author_registration.clone())
+    let verified_commit = commit_verifier
+        .authenticate_bytes(
+            &journal.operation().commit_ref,
+            &journal.operation().commit_bytes,
+        )
         .await?;
-    let verified_commit = VerifiedStoreBatchCommit::parse(
-        &journal.operation().commit_bytes,
-        store_root_hash,
-        &journal.operation().commit_ref,
-        &author,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let author = verified_commit.author().clone();
     let commit = verified_commit.value();
     let reference = commit.circle_controls();
     let [reference] = reference else {
@@ -96,15 +103,6 @@ pub(super) async fn publish_circle_operation(
             head,
             history_summary,
         } = &journal.operation().policy;
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        if root.store_root_hash != store_root_hash {
-            return Err(CircleOperationError::InvalidState(
-                "Circle commit names a different Store root".to_string(),
-            ));
-        }
         let prepared_head = journal
             .operation()
             .prepared_objects
@@ -490,10 +488,6 @@ pub(super) async fn publish_circle_operation(
         )
         .await?;
     }
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
     let verified = load_circle_activations(
         database,
         storage,
@@ -562,10 +556,10 @@ pub(super) async fn publish_circle_operation(
             block_lost_position(
                 database,
                 storage,
+                &mut commit_verifier,
                 &journal,
-                store_root_hash,
                 &head,
-                commit,
+                &verified_commit,
                 operation_id,
                 circle_id,
             )
@@ -705,10 +699,10 @@ async fn current_merge_authority(
 async fn block_lost_position(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     journal: &CircleOperationJournal,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
     head: &crate::sync::store_commit::StoreDeviceHead,
-    commit: &StoreBatchCommit,
+    commit: &VerifiedStoreBatchCommit,
     operation_id: &CircleOperationId,
     circle_id: crate::sync::circle::CircleId,
 ) -> Result<(), CircleOperationError> {
@@ -725,7 +719,7 @@ async fn block_lost_position(
         crate::sync::store::abandonment::observe_excluded_candidate_head(
             database,
             storage,
-            store_root_hash,
+            commit_verifier,
             head,
             commit,
             prepared_head.reference(),

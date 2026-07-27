@@ -13,7 +13,9 @@ use crate::database::{
     RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
 use crate::sync::remote_object::remote_object_id;
-use crate::sync::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
+use crate::sync::store_commit::{
+    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead, VerifiedStoreBatchCommit,
+};
 use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
 impl StoreDatabase {
@@ -292,16 +294,13 @@ impl StoreDatabase {
                         "accepted Merge head differs from the exact prepared commit".to_string(),
                     ));
                 }
-                let commit_value = StoreBatchCommit::parse_at(
+                let commit_value = VerifiedStoreBatchCommit::parse(
                     commit.semantic_bytes(),
                     root.store_root_hash,
-                    &accepted.coord,
+                    &accepted,
                     &registration,
                 )
                 .map_err(|error| DbError::Message(format!("outbound commit: {error}")))?;
-                accepted
-                    .verify_commit(&commit_value)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
                 let head_value = StoreDeviceHead::parse_at(
                     head.semantic_bytes(),
                     root.store_root_hash,

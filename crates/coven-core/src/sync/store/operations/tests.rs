@@ -101,12 +101,27 @@ async fn observe_excluded_candidate_head(
     candidate_commit: &StoreBatchCommit,
     candidate_object: &ExactObjectRef,
 ) -> Result<ExcludedCandidateHeadObservation, StoreError> {
+    let database = StoreDatabase::new(db);
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| StoreError::InvalidOutbound("test Store root is absent".to_string()))?;
+    if root.store_root_hash != store_root_hash {
+        return Err(StoreError::InvalidOutbound(
+            "test candidate names another Store root".to_string(),
+        ));
+    }
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+    let verified_commit = commit_verifier
+        .authenticate_bytes(&candidate.commit, &candidate_commit.to_bytes())
+        .await?;
     store_observe_excluded_candidate_head(
-        &StoreDatabase::new(db),
+        &database,
         storage,
-        store_root_hash,
+        &mut commit_verifier,
         candidate,
-        candidate_commit,
+        &verified_commit,
         candidate_object,
     )
     .await

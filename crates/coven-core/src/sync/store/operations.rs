@@ -394,8 +394,12 @@ pub(crate) fn publish<'a>(
 {
     Box::pin(async move {
         let db = database.sqlite();
-        let commit = activation.candidate.commit.clone();
         let reference = activation.candidate.reference.clone();
+        let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, &root).await?;
+        let verified_commit = commit_verifier
+            .authenticate_bytes(&reference, &activation.candidate.commit.to_bytes())
+            .await?;
+        let commit = verified_commit.value().clone();
         upload_commit(storage, &activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
         let authorization = Box::pin(super::pull::load_retained_merge_outbound_authorization(
@@ -444,7 +448,8 @@ pub(crate) fn publish<'a>(
                     database,
                     storage,
                     activation.candidate,
-                    commit,
+                    &mut commit_verifier,
+                    verified_commit,
                     reference,
                     head,
                     prepared_head,
@@ -578,7 +583,8 @@ async fn resolve_head_collision(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     mut candidate: Box<PreparedStoreOperationCommit>,
-    commit: StoreBatchCommit,
+    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
+    commit: crate::sync::store_commit::VerifiedStoreBatchCommit,
     reference: StoreBatchCommitRef,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
@@ -587,7 +593,7 @@ async fn resolve_head_collision(
     let observation = read_occupied_merge_head(
         database,
         storage,
-        commit.store_root_hash,
+        commit_verifier,
         &head,
         &commit,
         prepared_head.reference().slot(),

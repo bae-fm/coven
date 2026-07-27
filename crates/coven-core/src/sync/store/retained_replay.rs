@@ -14,9 +14,9 @@ use crate::sync::store::membership::{
 };
 use crate::sync::store_commit::{
     CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
-    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef,
-    StoreSnapshotRef,
+    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
+    VerifiedStoreBatchCommit,
 };
 
 pub(crate) const GENERATION_ZERO: u64 = 0;
@@ -344,14 +344,14 @@ impl RetainedReplaySnapshotAuthority {
                 .object
                 .verify(&commit_bytes)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            let parsed_commit = StoreBatchCommit::parse_at(
+            let parsed_commit = VerifiedStoreBatchCommit::parse(
                 &commit_bytes,
                 self.store_root.store_root_hash,
-                &acknowledgement.activating_commit.coord,
+                &acknowledgement.activating_commit,
                 &registration.value,
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
-            if parsed_commit != acknowledgement.activating_commit_value
+            if parsed_commit.value() != &acknowledgement.activating_commit_value
                 || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
                 || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
                 || !history_cut_covers_commit(

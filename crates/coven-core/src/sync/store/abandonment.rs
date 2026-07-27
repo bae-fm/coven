@@ -9,7 +9,7 @@ use crate::sync::store::database::publication_state::MergeCandidateAbandonmentPr
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest, ObjectHash,
     StoreBatchCommit, StoreBatchCommitDeletionTarget, StoreBatchCommitRef, StoreDeviceHead,
-    StoreDeviceRegistration,
+    StoreDeviceRegistration, VerifiedStoreBatchCommit,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -370,9 +370,9 @@ pub(crate) async fn discard_candidate_nonactivation(
         observe_excluded_candidate_head(
             database,
             storage,
-            root.store_root_hash,
+            history_verifier.commit_verifier(),
             &candidate.head.value,
-            verified_candidate.value(),
+            &verified_candidate,
             &candidate.head.object,
         )
         .await?
@@ -522,9 +522,9 @@ pub(crate) async fn excluded_candidate_nonactivation(
     let nonactivation = match observe_excluded_candidate_head(
         database,
         storage,
-        root.store_root_hash,
+        history_verifier.commit_verifier(),
         candidate_head,
-        candidate.value(),
+        candidate,
         candidate_head_object,
     )
     .await?
@@ -556,10 +556,10 @@ pub(crate) struct VerifiedMergeWinner {
     store_root_hash: ObjectHash,
     expected_slot: crate::storage::cloud::ObjectSlot,
     expected: StoreDeviceHead,
-    expected_commit: Box<StoreBatchCommit>,
+    expected_commit: Box<VerifiedStoreBatchCommit>,
     winner: StoreDeviceHead,
     winner_prepared: PreparedExactObject,
-    winner_commit: Box<StoreBatchCommit>,
+    winner_commit: Box<VerifiedStoreBatchCommit>,
 }
 
 impl VerifiedMergeWinner {
@@ -597,7 +597,7 @@ impl VerifiedMergeWinner {
             || self.winner.successor.predecessor != self.expected.successor.predecessor
             || self.winner_prepared.reference().slot() != &self.expected_slot
             || self.winner.commit == reference
-            || self.winner.commit.commit_hash != self.winner_commit.commit_hash()
+            || self.winner.commit != *self.winner_commit.reference()
         {
             return Err(
                 crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(
@@ -606,12 +606,6 @@ impl VerifiedMergeWinner {
                 ),
             );
         }
-        self.winner
-            .commit
-            .verify_commit(&self.winner_commit)
-            .map_err(|error| {
-                crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
-            })?;
         crate::sync::remote_object::VerifiedCandidateNonactivation::from_verified_merge_winner(
             candidate,
             crate::sync::store_commit::StoreDeviceHeadRef {
@@ -630,7 +624,7 @@ impl VerifiedMergeWinner {
         &self.winner_prepared
     }
 
-    pub(crate) fn winner_commit(&self) -> &StoreBatchCommit {
+    pub(crate) fn winner_commit(&self) -> &VerifiedStoreBatchCommit {
         &self.winner_commit
     }
 
@@ -660,11 +654,12 @@ pub(crate) enum ExcludedCandidateHeadObservation {
 pub(crate) async fn observe_excluded_candidate_head(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     candidate: &StoreDeviceHead,
-    candidate_commit: &StoreBatchCommit,
+    candidate_commit: &VerifiedStoreBatchCommit,
     candidate_object: &ExactObjectRef,
 ) -> Result<ExcludedCandidateHeadObservation, StoreError> {
+    let store_root_hash = commit_verifier.root().store_root_hash;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let prefix = head_slot_prefix(
@@ -682,7 +677,7 @@ pub(crate) async fn observe_excluded_candidate_head(
         Ok(_) => read_occupied_merge_head(
             database,
             storage,
-            store_root_hash,
+            commit_verifier,
             candidate,
             candidate_commit,
             candidate_object.slot(),
@@ -719,12 +714,13 @@ pub(crate) fn verify_merge_candidate_nonactivations(
 pub(crate) async fn read_occupied_merge_head(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     expected: &StoreDeviceHead,
-    expected_commit: &StoreBatchCommit,
+    expected_commit: &VerifiedStoreBatchCommit,
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
 ) -> Result<VerifiedMergeWinner, StoreError> {
+    let store_root_hash = commit_verifier.root().store_root_hash;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let (winner_bytes, winner_prepared) = storage
@@ -746,17 +742,14 @@ pub(crate) async fn read_occupied_merge_head(
     let registration = database
         .activated_store_device_registration(expected.author_registration.clone())
         .await?;
-    expected
-        .commit
-        .verify_commit(expected_commit)
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    StoreBatchCommit::parse_at(
-        &expected_commit.to_bytes(),
-        store_root_hash,
-        &expected.commit.coord,
-        &registration,
-    )
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    if expected_commit.store_root_hash() != store_root_hash
+        || expected_commit.reference() != &expected.commit
+        || expected_commit.author() != &registration
+    {
+        return Err(StoreError::InvalidOutbound(
+            "expected Merge head differs from its authenticated commit".to_string(),
+        ));
+    }
     StoreDeviceHead::parse_at(
         &expected.to_bytes(),
         store_root_hash,
@@ -764,14 +757,12 @@ pub(crate) async fn read_occupied_merge_head(
         &expected.commit,
     )
     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    let winner_commit = crate::sync::store_objects::load_commit_ref(
-        storage,
-        store_root_hash,
-        &unverified.commit,
-        &registration,
-    )
-    .await?
-    .value;
+    let winner_commit = commit_verifier.load_ref(&unverified.commit).await?;
+    if winner_commit.author() != &registration {
+        return Err(StoreError::InvalidOutbound(
+            "occupied Merge head commit has a different authenticated author".to_string(),
+        ));
+    }
     let winner = StoreDeviceHead::parse_at(
         &winner_bytes,
         store_root_hash,

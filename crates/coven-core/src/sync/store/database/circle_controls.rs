@@ -11,7 +11,8 @@ use crate::sync::circle::{CircleOperationId, CircleOperationState};
 use crate::sync::remote_object::remote_object_id;
 use crate::sync::store::circle_controls::{CircleOperationJournal, VerifiedCircleActivations};
 use crate::sync::store_commit::{
-    commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreDeviceOperations,
+    commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreBatchCommit,
+    VerifiedStoreDeviceOperations,
 };
 
 impl StoreDatabase {
@@ -346,19 +347,15 @@ impl StoreDatabase {
                     ));
                 };
                 let verify_commit = || {
-                    let commit = StoreBatchCommit::parse_at(
+                    let commit = VerifiedStoreBatchCommit::parse(
                         &operation.commit_bytes,
                         root.store_root_hash,
-                        &operation.commit_ref.coord,
+                        &operation.commit_ref,
                         &author,
                     )
                     .map_err(|error| {
                         DbError::Message(format!("verify circle Store commit: {error}"))
                     })?;
-                    operation
-                        .commit_ref
-                        .verify_commit(&commit)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
                     if operation.commit_ref.object.slot().logical_key()
                         != commit_semantic_prefix(
                             commit.candidate_family(),

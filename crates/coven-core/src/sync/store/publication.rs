@@ -27,6 +27,7 @@ pub(crate) async fn drain_store_writes(
     #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
+    let mut commit_verifier = None;
     database.retire_uploaded_blob_spools().await?;
     while let Some(batch) = database.oldest_prepared_store_write().await? {
         let write_id = batch.commit.value.write_id.clone();
@@ -40,7 +41,15 @@ pub(crate) async fn drain_store_writes(
                 &batch.commit.value.author_registration,
             ))
             .await?;
-            let store_root_hash = required_store_root(database).await?.store_root_hash;
+            if commit_verifier.is_none() {
+                let root = required_store_root(database).await?;
+                commit_verifier =
+                    Some(super::pull::StoreCommitVerifier::new(storage, &root).await?);
+            }
+            let commit_verifier = commit_verifier
+                .as_mut()
+                .expect("Store commit verifier was initialized above");
+            let store_root_hash = commit_verifier.root().store_root_hash;
             let commit = &batch.commit.value;
             if !matches!(
                 commit.body,
@@ -102,7 +111,7 @@ pub(crate) async fn drain_store_writes(
                 let observation = read_occupied_merge_head(
                     database,
                     storage,
-                    store_root_hash,
+                    commit_verifier,
                     head,
                     commit,
                     batch.head.object.slot(),
@@ -169,7 +178,7 @@ pub(crate) async fn drain_store_writes(
             let observation = read_occupied_merge_head(
                 database,
                 storage,
-                store_root_hash,
+                commit_verifier,
                 head,
                 commit,
                 batch.head.object.slot(),

@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
+    root: StoreRootRef,
     verified_root: super::store_commit::StoreProtocolRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
@@ -10,12 +10,12 @@ pub(crate) struct StoreCommitVerifier<'a> {
 impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn new(
         storage: &'a dyn SyncStorage,
-        root: &'a StoreRootRef,
+        root: &StoreRootRef,
     ) -> Result<Self, StoreObjectError> {
         let verified_root = load_store_protocol_root(storage, root).await?.value;
         Ok(Self {
             storage,
-            root,
+            root: root.clone(),
             verified_root,
             commits: BTreeMap::new(),
         })
@@ -29,7 +29,7 @@ impl<'a> StoreCommitVerifier<'a> {
             return Ok(commit.clone());
         }
         let verified =
-            load_verified_commit_at_root(self.storage, self.root, &self.verified_root, reference)
+            load_verified_commit_at_root(self.storage, &self.root, &self.verified_root, reference)
                 .await?;
         self.commits.insert(reference.clone(), verified.clone());
         Ok(verified)
@@ -55,7 +55,7 @@ impl<'a> StoreCommitVerifier<'a> {
         }
         let verified = verify_commit_bytes_at_root(
             self.storage,
-            self.root,
+            &self.root,
             &self.verified_root,
             reference,
             bytes.to_vec(),
@@ -67,6 +67,10 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
         &self.verified_root
+    }
+
+    pub(crate) fn root(&self) -> &StoreRootRef {
+        &self.root
     }
 
     pub(crate) fn remember(
