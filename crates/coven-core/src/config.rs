@@ -209,17 +209,21 @@ impl Config {
 }
 
 /// On-disk form of [`Config`] (the runtime `store_dir` is supplied separately).
+///
+/// This is the `config.yaml` wire format, not published API: hosts read and
+/// write it through [`Config::save_to_config_yaml`] and
+/// [`Config::load_from_config_yaml`], which are the only things that name it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigYaml {
-    pub store_id: String,
-    pub store_name: String,
-    pub device_id: String,
+pub(crate) struct ConfigYaml {
+    pub(crate) store_id: String,
+    pub(crate) store_name: String,
+    pub(crate) device_id: String,
     #[serde(default)]
-    pub encryption_key_stored: bool,
+    pub(crate) encryption_key_stored: bool,
     #[serde(default)]
-    pub encryption_key_fingerprint: Option<String>,
+    pub(crate) encryption_key_fingerprint: Option<String>,
     #[serde(default, flatten)]
-    pub cloud_home: CloudHomeConfig,
+    pub(crate) cloud_home: CloudHomeConfig,
 }
 
 impl From<&Config> for ConfigYaml {
