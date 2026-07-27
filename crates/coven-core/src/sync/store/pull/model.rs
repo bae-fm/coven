@@ -185,10 +185,6 @@ pub enum StorePullError {
 #[derive(Debug, thiserror::Error)]
 pub enum StorePullMembershipError {
     #[error("{0}")]
-    Object(#[source] StoreObjectError),
-    #[error("{0}")]
-    Chain(#[source] super::membership_ops::AnchoredChainError),
-    #[error("{0}")]
     State(#[source] crate::sync::membership::MembershipError),
     #[error("{0}")]
     Message(String),

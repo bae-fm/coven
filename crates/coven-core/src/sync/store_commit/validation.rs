@@ -79,30 +79,18 @@ pub enum StoreProtocolError {
         expected: String,
         actual: String,
     },
-    #[error("Store key generation must be positive, got {0}")]
-    InvalidKeyGeneration(u64),
-    #[error("store protocol root store id is empty")]
-    EmptyStoreId,
     #[error("Store commit sequence must start at 1, got {0}")]
     InvalidSequence(u64),
     #[error("Store commit sequence 1 must not name a predecessor")]
     UnexpectedPredecessor,
     #[error("Store commit after sequence 1 must name its predecessor hash")]
     MissingPredecessor,
-    #[error("Store control revision must start at 1, got {0}")]
-    InvalidRevision(u64),
-    #[error("Store control revision 1 must not name a predecessor")]
-    UnexpectedControlPredecessor,
-    #[error("Store control revision after 1 must name its predecessor hash")]
-    MissingControlPredecessor,
     #[error("Store acknowledgement sequence must start at 1, got {0}")]
     InvalidAckSequence(u64),
     #[error("Store acknowledgement sequence 1 must not name a predecessor object")]
     UnexpectedAckPredecessor,
     #[error("Store acknowledgement after sequence 1 must name its predecessor object")]
     MissingAckPredecessor,
-    #[error("Store commit for {0:?} must not name its own device as a dependency")]
-    OwnDependency(String),
     #[error(
         "invalid membership coordinate {author}/{grant}/{stream_id}/{seq} with entry hash {entry_hash}"
     )]
