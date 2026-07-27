@@ -258,8 +258,10 @@ rebuild the deleted choice.
   away from the current control. A bootstrap image's storage path is keyed by its
   recipient's slot, so recipients never share one image object and each is owned by
   exactly the one activation that seeded it.
-- Superseded-snapshot-generation and audience-blob-ciphertext reclamation, and the
-  beyond-epoch-cutoff eligibility arm, are not yet implemented.
+- Circle packages beyond an accepted epoch-close cutoff, superseded standalone
+  Circle snapshot generations, and audience blob ciphertext with no remaining
+  live row binding or retained-replay owner are reclaimed through the same
+  evidence, authorization, receipt, restart, and exact-deletion pipeline.
 - The signed schema-routing contract records each descendant's explicitly
   selected audience-parent foreign-key column.
 - Independent UUID and intentional shared-key identities are validated on host
@@ -292,26 +294,21 @@ rebuild the deleted choice.
 
 ### Required before Circles are complete
 
-- use the authenticated routing boundary for standalone Circle snapshot and
-  restore images;
-- complete Circle membership, access, close cancellation, device exclusion,
-  conflict resolution, deletion, and durable restart;
-- add Circle acknowledgement, standalone snapshot, restore, and reclamation;
-- finish audience-aware blob movement and retention;
-- expose the application API and errors described here; and
-- update all Coven documentation and dependent applications to the finished
-  API.
+- complete the integration, failure-boundary, and data-integrity audit against
+  the verification matrix below;
+- update all Coven documentation to the finished API and protocol; and
+- update dependent applications to the finished API and verify them.
 
 ## Completion order
 
 1. **Complete.** Seal the single Store owner boundary.
-1. **In progress.** Schema contracts, row identity, host and pull routing
+1. **Complete.** Schema contracts, row identity, host and pull routing
    authentication, destination-only moves, and final-component validation are
    implemented. Store snapshot creation, bootstrap, and restore installation
    use the same authenticated routing boundary. Adversarial routing arrival
    orders converge through independent audience and content resolution.
    Recipient Circle bootstrap images use and verify that boundary atomically.
-1. **In progress.** Create, rename, member addition, recipient bootstrap
+1. **Complete.** Create, rename, member addition, recipient bootstrap
    installation, member-removal epoch close, successor activation, close
    cancellation, the epoch-close device-exclusion slot competition, command, and
    outcome cutoff, Store-member-removal rotation blocking, control-conflict
@@ -330,16 +327,15 @@ rebuild the deleted choice.
    from the verified successor outcome, resets the projection through
    bootstrap-seeded replay, and refuses publication with the typed
    `ExcludedDeviceMustReset` until the successor bootstrap coverage records.
-1. Circle acknowledgement and standalone-snapshot authoring, publication,
+1. **Complete.** Circle acknowledgement and standalone-snapshot authoring, publication,
    bootstrap-machinery install, snapshot acknowledgement-stability gating, and
    mixed Store-and-Circle restore staging are implemented. Restore re-resolves the
    restoring identity's own access from the verified control chain, selects the
    maximal verified image per Circle it can decrypt, clears the coverage rows for
    Circles it cannot, and installs the Store image and every Circle image in one
-   transaction. Circle package and bootstrap-image reclamation are implemented on
-   the shared Store reclaim pipeline. Finish the remaining reclamation target kinds
-   (superseded snapshot generations, audience blob ciphertext, and the
-   beyond-epoch-cutoff arm), packages, pull, and blobs.
+   transaction. Circle package, bootstrap-image, superseded-snapshot-generation,
+   audience-blob-ciphertext, and beyond-epoch-cutoff reclamation use the shared
+   Store reclaim pipeline.
 1. **In progress.** The application API is implemented: the `coven.circles()`
    namespace (create, rename, add and remove member, resolve control, cancel and
    exclude-device on a close, delete, retry and discard operation, list, members,

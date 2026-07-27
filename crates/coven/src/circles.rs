@@ -324,6 +324,14 @@ mod tests {
             .expect("a 64-character hexadecimal close id")
     }
 
+    fn authority_lost_block() -> CircleOperationBlock {
+        serde_json::from_str(&format!(
+            r#"{{"authority_lost":{{"grant_id":"{}"}}}}"#,
+            "cd".repeat(32)
+        ))
+        .expect("an authority-lost block with a 64-character hexadecimal grant id")
+    }
+
     /// Each internal refusal maps to its public variant, carrying the identifiers a
     /// caller needs. Covers the named refusal set: rename-on-deleted,
     /// resolve-on-nonconflicted, cancel-without-close, exclude-non-participant, and
@@ -389,6 +397,17 @@ mod tests {
         );
 
         let operation_id = CircleOperationId::placeholder("discard-map-seed");
+        let not_blocked: CircleError = CircleOperationError::NotBlocked {
+            operation_id: operation_id.clone(),
+        }
+        .into();
+        assert!(matches!(
+            not_blocked,
+            CircleError::NotBlocked {
+                operation_id: mapped
+            } if mapped == operation_id
+        ));
+
         let discard: CircleError = CircleOperationError::DiscardRequiresNonactivation {
             operation_id: operation_id.clone(),
         }
@@ -397,6 +416,20 @@ mod tests {
             discard,
             CircleError::DiscardRequiresNonactivation { operation_id: mapped }
                 if mapped == operation_id
+        ));
+
+        let block = authority_lost_block();
+        let blocked: CircleError = CircleOperationError::Blocked {
+            circle_id: circle,
+            block: block.clone(),
+        }
+        .into();
+        assert!(matches!(
+            blocked,
+            CircleError::Blocked {
+                circle_id,
+                block: mapped
+            } if circle_id == circle && mapped == block
         ));
 
         let close_id = close_id(0xab);
@@ -458,6 +491,19 @@ mod tests {
             CircleError::ExcludedDeviceMustReset {
                 circle_id: circle,
                 close_id,
+            }
+            .to_string(),
+            CircleError::NotBlocked {
+                operation_id: CircleOperationId::placeholder("not-blocked-display"),
+            }
+            .to_string(),
+            CircleError::DiscardRequiresNonactivation {
+                operation_id: CircleOperationId::placeholder("discard-display"),
+            }
+            .to_string(),
+            CircleError::Blocked {
+                circle_id: circle,
+                block: authority_lost_block(),
             }
             .to_string(),
             CircleError::Identity("locked".to_string()).to_string(),

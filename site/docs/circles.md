@@ -222,11 +222,11 @@ operation id, its Circle, its
 - `Blocked { block }` — the operation cannot publish. The one block reason today
   is [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock), meaning the
   author's exact store grant no longer has current write authority. The
-  initiator retries it once authority is restored:
-
-```rust
-circles.retry_operation(op_id).await?;
-```
+  initiator calls `circles.retry_operation(op_id).await?` once authority is
+  restored.
+- `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
+  exact-deleting the candidate's exclusive objects before clearing the durable
+  operation.
 
 An initiator can discard an operation only after Coven verifies that its
 candidate can never activate:
@@ -376,7 +376,9 @@ package, snapshot, or bootstrap only when verified acknowledgements and snapshot
 coverage prove no retained history still needs it. A member-addition bootstrap
 is pinned to its recipient's access activation and is not reclaimed until that
 recipient has acknowledged a later sufficient Circle snapshot or lost authority
-under signed evidence.
+under signed evidence. It also deletes packages excluded by an accepted
+epoch-close cutoff, superseded standalone snapshot generations, and audience
+blob ciphertext after no live row or retained replay input still owns it.
 
 ## Deletion
 
