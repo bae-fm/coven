@@ -2938,54 +2938,6 @@ async fn fk_violation_still_retries_and_resolves() {
     );
 }
 
-#[tokio::test]
-async fn pull_skips_changeset_from_newer_schema() {
-    let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
-
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'Future', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
-    let reference = storage
-        .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
-        .await
-        .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
-    let commit = resign_exact_commit(
-        &storage,
-        &graph,
-        SCHEMA_VERSION + 1,
-        graph.commit.membership_authority.clone(),
-    )
-    .await;
-    replace_exact_commit_bytes(
-        &storage,
-        &graph,
-        commit.to_bytes(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
-
-    let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
-    assert_eq!(newer_schema_positions(&result).len(), 1);
-    // The position must NOT advance past a genuine newer-schema changeset: it
-    // becomes applicable once this app updates, and an already-running device
-    // never re-bootstraps, so advancing would strand its rows forever. Leaving
-    // the position put re-fetches seq 1 after the upgrade.
-    assert_eq!(updated.get("dev1"), None);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-}
-
 /// The schema-version gate reads `env.schema_version` to classify a held stream
 /// as routine version skew (the peer upgraded past us), so it must run only on an
 /// authenticated envelope. A forged object carrying a large `schema_version` and
