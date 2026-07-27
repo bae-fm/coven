@@ -67,16 +67,16 @@ pub(crate) async fn history_cut_covers(
 }
 
 pub(crate) async fn load_provider_access_activation(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    verified_root: &super::store_commit::StoreProtocolRoot,
     access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
     administrator: &StoreDeviceRegistration,
-) -> Result<StoreBatchCommit, StorePullError> {
+) -> Result<VerifiedStoreBatchCommit, StorePullError> {
     let grant = super::store_objects::load_provider_access_grant_ref_with_root(
         storage,
         root,
-        verified_root,
+        history_verifier.verified_root(),
         &access.grant_ref,
         administrator,
     )
@@ -87,11 +87,10 @@ pub(crate) async fn load_provider_access_activation(
                 .to_string(),
         ));
     }
-    let (activation, author) =
-        load_commit_with_author_at_root(storage, root, verified_root, &access.activation).await?;
-    if activation.provider_access_grants() != std::slice::from_ref(&access.grant_ref)
-        || activation.author_registration != access.grant.administrator
-        || author != *administrator
+    let activation = history_verifier.load_ref(&access.activation).await?;
+    if activation.value().provider_access_grants() != std::slice::from_ref(&access.grant_ref)
+        || activation.value().author_registration != access.grant.administrator
+        || activation.author() != administrator
     {
         return Err(StorePullError::Database(
             "device provider approval activation is not the administrator's exact sole access grant"

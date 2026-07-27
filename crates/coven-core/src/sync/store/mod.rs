@@ -516,13 +516,9 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &super::store_commit::StoreDeviceRegistration,
 ) -> Result<(), pull::StorePullError> {
-    let root_value = super::store_objects::load_store_protocol_root(storage, root)
-        .await?
-        .value;
     pull::verify_accepted_provider_access_activation(
         storage,
         root,
-        &root_value,
         access,
         provider_admin,
         administrator,

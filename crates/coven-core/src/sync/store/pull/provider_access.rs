@@ -4,23 +4,30 @@ use super::*;
 pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     access: &crate::sync::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &crate::sync::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
 ) -> Result<(), StorePullError> {
-    let activation =
-        load_provider_access_activation(storage, root, root_value, access, administrator).await?;
-    let membership = load_merge_predecessor_membership(storage, root, &activation.membership_state)
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    let activation = load_provider_access_activation(
+        &mut history_verifier,
+        storage,
+        root,
+        access,
+        administrator,
+    )
+    .await?;
+    let membership =
+        load_merge_predecessor_membership(storage, root, &activation.value().membership_state)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
     if !verify_merge_provider_administrator(
         &membership,
         &access.grant.administrator_grant,
-        &activation.author_registration,
+        &activation.value().author_registration,
         provider_admin,
     ) {
         return Err(StorePullError::Database(
@@ -28,7 +35,14 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
                 .to_string(),
         ));
     }
-    if !current_history_contains(storage, root, root_value, &membership, &access.activation).await?
+    if !current_history_contains(
+        &mut history_verifier,
+        storage,
+        root,
+        &membership,
+        &access.activation,
+    )
+    .await?
     {
         return Err(StorePullError::Database(
             "device provider approval activation is absent from current accepted Store history"
@@ -39,13 +53,12 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
 }
 
 async fn current_history_contains(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     membership: &MembershipChain,
     expected: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
     history_verifier.verify_refs([expected.clone()]).await?;
     let mut state = history_verifier
         .history()
@@ -59,10 +72,13 @@ async fn current_history_contains(
         .state_after
         .clone();
     let mut registrations = BTreeMap::new();
-    let founder = load_founder_registration_with_root(storage, root, root_value).await?;
+    let verified_root = history_verifier.verified_root().clone();
+    let founder = load_founder_registration_with_root(storage, root, &verified_root).await?;
     let founder_ref = StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object);
     registrations.insert(founder_ref.device_id, (founder_ref, founder.value));
-    for recovered in discover_merge_owner_recoveries(storage, root, root_value, membership).await? {
+    for recovered in
+        discover_merge_owner_recoveries(storage, root, &verified_root, membership).await?
+    {
         registrations.insert(recovered.0.device_id, recovered);
     }
     load_state_registrations(storage, root, &state, &mut registrations).await?;
@@ -86,7 +102,7 @@ async fn current_history_contains(
                 None => None,
             };
             let discovered = discover_merge_stream(
-                &mut history_verifier,
+                history_verifier,
                 storage,
                 root,
                 registration_ref,
@@ -176,4 +192,104 @@ async fn load_state_registrations(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestStore};
+
+    #[tokio::test]
+    async fn provider_access_verification_authenticates_its_activation_once() {
+        let owner = UserKeypair::generate();
+        let db = open_test_db();
+        let store = TestStore::create(&db, "provider-access-verification", owner.clone())
+            .await
+            .expect("create provider-access verification Store");
+        let database = StoreDatabase::new(&db);
+        let member = UserKeypair::generate();
+        crate::sync::store::membership::invite_member(
+            store.storage.as_ref(),
+            store.home.as_ref(),
+            &owner,
+            &crate::sync::hlc::Hlc::new("provider-administrator".to_string()),
+            &pubkey_hex(&member),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            "provider-access-verification",
+            "Provider access verification",
+            &database,
+        )
+        .await
+        .expect("invite provider-access recipient");
+        let membership = load_cycle_membership(store.storage.as_ref(), &database)
+            .await
+            .expect("load provider-access membership");
+        let pending_dir = tempfile::tempdir().expect("create provider-access join directory");
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+            pending_dir.path().join("pending.sqlite"),
+        )
+        .expect("open provider-access join journal");
+        let offer = crate::sync::store::begin_device_join(
+            &database,
+            store.storage.as_ref(),
+            &membership,
+            &owner,
+            &pubkey_hex(&member),
+            store
+                .protocol_root
+                .descriptor
+                .founder_provider_admin
+                .grant_id
+                .clone(),
+        )
+        .await
+        .expect("begin provider-access device join");
+        let request = crate::sync::store::prepare_device_provider_access_request(
+            &pending,
+            store
+                .storage
+                .provider_binding()
+                .await
+                .expect("load provider binding"),
+            &member,
+            offer,
+        )
+        .await
+        .expect("prepare provider-access request");
+        let approval = crate::sync::store::authorize_device_provider_access(
+            &database,
+            store.storage.as_ref(),
+            None,
+            None,
+            &membership,
+            &owner,
+            request,
+        )
+        .await
+        .expect("authorize provider access");
+        let administrator = database
+            .activated_store_device_registration(
+                approval.request.offer.provider_admin.administrator.clone(),
+            )
+            .await
+            .expect("load provider administrator registration");
+        let audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(&[approval
+            .access_grant
+            .activation
+            .clone()]);
+
+        crate::sync::store::verify_accepted_provider_access_activation(
+            store.storage.as_ref(),
+            &store.root,
+            &approval.access_grant,
+            &approval.request.offer.provider_admin,
+            &administrator,
+        )
+        .await
+        .expect("verify accepted provider access");
+
+        audit.assert_each_verified_once();
+    }
 }
