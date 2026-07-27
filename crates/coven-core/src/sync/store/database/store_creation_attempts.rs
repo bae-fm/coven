@@ -1,5 +1,4 @@
 use crate::database::*;
-use rusqlite::OptionalExtension;
 
 use super::*;
 
@@ -12,13 +11,8 @@ pub(super) fn consume_store_creation_probes_on(
         StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY,
     };
 
-    let attempt_json: String = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [STORE_CREATION_ATTEMPT_STATE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
+    let attempt_json =
+        crate::database::required_protocol_state_on(conn, STORE_CREATION_ATTEMPT_STATE_KEY)?;
     let attempt: StoreCreationAttempt = serde_json::from_str(&attempt_json)
         .map_err(|error| DbError::Message(format!("parse Store creation attempt: {error}")))?;
     let StoreCreationAttempt::FounderGraphReserved(graph_reservation) = attempt else {
@@ -63,13 +57,7 @@ pub(super) fn consume_store_creation_probes_on(
 
     let load_probe = |probe_id: crate::sync::provider::ProviderProbeId| {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
-        let value: String = conn
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [&key],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
+        let value = crate::database::required_protocol_state_on(conn, &key)?;
         let record = serde_json::from_str(&value)
             .map_err(|error| DbError::Message(format!("parse provider probe journal: {error}")))?;
         Ok::<_, DbError>((key, record))
@@ -93,9 +81,7 @@ pub(super) fn consume_store_creation_probes_on(
     let mut consumed_keys = vec![exact_key];
     consumed_keys.push(STORE_CREATION_ATTEMPT_STATE_KEY.to_string());
     for key in consumed_keys {
-        let deleted = conn
-            .execute("DELETE FROM protocol_state WHERE key = ?1", [key])
-            .map_err(DbError::from)?;
+        let deleted = crate::database::delete_protocol_state_on(conn, &key)?;
         if deleted != 1 {
             return Err(DbError::Message(
                 "Store creation journal disappeared during typed consumption".to_string(),
@@ -124,13 +110,10 @@ impl StoreDatabase {
                     ),
                 )
                 .map_err(DbError::from)?;
-                let actual: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let actual = crate::database::required_protocol_state_on(
+                    &tx,
+                    crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                )?;
                 tx.commit().map_err(DbError::from)?;
                 serde_json::from_str(&actual).map_err(|error| {
                     DbError::Message(format!("parse Store creation attempt: {error}"))
@@ -144,14 +127,10 @@ impl StoreDatabase {
     ) -> Result<Option<crate::sync::store::protocol_root::StoreCreationAttempt>, DbError> {
         self.sqlite()
             .call(move |conn| {
-                let value = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
+                let value = crate::database::get_protocol_state_on(
+                    conn,
+                    crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                )?;
                 value
                     .map(|value| {
                         serde_json::from_str(&value).map_err(|error| {

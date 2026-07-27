@@ -7,14 +7,7 @@ impl Database {
     ) -> Result<Option<crate::sync::provider::ProviderProbeJournalRecord>, DbError> {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
         self.call(move |conn| {
-            let value = conn
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?;
+            let value = get_protocol_state_on(conn, &key)?;
             value
                 .map(|value| {
                     serde_json::from_str(&value).map_err(|error| {
@@ -47,13 +40,7 @@ impl Database {
                 (&key, &value),
             )
             .map_err(DbError::from)?;
-            let actual: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [&key],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
+            let actual = required_protocol_state_on(&tx, &key)?;
             tx.commit().map_err(DbError::from)?;
             serde_json::from_str(&actual)
                 .map_err(|error| DbError::Message(format!("parse provider probe journal: {error}")))

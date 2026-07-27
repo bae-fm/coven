@@ -24,14 +24,7 @@ fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
     if !protocol_state_exists(conn)? {
         return Ok(false);
     }
-    let marker = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [COVEN_INITIALIZED_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?;
+    let marker = get_protocol_state_on(conn, COVEN_INITIALIZED_STATE_KEY)?;
     match marker.as_deref() {
         None => Ok(false),
         Some(COVEN_INITIALIZED_STATE_VALUE) => Ok(true),
@@ -98,15 +91,8 @@ pub(super) fn validate_initialized_coven_schema(
     include_routing: bool,
 ) -> Result<(), DbError> {
     let expected = expected_coven_schema_manifest(include_routing).map_err(DbError::from)?;
-    let stored_json = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [COVEN_SCHEMA_MANIFEST_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .ok_or_else(|| {
+    let stored_json =
+        get_protocol_state_on(conn, COVEN_SCHEMA_MANIFEST_STATE_KEY)?.ok_or_else(|| {
             DbError::Message(
                 "Store database is missing required Coven schema manifest metadata".to_string(),
             )
@@ -129,15 +115,8 @@ pub(super) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContra
             "Store database is missing required Coven initialization metadata".to_string(),
         ));
     }
-    let contract_bytes = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [SYNC_ROUTING_CONTRACT_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .ok_or_else(|| {
+    let contract_bytes =
+        get_protocol_state_on(conn, SYNC_ROUTING_CONTRACT_STATE_KEY)?.ok_or_else(|| {
             DbError::Message(
                 "Store database is missing required sync_routing_contract metadata".to_string(),
             )
@@ -145,15 +124,8 @@ pub(super) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContra
     let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes()).map_err(|error| {
         DbError::Message(format!("Store sync-routing contract is invalid: {error}"))
     })?;
-    let stored_hash = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [SYNC_ROUTING_HASH_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .ok_or_else(|| {
+    let stored_hash =
+        get_protocol_state_on(conn, SYNC_ROUTING_HASH_STATE_KEY)?.ok_or_else(|| {
             DbError::Message(
                 "Store database is missing required sync_routing_hash metadata".to_string(),
             )
@@ -300,14 +272,7 @@ impl DatabaseCore {
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
         // `_updated_at`).
-        let persisted = conn
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [HIGHWATER_STATE_KEY],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
+        let persisted = get_protocol_state_on(&conn, HIGHWATER_STATE_KEY)?;
         seed_from(&hlc, persisted, "HLC high-water mark in protocol_state")?;
         let seed_wall_ms = hlc.wall_now_ms();
         let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);

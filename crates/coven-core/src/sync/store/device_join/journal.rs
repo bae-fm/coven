@@ -814,13 +814,7 @@ pub(super) async fn begin_store_journal(
                 (&key, &value),
             )
             .map_err(crate::database::DbError::from)?;
-        let actual = connection
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [&key],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(crate::database::DbError::from)?;
+        let actual = crate::database::required_protocol_state_on(connection, &key)?;
         serde_json::from_str(&actual)
             .map_err(|error| crate::database::DbError::Message(error.to_string()))
     })
@@ -849,13 +843,7 @@ pub(super) async fn begin_store_replacement_terminal(
                     (&key, &value),
                 )
                 .map_err(crate::database::DbError::from)?;
-            connection
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [&key],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(crate::database::DbError::from)
+            crate::database::required_protocol_state_on(connection, &key)
         })
         .await
         .map_err(database_error)?;

@@ -47,14 +47,7 @@ pub(crate) fn upsert_head_cursor_on(
     reference: &MembershipHeadRef,
 ) -> Result<(), crate::database::DbError> {
     let key = head_cursor_key(reference);
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [&key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(crate::database::DbError::from)?;
+    let existing = crate::database::get_protocol_state_on(conn, &key)?;
     if let Some(existing) = existing {
         let existing: MembershipHeadRef = serde_json::from_str(&existing).map_err(|error| {
             crate::database::DbError::Message(format!(
@@ -81,13 +74,7 @@ pub(crate) fn upsert_head_cursor_on(
     let value = serde_json::to_string(reference).map_err(|error| {
         crate::database::DbError::Message(format!("serialize membership head cursor: {error}"))
     })?;
-    conn.execute(
-        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![key, value],
-    )
-    .map(|_| ())
-    .map_err(crate::database::DbError::from)
+    crate::database::set_protocol_state_on(conn, &key, &value)
 }
 
 pub(super) async fn persist_head_cursors(

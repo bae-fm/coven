@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
 
-use rusqlite::OptionalExtension;
-
 use crate::database::{persist_exact_remote_object_on, DbError};
 use crate::sync::remote_object::RemoteObjectRecord;
 
@@ -15,24 +13,18 @@ impl StoreDatabase {
         let key = format!("owner_promotion/{promotion_id}");
         self.database
             .call(move |conn| {
-                conn.query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|value| {
-                    let journal: crate::sync::store::owner_promotion::OwnerPromotionJournal =
-                        serde_json::from_str(&value).map_err(|error| {
-                            DbError::Message(format!("parse Owner-promotion journal: {error}"))
-                        })?;
-                    journal
-                        .validate_id(promotion_id)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                    Ok(journal)
-                })
-                .transpose()
+                crate::database::get_protocol_state_on(conn, &key)?
+                    .map(|value| {
+                        let journal: crate::sync::store::owner_promotion::OwnerPromotionJournal =
+                            serde_json::from_str(&value).map_err(|error| {
+                                DbError::Message(format!("parse Owner-promotion journal: {error}"))
+                            })?;
+                        journal
+                            .validate_id(promotion_id)
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                        Ok(journal)
+                    })
+                    .transpose()
             })
             .await
     }
@@ -43,14 +35,7 @@ impl StoreDatabase {
     ) -> Result<Option<crate::sync::store::owner_promotion::OwnerPromotionJournal>, DbError> {
         self.database
             .call(move |conn| {
-                let value = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
+                let value = crate::database::get_protocol_state_on(conn, &key)?;
                 let Some(value) = value else {
                     return Ok(None);
                 };
@@ -62,14 +47,7 @@ impl StoreDatabase {
                     .validate_target_key(&key)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 let journal_key = format!("owner_promotion/{}", journal.promotion_id());
-                let by_id = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [journal_key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
+                let by_id = crate::database::get_protocol_state_on(conn, &journal_key)?;
                 if by_id.as_deref() != Some(value.as_str()) {
                     return Err(DbError::Message(
                         "Owner-promotion target and id journals disagree".to_string(),
@@ -114,20 +92,8 @@ impl StoreDatabase {
                     (&target_key, &value),
                 )
                 .map_err(DbError::from)?;
-                let by_id: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&journal_key],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let by_target: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&target_key],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let by_id = crate::database::required_protocol_state_on(&tx, &journal_key)?;
+                let by_target = crate::database::required_protocol_state_on(&tx, &target_key)?;
                 if by_id != by_target {
                     return Err(DbError::Message(
                         "Owner-promotion id and target journals disagree".to_string(),
@@ -161,13 +127,7 @@ impl StoreDatabase {
                     (&journal_key, &value),
                 )
                 .map_err(DbError::from)?;
-                let actual: String = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&journal_key],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let actual = crate::database::required_protocol_state_on(conn, &journal_key)?;
                 if actual != value {
                     return Err(DbError::Message(
                         "Owner-promotion id is already bound to different candidate acceptance"

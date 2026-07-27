@@ -12,13 +12,7 @@ use super::StoreDatabase;
 pub(super) fn load_store_device_genesis_state_on(
     conn: &Connection,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
-    let raw: String = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [STORE_DEVICE_GENESIS_STATE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
+    let raw = crate::database::required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?;
     serde_json::from_str(&raw)
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }

@@ -655,9 +655,7 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
     let protocol_keys = protocol_state_keys(&transaction)?;
     for key in protocol_keys {
         if !generation_zero_protocol_key(founder_membership_cursor.as_deref(), &key) {
-            transaction
-                .execute("DELETE FROM protocol_state WHERE key = ?1", [&key])
-                .map_err(DbError::from)?;
+            crate::database::delete_protocol_state_on(&transaction, &key)?;
         }
     }
     transaction.commit().map_err(DbError::from)?;
@@ -740,13 +738,8 @@ fn validate_replay_image_metadata(
             "retained replay image schema version is {stored_schema_version}, expected {schema_version}"
         )));
     }
-    let stored_routing_hash: String = image
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [SYNC_ROUTING_HASH_STATE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
+    let stored_routing_hash =
+        crate::database::required_protocol_state_on(image, SYNC_ROUTING_HASH_STATE_KEY)?;
     if stored_routing_hash != routing_hash.to_string() {
         return Err(DbError::Message(
             "retained replay image routing hash differs from its baseline".to_string(),

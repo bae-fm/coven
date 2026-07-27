@@ -69,15 +69,11 @@ impl StoreDatabase {
                     &founder_bytes,
                     &genesis,
                 )?;
-                tx.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    rusqlite::params![
-                        crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
-                        owner,
-                    ],
-                )
-                .map_err(DbError::from)?;
+                crate::database::set_protocol_state_on(
+                    &tx,
+                    crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
+                    &owner,
+                )?;
                 for reference in &membership.head_refs {
                     crate::sync::store::membership::upsert_head_cursor_on(&tx, reference)?;
                 }
@@ -263,14 +259,8 @@ impl StoreDatabase {
                         )
                         .optional()
                         .map_err(DbError::from)?;
-                    let stored_device_genesis: Option<String> = tx
-                        .query_row(
-                            "SELECT value FROM protocol_state WHERE key = ?1",
-                            [STORE_DEVICE_GENESIS_STATE_KEY],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DbError::from)?;
+                    let stored_device_genesis =
+                        crate::database::get_protocol_state_on(&tx, STORE_DEVICE_GENESIS_STATE_KEY)?;
                     if installed
                         .as_ref()
                         .map(|(reference, value)| (reference, value))
@@ -404,22 +394,13 @@ impl StoreDatabase {
                 (LOCAL_DEVICE_ID_STATE_KEY, device_id),
                 (STORE_DEVICE_GENESIS_STATE_KEY, device_genesis_json),
             ] {
-                tx.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-                .map_err(DbError::from)?;
+                crate::database::set_protocol_state_on(&tx, key, &value)?;
             }
-            tx.execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (
-                    crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
-                    &graph.root.value.descriptor.founder_pubkey,
-                ),
-            )
-            .map_err(DbError::from)?;
+            crate::database::set_protocol_state_on(
+                &tx,
+                crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
+                &graph.root.value.descriptor.founder_pubkey,
+            )?;
             crate::sync::store::membership::upsert_head_cursor_on(&tx, &graph.membership.head_ref)?;
             install_generation_zero_replay_baseline_on(
                 &tx,

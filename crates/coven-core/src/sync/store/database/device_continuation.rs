@@ -3,7 +3,6 @@ use crate::sync::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreSnapshotRef,
 };
-use rusqlite::OptionalExtension;
 
 use super::*;
 
@@ -216,14 +215,8 @@ impl StoreDatabase {
                     })
                     .map_err(DbError::from)?;
                 let existing_snapshot = load_published_store_snapshot_on(&tx)?;
-                let existing_device: Option<String> = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [LOCAL_DEVICE_ID_STATE_KEY],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
+                let existing_device =
+                    crate::database::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
                 let state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
                     authority: continuation.activation.clone(),
                 })

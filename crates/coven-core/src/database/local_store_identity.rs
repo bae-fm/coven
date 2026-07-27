@@ -42,14 +42,7 @@ pub(crate) fn local_store_authority_on(
 pub(crate) fn local_activated_registration_ref_on(
     conn: &Connection,
 ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
-    let device_id: Option<String> = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [LOCAL_DEVICE_ID_STATE_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DbError::from)?;
+    let device_id = get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
     let Some(device_id) = device_id else {
         return Ok(None);
     };
@@ -78,14 +71,7 @@ pub(crate) fn local_activated_registration_ref_on(
 }
 
 pub(crate) fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError> {
-    let local_device_id = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [LOCAL_DEVICE_ID_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?;
+    let local_device_id = get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
     let Some(_) = local_device_id else {
         return Ok(None);
     };
@@ -117,14 +103,7 @@ pub(super) fn pin_host_device_id_on(
 }
 
 pub(super) fn validate_host_device_id_on(conn: &Connection, expected: &str) -> Result<(), DbError> {
-    let stored = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [HOST_DEVICE_ID_STATE_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
+    let stored = get_protocol_state_on(conn, HOST_DEVICE_ID_STATE_KEY)?
         .ok_or_else(|| DbError::Message("Coven host device identity is absent".to_string()))?;
     if stored != expected {
         return Err(DbError::Message(format!(

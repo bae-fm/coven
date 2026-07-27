@@ -530,13 +530,7 @@ pub(crate) fn install_store_founder_state_on(
         (STORE_DEVICE_GENESIS_STATE_KEY, &genesis),
     )
     .map_err(DbError::from)?;
-    let stored_genesis: String = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [STORE_DEVICE_GENESIS_STATE_KEY],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
+    let stored_genesis = required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?;
     if stored_genesis != genesis {
         return Err(DbError::Message(
             "Store device genesis differs from installed exact authority".to_string(),

@@ -32,13 +32,7 @@ impl StoreDatabase {
                     (&key, &value),
                 )
                 .map_err(DbError::from)?;
-                let actual: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&key],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let actual = crate::database::required_protocol_state_on(&tx, &key)?;
                 tx.commit().map_err(DbError::from)?;
                 let actual: DeviceJoinChallengePublicationRecord = serde_json::from_str(&actual)
                     .map_err(|error| {
@@ -73,13 +67,7 @@ impl StoreDatabase {
         self.sqlite()
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let previous_json: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&key],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let previous_json = crate::database::required_protocol_state_on(&tx, &key)?;
                 let previous: DeviceJoinChallengePublicationRecord =
                     serde_json::from_str(&previous_json).map_err(|error| {
                         DbError::Message(format!(

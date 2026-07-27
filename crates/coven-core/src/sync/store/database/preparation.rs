@@ -67,11 +67,8 @@ impl StoreDatabase {
         let write_id = stage.write_id.clone();
         self.database.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let local_device_id: String = tx.query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [LOCAL_DEVICE_ID_STATE_KEY],
-                |row| row.get(0),
-            ).map_err(DbError::from)?;
+            let local_device_id =
+                crate::database::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
             let root = required_store_root_authority_on(&tx)?;
             let (registration_bytes, registration_object): (Vec<u8>, String) = tx.query_row(
                 "SELECT registration_bytes, registration_object \

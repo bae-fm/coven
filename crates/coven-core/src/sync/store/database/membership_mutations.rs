@@ -83,14 +83,7 @@ impl StoreDatabase {
         ));
         self.sqlite()
             .call(move |conn| {
-                let existing = conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [&key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?
+                let existing = crate::database::get_protocol_state_on(conn, &key)?
                     .map(|value| {
                         value.parse().map_err(|error| {
                             DbError::Message(format!(
@@ -105,12 +98,7 @@ impl StoreDatabase {
                     }
                 }
                 let selected = reusable.iter().next_back().copied().unwrap_or(candidate);
-                conn.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    rusqlite::params![key, selected.to_string()],
-                )
-                .map_err(DbError::from)?;
+                crate::database::set_protocol_state_on(conn, &key, &selected.to_string())?;
                 Ok(selected)
             })
             .await
@@ -252,20 +240,16 @@ impl StoreDatabase {
         tx: &rusqlite::Transaction<'_>,
     ) -> Result<Option<(String, crate::sync::cloud_storage::RotationGate)>, DbError> {
         let key = crate::sync::cloud_storage::ROTATION_GATE_STATE_KEY;
-        tx.query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .map(|encoded| {
-            let gate =
-                serde_json::from_str::<crate::sync::cloud_storage::RotationGate>(&encoded)
-                    .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
-            Ok((encoded, gate))
-        })
-        .transpose()
+        crate::database::get_protocol_state_on(tx, key)?
+            .map(|encoded| {
+                let gate =
+                    serde_json::from_str::<crate::sync::cloud_storage::RotationGate>(&encoded)
+                        .map_err(|error| {
+                            DbError::Message(format!("parse rotation gate: {error}"))
+                        })?;
+                Ok((encoded, gate))
+            })
+            .transpose()
     }
 
     fn replace_rotation_gate_on(

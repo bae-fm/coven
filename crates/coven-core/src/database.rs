@@ -19,6 +19,10 @@ use crate::database::connection_io::open_connection;
 use crate::database::connection_io::open_connection_read_only;
 use crate::database::connection_io::scan_max_updated_at;
 use crate::database::connection_io::seed_from;
+pub(crate) use crate::database::local_state::{
+    delete_protocol_state_on, get_protocol_state_on, required_protocol_state_on,
+    set_protocol_state_on,
+};
 use crate::database::local_store_identity::pin_host_device_id_on;
 use crate::database::local_store_identity::validate_host_device_id_on;
 pub(crate) use crate::database::remote_object_records::begin_remote_candidate_nonactivation_on;

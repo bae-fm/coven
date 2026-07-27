@@ -3,7 +3,6 @@
 //! These are the high-level orchestration functions that download the membership
 //! chain from the storage, perform the operation, and upload the results.
 
-use rusqlite::OptionalExtension;
 use tracing::{debug, info};
 
 use crate::database::Database;

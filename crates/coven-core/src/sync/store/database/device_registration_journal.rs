@@ -265,13 +265,8 @@ impl StoreDatabase {
                     (LOCAL_DEVICE_ID_STATE_KEY, &expected.0),
                 )
                 .map_err(DbError::from)?;
-                let stored_device_id: String = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [LOCAL_DEVICE_ID_STATE_KEY],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
+                let stored_device_id =
+                    crate::database::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
                 if stored_device_id != expected.0 {
                     return Err(DbError::Message(
                         "existing local founder device id conflicts with installed state"
@@ -391,11 +386,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 tx.execute("DELETE FROM published_store_acks", [])
                     .map_err(DbError::from)?;
-                tx.execute(
-                    "DELETE FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                )
-                .map_err(DbError::from)?;
+                crate::database::delete_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
                 tx.execute(
                     "INSERT INTO local_store_device_registration \
                  (singleton, device_id, registration_hash, registration_bytes, \
