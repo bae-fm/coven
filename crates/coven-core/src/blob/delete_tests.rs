@@ -1012,10 +1012,11 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 }
 
-/// Corrupt local retry metadata is not a retry decision. The drain surfaces the
-/// invalid timestamp and leaves the delete row unchanged.
+/// An unparseable `last_attempt_at` is no retry decision at all, so the row is
+/// due now: it drains, and its rewritten timestamp clears the corruption through
+/// the normal path. A corrupt row never gates the rows queued behind it.
 #[tokio::test]
-async fn corrupt_delete_backoff_timestamp_fails_loud() {
+async fn corrupt_delete_backoff_timestamp_drains_and_does_not_strand_siblings() {
     tokio::task::LocalSet::new()
         .run_until(async {
             tokio::task::spawn_local(async {
@@ -1030,36 +1031,32 @@ async fn corrupt_delete_backoff_timestamp_fails_loud() {
 async fn corrupt_delete_backoff_timestamp_case() {
     let db = open_outbox_db();
     let storage = Box::pin(TestStore::new()).await;
-    let stored = Box::pin(create_exact_blob(
+    let corrupt = Box::pin(create_exact_blob(
         &storage,
         "delete-tests",
         "corrupt-retry",
-        b"body",
+        b"corrupt",
     ))
     .await;
-    let tombstone_key = exact_tombstone_key(&stored);
-    let inner = storage.home.as_ref();
-    let cloud = FailCloudOpOnKey::new(inner, FailingCloudOp::Read, &tombstone_key, 1);
+    let healthy = Box::pin(create_exact_blob(
+        &storage,
+        "delete-tests",
+        "healthy-retry",
+        b"healthy",
+    ))
+    .await;
+    let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
-    Box::pin(enqueue_delete(&db, &stored, T0)).await;
-    let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    Box::pin(drain_tombstones(
-        &db,
-        &cloud,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &first,
-    ))
-    .await
-    .expect_err("provider read failure fails the first drain");
+    Box::pin(enqueue_delete(&db, &corrupt, T0)).await;
+    Box::pin(enqueue_delete(&db, &healthy, T0)).await;
 
+    // Row 1 carries an attempt count, so a *parseable* recent timestamp would
+    // hold it inside its backoff window; the unparseable one must not.
     Box::pin(db.call(|conn| {
         conn.execute(
-            "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp' \
+            "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1 \
              WHERE id = 1 AND operation = 'delete'",
             [],
         )
@@ -1069,23 +1066,34 @@ async fn corrupt_delete_backoff_timestamp_case() {
     .await
     .expect("corrupt last_attempt_at");
 
-    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let error = Box::pin(drain_tombstones(
+    let clock = FixedClock(at("2024-06-01T00:00:10Z"));
+    let n = Box::pin(drain_tombstones(
         &db,
-        &cloud,
+        cloud,
         &cipher,
         &PendingRotation::none(),
         "lib",
         &kp,
-        &inside,
+        &clock,
     ))
     .await
-    .expect_err("corrupt timestamp must fail the drain");
-    assert!(error.contains("invalid last_attempt_at"), "{error}");
-    assert_eq!(cloud.matching_calls(), 1);
+    .expect("a corrupt retry timestamp does not fail the drain");
+    assert_eq!(n, 2, "both deletes drain");
     assert!(
-        Box::pin(get_delete(&db, 1)).await.is_some(),
-        "the delete row remains until its retry metadata is repaired explicitly",
+        cloud.get(&exact_tombstone_key(&corrupt)).is_some(),
+        "the row with the corrupt timestamp is treated as due and writes its tombstone",
+    );
+    assert!(
+        cloud.get(&exact_tombstone_key(&healthy)).is_some(),
+        "the healthy row queued behind it is not stranded",
+    );
+    assert!(
+        Box::pin(get_delete(&db, 1)).await.is_none(),
+        "the drained corrupt row is cleared",
+    );
+    assert!(
+        Box::pin(get_delete(&db, 2)).await.is_none(),
+        "the drained healthy row is cleared",
     );
 }
 

@@ -311,17 +311,8 @@ async fn drain_tombstones_inner(
             ));
         };
         let cloud_key = stored_cloud_key(stored);
-        if let Some(last) = entry.last_attempt_at.as_deref() {
-            let last_dt = chrono::DateTime::parse_from_rfc3339(last).map_err(|error| {
-                format!(
-                    "delete outbox entry {} has invalid last_attempt_at {last:?}: {error}",
-                    entry.id
-                )
-            })?;
-            let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-            if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
-                continue;
-            }
+        if crate::blob::retry::entry_in_backoff(&entry, now) {
+            continue;
         }
 
         let key = tombstone_key(stored, suffix);
