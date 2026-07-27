@@ -676,15 +676,11 @@ impl StoreDatabase {
                         ],
                     )
                     .map_err(DbError::from)?;
-                    conn.execute(
-                        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (
-                            LOCAL_DEVICE_ID_STATE_KEY,
-                            registration.device_id.to_string(),
-                        ),
-                    )
-                    .map_err(DbError::from)?;
+                    crate::database::set_protocol_state_on(
+                        conn,
+                        LOCAL_DEVICE_ID_STATE_KEY,
+                        &registration.device_id.to_string(),
+                    )?;
                 }
                 LocalDeviceRegistrationState::Activated {
                     authority: existing,
@@ -697,14 +693,8 @@ impl StoreDatabase {
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .map_err(DbError::from)?;
-                    let local_device_id: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM protocol_state WHERE key = ?1",
-                            [LOCAL_DEVICE_ID_STATE_KEY],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DbError::from)?;
+                    let local_device_id =
+                        crate::database::get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
                     if stored_ack.0
                         != serde_json::to_string(&local_ack_ref).map_err(|error| {
                             DbError::Message(format!("serialize replayed initial ack: {error}"))

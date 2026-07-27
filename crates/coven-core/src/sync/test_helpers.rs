@@ -150,15 +150,13 @@ pub fn install_test_store_root_authority(
     .expect("fixed test signing key is 64 bytes");
     let signer = UserKeypair::from_signing_key_bytes(&keypair_bytes)
         .expect("fixed test signing key is valid");
-    let sync_routing_hash: ObjectHash = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = 'sync_routing_hash'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .expect("test Store has a sync-routing hash")
-        .parse()
-        .expect("test Store sync-routing hash is valid");
+    let sync_routing_hash: ObjectHash = crate::database::required_protocol_state_on(
+        conn,
+        crate::database::SYNC_ROUTING_HASH_STATE_KEY,
+    )
+    .expect("test Store has a sync-routing hash")
+    .parse()
+    .expect("test Store sync-routing hash is valid");
     let root_slot =
         ObjectSlot::logical(crate::sync::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string())
             .expect("valid test Store root slot");
