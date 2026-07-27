@@ -80,6 +80,45 @@ impl Database {
         })
     }
 
+    /// Move one upload entry's `upload_state` from `from` to `to`, keyed by the
+    /// entry id and the five columns that identify which row version it uploads.
+    ///
+    /// The `from` value is part of the WHERE clause, so this is a
+    /// compare-and-swap: an entry whose state has already moved on is left
+    /// alone and `context` names the handoff that lost the race, rather than
+    /// one writer overwriting another's transition.
+    async fn swap_upload_state(
+        &self,
+        id: i64,
+        row: &crate::blob::RowBlobRef,
+        from: String,
+        to: String,
+        context: &'static str,
+    ) -> Result<(), DbError> {
+        let table = row.table().to_string();
+        let row_id = row.row_id().to_string();
+        let column = row.column().to_string();
+        let row_stamp = row.row_stamp().to_string();
+        self.call(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE cloud_outbox SET upload_state = ?1
+                     WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
+                       AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
+                       AND upload_state = ?7",
+                    rusqlite::params![to, id, table, row_id, column, row_stamp, from],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(format!(
+                    "upload outbox entry changed before {context}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn mark_cloud_upload_prepared(
         &self,
         entry: &OutboxEntry,
@@ -123,36 +162,13 @@ impl Database {
         })?;
         let pending_json = serde_json::to_string(&OutboxUploadState::Pending)
             .map_err(|error| DbError::Message(format!("serialize pending blob upload: {error}")))?;
-        let id = entry.id;
-        let table = row.table().to_string();
-        let row_id = row.row_id().to_string();
-        let column = row.column().to_string();
-        let row_stamp = row.row_stamp().to_string();
-        self.call(move |conn| {
-            let updated = conn
-                .execute(
-                    "UPDATE cloud_outbox SET upload_state = ?1
-                     WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
-                       AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
-                       AND upload_state = ?7",
-                    rusqlite::params![
-                        prepared_json,
-                        id,
-                        table,
-                        row_id,
-                        column,
-                        row_stamp,
-                        pending_json,
-                    ],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "upload outbox entry changed before prepared-object handoff".to_string(),
-                ));
-            }
-            Ok(())
-        })
+        self.swap_upload_state(
+            entry.id,
+            row,
+            pending_json,
+            prepared_json,
+            "prepared-object handoff",
+        )
         .await
     }
 
@@ -181,36 +197,13 @@ impl Database {
         let prepared_json = serde_json::to_string(state).map_err(|error| {
             DbError::Message(format!("serialize prepared blob upload identity: {error}"))
         })?;
-        let id = entry.id;
-        let table = row.table().to_string();
-        let row_id = row.row_id().to_string();
-        let column = row.column().to_string();
-        let row_stamp = row.row_stamp().to_string();
-        self.call(move |conn| {
-            let updated = conn
-                .execute(
-                    "UPDATE cloud_outbox SET upload_state = ?1
-                     WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
-                       AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
-                       AND upload_state = ?7",
-                    rusqlite::params![
-                        created_json,
-                        id,
-                        table,
-                        row_id,
-                        column,
-                        row_stamp,
-                        prepared_json,
-                    ],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "upload outbox entry changed before cloud-created handoff".to_string(),
-                ));
-            }
-            Ok(())
-        })
+        self.swap_upload_state(
+            entry.id,
+            row,
+            prepared_json,
+            created_json,
+            "cloud-created handoff",
+        )
         .await
     }
 
