@@ -29,8 +29,8 @@ mod metadata;
 mod roster;
 mod state;
 
-pub(crate) use context::{load_exact_slot_bytes, verify_control_context};
-use context::{read_exact_circle_object, verify_control_membership};
+use context::verify_control_membership;
+pub(crate) use context::{read_exact_circle_object, verify_control_context};
 use metadata::load_circle_metadata_state;
 use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle_roster_state};
 #[cfg(test)]

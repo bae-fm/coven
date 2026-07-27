@@ -9,10 +9,10 @@ mod preparation;
 mod publication;
 
 pub(crate) use activation::{
-    load_circle_activations, load_exact_slot_bytes, verify_control_context, CircleAuthoringState,
-    CircleCurrentState, CirclePackageAccess, LocalCircleExclusion, VerifiedCircleAccess,
-    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
-    VerifiedStreamActivations,
+    load_circle_activations, read_exact_circle_object, verify_control_context,
+    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, LocalCircleExclusion,
+    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage,
+    VerifiedCircleReference, VerifiedStreamActivations,
 };
 pub use error::CircleOperationError;
 pub(crate) use journal::{

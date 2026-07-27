@@ -1772,10 +1772,6 @@ impl CircleRosterChain {
             .collect()
     }
 
-    fn frontier(&self) -> Vec<CircleRosterCoord> {
-        self.effective_frontier()
-    }
-
     fn owner_barriers(
         &self,
         grants: &BTreeSet<MembershipGrantId>,
@@ -1883,7 +1879,7 @@ impl CircleRosterChain {
             author_owner_grant: author_owner_grant.clone(),
         };
         let (seq, previous_hash) = self.next_position(&stream)?;
-        let dependencies = self.frontier();
+        let dependencies = self.effective_frontier();
         let replaced = self.active_grants(&member_pubkey);
         let owner_barriers = self.owner_barriers(&replaced, &dependencies);
         let change = match role {

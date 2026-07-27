@@ -1,5 +1,5 @@
 use super::{
-    load_circle_activations, load_exact_slot_bytes, verify_control_context,
+    load_circle_activations, read_exact_circle_object, verify_control_context,
     verify_prepared_objects_are_signed, CircleOperationError, CircleOperationJournal,
     CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
 };
@@ -731,14 +731,14 @@ async fn create_or_read_step(
             ))
         })?;
     if journal.operation().uploaded.contains(step) {
-        return load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix)
+        return read_exact_circle_object(storage, context, prepared.reference(), semantic_prefix)
             .await;
     }
     storage
         .create_protocol_object(&prepared)
         .await
         .map_err(crate::sync::store_objects::StoreObjectError::from)?;
-    load_exact_slot_bytes(storage, context, prepared.reference(), semantic_prefix).await
+    read_exact_circle_object(storage, context, prepared.reference(), semantic_prefix).await
 }
 
 async fn complete_step(

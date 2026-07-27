@@ -80,16 +80,7 @@ pub(crate) fn verify_control_context(
     Ok(())
 }
 
-pub(crate) async fn load_exact_slot_bytes(
-    storage: &dyn SyncStorage,
-    context: &ProtocolObjectContext,
-    object: &ExactObjectRef,
-    semantic_prefix: &str,
-) -> Result<Vec<u8>, CircleOperationError> {
-    read_exact_circle_object(storage, context, object, semantic_prefix).await
-}
-
-pub(super) async fn read_exact_circle_object(
+pub(crate) async fn read_exact_circle_object(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     object: &ExactObjectRef,

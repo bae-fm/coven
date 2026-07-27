@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::commands::CircleOperationRequest;
 use super::{
-    load_exact_slot_bytes, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
+    read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
 use crate::encryption::{EncryptionService, MasterKeyring};
@@ -399,9 +399,13 @@ pub(super) async fn prepare_circle_activation_objects(
                         circle_id: draft.circle_id,
                         head: reference,
                     });
-                    let bytes =
-                        load_exact_slot_bytes(storage, &roster_context, &reference.object, &prefix)
-                            .await?;
+                    let bytes = read_exact_circle_object(
+                        storage,
+                        &roster_context,
+                        &reference.object,
+                        &prefix,
+                    )
+                    .await?;
                     let head: crate::sync::circle::CircleRosterHead =
                         serde_json::from_slice(&bytes).map_err(|error| {
                             CircleOperationError::InvalidState(format!(
@@ -547,7 +551,7 @@ pub(super) async fn prepare_circle_activation_objects(
                         circle_id: draft.circle_id,
                         head: reference,
                     });
-                    let bytes = load_exact_slot_bytes(
+                    let bytes = read_exact_circle_object(
                         storage,
                         &metadata_context,
                         &reference.object,
@@ -636,7 +640,7 @@ pub(super) async fn prepare_circle_activation_objects(
                         circle_id: draft.circle_id,
                         head: reference,
                     });
-                    let bytes = load_exact_slot_bytes(
+                    let bytes = read_exact_circle_object(
                         storage,
                         &metadata_context,
                         &reference.object,
@@ -827,7 +831,7 @@ pub(super) async fn prepare_circle_activation_objects(
                     head_hash: reference.head_hash,
                 });
                 let bytes =
-                    load_exact_slot_bytes(storage, &control_context, &reference.object, &prefix)
+                    read_exact_circle_object(storage, &control_context, &reference.object, &prefix)
                         .await?;
                 let head: crate::sync::circle::CircleControlHead = serde_json::from_slice(&bytes)
                     .map_err(|error| {
@@ -1027,7 +1031,7 @@ pub(super) async fn prepare_circle_activation_objects(
                     head_hash: reference.head_hash,
                 });
                 let bytes =
-                    load_exact_slot_bytes(storage, &control_context, &reference.object, &prefix)
+                    read_exact_circle_object(storage, &control_context, &reference.object, &prefix)
                         .await?;
                 let head: crate::sync::circle::CircleControlHead = serde_json::from_slice(&bytes)
                     .map_err(|error| {

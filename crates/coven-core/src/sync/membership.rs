@@ -2118,7 +2118,7 @@ impl MembershipChain {
             stream_id,
             seq,
             previous_hash,
-            dependencies: self.frontier(),
+            dependencies: self.effective_frontier(),
             resolution_dependencies: self.resolution_refs().to_vec(),
             created_at,
             change: MembershipChange::SetMember {
@@ -2218,7 +2218,7 @@ impl MembershipChain {
     ) -> Result<MembershipEntry, MembershipError> {
         let role = StoreMembershipRoleGrant::from_direct_assignment(role)?;
         let grant_id = self.next_member_grant_id_in_stream(signer, stream_id, &user_pubkey)?;
-        let dependencies = self.frontier();
+        let dependencies = self.effective_frontier();
         let wrapped_key = test_wrapped_key_ref(
             &keys::public_key_hex(signer),
             &user_pubkey,
@@ -2247,7 +2247,7 @@ impl MembershipChain {
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let author_pubkey = keys::public_key_hex(signer);
-        let dependencies = self.frontier();
+        let dependencies = self.effective_frontier();
         let wrapped_key = test_wrapped_key_ref(
             &author_pubkey,
             &user_pubkey,
@@ -2512,7 +2512,7 @@ impl MembershipChain {
             stream_id,
             seq,
             previous_hash,
-            dependencies: self.frontier(),
+            dependencies: self.effective_frontier(),
             resolution_dependencies: self.resolution_refs().to_vec(),
             created_at,
             change: MembershipChange::RemoveMember {
@@ -2540,7 +2540,7 @@ impl MembershipChain {
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let owner = keys::public_key_hex(signer);
-        let dependencies = self.frontier();
+        let dependencies = self.effective_frontier();
         let generation = membership_causal_generation(&self.entries, &dependencies)
             .checked_add(1)
             .ok_or(MembershipError::InvalidWrappedKeys(self.entries.len()))?;
@@ -2636,7 +2636,7 @@ impl MembershipChain {
             stream_id,
             seq,
             previous_hash,
-            dependencies: self.frontier(),
+            dependencies: self.effective_frontier(),
             resolution_dependencies: Vec::new(),
             created_at,
             change: MembershipChange::ProviderAdmin,
@@ -2730,10 +2730,6 @@ impl MembershipChain {
                 .map(|seq| (seq, Some(tip.entry_hash)))
                 .ok_or(MembershipError::SequenceExhausted)
         })
-    }
-
-    fn frontier(&self) -> Vec<MembershipCoord> {
-        self.effective_frontier()
     }
 
     fn owner_barriers(
