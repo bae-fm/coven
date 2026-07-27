@@ -2069,7 +2069,7 @@ impl TestStore {
         .await
     }
 
-    pub async fn with_store_and_keypair(store_id: &str, signer: UserKeypair) -> Self {
+    pub(crate) async fn with_store_and_keypair(store_id: &str, signer: UserKeypair) -> Self {
         let db = open_test_db();
         Box::pin(Self::create(&db, store_id, signer))
             .await

@@ -25,7 +25,7 @@ const CROSS_CHALLENGE_DOMAIN: &[u8] = b"coven.provider-cross-principal-challenge
 const CROSS_RESPONSE_DOMAIN: &[u8] = b"coven.provider-cross-principal-response.v1\0";
 const PAYLOAD_DOMAIN: &[u8] = b"coven.provider-probe-payload.v1\0";
 const MEMBER_ACCESS_GRANT_DOMAIN: &[u8] = b"coven.provider-member-access-grant.v1\0";
-pub const PROBE_PAYLOAD_LEN: usize = 256;
+pub(crate) const PROBE_PAYLOAD_LEN: usize = 256;
 pub const PROBE_RANGE_START: u64 = 31;
 pub const PROBE_RANGE_END: u64 = 173;
 

@@ -188,7 +188,7 @@ impl ChunkSealer {
 /// The sealed-blob format version this build writes, and the only one it reads.
 /// The leading byte of every blob header; a blob naming any other version is
 /// refused rather than guessed at.
-pub const SEALED_BLOB_VERSION: u8 = 1;
+pub(crate) const SEALED_BLOB_VERSION: u8 = 1;
 
 /// The chunk size a blob is sealed at when the host configures none. A read
 /// honors whatever its own header records, so this is only ever the *writer's*
@@ -293,7 +293,7 @@ impl SealedBlobHeader {
 
     /// The plaintext length chunk `index` carries — the chunk size for every
     /// chunk but the last, which holds the remainder.
-    pub fn chunk_plaintext_len(self, index: u64) -> u64 {
+    pub(crate) fn chunk_plaintext_len(self, index: u64) -> u64 {
         let start = index.saturating_mul(u64::from(self.chunk_size.get()));
         self.plaintext_len
             .saturating_sub(start)
@@ -856,7 +856,10 @@ impl EncryptionService {
     /// The key with fingerprint `fingerprint`, if this keyring holds it. A sealed
     /// object names its sealing key this way, so decryption resolves the key by
     /// identity rather than by a generation number that a fork could reuse.
-    pub fn key_for_fingerprint(&self, fingerprint: &[u8; 32]) -> Result<[u8; 32], EncryptionError> {
+    pub(crate) fn key_for_fingerprint(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<[u8; 32], EncryptionError> {
         let fingerprint = KeyFingerprint::from_bytes(*fingerprint);
         self.keys.get(&fingerprint).map(|e| e.key).ok_or_else(|| {
             EncryptionError::KeyManagement(format!("no key with fingerprint {fingerprint}"))

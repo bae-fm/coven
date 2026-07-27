@@ -680,7 +680,7 @@ impl CircleRosterConflictResolution {
             )
     }
 
-    pub fn verify_against(
+    pub(crate) fn verify_against(
         &self,
         store_root_hash: ObjectHash,
         circle_id: CircleId,
@@ -1592,7 +1592,7 @@ impl CircleRosterChain {
         }
     }
 
-    pub fn resolved_with(
+    pub(crate) fn resolved_with(
         &self,
         resolutions: &[CircleRosterConflictResolution],
     ) -> Result<ResolvedCircleRoster, CircleRosterError> {

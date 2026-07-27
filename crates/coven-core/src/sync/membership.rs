@@ -815,7 +815,7 @@ impl StoreMembershipConflictResolution {
             )
     }
 
-    pub fn verify_against(
+    pub(crate) fn verify_against(
         &self,
         store_root_hash: ObjectHash,
         conflict: &MembershipConflict,
@@ -950,7 +950,7 @@ fn conflict_retirement_barriers(
         .collect()
 }
 
-pub fn resolve_store_membership_conflict(
+pub(crate) fn resolve_store_membership_conflict(
     store_root_hash: ObjectHash,
     conflict: &MembershipConflict,
     resolutions: &[(
@@ -1376,7 +1376,7 @@ impl MembershipChain {
         Self::from_entries_with_coords_and_heads_and_provider_admin(entries, heads, provider_admin)
     }
 
-    pub fn from_entries_with_coords_and_provider_admin(
+    pub(crate) fn from_entries_with_coords_and_provider_admin(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         provider_admin: super::provider::ProviderAdminState,
     ) -> Result<Self, MembershipError> {
@@ -1588,7 +1588,7 @@ impl MembershipChain {
         }
     }
 
-    pub fn resolved_with(
+    pub(crate) fn resolved_with(
         &self,
         store_root_hash: ObjectHash,
         resolutions: &[(
@@ -2009,7 +2009,7 @@ impl MembershipChain {
         heads.into_values().collect()
     }
 
-    pub fn stream_tip(
+    pub(crate) fn stream_tip(
         &self,
         author_pubkey: &str,
         grant: &MembershipGrantId,
@@ -2022,7 +2022,7 @@ impl MembershipChain {
         })
     }
 
-    pub fn raw_stream_tip(
+    pub(crate) fn raw_stream_tip(
         &self,
         author_pubkey: &str,
         grant: &MembershipGrantId,
@@ -2243,7 +2243,7 @@ impl MembershipChain {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn signed_promote_member_in_stream_for_test(
+    pub(crate) fn signed_promote_member_in_stream_for_test(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
@@ -2268,7 +2268,7 @@ impl MembershipChain {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn signed_promote_member_in_stream_with_wrapped_key_for_test(
+    pub(crate) fn signed_promote_member_in_stream_with_wrapped_key_for_test(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
@@ -4048,7 +4048,7 @@ fn store_membership_anchor_stream(
         .ok()
 }
 
-pub fn derive_grant_id(
+pub(crate) fn derive_grant_id(
     store_id: &str,
     author_pubkey: &str,
     author_grant: &MembershipGrantId,

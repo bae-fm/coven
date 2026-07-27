@@ -76,7 +76,7 @@ impl DeviceJoinOffer {
         )
     }
 
-    pub fn offer_hash(&self) -> ObjectHash {
+    pub(crate) fn offer_hash(&self) -> ObjectHash {
         ObjectHash::digest(&domain_json(OFFER_DOMAIN, &self.signed_fields()))
     }
 
