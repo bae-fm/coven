@@ -11,7 +11,10 @@ on:
     branches: [main]
     paths:
       - 'site/**'
-      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 # A new push supersedes any in-flight deploy: cancel the old build rather than
