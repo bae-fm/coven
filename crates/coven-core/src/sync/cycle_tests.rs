@@ -2127,7 +2127,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         crate::sync::store::SnapshotBlobReconcile::Complete,
     );
     assert_eq!(
-        crate::blob::cache::read_staged(
+        crate::blob::cache::read_cached_exact(
             &restore_dir,
             &restored
                 .row_blob_ref("note_photos", "cover1")

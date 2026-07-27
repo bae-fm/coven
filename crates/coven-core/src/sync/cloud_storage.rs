@@ -1106,7 +1106,7 @@ impl CloudSyncStorage {
         self.pending_rotation.clone()
     }
 
-    /// Borrow the underlying CloudHome for direct access (e.g., grant_access/revoke_access).
+    /// Borrow the underlying CloudHome for direct access (e.g., set_access).
     pub fn cloud_home(&self) -> &dyn CloudHome {
         &*self.home
     }

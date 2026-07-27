@@ -392,27 +392,6 @@ pub(crate) async fn populate_pinned_from_file(
     publish_exact_file(staged, plaintext_size, plaintext_hash).await
 }
 
-/// Read a Remote blob's plaintext from the cache only — the locator-keyed pinned
-/// path then the locator-keyed evictable path, in order — returning `None` when it
-/// is in neither folder. No cloud
-/// fetch and no local-store check: just the two cache folders. A failure to even
-/// check existence (broken filesystem) is surfaced, never collapsed into `None`. Two
-/// callers share this probe:
-///
-/// - `read_remote_whole`: the Remote read's cache-hit check — a hit serves the file,
-///   a `None` means fetch from the cloud and populate the cache.
-/// - the inline push's crash-recovery read of a host-provided blob whose local-store
-///   copy a prior cycle already moved into the cache. The push's primary read is from
-///   the local store ([`local_files::read`](super::local_files::read)); this is the
-///   recovery read, and a `None` from both tells the push the blob is not ready, so it
-///   aborts rather than publishing a row whose blob never reached the cloud.
-pub async fn read_staged(
-    store_dir: &StoreDir,
-    reference: &RowBlobRef,
-) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    read_cached_exact(store_dir, reference).await
-}
-
 /// Drop one exact Remote blob cache copy from both locator-keyed folders, part of
 /// apply-side cleanup when an incoming changeset deletes
 /// a blob-bearing row (a gate retract or a genuine delete). A peer drops only its
@@ -561,8 +540,8 @@ async fn read_remote_whole(
     reference: &RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let blob = reference.blob();
-    // A cache hit (`pinned/` or `cache/`) serves the file straight off disk — the same
-    // pinned→cache probe [`read_staged`] runs. An existence-check failure there is
+    // A cache hit (`pinned/` or `cache/`) serves the file straight off disk — the
+    // pinned→cache probe `read_cached_exact` runs. An existence-check failure there is
     // surfaced, not collapsed into a miss: re-downloading over a present file would be
     // wasteful and could mask a real fault.
     if let Some(bytes) = read_cached_exact(store_dir, reference).await? {
@@ -991,14 +970,11 @@ pub(crate) async fn materialize_remote_blob_to_file(
 /// from the evictable cache. A pin POPULATES — if the blob isn't cached it is
 /// fetched first — so it is not a flag flip. Idempotent.
 ///
-/// Three cases per blob: already in `pinned/` (nothing to do); in `cache/` (stage
-/// and publish it into `pinned/`, so a read-populated or eagerly-pulled blob is promoted with no
-/// cloud fetch); in neither (fetch from the cloud and write straight to `pinned/`).
-/// `&[RowBlobRef]` rather than ids because every operation must use and revalidate
-/// the exact row version and locator.
 /// Pin one Remote blob into its locator-keyed pinned path: a no-op if already pinned, a verified move
 /// from the evictable cache if staged there, else a cloud fetch straight into
-/// `pinned/`. [`pin`] dispatches this per blob, up to its concurrency limit.
+/// `pinned/`. [`crate::sync::store::blob::pin`] dispatches this per blob, up to
+/// its concurrency limit, and takes `&[RowBlobRef]` rather than ids because
+/// every operation must use and revalidate the exact row version and locator.
 pub(crate) async fn pin_one(
     db: &Database,
     store_dir: &StoreDir,
@@ -1407,7 +1383,12 @@ async fn cached_blob_path(
     Ok(None)
 }
 
-async fn read_cached_exact(
+/// Read a Remote blob's plaintext from the cache only — the locator-keyed pinned
+/// path then the locator-keyed evictable path, in order — returning `None` when it
+/// is in neither folder. No cloud fetch and no local-store check. A failure to
+/// even check existence (broken filesystem) is surfaced, never collapsed into
+/// `None`.
+pub(crate) async fn read_cached_exact(
     store_dir: &StoreDir,
     reference: &RowBlobRef,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {

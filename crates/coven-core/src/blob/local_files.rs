@@ -75,8 +75,9 @@ pub async fn store(
 }
 
 /// Read a host-provided blob from the local store, or `None` when no file is stored
-/// there. For a host-provided Local or PendingRemote blob, absence is fail-loud
-/// corruption to the cache layer's `read_blob`.
+/// there. Production reads resolve the path through [`path_if_present`]; this
+/// whole-file read exists for tests asserting local-store contents.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn read(
     store_dir: &StoreDir,
     namespace: &str,

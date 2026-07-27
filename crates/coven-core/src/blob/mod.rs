@@ -233,31 +233,6 @@ pub enum BlobScope {
     Derived(String),
 }
 
-impl BlobScope {
-    /// Serialize for the `cloud_outbox.scope` column. The audio outbox persists
-    /// the scope at enqueue and resolves it to a key at drain, so the string
-    /// must round-trip every variant. The variant tag is split from the payload
-    /// at the first `:`; the payload (a derived scope name) is stored verbatim,
-    /// so it may itself contain `:`.
-    pub fn to_outbox_str(&self) -> String {
-        match self {
-            BlobScope::Master => "master".to_string(),
-            BlobScope::Derived(s) => format!("derived:{s}"),
-        }
-    }
-
-    /// Parse a `cloud_outbox.scope` value written by [`Self::to_outbox_str`].
-    /// Returns `None` on an unknown tag (a corrupt row), which the drain surfaces
-    /// rather than silently defaulting to the master key.
-    pub fn from_outbox_str(s: &str) -> Option<Self> {
-        match s.split_once(':') {
-            None if s == "master" => Some(BlobScope::Master),
-            Some(("derived", rest)) => Some(BlobScope::Derived(rest.to_string())),
-            _ => None,
-        }
-    }
-}
-
 /// A blob's **Local story**: where its bytes live while the blob is Local, and
 /// whether bringing it back from Remote needs a destination path. Orthogonal to
 /// [`CacheFill`] (the Remote story) — a blob declares both.

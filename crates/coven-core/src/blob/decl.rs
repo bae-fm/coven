@@ -362,7 +362,9 @@ impl BlobDecls {
             let Some(decl) = t.blob() else {
                 continue;
             };
-            let cols = table_columns(conn, t.name())?;
+            // Column names in declared (schema) order — the index of a name here
+            // is the index a changeset reports for that column.
+            let cols = session_table_columns(conn, t.name()).map_err(BlobDeclError::from)?;
             let index_of = |column: &str| -> Result<usize, BlobDeclError> {
                 cols.iter()
                     .position(|c| c == column)
@@ -778,14 +780,6 @@ fn pk_carrying_blob(
     conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
         .optional()
         .map_err(BlobDeclError::from)
-}
-
-/// One column's value off the row with primary key `pk`. The row is named by the key every
-/// changeset change carries, so this resolves on any device holding the row.
-/// Column names of `table`, in declared (schema) order, via `PRAGMA table_info`.
-/// The index of a name here is the index a changeset reports for that column.
-pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
-    session_table_columns(conn, table).map_err(BlobDeclError::from)
 }
 
 #[cfg(test)]

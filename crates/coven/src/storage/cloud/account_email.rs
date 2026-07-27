@@ -1,7 +1,7 @@
 //! Fetch the authenticated account's email from each OAuth provider.
 //!
 //! Called once, right after a joining device authenticates: OAuth folder sharing
-//! (`grant_access`) shares to the invitee's provider-account email, so the joiner
+//! (`CloudHome::set_access`) shares to the invitee's provider-account email, so the joiner
 //! must report which email its fresh tokens belong to. The token is fresh at this
 //! point, so each fetch is a single bearer request with no refresh logic.
 

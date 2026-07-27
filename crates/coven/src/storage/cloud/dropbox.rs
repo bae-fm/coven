@@ -1737,7 +1737,7 @@ mod tests {
         shutdown.send(()).expect("shut down test endpoint");
     }
 
-    /// `join_info()` (what `grant_access` returns to a newly-added member) must
+    /// `join_info()` (what `set_access` returns to a newly-added member) must
     /// carry the folder *path* files are read/written under — the same value
     /// passed to `DropboxCloudHome::new` — not Dropbox's own sharing-API
     /// `shared_folder_id`, which is an unrelated member-management handle a

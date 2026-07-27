@@ -498,9 +498,9 @@ pub(crate) fn build_cloud_cipher(
 
 /// Create sync storage from config and credentials.
 ///
-/// This is a lighter version of `sync::cycle::init_sync` that only creates the
-/// storage client without starting a sync session or extracting raw DB handles.
-/// Used by membership management which only needs storage access.
+/// This is a lighter version of `sync::cycle::init_sync_over_storage` that only
+/// creates the storage client without starting a sync session or extracting raw
+/// DB handles. Used by membership management which only needs storage access.
 ///
 /// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
 /// storage share one instance for in-place key rotation); when `None` it is

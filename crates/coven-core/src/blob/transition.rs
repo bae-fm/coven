@@ -623,9 +623,9 @@ pub async fn make_local(
     }
 
     // Any error after the first local copy is written must roll those files back, so
-    // an aborted make_local leaves no partial materialization behind. `written` tracks
-    // what to remove (typed by kind so the rollback treats a local-store leftover
-    // loud); the loop's result drives the cleanup-or-commit decision.
+    // an aborted make_local leaves no partial materialization behind. `written`
+    // tracks what to remove; the loop's result drives the cleanup-or-commit
+    // decision.
     let mut written: Vec<PathBuf> = Vec::new();
     let materialized = match materialize_blobs(
         database,
@@ -969,9 +969,9 @@ async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
 
 /// Roll back the partial local copies an aborted make_local wrote, then return the
 /// error to surface. Returns the original `abort_err` when the rollback succeeds; if
-/// the rollback itself fails to remove a local-store leftover it returns THAT
-/// instead — the more urgent signal, since that leftover is a readable, budget-exempt
-/// copy of a still-Remote blob (a retry re-materializes over it).
+/// the rollback itself fails to remove a leftover it returns THAT instead — the
+/// more urgent signal, since that leftover is a readable copy of a still-Remote
+/// blob (a retry re-materializes over it).
 async fn roll_back(written: &[PathBuf], abort_err: MakeLocalError) -> MakeLocalError {
     match cleanup_partial(written).await {
         Ok(()) => abort_err,
