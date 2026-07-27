@@ -7,9 +7,35 @@ use crate::sync::store::pull::{
 use crate::sync::store_commit::DeviceJoinAttempt;
 use crate::sync::store_objects::VerifiedObject;
 
-pub(super) struct MergeAcceptedJoinHistory<'a> {
+#[derive(Clone, Copy)]
+pub(super) struct VerifiedMergePredecessorHistory<'a> {
     pub(super) commits: &'a BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
     pub(super) frontier: &'a [StoreBatchCommitRef],
+}
+
+impl<'a> VerifiedMergePredecessorHistory<'a> {
+    pub(super) fn find(
+        &self,
+        mut matches: impl FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool,
+    ) -> Result<Option<&'a VerifiedMergeHistoryCommit>, StorePullError> {
+        let mut pending = self.frontier.to_vec();
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            let verified = self.commits.get(&reference).ok_or_else(|| {
+                StorePullError::Database(
+                    "verified Merge predecessor graph is missing an exact commit".to_string(),
+                )
+            })?;
+            if matches(&reference, verified.verified.value()) {
+                return Ok(Some(verified));
+            }
+            pending.extend(commit_predecessor_references(verified.verified.value()));
+        }
+        Ok(None)
+    }
 }
 
 pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
@@ -19,7 +45,9 @@ pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
 ) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
         let frontier = &evidence.attempt.value.bootstrap_cut.0;
-        let authority = verify_merge_history_authority(
+        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+        verify_merge_history_authority(
+            &mut history_verifier,
             storage,
             root,
             frontier,
@@ -27,8 +55,8 @@ pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
         )
         .await?;
         let access = &evidence.attempt.value.provider_approval.access_grant;
-        let verified = authority
-            .history
+        let verified = history_verifier
+            .history()
             .commits
             .get(&access.activation)
             .ok_or_else(|| {
@@ -37,20 +65,18 @@ pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
                         .to_string(),
                 )
             })?;
-        if verified.commit != evidence.provider_access_activation
-            || !verify_merge_provider_administrator(
-                &verified.predecessor_membership,
-                &access.grant.administrator_grant,
-                &verified.commit.author_registration,
-                &evidence
-                    .attempt
-                    .value
-                    .provider_approval
-                    .request
-                    .offer
-                    .provider_admin,
-            )
-        {
+        if !verify_merge_provider_administrator(
+            &verified.predecessor_membership,
+            &access.grant.administrator_grant,
+            &verified.verified.value().author_registration,
+            &evidence
+                .attempt
+                .value
+                .provider_approval
+                .request
+                .offer
+                .provider_admin,
+        ) {
             return Err(StorePullError::Database(
                 "device join attempt lacks exact Merge provider-administrator authority"
                     .to_string(),
@@ -63,7 +89,7 @@ pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
 pub(super) fn verify_commit_join_evidence<'a>(
     commit: &'a StoreBatchCommit,
     loaded: LoadedCommitJoinEvidence,
-    accepted: Option<MergeAcceptedJoinHistory<'a>>,
+    accepted: VerifiedMergePredecessorHistory<'a>,
 ) -> StorePullFuture<'a, VerifiedCommitJoinEvidence> {
     Box::pin(async move {
         if loaded.attempts.is_empty() {
@@ -73,53 +99,29 @@ pub(super) fn verify_commit_join_evidence<'a>(
                 cleanup_receipts: loaded.cleanup_receipts,
             });
         }
-        let accepted = accepted.ok_or_else(|| {
-            StorePullError::Database(
-                "Merge commit join evidence has no verified accepted predecessor history"
-                    .to_string(),
-            )
-        })?;
         let mut attempts = BTreeMap::new();
         for (reference, evidence) in loaded.attempts {
             let access = &evidence.attempt.value.provider_approval.access_grant;
-            let mut pending = accepted.frontier.to_vec();
-            let mut visited = BTreeSet::new();
-            let mut verified_access = None;
-            while let Some(candidate) = pending.pop() {
-                if !visited.insert(candidate.clone()) {
-                    continue;
-                }
-                let verified = accepted.commits.get(&candidate).ok_or_else(|| {
+            let verified = accepted
+                .find(|candidate, _| candidate == &access.activation)?
+                .ok_or_else(|| {
                     StorePullError::Database(
-                        "accepted Merge predecessor graph is missing an exact commit".to_string(),
+                        "provider-access activation is outside the accepted Merge predecessor graph"
+                            .to_string(),
                     )
                 })?;
-                if candidate == access.activation {
-                    verified_access = Some(verified);
-                    break;
-                }
-                pending.extend(commit_predecessor_references(&verified.commit));
-            }
-            let verified = verified_access.ok_or_else(|| {
-                StorePullError::Database(
-                    "provider-access activation is outside the accepted Merge predecessor graph"
-                        .to_string(),
-                )
-            })?;
-            if verified.commit != evidence.provider_access_activation
-                || !verify_merge_provider_administrator(
-                    &verified.predecessor_membership,
-                    &access.grant.administrator_grant,
-                    &verified.commit.author_registration,
-                    &evidence
-                        .attempt
-                        .value
-                        .provider_approval
-                        .request
-                        .offer
-                        .provider_admin,
-                )
-            {
+            if !verify_merge_provider_administrator(
+                &verified.predecessor_membership,
+                &access.grant.administrator_grant,
+                &verified.verified.value().author_registration,
+                &evidence
+                    .attempt
+                    .value
+                    .provider_approval
+                    .request
+                    .offer
+                    .provider_admin,
+            ) {
                 return Err(StorePullError::Database(
                     "device join attempt lacks exact Merge provider-administrator authority"
                         .to_string(),

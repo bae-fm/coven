@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::verify_control_context;
+use super::verify_control_context_for_verified_commit;
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::sync::circle::{
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
@@ -11,10 +11,12 @@ use crate::sync::circle::{
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::store::circle_controls::CircleOperationError;
+#[cfg(test)]
+use crate::sync::store_commit::StoreDeviceRegistration;
 use crate::sync::store_commit::{
     CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, ObjectHash, StoreBatchCommit,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StreamActivation,
-    StreamActivationId,
+    StoreBatchCommitRef, StoreDeviceRegistrationRef, StreamActivation, StreamActivationId,
+    VerifiedStoreBatchCommit,
 };
 
 /// The local device's own exclusion from a Circle epoch close, derived strictly
@@ -445,6 +447,7 @@ impl VerifiedCircleActivations {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_retained(
         bytes: &[u8],
         commit: &StoreBatchCommit,
@@ -452,6 +455,23 @@ impl VerifiedCircleActivations {
         author: &StoreDeviceRegistration,
         recipient_pubkey: Option<&str>,
     ) -> Result<Self, CircleOperationError> {
+        let verified = VerifiedStoreBatchCommit::parse(
+            &commit.to_bytes(),
+            commit.store_root_hash,
+            commit_ref,
+            author,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        Self::parse_retained_for_verified_commit(bytes, &verified, recipient_pubkey)
+    }
+
+    pub(crate) fn parse_retained_for_verified_commit(
+        bytes: &[u8],
+        verified: &VerifiedStoreBatchCommit,
+        recipient_pubkey: Option<&str>,
+    ) -> Result<Self, CircleOperationError> {
+        let commit = verified.value();
+        let commit_ref = verified.reference();
         let retained: RetainedCircleActivations =
             serde_json::from_slice(bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!(
@@ -468,10 +488,6 @@ impl VerifiedCircleActivations {
                 "retained Circle activation bytes are not canonical".to_string(),
             ));
         }
-        commit_ref
-            .verify_commit(commit)
-            .and_then(|()| commit.verify_at(commit.store_root_hash, &commit_ref.coord, author))
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if retained.activating_commit != *commit_ref
             || retained.circles.len() != commit.circle_controls().len()
         {
@@ -485,7 +501,7 @@ impl VerifiedCircleActivations {
             .into_iter()
             .zip(commit.circle_controls())
             .map(|(retained, reference)| {
-                retained.verify_and_open(commit, commit_ref, author, recipient_pubkey, reference)
+                retained.verify_and_open(verified, recipient_pubkey, reference)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut expected_bootstraps = BTreeMap::new();
@@ -560,18 +576,17 @@ impl RetainedCircleReference {
 
     fn verify_and_open(
         self,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
-        author: &StoreDeviceRegistration,
+        verified: &VerifiedStoreBatchCommit,
         recipient_pubkey: Option<&str>,
         reference: &CircleControlRef,
     ) -> Result<VerifiedCircleReference, CircleOperationError> {
+        let commit = verified.value();
         if self.reference != *reference || self.circle_id != reference.circle_id() {
             return Err(CircleOperationError::InvalidState(
                 "retained Circle reference differs from its exact Store commit".to_string(),
             ));
         }
-        verify_control_context(reference, &self.control, commit_ref, commit, author)?;
+        verify_control_context_for_verified_commit(reference, &self.control, verified)?;
         let local_access = self
             .local_access
             .map(|access| {

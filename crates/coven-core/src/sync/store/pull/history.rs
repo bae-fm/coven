@@ -74,16 +74,19 @@ pub(crate) async fn verify_merge_owner_conflict_acceptance(
 }
 
 pub(crate) struct VerifiedMergeHistoryCommit {
-    pub(crate) commit: StoreBatchCommit,
+    pub(crate) verified: VerifiedStoreBatchCommit,
     pub(crate) predecessor_membership: MembershipChain,
     pub(crate) predecessor_state: ResolvedStoreDeviceState,
     pub(crate) state_after: ResolvedStoreDeviceState,
+    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
     pub(crate) operations: VerifiedStoreDeviceOperations,
     pub(crate) acknowledgement: Option<(
         super::store_commit::StoreAckRef,
         super::store_commit::StoreAck,
     )>,
     pub(crate) membership_control: Option<VerifiedMergeMembershipControl>,
+    pub(crate) activation_head: StoreDeviceHead,
+    pub(crate) activation_head_object: ExactObjectRef,
     pub(crate) history: OpenedRetainedMergeHistorySummary,
 }
 
@@ -313,7 +316,7 @@ fn verified_merge_commit_closure(
                 "verified Merge predecessor closure is absent from its history".to_string(),
             )
         })?;
-        pending.extend(commit_predecessor_references(&verified.commit));
+        pending.extend(commit_predecessor_references(verified.verified.value()));
     }
     Ok(closure)
 }
@@ -480,6 +483,14 @@ pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
 pub(crate) struct VerifiedMergeHistory {
     pub(crate) genesis: ResolvedStoreDeviceState,
     pub(crate) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
+}
+
+pub(crate) struct MergeHistoryVerifier<'a> {
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    verified_root: super::store_commit::StoreProtocolRoot,
+    loaded: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+    history: VerifiedMergeHistory,
 }
 
 pub(crate) struct MergeOutboundAuthorization {
@@ -1086,305 +1097,380 @@ pub(crate) fn verify_merge_history_refs<'a>(
     tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> StorePullFuture<'a, VerifiedMergeHistory> {
     let pending = tips.into_iter().collect::<Vec<_>>();
-    Box::pin(verify_merge_history_refs_impl(storage, root, pending))
+    Box::pin(async move {
+        let mut verifier = MergeHistoryVerifier::new(storage, root).await?;
+        verifier.verify_refs(pending).await?;
+        Ok(verifier.into_history())
+    })
 }
 
-async fn verify_merge_history_refs_impl(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    mut pending: Vec<StoreBatchCommitRef>,
-) -> Result<VerifiedMergeHistory, StorePullError> {
-    let verified_root = Box::pin(load_store_protocol_root(storage, root))
-        .await?
-        .value;
-    let founder = Box::pin(load_founder_registration_with_root(
-        storage,
-        root,
-        &verified_root,
-    ))
-    .await?;
-    let founder_ref =
-        StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-    let genesis = ResolvedStoreDeviceState::founder(
-        root,
-        founder_ref.clone(),
-        &verified_root.descriptor.founder_pubkey,
-        verified_root.descriptor.founder_grant.clone(),
-        &verified_root.descriptor.founder_recovery,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-
-    let mut loaded =
-        BTreeMap::<StoreBatchCommitRef, (StoreBatchCommit, StoreDeviceRegistration)>::new();
-    while let Some(reference) = pending.pop() {
-        if loaded.contains_key(&reference) {
-            continue;
-        }
-        let (commit, author) = Box::pin(load_commit_with_author_at_root(
+impl<'a> MergeHistoryVerifier<'a> {
+    pub(crate) async fn new(
+        storage: &'a dyn SyncStorage,
+        root: &'a StoreRootRef,
+    ) -> Result<Self, StorePullError> {
+        let verified_root = Box::pin(load_store_protocol_root(storage, root))
+            .await?
+            .value;
+        let founder = Box::pin(load_founder_registration_with_root(
             storage,
             root,
             &verified_root,
-            &reference,
         ))
         .await?;
-        pending.extend(commit_predecessor_references(&commit));
-        loaded.insert(reference, (commit, author));
+        let founder_ref =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        let genesis = ResolvedStoreDeviceState::founder(
+            root,
+            founder_ref,
+            &verified_root.descriptor.founder_pubkey,
+            verified_root.descriptor.founder_grant.clone(),
+            &verified_root.descriptor.founder_recovery,
+        )
+        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        Ok(Self {
+            storage,
+            root,
+            verified_root,
+            loaded: BTreeMap::new(),
+            history: VerifiedMergeHistory {
+                genesis,
+                commits: BTreeMap::new(),
+            },
+        })
     }
 
-    let mut states = BTreeMap::<StoreBatchCommitRef, ResolvedStoreDeviceState>::new();
-    let mut verified = BTreeMap::new();
-    while !loaded.is_empty() {
-        let next = loaded.iter().find_map(|(reference, (commit, _))| {
-            commit_predecessor_references(commit)
-                .iter()
-                .all(|dependency| states.contains_key(dependency))
-                .then(|| reference.clone())
-        });
-        let Some(reference) = next else {
-            return Err(StorePullError::Database(
-                "Merge history is cyclic or has an unresolved predecessor".to_string(),
-            ));
-        };
-        let (commit, author) = loaded.remove(&reference).ok_or_else(|| {
-            StorePullError::Database(
-                "selected exclusion-history commit disappeared before verification".to_string(),
+    pub(crate) async fn load_ref(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<VerifiedStoreBatchCommit, StorePullError> {
+        if let Some(verified) = self.history.commits.get(reference) {
+            return Ok(verified.verified.clone());
+        }
+        if let Some(loaded) = self.loaded.get(reference) {
+            return Ok(loaded.clone());
+        }
+        let loaded = Box::pin(load_verified_commit_at_root(
+            self.storage,
+            self.root,
+            &self.verified_root,
+            reference,
+        ))
+        .await?;
+        self.loaded.insert(reference.clone(), loaded.clone());
+        Ok(loaded)
+    }
+
+    pub(crate) fn history(&self) -> &VerifiedMergeHistory {
+        &self.history
+    }
+
+    pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
+        &self.verified_root
+    }
+
+    fn into_history(self) -> VerifiedMergeHistory {
+        self.history
+    }
+
+    pub(crate) async fn verify_refs(
+        &mut self,
+        tips: impl IntoIterator<Item = StoreBatchCommitRef>,
+    ) -> Result<(), StorePullError> {
+        let storage = self.storage;
+        let root = self.root;
+        let verified_root = self.verified_root.clone();
+        let mut pending = tips.into_iter().collect::<Vec<_>>();
+        let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
+        while let Some(reference) = pending.pop() {
+            if self.history.commits.contains_key(&reference) || loaded.contains_key(&reference) {
+                continue;
+            }
+            let verified = self.load_ref(&reference).await?;
+            pending.extend(commit_predecessor_references(verified.value()));
+            loaded.insert(reference, verified);
+        }
+
+        let mut states = self
+            .history
+            .commits
+            .iter()
+            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut verified_announcement_commits = self
+            .history
+            .commits
+            .iter()
+            .map(|(reference, history)| (reference.clone(), history.verified.clone()))
+            .collect::<BTreeMap<_, _>>();
+        while !loaded.is_empty() {
+            let next = loaded.iter().find_map(|(reference, verified)| {
+                commit_predecessor_references(verified.value())
+                    .iter()
+                    .all(|dependency| states.contains_key(dependency))
+                    .then(|| reference.clone())
+            });
+            let Some(reference) = next else {
+                return Err(StorePullError::Database(
+                    "Merge history is cyclic or has an unresolved predecessor".to_string(),
+                ));
+            };
+            let verified = loaded.remove(&reference).ok_or_else(|| {
+                StorePullError::Database(
+                    "selected exclusion-history commit disappeared before verification".to_string(),
+                )
+            })?;
+            let commit = verified.value().clone();
+            let author = verified.author().clone();
+            let (_, accepted_head) = Box::pin(
+                crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
+                    storage,
+                    root,
+                    &commit.author_registration,
+                    &author,
+                    &verified,
+                    &verified_announcement_commits,
+                ),
             )
-        })?;
-        let (_, accepted_head) = Box::pin(
-            crate::sync::store::operations::exact_next_announcement_slot_for_verified_commit(
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let activation_head_ref = accepted_head.ok_or_else(|| {
+                StorePullError::Database(
+                    "Merge history commit has no accepted announcement head".to_string(),
+                )
+            })?;
+            let predecessor_state =
+                verified_merge_predecessor_state(&self.history.genesis, &states, &commit)?;
+            let verified_membership_prefix = verified_merge_membership_prefix(
+                &self.history.commits,
+                commit_predecessor_references(&commit),
+            )?;
+            let pending_resolution =
+                Box::pin(verify_merge_resolution_activation_acceptance_with_history(
+                    storage,
+                    root,
+                    &commit,
+                    &self.history.genesis,
+                    &self.history.commits,
+                ))
+                .await?;
+            let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
                 storage,
                 root,
-                &commit.author_registration,
-                &author,
-                &reference,
+                &commit.membership_state,
+                &verified_membership_prefix,
+                pending_resolution.as_ref(),
+            ))
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+            verified_membership_prefix
+                .validate_complete_membership(&membership)
+                .map_err(StorePullError::Database)?;
+            verify_merge_membership_state_ref(
+                &commit.membership_state,
+                &membership,
+                &predecessor_state,
+            )?;
+            if !membership_authorizes(Some(&membership), &commit, &author) {
+                return Err(StorePullError::Database(
+                    "Merge history commit lacks exact membership authority".to_string(),
+                ));
+            }
+            let accepted_frontier = commit_predecessor_references(&commit);
+            let registrations = Box::pin(load_merge_commit_registrations(
+                storage,
+                root,
+                &verified_root,
                 &commit,
-            ),
-        )
-        .await
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let activation_head_ref = accepted_head.ok_or_else(|| {
-            StorePullError::Database(
-                "Merge history commit has no accepted announcement head".to_string(),
+                &author,
+                &membership,
+                super::device_join_attempt::VerifiedMergePredecessorHistory {
+                    commits: &self.history.commits,
+                    frontier: &accepted_frontier,
+                },
+            ))
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+            let (authorized_predecessor, recovery_author) = predecessor_with_recovery_author(
+                predecessor_state.clone(),
+                &commit,
+                &registrations,
             )
-        })?;
-        let predecessor_state = verified_merge_predecessor_state(&genesis, &states, &commit)?;
-        let verified_membership_prefix =
-            verified_merge_membership_prefix(&verified, commit_predecessor_references(&commit))?;
-        let pending_resolution =
-            Box::pin(verify_merge_resolution_activation_acceptance_with_history(
-                storage, root, &commit, &genesis, &verified,
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            if !device_state_has_active_registration(
+                &authorized_predecessor,
+                &commit.author_registration,
+            ) {
+                return Err(StorePullError::Database(
+                    "author exclusion history commit author is inactive at its predecessor"
+                        .to_string(),
+                ));
+            }
+            let resolver = DeviceStateResolver::Loaded {
+                genesis: &self.history.genesis,
+                states: &states,
+            };
+            let operations = Box::pin(load_commit_device_operations(
+                Some(&resolver),
+                storage,
+                root,
+                &commit,
+                &authorized_predecessor,
+                Some(&membership),
+            ))
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+            let acknowledgement = Box::pin(validate_commit_acknowledgement(
+                storage, root, &commit, &author,
+            ))
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+            let membership_control =
+                if let Some(super::store_commit::StoreControl { transition }) = commit.control() {
+                    let (activations, conflict_resolution) =
+                        Box::pin(verify_merge_membership_control_with_history(
+                            storage,
+                            root,
+                            &reference,
+                            &commit,
+                            &membership,
+                            &predecessor_state,
+                            &self.history.commits,
+                            pending_resolution.as_ref(),
+                        ))
+                        .await
+                        .map_err(StorePullError::Database)?;
+                    Some(VerifiedMergeMembershipControl {
+                        activations,
+                        head_activation: VerifiedMergeMembershipHeadActivation {
+                            commit: reference.clone(),
+                            transition: transition.clone(),
+                        },
+                        conflict_resolution,
+                    })
+                } else {
+                    None
+                };
+            let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
+                storage, root, &commit,
             ))
             .await?;
-        let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
-            storage,
-            root,
-            &commit.membership_state,
-            &verified_membership_prefix,
-            pending_resolution.as_ref(),
-        ))
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-        verified_membership_prefix
-            .validate_complete_membership(&membership)
-            .map_err(StorePullError::Database)?;
-        verify_merge_membership_state_ref(
-            &commit.membership_state,
-            &membership,
-            &predecessor_state,
-        )?;
-        if !membership_authorizes(Some(&membership), &commit, &author) {
-            return Err(StorePullError::Database(
-                "Merge history commit lacks exact membership authority".to_string(),
-            ));
-        }
-        let accepted_frontier = commit_predecessor_references(&commit);
-        let registrations = Box::pin(load_merge_commit_registrations(
-            storage,
-            root,
-            &verified_root,
-            &commit,
-            &author,
-            &membership,
-            Some(super::device_join_attempt::MergeAcceptedJoinHistory {
-                commits: &verified,
-                frontier: &accepted_frontier,
-            }),
-        ))
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-        let (authorized_predecessor, recovery_author) =
-            predecessor_with_recovery_author(predecessor_state.clone(), &commit, &registrations)
+            let state = operations
+                .apply_to(authorized_predecessor, &commit.device_state)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
-        if !device_state_has_active_registration(
-            &authorized_predecessor,
-            &commit.author_registration,
-        ) {
-            return Err(StorePullError::Database(
-                "author exclusion history commit author is inactive at its predecessor".to_string(),
-            ));
-        }
-        let resolver = DeviceStateResolver::Loaded {
-            genesis: &genesis,
-            states: &states,
-        };
-        let operations = Box::pin(load_commit_device_operations(
-            Some(&resolver),
-            storage,
-            root,
-            &commit,
-            &authorized_predecessor,
-            Some(&membership),
-        ))
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-        let acknowledgement = Box::pin(validate_commit_acknowledgement(
-            storage, root, &commit, &author,
-        ))
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-        let membership_control =
-            if let Some(super::store_commit::StoreControl { transition }) = commit.control() {
-                let (activations, conflict_resolution) =
-                    Box::pin(verify_merge_membership_control_with_history(
+            let state = apply_verified_device_lifecycle(
+                state,
+                &commit,
+                &registrations,
+                recovery_author.as_ref(),
+                owner_recovery,
+            )
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let predecessor_histories = commit_predecessor_references(&commit)
+                .iter()
+                .map(|predecessor| {
+                    self.history
+                        .commits
+                        .get(predecessor)
+                        .map(|verified: &VerifiedMergeHistoryCommit| verified.history.clone())
+                        .ok_or_else(|| {
+                            StorePullError::Database(
+                                "Merge history summary has an unresolved predecessor".to_string(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let membership_closure = Box::pin(verified_merge_membership_objects(
+                storage, root, &reference, &commit,
+            ))
+            .await?;
+            let retained_registrations = commit
+                .device_registrations()
+                .iter()
+                .zip(&registrations)
+                .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+                    reference: activation.registration.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            let retained_acknowledgement = match acknowledgement.clone() {
+                Some((acknowledgement_ref, acknowledgement_value)) => Some(
+                    retain_activated_acknowledgement(
                         storage,
                         root,
                         &reference,
                         &commit,
-                        &membership,
-                        &predecessor_state,
-                        &verified,
-                        pending_resolution.as_ref(),
-                    ))
-                    .await
-                    .map_err(StorePullError::Database)?;
-                Some(VerifiedMergeMembershipControl {
-                    activations,
-                    head_activation: VerifiedMergeMembershipHeadActivation {
-                        commit: reference.clone(),
-                        transition: transition.clone(),
-                    },
-                    conflict_resolution,
-                })
-            } else {
-                None
+                        &author,
+                        acknowledgement_ref,
+                        acknowledgement_value,
+                    )
+                    .await?,
+                ),
+                None => None,
             };
-        let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-            storage, root, &commit,
-        ))
-        .await?;
-        let state = operations
-            .apply_to(authorized_predecessor, &commit.device_state)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let state = apply_verified_device_lifecycle(
-            state,
-            &commit,
-            &registrations,
-            recovery_author.as_ref(),
-            owner_recovery,
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let predecessor_histories = commit_predecessor_references(&commit)
-            .iter()
-            .map(|predecessor| {
-                verified
-                    .get(predecessor)
-                    .map(|verified: &VerifiedMergeHistoryCommit| verified.history.clone())
-                    .ok_or_else(|| {
-                        StorePullError::Database(
-                            "Merge history summary has an unresolved predecessor".to_string(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let membership_closure = Box::pin(verified_merge_membership_objects(
-            storage, root, &reference, &commit,
-        ))
-        .await?;
-        let retained_registrations = commit
-            .device_registrations()
-            .iter()
-            .zip(&registrations)
-            .map(|(activation, (value, _))| RetainedVerifiedRegistration {
-                reference: activation.registration.clone(),
-                value: value.clone(),
-            })
-            .collect();
-        let retained_acknowledgement = match acknowledgement.clone() {
-            Some((acknowledgement_ref, acknowledgement_value)) => Some(
-                retain_activated_acknowledgement(
-                    storage,
-                    root,
-                    &reference,
-                    &commit,
-                    &author,
-                    acknowledgement_ref,
-                    acknowledgement_value,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-        let successor = compose_merge_history_successor(
-            root,
-            &commit,
-            &reference,
-            &membership,
-            &author,
-            state.clone(),
-            predecessor_histories,
-            MergeHistorySuccessorEvidence {
-                registrations: retained_registrations,
-                acknowledgement: retained_acknowledgement,
-                membership_proof: membership_closure.map(|closure| closure.proof),
-            },
-        )?;
-        let activation_head = Box::pin(super::store_objects::load_head_ref(
-            storage,
-            root.store_root_hash,
-            &activation_head_ref,
-            &author,
-            &reference,
-        ))
-        .await?;
-        let history = successor
-            .summary
-            .open(
+            let successor = compose_merge_history_successor(
+                root,
                 &commit,
                 &reference,
-                &activation_head.value,
+                &membership,
+                &author,
+                state.clone(),
+                predecessor_histories,
+                MergeHistorySuccessorEvidence {
+                    registrations: retained_registrations,
+                    acknowledgement: retained_acknowledgement,
+                    membership_proof: membership_closure.map(|closure| closure.proof),
+                },
+            )?;
+            let activation_head = Box::pin(super::store_objects::load_head_ref(
+                storage,
+                root.store_root_hash,
                 &activation_head_ref,
-                &state,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-        states.insert(reference.clone(), state.clone());
-        verified.insert(
-            reference,
-            VerifiedMergeHistoryCommit {
-                commit,
-                predecessor_membership: membership,
-                predecessor_state,
-                state_after: state,
-                operations,
-                acknowledgement,
-                membership_control,
-                history,
-            },
-        );
+                &author,
+                &reference,
+            ))
+            .await?;
+            let history = successor
+                .summary
+                .open(
+                    &commit,
+                    &reference,
+                    &activation_head.value,
+                    &activation_head_ref,
+                    &state,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            verified_announcement_commits.insert(reference.clone(), verified.clone());
+            states.insert(reference.clone(), state.clone());
+            self.history.commits.insert(
+                reference,
+                VerifiedMergeHistoryCommit {
+                    verified,
+                    predecessor_membership: membership,
+                    predecessor_state,
+                    state_after: state,
+                    registrations,
+                    operations,
+                    acknowledgement,
+                    membership_control,
+                    activation_head: activation_head.value,
+                    activation_head_object: activation_head.object,
+                    history,
+                },
+            );
+        }
+        Ok(())
     }
-    Ok(VerifiedMergeHistory {
-        genesis,
-        commits: verified,
-    })
 }

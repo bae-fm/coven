@@ -26,7 +26,6 @@ pub(super) async fn publish_circle_operation(
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<(), CircleOperationError> {
-    let db = database.sqlite();
     let mut journal = database
         .circle_operation(operation_id)
         .await?
@@ -492,10 +491,6 @@ pub(super) async fn publish_circle_operation(
         .local_store_root_ref()
         .await?
         .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-    let founder = db
-        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let verified = load_circle_activations(
         database,
         storage,
@@ -504,7 +499,6 @@ pub(super) async fn publish_circle_operation(
         &commit,
         &author,
         identity,
-        &founder,
         routing_key,
     )
     .await?;

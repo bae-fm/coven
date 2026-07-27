@@ -3040,7 +3040,6 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         &forged_commit,
         &author,
         &fixture.signer,
-        &owner_pubkey,
     )
     .await
     .expect_err("reopen without a slot cancellation must fail activation");

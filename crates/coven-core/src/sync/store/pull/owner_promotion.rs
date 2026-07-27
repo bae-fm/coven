@@ -9,7 +9,9 @@ pub(in crate::sync::store) async fn find_request_activation(
     request
         .verify(root, &promoter.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
     let discovered = discover_merge_stream(
+        &mut history_verifier,
         storage,
         root,
         &request.promoter_registration,
@@ -47,12 +49,15 @@ pub(in crate::sync::store) async fn verify_acceptance(
         commit: activation_commit,
         ..
     } = &acceptance.activation;
-    let history = verify_merge_history_refs(storage, root, [activation_commit.clone()]).await?;
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    history_verifier
+        .verify_refs([activation_commit.clone()])
+        .await?;
     verify_merge_owner_promotion_acceptance_with_history(
         storage,
         root,
         acceptance,
-        &history.commits,
+        &history_verifier.history().commits,
     )
     .await
 }
@@ -122,10 +127,11 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
             "Owner-promotion request activation is absent from its verified history".to_string(),
         )
     })?;
-    if verified.commit.owner_promotion_request() != Some(request)
-        || verified.commit.membership_state != request.predecessor_membership
-        || verified.commit.device_state != request.predecessor_devices
-        || verified.commit.author_registration != request.promoter_registration
+    let verified_commit = verified.verified.value();
+    if verified_commit.owner_promotion_request() != Some(request)
+        || verified_commit.membership_state != request.predecessor_membership
+        || verified_commit.device_state != request.predecessor_devices
+        || verified_commit.author_registration != request.promoter_registration
     {
         return Err(StorePullError::Database(
             "Owner-promotion request commit differs from its signed predecessor authority"
@@ -134,7 +140,7 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
     }
     let verified_membership_activations = verified_merge_membership_prefix(
         verified_commits,
-        commit_predecessor_references(&verified.commit),
+        commit_predecessor_references(verified_commit),
     )?;
     let membership = load_merge_predecessor_membership_with_verified_activations(
         storage,

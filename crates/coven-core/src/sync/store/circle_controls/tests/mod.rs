@@ -196,7 +196,6 @@ async fn load_circle_activations(
     commit: &StoreBatchCommit,
     author: &crate::sync::store_commit::StoreDeviceRegistration,
     identity: &UserKeypair,
-    founder_pubkey: &str,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
@@ -211,7 +210,6 @@ async fn load_circle_activations(
         commit,
         author,
         identity,
-        founder_pubkey,
         Some(&routing_key),
     )
     .await

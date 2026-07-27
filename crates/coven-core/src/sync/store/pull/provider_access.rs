@@ -45,8 +45,10 @@ async fn current_history_contains(
     membership: &MembershipChain,
     expected: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
-    let initial = verify_merge_history_refs(storage, root, [expected.clone()]).await?;
-    let mut state = initial
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    history_verifier.verify_refs([expected.clone()]).await?;
+    let mut state = history_verifier
+        .history()
         .commits
         .get(expected)
         .ok_or_else(|| {
@@ -83,9 +85,15 @@ async fn current_history_contains(
                 },
                 None => None,
             };
-            let discovered =
-                discover_merge_stream(storage, root, registration_ref, registration, inactive_cut)
-                    .await?;
+            let discovered = discover_merge_stream(
+                &mut history_verifier,
+                storage,
+                root,
+                registration_ref,
+                registration,
+                inactive_cut,
+            )
+            .await?;
             if matches!(discovered.block, Some(MergeStreamBlock::Authenticated(_))) {
                 return Err(StorePullError::Database(
                     "an authenticated Merge stream position cannot be verified".to_string(),
@@ -96,14 +104,15 @@ async fn current_history_contains(
                 next.insert(stream_id, reference.clone());
             }
         }
-        let history = verify_merge_history_refs(storage, root, next.values().cloned()).await?;
+        history_verifier.verify_refs(next.values().cloned()).await?;
         let next_state = if next.is_empty() {
-            history.genesis.clone()
+            history_verifier.history().genesis.clone()
         } else {
             ResolvedStoreDeviceState::merge(
                 next.values()
                     .map(|reference| {
-                        history
+                        history_verifier
+                            .history()
                             .commits
                             .get(reference)
                             .map(|commit| commit.state_after.clone())
@@ -123,7 +132,7 @@ async fn current_history_contains(
         let stable =
             next == accepted && next_state == state && registrations.len() == registration_count;
         if stable {
-            return Ok(history.commits.contains_key(expected));
+            return Ok(history_verifier.history().commits.contains_key(expected));
         }
         let state_fingerprint = ObjectHash::digest(
             &serde_json::to_vec(&(&next, &next_state))

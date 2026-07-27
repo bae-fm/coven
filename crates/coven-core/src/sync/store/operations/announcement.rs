@@ -1,4 +1,6 @@
 use super::*;
+use crate::sync::store_commit::VerifiedStoreBatchCommit;
+use std::collections::BTreeMap;
 
 pub(crate) async fn exact_next_announcement_slot(
     storage: &dyn SyncStorage,
@@ -13,15 +15,14 @@ pub(crate) async fn exact_next_announcement_slot(
     ),
     StoreError,
 > {
-    exact_next_announcement_slot_impl(
-        storage,
-        root,
-        registration_ref,
-        registration,
-        previous,
-        false,
-    )
-    .await
+    let path =
+        exact_next_announcement_slot_impl(storage, root, registration_ref, registration, previous)
+            .await?;
+    for commit in &path.commits {
+        super::store_objects::load_commit_ref(storage, root.store_root_hash, commit, registration)
+            .await?;
+    }
+    Ok((path.next_slot, path.accepted_head))
 }
 
 pub(crate) async fn exact_next_announcement_slot_for_verified_commit(
@@ -29,8 +30,8 @@ pub(crate) async fn exact_next_announcement_slot_for_verified_commit(
     root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
-    reference: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
+    commit: &VerifiedStoreBatchCommit,
+    verified_predecessors: &BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 ) -> Result<
     (
         crate::storage::cloud::ObjectSlot,
@@ -38,23 +39,46 @@ pub(crate) async fn exact_next_announcement_slot_for_verified_commit(
     ),
     StoreError,
 > {
-    reference
-        .verify_commit(commit)
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    if commit.author_registration != *registration_ref {
+    if commit.value().author_registration != *registration_ref || commit.author() != registration {
         return Err(StoreError::InvalidOutbound(
             "verified Store commit author differs from its announcement registration".to_string(),
         ));
     }
-    exact_next_announcement_slot_impl(
+    let path = exact_next_announcement_slot_impl(
         storage,
         root,
         registration_ref,
         registration,
-        Some(reference),
-        true,
+        Some(commit.reference()),
     )
-    .await
+    .await?;
+    for reference in &path.commits {
+        let verified = if reference == commit.reference() {
+            commit
+        } else {
+            verified_predecessors.get(reference).ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "Store announcement names a commit absent from the verified operation history"
+                        .to_string(),
+                )
+            })?
+        };
+        if verified.reference() != reference
+            || verified.author() != registration
+            || verified.value().author_registration != *registration_ref
+        {
+            return Err(StoreError::InvalidOutbound(
+                "verified Store announcement history belongs to another author".to_string(),
+            ));
+        }
+    }
+    Ok((path.next_slot, path.accepted_head))
+}
+
+struct ExactAnnouncementPath {
+    next_slot: crate::storage::cloud::ObjectSlot,
+    accepted_head: Option<StoreDeviceHeadRef>,
+    commits: Vec<StoreBatchCommitRef>,
 }
 
 async fn exact_next_announcement_slot_impl(
@@ -63,14 +87,7 @@ async fn exact_next_announcement_slot_impl(
     registration_ref: &StoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     previous: Option<&StoreBatchCommitRef>,
-    target_is_verified: bool,
-) -> Result<
-    (
-        crate::storage::cloud::ObjectSlot,
-        Option<StoreDeviceHeadRef>,
-    ),
-    StoreError,
-> {
+) -> Result<ExactAnnouncementPath, StoreError> {
     let super::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
         &registration.store_commits
     else {
@@ -79,7 +96,11 @@ async fn exact_next_announcement_slot_impl(
         ));
     };
     let Some(target) = previous else {
-        return Ok((first_slot.clone(), None));
+        return Ok(ExactAnnouncementPath {
+            next_slot: first_slot.clone(),
+            accepted_head: None,
+            commits: Vec::new(),
+        });
     };
     let expected_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
         root.store_root_hash,
@@ -101,6 +122,7 @@ async fn exact_next_announcement_slot_impl(
     );
     let mut slot = first_slot.clone();
     let mut predecessor: Option<StoreDeviceHeadRef> = None;
+    let mut commits = Vec::new();
     for sequence in 1..=target.coord.sequence() {
         let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
         let (bytes, object) = storage
@@ -144,21 +166,17 @@ async fn exact_next_announcement_slot_impl(
                 actual: Box::new(head.commit),
             });
         }
-        if !is_target || !target_is_verified {
-            super::store_objects::load_commit_ref(
-                storage,
-                root.store_root_hash,
-                &head.commit,
-                registration,
-            )
-            .await?;
-        }
+        commits.push(head.commit.clone());
         let reference = StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object,
         };
         if is_target {
-            return Ok((head.successor.next_slot, Some(reference)));
+            return Ok(ExactAnnouncementPath {
+                next_slot: head.successor.next_slot,
+                accepted_head: Some(reference),
+                commits,
+            });
         }
         slot = head.successor.next_slot;
         predecessor = Some(reference);

@@ -7,23 +7,21 @@ struct VerifiedMergeSnapshotState {
 }
 
 pub(super) struct VerifiedMergeHistoryAuthority {
-    pub(super) history: VerifiedMergeHistory,
     device_state: ResolvedStoreDeviceState,
     pub(super) membership: MembershipChain,
 }
 
 pub(super) async fn verify_merge_history_authority(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
     membership_ref: &StoreMembershipStateRef,
 ) -> Result<VerifiedMergeHistoryAuthority, StorePullError> {
-    let history = Box::pin(verify_merge_history_refs(
-        storage,
-        root,
-        frontier.values().cloned().collect::<Vec<_>>(),
-    ))
-    .await?;
+    history_verifier
+        .verify_refs(frontier.values().cloned())
+        .await?;
+    let history = history_verifier.history();
     let device_state = if frontier.is_empty() {
         history.genesis.clone()
     } else {
@@ -65,26 +63,28 @@ pub(super) async fn verify_merge_history_authority(
         .map_err(StorePullError::Database)?;
     verify_merge_membership_state_ref(membership_ref, &membership, &device_state)?;
     Ok(VerifiedMergeHistoryAuthority {
-        history,
         device_state,
         membership,
     })
 }
 
 async fn verify_history_state(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
     membership_ref: &StoreMembershipStateRef,
 ) -> Result<VerifiedMergeSnapshotState, StorePullError> {
-    let authority = verify_merge_history_authority(storage, root, frontier, membership_ref).await?;
+    let authority =
+        verify_merge_history_authority(history_verifier, storage, root, frontier, membership_ref)
+            .await?;
     let active_registrations =
         load_active_history_registrations(storage, root, &authority.device_state).await?;
     let checkpoints = frontier
         .values()
         .map(|reference| {
-            authority
-                .history
+            history_verifier
+                .history()
                 .commits
                 .get(reference)
                 .map(|commit| commit.history.clone())
@@ -106,13 +106,20 @@ async fn verify_history_state(
 }
 
 async fn verify_authority(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
     let frontier = &snapshot.meta.coverage.0;
-    let state =
-        verify_history_state(storage, root, frontier, &snapshot.meta.state.membership).await?;
+    let state = verify_history_state(
+        history_verifier,
+        storage,
+        root,
+        frontier,
+        &snapshot.meta.state.membership,
+    )
+    .await?;
     let expected_device_state = StoreDeviceStateRef::from_resolved(
         snapshot.meta.coverage.clone(),
         &state.common.device_state,
@@ -151,6 +158,7 @@ async fn verify_authority(
 }
 
 async fn accepted_cut(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot_frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
@@ -163,8 +171,15 @@ async fn accepted_cut(
             registration_ref,
             super::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let discovery =
-            discover_merge_stream(storage, root, registration_ref, registration, None).await?;
+        let discovery = discover_merge_stream(
+            history_verifier,
+            storage,
+            root,
+            registration_ref,
+            registration,
+            None,
+        )
+        .await?;
         let Some((_, _, latest, _)) = discovery.commits.last() else {
             if accepted.contains_key(&stream_id) {
                 return Err(StorePullError::Database(
@@ -189,19 +204,15 @@ async fn accepted_cut(
 }
 
 async fn activated_acknowledgements(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
 ) -> Result<Vec<VerifiedActivatedStoreAck>, StorePullError> {
-    let history = verify_merge_history_refs(
-        storage,
-        root,
-        frontier.values().cloned().collect::<Vec<_>>(),
-    )
-    .await?;
+    history_verifier
+        .verify_refs(frontier.values().cloned())
+        .await?;
     let mut acknowledgements = Vec::new();
-    for (activating_commit, commit) in history.commits {
-        let Some((reference, value)) = commit.acknowledgement else {
+    for (activating_commit, commit) in &history_verifier.history().commits {
+        let Some((reference, value)) = commit.acknowledgement.as_ref() else {
             continue;
         };
         let chain = commit
@@ -217,11 +228,11 @@ async fn activated_acknowledgements(
             .chain
             .clone();
         acknowledgements.push(VerifiedActivatedStoreAck {
-            reference,
-            value,
+            reference: reference.clone(),
+            value: value.clone(),
             chain,
-            activating_commit,
-            activating_commit_value: commit.commit,
+            activating_commit: activating_commit.clone(),
+            activating_commit_value: commit.verified.value().clone(),
         });
     }
     Ok(acknowledgements)
@@ -232,7 +243,10 @@ pub(in crate::sync::store) async fn verify_snapshot_for_acknowledgement(
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<(), StorePullError> {
-    verify_authority(storage, root, snapshot).await.map(|_| ())
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    verify_authority(&mut history_verifier, storage, root, snapshot)
+        .await
+        .map(|_| ())
 }
 
 pub(in crate::sync::store) async fn verify_snapshot_stability(
@@ -240,11 +254,21 @@ pub(in crate::sync::store) async fn verify_snapshot_stability(
     root: &StoreRootRef,
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
-    let (snapshot_cut, state) = verify_authority(storage, root, snapshot).await?;
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    let (snapshot_cut, state) =
+        verify_authority(&mut history_verifier, storage, root, snapshot).await?;
     let snapshot_frontier = &snapshot_cut.0;
-    let accepted_cut = accepted_cut(storage, root, snapshot_frontier, &state).await?;
+    let accepted_cut = accepted_cut(
+        &mut history_verifier,
+        storage,
+        root,
+        snapshot_frontier,
+        &state,
+    )
+    .await?;
     let accepted_frontier = &accepted_cut.0;
-    let acknowledgements = activated_acknowledgements(storage, root, accepted_frontier).await?;
+    let acknowledgements =
+        activated_acknowledgements(&mut history_verifier, accepted_frontier).await?;
     assemble_snapshot_stability(
         storage,
         root,

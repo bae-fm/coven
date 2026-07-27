@@ -22,7 +22,7 @@ pub(super) async fn replay_merge_device_history(
     Ok((
         verified.predecessor_state.clone(),
         verified.operations.clone(),
-        verified.commit.clone(),
+        verified.verified.value().clone(),
         verified
             .membership_control
             .as_ref()
@@ -286,8 +286,10 @@ pub(crate) fn replay_retained_merge_projection_on(
             live,
             retained_merge_materializations,
         )?;
-    let circle_epochs =
-        crate::sync::store::database::StoreDatabase::circle_replay_epoch_index_on(live)?;
+    let circle_epochs = crate::sync::store::database::StoreDatabase::circle_replay_epoch_index_with_verified_materializations_on(
+        live,
+        retained_merge_materializations,
+    )?;
     let active_references = retained
         .iter()
         .filter(|materialization| {
@@ -471,8 +473,7 @@ pub(crate) fn replay_retained_merge_projection_on(
                 };
             let replay_materialization = PreparedMergeMaterialization {
                 root: materialization.root().clone(),
-                commit: materialization.commit().clone(),
-                commit_ref: materialization.commit_ref().clone(),
+                verified_commit: materialization.verified_commit().clone(),
                 activation_head: materialization.activation_head().clone(),
                 activation_head_object: materialization.activation_head_object().clone(),
                 history_summary: materialization.history_summary().clone(),

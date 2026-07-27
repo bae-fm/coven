@@ -11,6 +11,60 @@ use super::validation::{
 };
 use super::*;
 
+#[cfg(test)]
+static COMMIT_VERIFICATION_COUNTS: std::sync::Mutex<BTreeMap<ObjectHash, u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_commit_verification(commit_hash: ObjectHash) {
+    let mut counts = COMMIT_VERIFICATION_COUNTS
+        .lock()
+        .expect("Store commit verification counts lock is not poisoned");
+    *counts.entry(commit_hash).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn commit_verification_count(commit_hash: ObjectHash) -> u64 {
+    COMMIT_VERIFICATION_COUNTS
+        .lock()
+        .expect("Store commit verification counts lock is not poisoned")
+        .get(&commit_hash)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) struct StoreCommitVerificationAudit {
+    baseline: BTreeMap<StoreBatchCommitRef, u64>,
+}
+
+#[cfg(test)]
+impl StoreCommitVerificationAudit {
+    pub(crate) fn begin(references: &[StoreBatchCommitRef]) -> Self {
+        Self {
+            baseline: references
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.clone(),
+                        commit_verification_count(reference.commit_hash),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn assert_each_verified_once(self) {
+        for (reference, baseline) in self.baseline {
+            assert_eq!(
+                commit_verification_count(reference.commit_hash) - baseline,
+                1,
+                "Store commit {reference:?} must be cryptographically verified once"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreBatchCommit {
@@ -1079,6 +1133,8 @@ impl StoreBatchCommit {
             validate_membership_authority(authority)?;
         }
         validate_parsed_control(self, author)?;
+        #[cfg(test)]
+        record_commit_verification(self.commit_hash());
         if !keys::verify_signature_hex(
             &author.device_signing_pubkey,
             &self.signature,

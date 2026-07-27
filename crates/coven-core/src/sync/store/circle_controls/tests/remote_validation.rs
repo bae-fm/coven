@@ -79,7 +79,8 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         },
         bootstrap: None,
     });
-    let author = crate::sync::store::database::StoreDatabase::new(&db)
+    let database = crate::sync::store::database::StoreDatabase::new(&db);
+    let author = database
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -146,7 +147,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         &commit,
         &author,
         &signer,
-        &keys::public_key_hex(&signer),
     )
     .await
     .expect_err("invented access references must fail activation");
@@ -157,12 +157,32 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         "{error}"
     );
 
+    let membership = crate::sync::store::pull::load_cycle_membership(&store.storage, &database)
+        .await
+        .expect("load exact Store membership for the forged Circle commit");
+    let (_, state_after) = database
+        .store_device_state_for_order(&commit.order)
+        .await
+        .expect("load exact predecessor device state for the forged Circle commit");
+    let history = crate::sync::store::pull::prepare_merge_history_successor(
+        &database,
+        &store.root,
+        &commit,
+        &commit_ref,
+        &membership,
+        &author,
+        None,
+        state_after,
+        crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),
+    )
+    .await
+    .expect("prepare matching retained history for the forged Circle commit");
     let original_head = &journal.operation().policy.head;
     let forged_head = StoreDeviceHead::signed(
         commit.store_root_hash,
         commit.author_registration.clone(),
         commit_ref.clone(),
-        original_head.history_summary,
+        history.summary.digest(),
         original_head.successor.clone(),
         &device_signer,
     )
@@ -201,13 +221,17 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .pull(&store_dir, &signer, None)
         .await
         .expect("pull reports the invented access commit as held");
-    assert!(pull.held_positions.iter().any(|held| {
-        matches!(
-            &held.reason,
-            crate::sync::store::pull::HeldStorePositionReason::InvalidObject(reason)
-                if reason.contains("circle access envelope failed verification")
-        )
-    }));
+    assert!(
+        pull.held_positions.iter().any(|held| {
+            matches!(
+                &held.reason,
+                crate::sync::store::pull::HeldStorePositionReason::InvalidObject(reason)
+                    if reason.contains("circle access envelope failed verification")
+            )
+        }),
+        "{:#?}",
+        pull.held_positions
+    );
     assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
     assert!(crate::sync::store::database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), commit.seq())
@@ -337,7 +361,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         &commit,
         &author,
         &peer,
-        &keys::public_key_hex(&founder),
     )
     .await
     .expect_err("Active access must name a resolved Circle member");
@@ -446,7 +469,6 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         &commit,
         &author,
         &peer,
-        &keys::public_key_hex(&founder),
     )
     .await
     .expect("inactive Circle member verifies the public activation graph");
@@ -488,7 +510,6 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         &baseline_commit,
         &baseline_author,
         &baseline_signer,
-        &keys::public_key_hex(&baseline_signer),
     )
     .await
     .expect("baseline exact Circle activation verifies remotely");
@@ -613,7 +634,6 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         &commit,
         &author,
         &signer,
-        &keys::public_key_hex(&signer),
     )
     .await
     .expect_err("metadata cannot borrow authority from a different roster state");

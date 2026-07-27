@@ -136,6 +136,52 @@ pub enum StoreProtocolError {
     },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedStoreBatchCommit {
+    reference: StoreBatchCommitRef,
+    value: StoreBatchCommit,
+    author: StoreDeviceRegistration,
+}
+
+impl VerifiedStoreBatchCommit {
+    pub(crate) fn parse(
+        bytes: &[u8],
+        store_root_hash: ObjectHash,
+        reference: &StoreBatchCommitRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<Self, StoreProtocolError> {
+        let value = StoreBatchCommit::parse_at(bytes, store_root_hash, &reference.coord, author)?;
+        reference.verify_commit(&value)?;
+        Ok(Self {
+            reference: reference.clone(),
+            value,
+            author: author.clone(),
+        })
+    }
+
+    pub(crate) fn reference(&self) -> &StoreBatchCommitRef {
+        &self.reference
+    }
+
+    pub(crate) fn value(&self) -> &StoreBatchCommit {
+        &self.value
+    }
+
+    pub(crate) fn author(&self) -> &StoreDeviceRegistration {
+        &self.author
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        StoreBatchCommitRef,
+        StoreBatchCommit,
+        StoreDeviceRegistration,
+    ) {
+        (self.reference, self.value, self.author)
+    }
+}
+
 pub fn store_protocol_root_logical_key() -> &'static str {
     STORE_PROTOCOL_ROOT_SEMANTIC_PATH
 }

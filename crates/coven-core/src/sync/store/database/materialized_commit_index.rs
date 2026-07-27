@@ -3,7 +3,7 @@ use crate::sync::storage::PreparedExactObject;
 use crate::sync::store_commit::{
     CommitFrontier, ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit,
     StoreBatchCommitRef, StoreDeviceProposalAck, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
@@ -35,6 +35,56 @@ impl StoreDatabase {
                     )
                 })?;
                 Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)
+            })
+            .await
+    }
+
+    pub(crate) async fn retained_merge_materialization_refs(
+        &self,
+    ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
+        self.database
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT device_id, seq, commit_ref
+                         FROM retained_merge_materializations
+                         ORDER BY device_id, seq",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                rows.map(|row| {
+                    let (stream_id, sequence, encoded_ref) = row.map_err(DbError::from)?;
+                    let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
+                    Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)
+                })
+                .collect()
+            })
+            .await
+    }
+
+    pub(crate) async fn retained_merge_replay_inputs_with_verified_commits(
+        &self,
+        verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        let cache = self.retained_merge_materialization_cache();
+        self.database
+            .call(move |conn| {
+                let mut cache = cache.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
+                Self::cached_retained_merge_replay_inputs_with_verified_commits_on(
+                    conn, &mut cache, &verified,
+                )
             })
             .await
     }

@@ -184,8 +184,7 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
 #[derive(Clone)]
 pub(crate) struct OwnedVerifiedMergeMaterialization {
     root: crate::sync::store_commit::StoreRootRef,
-    commit: StoreBatchCommit,
-    commit_ref: StoreBatchCommitRef,
+    verified_commit: crate::sync::store_commit::VerifiedStoreBatchCommit,
     registrations: Vec<(
         StoreDeviceRegistration,
         crate::sync::store_commit::StoreDeviceRegistrationActivation,
@@ -204,8 +203,7 @@ pub(crate) struct OwnedVerifiedMergeMaterialization {
 impl OwnedVerifiedMergeMaterialization {
     pub(crate) fn verify(
         root: crate::sync::store_commit::StoreRootRef,
-        commit: StoreBatchCommit,
-        commit_ref: StoreBatchCommitRef,
+        verified_commit: crate::sync::store_commit::VerifiedStoreBatchCommit,
         registrations: Vec<(
             StoreDeviceRegistration,
             crate::sync::store_commit::StoreDeviceRegistrationActivation,
@@ -222,8 +220,8 @@ impl OwnedVerifiedMergeMaterialization {
     ) -> Result<Self, DbError> {
         VerifiedMergeMaterialization::verify(
             &root,
-            &commit,
-            &commit_ref,
+            verified_commit.value(),
+            verified_commit.reference(),
             &registrations,
             &device_operations,
             &circle_activations,
@@ -236,8 +234,7 @@ impl OwnedVerifiedMergeMaterialization {
         )?;
         Ok(Self {
             root,
-            commit,
-            commit_ref,
+            verified_commit,
             registrations,
             device_operations,
             circle_activations,
@@ -260,11 +257,15 @@ impl OwnedVerifiedMergeMaterialization {
     }
 
     pub(crate) fn commit(&self) -> &StoreBatchCommit {
-        &self.commit
+        self.verified_commit.value()
     }
 
     pub(crate) fn commit_ref(&self) -> &StoreBatchCommitRef {
-        &self.commit_ref
+        self.verified_commit.reference()
+    }
+
+    pub(crate) fn verified_commit(&self) -> &crate::sync::store_commit::VerifiedStoreBatchCommit {
+        &self.verified_commit
     }
 
     pub(crate) fn registrations(

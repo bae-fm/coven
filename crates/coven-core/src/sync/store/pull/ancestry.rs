@@ -103,7 +103,6 @@ pub(crate) async fn load_provider_access_activation(
 
 pub(crate) struct LoadedDeviceJoinAttemptEvidence {
     pub(crate) attempt: VerifiedObject<DeviceJoinAttempt>,
-    pub(crate) provider_access_activation: StoreBatchCommit,
 }
 
 pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
@@ -131,31 +130,7 @@ pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
             .provider_approval
             .verify(&verified_root, owner, &administrator)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let provider_access_activation = load_provider_access_activation(
-            storage,
-            root,
-            &verified_root.value,
-            &attempt.value.provider_approval.access_grant,
-            &administrator,
-        )
-        .await?;
-        if !history_cut_covers(
-            storage,
-            root,
-            &attempt.value.bootstrap_cut,
-            &attempt.value.provider_approval.access_grant.activation,
-        )
-        .await?
-        {
-            return Err(StorePullError::Database(
-                "device join attempt predecessor cut does not include its provider-access activation"
-                    .to_string(),
-            ));
-        }
-        Ok(LoadedDeviceJoinAttemptEvidence {
-            attempt,
-            provider_access_activation,
-        })
+        Ok(LoadedDeviceJoinAttemptEvidence { attempt })
     })
 }
 
@@ -165,17 +140,30 @@ pub(crate) fn load_commit_with_author_at_root<'a>(
     root_value: &'a super::store_commit::StoreProtocolRoot,
     reference: &'a StoreBatchCommitRef,
 ) -> super::store_objects::StoreObjectFuture<'a, (StoreBatchCommit, StoreDeviceRegistration)> {
-    Box::pin(load_commit_with_author_at_root_impl(
+    Box::pin(async move {
+        let verified = load_verified_commit_at_root(storage, root, root_value, reference).await?;
+        let (_, commit, author) = verified.into_parts();
+        Ok((commit, author))
+    })
+}
+
+pub(crate) fn load_verified_commit_at_root<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    root_value: &'a super::store_commit::StoreProtocolRoot,
+    reference: &'a StoreBatchCommitRef,
+) -> super::store_objects::StoreObjectFuture<'a, VerifiedStoreBatchCommit> {
+    Box::pin(load_verified_commit_at_root_impl(
         storage, root, root_value, reference,
     ))
 }
 
-async fn load_commit_with_author_at_root_impl(
+async fn load_verified_commit_at_root_impl(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &super::store_commit::StoreProtocolRoot,
     reference: &StoreBatchCommitRef,
-) -> Result<(StoreBatchCommit, StoreDeviceRegistration), StoreObjectError> {
+) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
     let semantic_prefix =
         super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
             .map_err(|source| StoreObjectError::InvalidObject {
@@ -218,16 +206,14 @@ async fn load_commit_with_author_at_root_impl(
         &semantic_prefix,
         &reference.object,
         Box::new(move || {
-            let commit = StoreBatchCommit::parse_at(
+            VerifiedStoreBatchCommit::parse(
                 &verify_bytes,
                 store_root_hash,
-                &expected_reference.coord,
+                &expected_reference,
                 &expected_author,
-            )?;
-            expected_reference.verify_commit(&commit)?;
-            Ok(commit)
+            )
         }),
     )
     .await?;
-    Ok((commit, author))
+    Ok(commit)
 }

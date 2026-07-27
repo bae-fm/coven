@@ -529,7 +529,7 @@ async fn validate_commit_reclaim_receipt(
     Ok(())
 }
 
-pub(crate) async fn load_commit_registrations_with_root(
+pub(super) async fn load_commit_registrations_with_root(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &super::store_commit::StoreProtocolRoot,
@@ -537,6 +537,7 @@ pub(crate) async fn load_commit_registrations_with_root(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     if join_evidence.commit != *commit {
@@ -590,11 +591,11 @@ pub(crate) async fn load_commit_registrations_with_root(
         Box::pin(validate_commit_join_outcomes(
             storage,
             root,
-            root_value,
             commit,
             activating_author,
             predecessor,
             join_evidence,
+            accepted,
         ))
         .await?
     };
@@ -613,7 +614,12 @@ pub(crate) async fn load_commit_registrations_with_root(
         .await?;
     }
     if !commit.device_join_cleanup_receipts().is_empty() {
-        validate_commit_join_cleanup_receipts(activating_author, predecessor, join_evidence)?;
+        validate_commit_join_cleanup_receipts(
+            activating_author,
+            predecessor,
+            join_evidence,
+            accepted,
+        )?;
     }
     let mut registrations = Vec::with_capacity(commit.device_registrations().len());
     for activated in commit.device_registrations() {

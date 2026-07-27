@@ -134,14 +134,6 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
             if receipt.executor != commit.author_registration
                 || receipt.membership != commit.membership_state
-                || !predecessor_contains_join_outcome(
-                    storage,
-                    root,
-                    root_value,
-                    &commit.order,
-                    &receipt.cancellation,
-                )
-                .await?
             {
                 return Err(RegistrationLoadError::Invalid(
                     "device join cleanup receipt differs from its activating predecessor"
@@ -293,6 +285,7 @@ pub(super) fn validate_commit_join_cleanup_receipts(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -305,6 +298,12 @@ pub(super) fn validate_commit_join_cleanup_receipts(
         ));
     }
     for loaded in &join_evidence.cleanup_receipts {
+        if !predecessor_contains_join_outcome(accepted, &loaded.receipt.cancellation)? {
+            return Err(RegistrationLoadError::Invalid(
+                "device join cleanup receipt outcome is absent from its verified predecessor history"
+                    .to_string(),
+            ));
+        }
         let attempt = join_evidence.attempts.get(&loaded.attempt).ok_or_else(|| {
             RegistrationLoadError::Invalid(
                 "device join cleanup receipt has no verified exact attempt".to_string(),
@@ -329,11 +328,11 @@ pub(super) fn validate_commit_join_cleanup_receipts(
 pub(super) async fn validate_commit_join_outcomes(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<
     BTreeMap<super::store_commit::DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
     RegistrationLoadError,
@@ -351,15 +350,7 @@ pub(super) async fn validate_commit_join_outcomes(
     }
     let mut verified = BTreeMap::new();
     for outcome_ref in commit.device_join_outcomes() {
-        if !Box::pin(predecessor_contains_join_attempt(
-            storage,
-            root,
-            root_value,
-            &commit.order,
-            outcome_ref.attempt(),
-        ))
-        .await?
-        {
+        if !predecessor_contains_join_attempt(accepted, outcome_ref.attempt())? {
             return Err(RegistrationLoadError::Invalid(
                 "device join outcome names an attempt absent from its predecessor history"
                     .to_string(),
@@ -638,28 +629,18 @@ pub(crate) async fn registration_activation(
     }
 }
 
-async fn predecessor_contains_join_attempt(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    order: &super::store_commit::StoreCommitOrder,
+fn predecessor_contains_join_attempt(
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
     expected: &super::store_commit::DeviceJoinAttemptRef,
 ) -> Result<bool, RegistrationLoadError> {
-    Ok(
-        Box::pin(predecessor_commit_matching_at_root(
-            storage,
-            root,
-            root_value,
-            order,
-            Box::new(|_, commit| {
+    accepted
+        .find(|_, commit| {
                 commit.device_join_attempt_decisions().iter().any(|decision| {
                     matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
                 })
-            }),
-        ))
-        .await?
-        .is_some(),
-    )
+        })
+        .map(|found| found.is_some())
+        .map_err(registration_attempt_error)
 }
 
 type PredecessorCommitPredicate<'a> =
@@ -715,25 +696,17 @@ pub(super) async fn predecessor_commit_matching_at_root(
     Ok(None)
 }
 
-async fn predecessor_contains_join_outcome(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    order: &super::store_commit::StoreCommitOrder,
+fn predecessor_contains_join_outcome(
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
     expected: &super::store_commit::DeviceJoinOutcomeRef,
 ) -> Result<bool, RegistrationLoadError> {
-    Ok(Box::pin(predecessor_commit_matching_at_root(
-        storage,
-        root,
-        root_value,
-        order,
-        Box::new(|_, commit| {
+    accepted
+        .find(|_, commit| {
             commit
                 .device_join_outcomes()
                 .binary_search(expected)
                 .is_ok()
-        }),
-    ))
-    .await?
-    .is_some())
+        })
+        .map(|found| found.is_some())
+        .map_err(registration_attempt_error)
 }

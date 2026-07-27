@@ -7,7 +7,7 @@ pub(super) async fn load_merge_commit_registrations(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor_membership: &MembershipChain,
-    accepted: Option<super::device_join_attempt::MergeAcceptedJoinHistory<'_>>,
+    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     let loaded =
@@ -24,6 +24,7 @@ pub(super) async fn load_merge_commit_registrations(
         activating_author,
         Some(predecessor_membership),
         &join_evidence,
+        accepted,
     )
     .await
 }

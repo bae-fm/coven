@@ -11,8 +11,8 @@ use crate::database::{
     record_activated_circle_acks_on, record_activated_store_ack_on,
     record_store_reclaim_activation_on, record_verified_stream_activations_on,
     required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
-    Database, DbError, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedMergeMaterialization,
+    Database, DbError, OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::sync::audience_package::AudiencePackage;
 use crate::sync::remote_object::RemoteObjectRecord;
@@ -23,9 +23,14 @@ use crate::sync::store::circle_controls::activation::{
 use crate::sync::store::ReclaimCommitActivation;
 use crate::sync::store_commit::{
     CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
+
+enum MaterializationCommitAuthority<'a> {
+    StoredBytes,
+    Operation(&'a VerifiedStoreBatchCommit),
+}
 
 impl StoreDatabase {
     pub(crate) async fn install_device_join_bootstrap(
@@ -227,6 +232,35 @@ impl StoreDatabaseTransaction<'_, '_> {
         &self,
         materialization: VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
+        self.record_verified_merge_materialization_with_authority(
+            materialization,
+            MaterializationCommitAuthority::StoredBytes,
+        )
+        .map(drop)
+    }
+
+    pub(in crate::sync::store) fn record_operation_verified_merge_materialization(
+        &self,
+        materialization: VerifiedMergeMaterialization<'_>,
+        verified_commit: &VerifiedStoreBatchCommit,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        self.record_verified_merge_materialization_with_authority(
+            materialization,
+            MaterializationCommitAuthority::Operation(verified_commit),
+        )?
+        .ok_or_else(|| {
+            DbError::Message(
+                "operation-verified Merge materialization did not retain its verified input"
+                    .to_string(),
+            )
+        })
+    }
+
+    fn record_verified_merge_materialization_with_authority(
+        &self,
+        materialization: VerifiedMergeMaterialization<'_>,
+        authority: MaterializationCommitAuthority<'_>,
+    ) -> Result<Option<OwnedVerifiedMergeMaterialization>, DbError> {
         let conn = self.transaction;
         self.record_author_exclusion_activations(
             materialization.commit(),
@@ -257,11 +291,24 @@ impl StoreDatabaseTransaction<'_, '_> {
                     .to_string(),
             ));
         }
-        let retained_commit_ref =
-            crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
-                conn,
-                &materialization,
-            )?;
+        let (retained_commit_ref, retained) = match authority {
+            MaterializationCommitAuthority::StoredBytes => (
+                crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
+                    conn,
+                    &materialization,
+                )?,
+                None,
+            ),
+            MaterializationCommitAuthority::Operation(verified_commit) => {
+                let (key, retained) = crate::sync::store::database::StoreDatabase::
+                    retain_merge_materialization_with_verified_commit_on(
+                        conn,
+                        &materialization,
+                        verified_commit,
+                    )?;
+                (key, Some(retained))
+            }
+        };
         StoreDatabase::record_circle_bootstrap_coverage_on(
             conn,
             materialization.commit_ref(),
@@ -282,7 +329,8 @@ impl StoreDatabaseTransaction<'_, '_> {
             materialization.circle_activations().stream_activations(),
             &retained_commit_ref,
             &activation,
-        )
+        )?;
+        Ok(retained)
     }
 
     fn derive_materialized_store_device_state(

@@ -160,6 +160,7 @@ pub(crate) async fn discover_merge_owner_recoveries(
 }
 
 pub(crate) async fn discover_merge_stream(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,
@@ -279,19 +280,28 @@ pub(crate) async fn discover_merge_stream(
                 break;
             }
         };
-        let commit = match load_commit_ref(
-            storage,
-            root.store_root_hash,
-            &unverified.commit,
-            registration,
-        )
-        .await
-        {
-            Ok(commit) => commit,
-            Err(error) => {
+        let commit = match history_verifier.load_ref(&unverified.commit).await {
+            Ok(verified)
+                if verified.value().author_registration == *registration_ref
+                    && verified.author() == registration =>
+            {
+                verified.value().clone()
+            }
+            Ok(_) => {
                 block = Some(MergeStreamBlock::Authenticated(held_commit(
                     &unverified.commit,
-                    held_object_error(error),
+                    HeldStorePositionReason::Unauthorized,
+                )));
+                break;
+            }
+            Err(error) => {
+                let reason = match error {
+                    StorePullError::Object(error) => held_object_error(error),
+                    error => HeldStorePositionReason::InvalidObject(error.to_string()),
+                };
+                block = Some(MergeStreamBlock::Authenticated(held_commit(
+                    &unverified.commit,
+                    reason,
                 )));
                 break;
             }
@@ -307,7 +317,7 @@ pub(crate) async fn discover_merge_stream(
                 "Store announcement stream {stream_id} sequence overflow"
             ))
         })?;
-        commits.push((head_ref, head.clone(), head.commit.clone(), commit.value));
+        commits.push((head_ref, head.clone(), head.commit.clone(), commit));
         latest_head = Some(head);
         slot = next_slot;
     }

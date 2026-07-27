@@ -3,6 +3,7 @@ use crate::sync::storage::{ExactObjectRef, ProtocolObjectContext, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store_commit::{
     CircleControlRef, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
+    VerifiedStoreBatchCommit,
 };
 
 pub(super) async fn verify_control_membership(
@@ -23,6 +24,39 @@ pub(super) async fn verify_control_membership(
     )
     .await
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    verify_loaded_control_membership(control, chain)
+}
+
+pub(super) async fn verify_control_membership_with_verified_activations(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    verified_root: &crate::sync::store_commit::StoreProtocolRoot,
+    control: &PreparedCircleControl,
+    verified_activations: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
+) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
+    let state = &control.value.access_epoch().store_membership;
+    let chain = Box::pin(
+        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+            storage,
+            root,
+            verified_root,
+            &verified_root.descriptor.founder_pubkey,
+            &state.heads,
+            &state.resolutions,
+            verified_activations,
+            None,
+        ),
+    )
+    .await
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    verify_loaded_control_membership(control, chain)
+}
+
+fn verify_loaded_control_membership(
+    control: &PreparedCircleControl,
+    chain: crate::sync::membership::MembershipChain,
+) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
+    let state = &control.value.access_epoch().store_membership;
     if !chain.authorizes_write_authority(
         &control.value.value.membership_authority,
         &control.value.author_pubkey,
@@ -61,10 +95,27 @@ pub(crate) fn verify_control_context(
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
 ) -> Result<(), CircleOperationError> {
-    commit_ref
-        .verify_commit(commit)
-        .and_then(|()| commit.verify_at(commit.store_root_hash, &commit_ref.coord, author))
+    let verified = VerifiedStoreBatchCommit::parse(
+        &commit.to_bytes(),
+        commit.store_root_hash,
+        commit_ref,
+        author,
+    )
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    verify_control_context_for_verified_commit(reference, control, &verified)
+}
+
+pub(crate) fn verify_control_context_for_verified_commit(
+    reference: &CircleControlRef,
+    control: &PreparedCircleControl,
+    verified: &VerifiedStoreBatchCommit,
+) -> Result<(), CircleOperationError> {
+    verified
+        .reference()
+        .verify_commit(verified.value())
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let commit = verified.value();
+    let author = verified.author();
     let device_matches = control.value.value.order.device_id == author.device_id.to_string();
     if !control.verify()
         || reference.circle_id() != control.value.circle_id

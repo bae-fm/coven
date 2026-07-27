@@ -272,7 +272,7 @@ pub(crate) async fn verify_merge_membership_control_with_history(
     })?;
     let verified_membership_activations = verified_merge_membership_prefix(
         verified_commits,
-        commit_predecessor_references(&request_commit.commit),
+        commit_predecessor_references(request_commit.verified.value()),
     )
     .map_err(|error| error.to_string())?;
     let request_membership = load_merge_predecessor_membership_with_verified_activations(

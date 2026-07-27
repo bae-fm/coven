@@ -10,41 +10,27 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
 ) -> StorePullFuture<'a, DeviceJoinBootstrapPlan> {
     Box::pin(async move {
         load_device_join_authorization(storage, root, membership_state).await?;
-        let verified_root = load_store_protocol_root(storage, root).await?.value;
+        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
         let founder = Box::pin(load_founder_registration(storage, root)).await?;
         let founder_reference =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-        let genesis = ResolvedStoreDeviceState::founder(
-            root,
-            founder_reference.clone(),
-            &verified_root.descriptor.founder_pubkey,
-            verified_root.descriptor.founder_grant.clone(),
-            &verified_root.descriptor.founder_recovery,
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let genesis = history_verifier.history().genesis.clone();
 
         let mut pending = history_cut_references(coverage);
         pending.push(attempt_activation.clone());
-        let verified_history =
-            verify_merge_history_refs(storage, root, pending.iter().cloned()).await?;
-        let mut loaded =
-            BTreeMap::<StoreBatchCommitRef, (StoreBatchCommit, StoreDeviceRegistration)>::new();
-        while let Some(reference) = pending.pop() {
-            if loaded.contains_key(&reference) {
-                continue;
-            }
-            let (commit, author) =
-                Box::pin(load_commit_with_author(storage, root, &reference)).await?;
-            pending.extend(commit_predecessor_references(&commit));
-            loaded.insert(reference, (commit, author));
-        }
-        let activation = loaded.get(attempt_activation).ok_or_else(|| {
-            StorePullError::Database(
-                "device join attempt activation is absent from its graph".into(),
-            )
-        })?;
+        history_verifier.verify_refs(pending).await?;
+        let activation = history_verifier
+            .history()
+            .commits
+            .get(attempt_activation)
+            .ok_or_else(|| {
+                StorePullError::Database(
+                    "device join attempt activation is absent from its graph".into(),
+                )
+            })?;
         if activation
-            .0
+            .verified
+            .value()
             .order
             .predecessor_cut()
             .map_err(|error| StorePullError::Database(error.to_string()))?
@@ -55,162 +41,43 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
                     .to_string(),
             ));
         }
-        let verified_activation = verified_history
-            .commits
-            .get(attempt_activation)
-            .ok_or_else(|| {
-                StorePullError::Database(
-                    "device join attempt activation is absent from its verified Merge history"
-                        .to_string(),
-                )
-            })?;
-        if &verified_activation.commit.membership_state != membership_state {
+        if &activation.verified.value().membership_state != membership_state {
             return Err(StorePullError::Database(
                 "device join attempt activation differs from its exact verified membership state"
                     .to_string(),
             ));
         }
 
-        let mut states = BTreeMap::<StoreBatchCommitRef, ResolvedStoreDeviceState>::new();
-        let mut ordered = Vec::with_capacity(loaded.len());
-        while !loaded.is_empty() {
-            let next = loaded.iter().find_map(|(reference, (commit, _))| {
-                commit_predecessor_references(commit)
-                    .iter()
-                    .all(|dependency| states.contains_key(dependency))
-                    .then(|| reference.clone())
+        let history = history_verifier.history();
+        let mut emitted = BTreeSet::new();
+        let mut ordered = Vec::with_capacity(history.commits.len());
+        while emitted.len() != history.commits.len() {
+            let next = history.commits.iter().find_map(|(reference, verified)| {
+                (!emitted.contains(reference)
+                    && commit_predecessor_references(verified.verified.value())
+                        .iter()
+                        .all(|dependency| emitted.contains(dependency)))
+                .then(|| reference.clone())
             });
             let Some(reference) = next else {
                 return Err(StorePullError::Database(
-                    "device join bootstrap history is cyclic or has an unresolved predecessor"
+                    "verified device join bootstrap history has an unresolved predecessor"
                         .to_string(),
                 ));
             };
-            let (commit, author) = loaded
-                .remove(&reference)
-                .expect("selected bootstrap commit remains loaded");
-            let predecessor_state = verified_merge_predecessor_state(&genesis, &states, &commit)?;
-            let verified_commit = verified_history.commits.get(&reference).ok_or_else(|| {
-                StorePullError::Database(
-                    "device join bootstrap commit is absent from its verified Merge history"
-                        .to_string(),
-                )
-            })?;
-            if verified_commit.commit != commit
-                || verified_commit.predecessor_state != predecessor_state
-            {
-                return Err(StorePullError::Database(
-                    "device join bootstrap commit differs from its verified Merge history"
-                        .to_string(),
-                ));
-            }
-            let carries_lifecycle = !(commit.device_join_attempt_decisions().is_empty()
-                && commit.device_join_outcomes().is_empty()
-                && commit.device_join_cleanup_receipts().is_empty()
-                && commit.device_registrations().is_empty()
-                && commit.device_exclusion_proposals().is_empty()
-                && commit.device_exclusion_outcomes().is_empty()
-                && commit.reclaim_authorization().is_none()
-                && commit.reclaim_receipt().is_none());
-            let accepted_frontier = commit_predecessor_references(&commit);
-            let registrations = Box::pin(load_merge_commit_registrations(
-                storage,
-                root,
-                &verified_root,
-                &commit,
-                &author,
-                &verified_commit.predecessor_membership,
-                Some(super::device_join_attempt::MergeAcceptedJoinHistory {
-                    commits: &verified_history.commits,
-                    frontier: &accepted_frontier,
-                }),
-            ))
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
-            let (authorized_predecessor, recovery_author) =
-                predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
-                    .map_err(|error| StorePullError::Database(error.to_string()))?;
-            if !device_state_has_active_registration(
-                &authorized_predecessor,
-                &commit.author_registration,
-            ) {
-                return Err(StorePullError::Database(
-                    "device join bootstrap commit author is inactive at its predecessor"
-                        .to_string(),
-                ));
-            }
-            let resolver = DeviceStateResolver::Loaded {
-                genesis: &genesis,
-                states: &states,
-            };
-            let device_operations = load_commit_device_operations(
-                Some(&resolver),
-                storage,
-                root,
-                &commit,
-                &authorized_predecessor,
-                carries_lifecycle.then_some(&verified_commit.predecessor_membership),
-            )
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
-            if commit.control().is_some() {
-                verify_merge_membership_control(storage, root, &reference, &commit)
-                    .await
-                    .map_err(StorePullError::Database)?;
-            }
-            let owner_recovery =
-                verify_commit_owner_recovery_activation(storage, root, &commit).await?;
-            let (_, head_ref) = crate::sync::store::operations::exact_next_announcement_slot(
-                storage,
-                root,
-                &commit.author_registration,
-                &author,
-                Some(&reference),
-            )
-            .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-            let head_ref = head_ref.ok_or_else(|| {
-                StorePullError::Database(
-                    "Merge bootstrap commit has no exact accepted activation head".to_string(),
-                )
-            })?;
-            let head = super::store_objects::load_head_ref(
-                storage,
-                root.store_root_hash,
-                &head_ref,
-                &author,
-                &reference,
-            )
-            .await?;
-            let state = device_operations
-                .apply_to(authorized_predecessor, &commit.device_state)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
-            let state = apply_verified_device_lifecycle(
-                state,
-                &commit,
-                &registrations,
-                recovery_author.as_ref(),
-                owner_recovery,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-            states.insert(reference.clone(), state);
+            let verified = &history.commits[&reference];
             ordered.push(DeviceJoinBootstrapCommit {
-                reference,
-                commit,
-                registrations,
-                device_operations,
+                reference: reference.clone(),
+                commit: verified.verified.value().clone(),
+                registrations: verified.registrations.clone(),
+                device_operations: verified.operations.clone(),
                 activation: DeviceJoinBootstrapActivation {
-                    head: head.value,
-                    object: head.object,
-                    history_summary: verified_commit.history.summary.clone(),
+                    head: verified.activation_head.clone(),
+                    object: verified.activation_head_object.clone(),
+                    history_summary: verified.history.summary.clone(),
                 },
             });
+            emitted.insert(reference);
         }
 
         Ok(DeviceJoinBootstrapPlan {
@@ -249,8 +116,11 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
             )));
         }
-        let (commit, author) =
-            load_device_join_activation_commit(storage, root, reference, expected_outcome).await?;
+        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+        let verified_commit = history_verifier.load_ref(reference).await?;
+        let commit = verified_commit.value().clone();
+        let author = verified_commit.author().clone();
+        verify_device_join_activation_commit(&commit, expected_outcome)?;
         if &commit.membership_state != membership_state {
             return Err(StorePullError::Database(
                 "device join activation differs from its expected Merge membership state"
@@ -263,6 +133,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         let frontier = predecessor_cut.0;
         let accepted_history = super::snapshot_authority::verify_merge_history_authority(
+            &mut history_verifier,
             storage,
             root,
             &frontier,
@@ -270,7 +141,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         )
         .await?;
         let membership = accepted_history.membership.clone();
-        let verified_root = load_store_protocol_root(storage, root).await?.value;
+        let verified_root = history_verifier.verified_root().clone();
         let accepted_frontier = commit_predecessor_references(&commit);
         let registrations = Box::pin(load_merge_commit_registrations(
             storage,
@@ -279,10 +150,10 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             &commit,
             &author,
             &membership,
-            Some(super::device_join_attempt::MergeAcceptedJoinHistory {
-                commits: &accepted_history.history.commits,
+            super::device_join_attempt::VerifiedMergePredecessorHistory {
+                commits: &history_verifier.history().commits,
                 frontier: &accepted_frontier,
-            }),
+            },
         ))
         .await
         .map_err(|error| match error {

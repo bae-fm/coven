@@ -214,7 +214,6 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &commit,
         &author,
         &founder,
-        &keys::public_key_hex(&founder),
     )
     .await
     .expect("verify retained Circle activation fixture");

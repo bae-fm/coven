@@ -32,9 +32,24 @@ use crate::sync::store::database::candidate_records::{
     parse_prepared_merge_candidate_parts_on, validate_terminal_nonactivation_authority_on,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RetainedMergeMaterializationCache {
     verified: BTreeMap<(String, u64), OwnedVerifiedMergeMaterialization>,
+}
+
+enum RetainedCommitAuthority<'a> {
+    StoredBytes,
+    Operation(&'a crate::sync::store_commit::VerifiedStoreBatchCommit),
+}
+
+enum RetainedCommitAuthorities<'a> {
+    StoredBytes,
+    Operation(
+        &'a BTreeMap<
+            crate::sync::store_commit::StoreBatchCommitRef,
+            crate::sync::store_commit::VerifiedStoreBatchCommit,
+        >,
+    ),
 }
 
 impl RetainedMergeMaterializationCache {
@@ -53,6 +68,51 @@ impl RetainedMergeMaterializationCache {
             }
         }
         Ok(Self { verified: entries })
+    }
+
+    pub(crate) fn insert_verified(
+        &mut self,
+        materialization: OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), DbError> {
+        let coordinate = materialization.commit_ref().coord.clone();
+        let key = (coordinate.stream_id.to_string(), coordinate.sequence());
+        match self.verified.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(materialization);
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get().commit_ref() == materialization.commit_ref()
+                    && entry.get().input_hash() == materialization.input_hash() => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(DbError::Message(
+                    "retained Merge materialization cache coordinate contains another exact input"
+                        .to_string(),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verified_by_ref(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<&OwnedVerifiedMergeMaterialization, DbError> {
+        let key = (
+            reference.coord.stream_id.to_string(),
+            reference.coord.sequence(),
+        );
+        let verified = self.verified.get(&key).ok_or_else(|| {
+            DbError::Message(format!(
+                "retained Merge materialization cache omits {reference:?}"
+            ))
+        })?;
+        if verified.commit_ref() != reference {
+            return Err(DbError::Message(
+                "retained Merge materialization cache coordinate contains another commit"
+                    .to_string(),
+            ));
+        }
+        Ok(verified)
     }
 }
 
@@ -163,7 +223,18 @@ impl StoreDatabase {
     pub(crate) async fn circle_replay_epoch_index(
         &self,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.sqlite().call(Self::circle_replay_epoch_index_on).await
+        let cache = self.retained_merge_materialization_cache();
+        self.sqlite()
+            .call(move |conn| {
+                let mut cache = cache.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
+                Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)?;
+                Self::circle_replay_epoch_index_with_verified_materializations_on(conn, &cache)
+            })
+            .await
     }
 
     pub(crate) fn record_circle_bootstrap_coverage_on(
@@ -530,8 +601,25 @@ impl StoreDatabase {
         Ok(bootstraps)
     }
 
-    pub(crate) fn circle_replay_epoch_index_on(
+    pub(crate) fn circle_replay_epoch_index_with_verified_materializations_on(
         conn: &Connection,
+        retained: &RetainedMergeMaterializationCache,
+    ) -> Result<CircleReplayEpochIndex, DbError> {
+        Self::circle_replay_epoch_index_with_on(conn, |conn, circle_id, control| {
+            Self::verified_circle_activation_from_cache_on(conn, retained, circle_id, control)
+        })
+    }
+
+    fn circle_replay_epoch_index_with_on(
+        conn: &Connection,
+        mut load_activation: impl FnMut(
+            &Connection,
+            crate::sync::circle::CircleId,
+            &crate::sync::circle::CircleControlCoord,
+        ) -> Result<
+            Option<crate::sync::store::circle_controls::VerifiedCircleReference>,
+            DbError,
+        >,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         let mut statement = conn
             .prepare(
@@ -563,12 +651,11 @@ impl StoreDatabase {
                     "parse Circle replay index control for {circle_id}: {error}"
                 ))
             })?;
-            let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
-                .ok_or_else(|| {
-                    DbError::Message(format!(
-                        "Circle replay index activation for {circle_id} disappeared"
-                    ))
-                })?;
+            let activation = load_activation(conn, circle_id, &control)?.ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle replay index activation for {circle_id} disappeared"
+                ))
+            })?;
             index.record_control(circle_id, &activation.control)?;
         }
         Ok(index)
@@ -1247,11 +1334,12 @@ impl StoreDatabase {
         Ok(())
     }
 
-    fn open_retained_merge_materialization_input_on(
+    fn open_retained_merge_materialization_input_with_authority_on(
         conn: &Connection,
         commit_ref: &StoreBatchCommitRef,
         input: &RetainedMergeMaterializationInput,
         input_hash: ObjectHash,
+        authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let sequence = &commit_ref.coord.sequence;
         if sequence == &0 {
@@ -1292,13 +1380,31 @@ impl StoreDatabase {
                 &stored_author
             }
         };
-        let commit = StoreBatchCommit::parse_at(
-            input.commit.stored_bytes(),
-            root.store_root_hash,
-            &commit_ref.coord,
-            author,
-        )
-        .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
+        let verified_commit = match authority {
+            RetainedCommitAuthority::StoredBytes => {
+                crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+                    input.commit.stored_bytes(),
+                    root.store_root_hash,
+                    commit_ref,
+                    author,
+                )
+                .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?
+            }
+            RetainedCommitAuthority::Operation(verified)
+                if verified.reference() == commit_ref
+                    && verified.author() == author
+                    && verified.value().to_bytes() == input.commit.stored_bytes() =>
+            {
+                verified.clone()
+            }
+            RetainedCommitAuthority::Operation(_) => {
+                return Err(DbError::Message(
+                    "retained Merge commit differs from its operation-verified exact commit"
+                        .to_string(),
+                ))
+            }
+        };
+        let commit = verified_commit.value().clone();
         if commit.to_bytes() != input.commit.stored_bytes() {
             return Err(DbError::Message(
                 "retained Merge commit bytes are not canonical".to_string(),
@@ -1358,11 +1464,9 @@ impl StoreDatabase {
             }),
             None => None,
         };
-        let circle_activations = VerifiedCircleActivations::parse_retained(
+        let circle_activations = VerifiedCircleActivations::parse_retained_for_verified_commit(
             &input.activation.circle_activations,
-            &commit,
-            commit_ref,
-            author,
+            &verified_commit,
             local_identity.as_deref(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -1417,8 +1521,7 @@ impl StoreDatabase {
         }
         OwnedVerifiedMergeMaterialization::verify(
             root,
-            commit,
-            commit_ref.clone(),
+            verified_commit,
             registrations,
             device_operations,
             circle_activations,
@@ -1436,6 +1539,43 @@ impl StoreDatabase {
         conn: &rusqlite::Transaction<'_>,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<RetainedMergeMaterializationKey, DbError> {
+        let (key, _) = Self::retain_merge_materialization_with_authority_on(
+            conn,
+            materialization,
+            RetainedCommitAuthority::StoredBytes,
+        )?;
+        Ok(key)
+    }
+
+    pub(crate) fn retain_merge_materialization_with_verified_commit_on(
+        conn: &rusqlite::Transaction<'_>,
+        materialization: &VerifiedMergeMaterialization<'_>,
+        verified_commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<
+        (
+            RetainedMergeMaterializationKey,
+            OwnedVerifiedMergeMaterialization,
+        ),
+        DbError,
+    > {
+        Self::retain_merge_materialization_with_authority_on(
+            conn,
+            materialization,
+            RetainedCommitAuthority::Operation(verified_commit),
+        )
+    }
+
+    fn retain_merge_materialization_with_authority_on(
+        conn: &rusqlite::Transaction<'_>,
+        materialization: &VerifiedMergeMaterialization<'_>,
+        authority: RetainedCommitAuthority<'_>,
+    ) -> Result<
+        (
+            RetainedMergeMaterializationKey,
+            OwnedVerifiedMergeMaterialization,
+        ),
+        DbError,
+    > {
         let packages = Self::canonical_retained_merge_packages(
             materialization.commit(),
             materialization.commit_ref(),
@@ -1474,11 +1614,12 @@ impl StoreDatabase {
             DbError::Message(format!("serialize retained Merge materialization: {error}"))
         })?;
         let input_hash = ObjectHash::digest(&canonical_input);
-        Self::open_retained_merge_materialization_input_on(
+        let verified = Self::open_retained_merge_materialization_input_with_authority_on(
             conn,
             materialization.commit_ref(),
             &input,
             input_hash,
+            authority,
         )?;
         let StoreCommitCoord {
             stream_id,
@@ -1534,10 +1675,13 @@ impl StoreDatabase {
         };
         Self::pin_retained_merge_objects_on(conn, &input, &replay_owner)?;
         Self::validate_retained_merge_pin_closure_on(conn, &input, &replay_owner)?;
-        Ok(RetainedMergeMaterializationKey {
-            commit_ref: commit_ref_json,
-            input_hash,
-        })
+        Ok((
+            RetainedMergeMaterializationKey {
+                commit_ref: commit_ref_json,
+                input_hash,
+            },
+            verified,
+        ))
     }
 
     pub(crate) fn load_retained_merge_materialization_on(
@@ -1546,6 +1690,42 @@ impl StoreDatabase {
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        Self::load_retained_merge_materialization_with_authority_on(
+            conn,
+            stream_id,
+            sequence,
+            commit_ref,
+            expected_input_hash,
+            RetainedCommitAuthority::StoredBytes,
+        )
+    }
+
+    fn load_retained_merge_materialization_with_verified_commit_on(
+        conn: &Connection,
+        stream_id: &str,
+        sequence: u64,
+        commit_ref: &StoreBatchCommitRef,
+        expected_input_hash: &str,
+        verified: &crate::sync::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        Self::load_retained_merge_materialization_with_authority_on(
+            conn,
+            stream_id,
+            sequence,
+            commit_ref,
+            expected_input_hash,
+            RetainedCommitAuthority::Operation(verified),
+        )
+    }
+
+    fn load_retained_merge_materialization_with_authority_on(
+        conn: &Connection,
+        stream_id: &str,
+        sequence: u64,
+        commit_ref: &StoreBatchCommitRef,
+        expected_input_hash: &str,
+        authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
         let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
@@ -1589,8 +1769,8 @@ impl StoreDatabase {
                 "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
             ))
         })?;
-        let verified = Self::open_retained_merge_materialization_input_on(
-            conn, commit_ref, &input, input_hash,
+        let verified = Self::open_retained_merge_materialization_input_with_authority_on(
+            conn, commit_ref, &input, input_hash, authority,
         )?;
         Self::validate_retained_merge_pin_closure_on(
             conn,
@@ -1809,6 +1989,33 @@ impl StoreDatabase {
         conn: &Connection,
         cache: &mut RetainedMergeMaterializationCache,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        Self::cached_retained_merge_replay_inputs_with_authorities_on(
+            conn,
+            cache,
+            RetainedCommitAuthorities::StoredBytes,
+        )
+    }
+
+    pub(crate) fn cached_retained_merge_replay_inputs_with_verified_commits_on(
+        conn: &Connection,
+        cache: &mut RetainedMergeMaterializationCache,
+        verified: &BTreeMap<
+            crate::sync::store_commit::StoreBatchCommitRef,
+            crate::sync::store_commit::VerifiedStoreBatchCommit,
+        >,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        Self::cached_retained_merge_replay_inputs_with_authorities_on(
+            conn,
+            cache,
+            RetainedCommitAuthorities::Operation(verified),
+        )
+    }
+
+    fn cached_retained_merge_replay_inputs_with_authorities_on(
+        conn: &Connection,
+        cache: &mut RetainedMergeMaterializationCache,
+        authorities: RetainedCommitAuthorities<'_>,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let mut statement = conn
             .prepare(
                 "SELECT device_id, seq, commit_ref, input_hash
@@ -1847,13 +2054,32 @@ impl StoreDatabase {
                 {
                     cached.clone()
                 }
-                _ => Self::load_retained_merge_materialization_on(
-                    conn,
-                    &stream_id,
-                    sequence,
-                    &commit_ref,
-                    &encoded_input_hash,
-                )?,
+                _ => match &authorities {
+                    RetainedCommitAuthorities::StoredBytes => {
+                        Self::load_retained_merge_materialization_on(
+                            conn,
+                            &stream_id,
+                            sequence,
+                            &commit_ref,
+                            &encoded_input_hash,
+                        )?
+                    }
+                    RetainedCommitAuthorities::Operation(verified) => {
+                        let commit = verified.get(&commit_ref).ok_or_else(|| {
+                            DbError::Message(format!(
+                                "retained Merge commit {commit_ref:?} is absent from the operation-verified history"
+                            ))
+                        })?;
+                        Self::load_retained_merge_materialization_with_verified_commit_on(
+                            conn,
+                            &stream_id,
+                            sequence,
+                            &commit_ref,
+                            &encoded_input_hash,
+                            commit,
+                        )?
+                    }
+                },
             };
             verified.insert(key, materialization.clone());
             replay_inputs.push(materialization);

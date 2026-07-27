@@ -9,39 +9,30 @@ pub(crate) async fn load_circle_payload_activations(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
+    verified: &VerifiedStoreBatchCommit,
     identity: Option<&crate::keys::UserKeypair>,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     verified_prefix: &VerifiedStreamActivationPrefix,
+    verified_root: &super::store_commit::StoreProtocolRoot,
+    verified_membership_prefix: &VerifiedMergeMembershipPrefix,
 ) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
+    let commit = verified.value();
+    let commit_ref = verified.reference();
     if commit.circle_controls().is_empty() && commit.stream_activations().is_empty() {
         return VerifiedCircleActivations::none(commit, commit_ref)
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()));
     }
-    let founder = database
-        .sqlite()
-        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(PullCircleActivationError::Database)?
-        .ok_or_else(|| {
-            PullCircleActivationError::Invalid(
-                "Store founder is absent while loading circle controls".to_string(),
-            )
-        })?;
     Box::pin(
         crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
             database,
             storage,
             root,
-            commit_ref,
-            commit,
-            author,
+            verified,
             identity,
-            &founder,
             routing_key,
             verified_prefix,
+            verified_root,
+            verified_membership_prefix,
         ),
     )
     .await

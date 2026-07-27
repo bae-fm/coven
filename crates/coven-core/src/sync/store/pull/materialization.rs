@@ -273,43 +273,6 @@ pub(crate) async fn verify_merge_commit_currently_materialized(
     }
 }
 
-async fn resolve_candidate_device_operations(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    merge_candidate: &MergeCandidate,
-) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
-    match &merge_candidate.device_operations {
-        MergeCandidateDeviceOperations::Verified(operations) => Ok(operations.clone()),
-        MergeCandidateDeviceOperations::Pending => {
-            let candidate = &merge_candidate.candidate;
-            let (state_ref, state) = database
-                .store_device_state_for_order(&candidate.commit.order)
-                .await?;
-            if state_ref != candidate.commit.device_state {
-                return Err(StorePullError::Database(
-                    "Merge exclusion commit differs from its materialized predecessor device state"
-                        .to_string(),
-                ));
-            }
-            let resolver = DeviceStateResolver::Database(database);
-            load_commit_device_operations(
-                Some(&resolver),
-                storage,
-                root,
-                &candidate.commit,
-                &state,
-                Some(&merge_candidate.predecessor_membership),
-            )
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })
-        }
-    }
-}
-
 pub(super) async fn apply_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -321,14 +284,27 @@ pub(super) async fn apply_candidate(
     identity: Option<&crate::keys::UserKeypair>,
     latest_membership: &mut MembershipChain,
     routing_key: Option<&super::circle::RowRoutingKey>,
+    verified_root: &super::store_commit::StoreProtocolRoot,
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
-    let device_operations =
-        resolve_candidate_device_operations(database, storage, root, merge_candidate).await?;
+    let commit = candidate.commit();
+    let commit_ref = candidate.commit_ref();
+    let author = candidate.author();
+    let device_operations = merge_candidate.device_operations.clone();
+    if !commit.device_exclusion_proposals().is_empty()
+        || !commit.device_exclusion_outcomes().is_empty()
+    {
+        let (state_ref, _) = database.store_device_state_for_order(&commit.order).await?;
+        if state_ref != commit.device_state {
+            return Err(StorePullError::Database(
+                "Merge exclusion commit differs from its materialized predecessor device state"
+                    .to_string(),
+            ));
+        }
+    }
     let membership_objects =
-        verified_merge_membership_objects(storage, root, &candidate.commit_ref, &candidate.commit)
-            .await?;
+        verified_merge_membership_objects(storage, root, commit_ref, commit).await?;
     let (local_store_membership, membership_after_candidate) =
         local_store_membership_after_candidate(
             latest_membership,
@@ -338,21 +314,24 @@ pub(super) async fn apply_candidate(
             identity,
         )?;
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
-    let circle_activations = if candidate.commit.control().is_some() {
-        verify_merge_membership_control(storage, root, &candidate.commit_ref, &candidate.commit)
-            .await
-            .map_err(PullCircleActivationError::Invalid)
+    let circle_activations = if commit.control().is_some() {
+        merge_candidate.membership_control.clone().ok_or_else(|| {
+            PullCircleActivationError::Invalid(
+                "Merge membership control is absent from its operation-verified history"
+                    .to_string(),
+            )
+        })
     } else {
         load_circle_payload_activations(
             database,
             storage,
             root,
-            &candidate.commit_ref,
-            &candidate.commit,
-            &candidate.author,
+            &candidate.verified,
             identity.filter(|_| local_store_membership.allows_circle_access()),
             routing_key,
             &verified_prefix,
+            verified_root,
+            &merge_candidate.membership_prefix,
         )
         .await
     };
@@ -395,10 +374,10 @@ pub(super) async fn apply_candidate(
         database,
         storage,
         root,
-        &candidate.commit_ref,
-        &candidate.commit,
+        commit_ref,
+        commit,
         verified_circle_activations.circles(),
-        &candidate.author,
+        author,
         local_store_membership,
     )
     .await
@@ -480,8 +459,8 @@ pub(super) async fn apply_candidate(
     #[cfg(any(test, feature = "test-utils"))]
     if matches!(outcome, ApplyOutcome::Applied(_)) {
         db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
-            device_id: commit_stream_id(&candidate.commit_ref.coord),
-            seq: candidate.commit.seq(),
+            device_id: commit_stream_id(&commit_ref.coord),
+            seq: commit.seq(),
         })
         .await;
     }
@@ -636,8 +615,7 @@ async fn prepare_merge_candidate_package(
 
 pub(crate) struct PreparedMergeMaterialization {
     pub(crate) root: StoreRootRef,
-    pub(crate) commit: StoreBatchCommit,
-    pub(crate) commit_ref: StoreBatchCommitRef,
+    pub(crate) verified_commit: VerifiedStoreBatchCommit,
     pub(crate) activation_head: StoreDeviceHead,
     pub(crate) activation_head_object: ExactObjectRef,
     pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
@@ -654,6 +632,7 @@ pub(crate) struct AppliedMergeMaterialization {
     pub(crate) outcome: ApplyOutcome,
     pub(crate) max_updated_at: Option<super::hlc::Timestamp>,
     pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
+    pub(crate) retained: Option<crate::database::OwnedVerifiedMergeMaterialization>,
 }
 
 enum MergeSubsetOutcome {
@@ -871,8 +850,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
 ) -> Result<AppliedMergeMaterialization, DbError> {
     let PreparedMergeMaterialization {
         root,
-        commit,
-        commit_ref,
+        verified_commit,
         activation_head,
         activation_head_object,
         history_summary,
@@ -884,6 +862,8 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         circle_activations,
         package_application,
     } = materialization;
+    let commit = verified_commit.value();
+    let commit_ref = verified_commit.reference();
     let mut inactive_circles = circle_activations
         .circles()
         .iter()
@@ -895,7 +875,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
                 .filter(|_| {
                     baseline_circle_cuts
                         .and_then(|cuts| cuts.get(&activation.circle_id))
-                        .is_none_or(|cut| !cut.covers_commit(&commit_ref))
+                        .is_none_or(|cut| !cut.covers_commit(commit_ref))
                 })
                 .map(|_| activation.circle_id)
         })
@@ -905,16 +885,16 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     let mut package_reported_fk_violation = false;
     crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
         conn,
-        &commit,
+        commit,
         &registrations,
     )?;
     for bootstrap in circle_activations.bootstraps() {
-        super::replay::install_circle_bootstrap_remote_objects_on(conn, &commit_ref, bootstrap)?;
+        super::replay::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
     }
     let store_transaction = crate::sync::store::database::StoreDatabaseTransaction::new(conn);
     store_transaction.record_verified_circle_activations(
-        &commit,
-        &commit_ref,
+        commit,
+        commit_ref,
         circle_activations.circles(),
     )?;
     // A Circle whose winning control chain is now Deleted prunes its rows,
@@ -966,22 +946,23 @@ pub(crate) fn apply_prepared_merge_materialization_on(
                     )),
                     max_updated_at: None,
                     write_status_notifications: Vec::new(),
+                    retained: None,
                 });
             }
         };
         let retained = crate::sync::store::database::StoreDatabase::retained_audience_package(
-            &commit,
-            &commit_ref,
+            commit,
+            commit_ref,
             package.clone(),
         )?;
         Database::install_pulled_package_activation_on(
             conn,
-            &commit_ref,
+            commit_ref,
             retained.domain(),
             retained.object(),
             retained.package(),
         )?;
-        Database::install_pulled_blob_activations_on(conn, &package, &commit_ref)?;
+        Database::install_pulled_blob_activations_on(conn, &package, commit_ref)?;
         Database::install_winning_blob_bindings_on(
             conn,
             gates,
@@ -1053,13 +1034,14 @@ pub(crate) fn apply_prepared_merge_materialization_on(
                 outcome: ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency),
                 max_updated_at: None,
                 write_status_notifications: Vec::new(),
+                retained: None,
             });
         }
     }
     let verified = VerifiedMergeMaterialization::verify(
         &root,
-        &commit,
-        &commit_ref,
+        commit,
+        commit_ref,
         &registrations,
         &device_operations,
         &circle_activations,
@@ -1072,14 +1054,16 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     )?;
     Database::install_pulled_merge_membership_activations_on(
         conn,
-        &commit_ref,
+        commit_ref,
         &membership_remote_objects,
     )?;
-    store_transaction.record_verified_merge_materialization(verified)?;
+    let retained = store_transaction
+        .record_operation_verified_merge_materialization(verified, &verified_commit)?;
     Ok(AppliedMergeMaterialization {
         outcome: ApplyOutcome::Applied(returned_changes),
         max_updated_at: changeset_max,
         write_status_notifications: Vec::new(),
+        retained: Some(retained),
     })
 }
 
@@ -1297,53 +1281,46 @@ async fn commit_candidate(
 ) -> Result<ApplyOutcome, StorePullError> {
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
+    let commit = candidate.commit();
+    let commit_ref = candidate.commit_ref();
+    let author = candidate.author();
     let predecessor_membership = &merge_candidate.predecessor_membership;
-    let (_, predecessor_state) = database
-        .store_device_state_for_order(&candidate.commit.order)
-        .await?;
+    let (_, predecessor_state) = database.store_device_state_for_order(&commit.order).await?;
     verify_merge_membership_state_ref(
-        &candidate.commit.membership_state,
+        &commit.membership_state,
         predecessor_membership,
         &predecessor_state,
     )?;
-    let (authorized_predecessor, recovery_author) = predecessor_with_recovery_author(
-        predecessor_state,
-        &candidate.commit,
-        &candidate.registrations,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let owner_recovery =
-        verify_commit_owner_recovery_activation(storage, root, &candidate.commit).await?;
+    let (authorized_predecessor, recovery_author) =
+        predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let owner_recovery = verify_commit_owner_recovery_activation(storage, root, commit).await?;
     let state_after = device_operations
-        .apply_to(
-            authorized_predecessor.clone(),
-            &candidate.commit.device_state,
-        )
+        .apply_to(authorized_predecessor.clone(), &commit.device_state)
         .and_then(|state| {
             apply_verified_device_lifecycle(
                 state,
-                &candidate.commit,
+                commit,
                 &candidate.registrations,
                 recovery_author.as_ref(),
                 owner_recovery,
             )
         })
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let acknowledgement =
-        validate_commit_acknowledgement(storage, root, &candidate.commit, &candidate.author)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+    let acknowledgement = validate_commit_acknowledgement(storage, root, commit, author)
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
     let retained_acknowledgement = match acknowledgement {
         Some((acknowledgement_ref, acknowledgement_value)) => Some(
             retain_activated_acknowledgement(
                 storage,
                 root,
-                &candidate.commit_ref,
-                &candidate.commit,
-                &candidate.author,
+                commit_ref,
+                commit,
+                author,
                 acknowledgement_ref,
                 acknowledgement_value,
             )
@@ -1351,8 +1328,7 @@ async fn commit_candidate(
         ),
         None => None,
     };
-    let registrations = candidate
-        .commit
+    let registrations = commit
         .device_registrations()
         .iter()
         .zip(&candidate.registrations)
@@ -1364,10 +1340,10 @@ async fn commit_candidate(
     let history = prepare_merge_history_successor(
         database,
         root,
-        &candidate.commit,
-        &candidate.commit_ref,
+        commit,
+        commit_ref,
         predecessor_membership,
-        &candidate.author,
+        author,
         recovery_author.as_ref(),
         state_after.clone(),
         MergeHistorySuccessorEvidence {
@@ -1384,8 +1360,8 @@ async fn commit_candidate(
     history
         .summary
         .open(
-            &candidate.commit,
-            &candidate.commit_ref,
+            commit,
+            commit_ref,
             &merge_candidate.activation_head,
             &activation_head_ref,
             &state_after,
@@ -1399,8 +1375,8 @@ async fn commit_candidate(
         root,
         &merge_candidate.activation_head,
         &merge_candidate.activation_head_object,
-        &candidate.commit_ref,
-        &candidate.commit,
+        commit_ref,
+        commit,
         &authorized_predecessor,
         predecessor_membership,
         &device_operations,
@@ -1410,8 +1386,7 @@ async fn commit_candidate(
     let receiver_wall_ms = db.receive_wall_ms();
     let materialization = PreparedMergeMaterialization {
         root: root.clone(),
-        commit: candidate.commit.clone(),
-        commit_ref: candidate.commit_ref.clone(),
+        verified_commit: candidate.verified.clone(),
         activation_head: merge_candidate.activation_head.clone(),
         activation_head_object: merge_candidate.activation_head_object.clone(),
         history_summary: history.summary,
@@ -1466,7 +1441,8 @@ async fn commit_candidate(
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
             let candidate_predecessors = materialization
-                .commit
+                .verified_commit
+                .value()
                 .order
                 .predecessor_cut()
                 .map_err(|error| DbError::Message(error.to_string()))?
@@ -1491,6 +1467,14 @@ async fn commit_candidate(
                             "retained Merge materialization cache lock is poisoned".to_string(),
                         )
                     })?;
+                let mut transaction_cache = retained_merge_materializations.clone();
+                let retained = applied.retained.take().ok_or_else(|| {
+                    DbError::Message(
+                        "applied Merge materialization omitted its verified retained input"
+                            .to_string(),
+                    )
+                })?;
+                transaction_cache.insert_verified(retained)?;
                 #[cfg(any(test, feature = "test-utils"))]
                 if materialization_failure.reach(
                     crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
@@ -1520,7 +1504,7 @@ async fn commit_candidate(
                     applied.write_status_notifications =
                         crate::sync::store::database::StoreDatabase::retract_verified_merge_materializations_on(
                             &tx,
-                            &mut retained_merge_materializations,
+                            &mut transaction_cache,
                             retractions,
                         )?;
                     #[cfg(any(test, feature = "test-utils"))]
@@ -1539,7 +1523,7 @@ async fn commit_candidate(
                 {
                     let replay = replay_retained_merge_projection_on(
                         &tx,
-                        &mut retained_merge_materializations,
+                        &mut transaction_cache,
                         &blob_decls,
                         &gates,
                         &synced_tables,
@@ -1583,6 +1567,7 @@ async fn commit_candidate(
                     }
                 }
                 tx.commit().map_err(DbError::from)?;
+                *retained_merge_materializations = transaction_cache;
             }
             Ok(applied)
         })
