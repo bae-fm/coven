@@ -2917,7 +2917,6 @@ async fn finish_reclaim_candidate_replacement(
     {
         crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
         database
-            .sqlite()
             .mark_candidate_cleanup_absent(target.object)
             .await?;
     }

@@ -466,7 +466,6 @@ async fn finish_nonactivating_revoke_with_targets(
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         persistence
             .database
-            .sqlite()
             .mark_candidate_cleanup_absent(target.object)
             .await?;
     }

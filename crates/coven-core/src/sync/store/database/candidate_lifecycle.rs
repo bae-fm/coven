@@ -5,7 +5,7 @@ use super::{
 };
 use crate::database::*;
 use crate::sync::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::sync::storage::PreparedExactObject;
+use crate::sync::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::store_commit::{
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
@@ -13,6 +13,27 @@ use crate::write::{WriteId, WriteResolution, WriteStatus};
 use rusqlite::OptionalExtension;
 
 impl StoreDatabase {
+    pub(crate) async fn mark_candidate_cleanup_absent(
+        &self,
+        object: ExactObjectRef,
+    ) -> Result<(), DbError> {
+        self.database
+            .call(move |conn| {
+                let object_id = remote_object_id(&object);
+                let mut remote = load_remote_object_on(conn, object_id)?;
+                if remote.cleanup_target() != Some(&object) {
+                    return Err(DbError::Message(format!(
+                        "remote object {object_id} is not awaiting exact cleanup"
+                    )));
+                }
+                remote.mark_absent_verified().map_err(|error| {
+                    DbError::Message(format!("mark candidate {object_id} absent: {error}"))
+                })?;
+                update_remote_object_on(conn, object_id, &remote)
+            })
+            .await
+    }
+
     pub(crate) async fn blocked_merge_candidate(
         &self,
         write_id: WriteId,

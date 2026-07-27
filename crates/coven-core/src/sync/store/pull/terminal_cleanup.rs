@@ -5,7 +5,6 @@ pub(crate) async fn cleanup_merge_candidate(
     storage: &dyn SyncStorage,
     write_id: crate::WriteId,
 ) -> Result<(), StorePullError> {
-    let db = database.sqlite();
     let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StorePullError::Database("Merge candidate cleanup has no Store root".to_string())
     })?;
@@ -22,7 +21,9 @@ pub(crate) async fn cleanup_merge_candidate(
     let targets = database.merge_candidate_cleanup_targets(write_id).await?;
     for target in targets {
         super::store_objects::delete_exact_object(storage, &target.object).await?;
-        db.mark_candidate_cleanup_absent(target.object).await?;
+        database
+            .mark_candidate_cleanup_absent(target.object)
+            .await?;
     }
     Ok(())
 }
@@ -37,7 +38,6 @@ pub(crate) async fn cleanup_circle_operation_candidate(
     storage: &dyn SyncStorage,
     operation_id: &crate::sync::circle::CircleOperationId,
 ) -> Result<(), StorePullError> {
-    let db = database.sqlite();
     let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StorePullError::Database("Circle operation discard has no Store root".to_string())
     })?;
@@ -56,7 +56,9 @@ pub(crate) async fn cleanup_circle_operation_candidate(
         .await?;
     for target in targets {
         super::store_objects::delete_exact_object(storage, &target.object).await?;
-        db.mark_candidate_cleanup_absent(target.object).await?;
+        database
+            .mark_candidate_cleanup_absent(target.object)
+            .await?;
     }
     Ok(())
 }
@@ -132,7 +134,6 @@ pub(crate) async fn resume_merge_retraction_cleanups(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<(), StorePullError> {
-    let db = database.sqlite();
     for candidate in database.pending_merge_retraction_cleanups().await? {
         let verification = database
             .merge_retraction_cleanup_verification(candidate.clone())
@@ -147,7 +148,9 @@ pub(crate) async fn resume_merge_retraction_cleanups(
             .await?
         {
             super::store_objects::delete_exact_object(storage, &target.object).await?;
-            db.mark_candidate_cleanup_absent(target.object).await?;
+            database
+                .mark_candidate_cleanup_absent(target.object)
+                .await?;
         }
         database.finish_merge_retraction_cleanup(candidate).await?;
     }

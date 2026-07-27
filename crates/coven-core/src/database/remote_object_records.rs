@@ -1123,25 +1123,3 @@ pub(crate) fn validate_prepared_blob_on(
     }
     Ok(())
 }
-
-impl Database {
-    pub(crate) async fn mark_candidate_cleanup_absent(
-        &self,
-        object: ExactObjectRef,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let object_id = remote_object_id(&object);
-            let mut remote = load_remote_object_on(conn, object_id)?;
-            if remote.cleanup_target() != Some(&object) {
-                return Err(DbError::Message(format!(
-                    "remote object {object_id} is not awaiting exact cleanup"
-                )));
-            }
-            remote.mark_absent_verified().map_err(|error| {
-                DbError::Message(format!("mark candidate {object_id} absent: {error}"))
-            })?;
-            update_remote_object_on(conn, object_id, &remote)
-        })
-        .await
-    }
-}

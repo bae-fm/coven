@@ -104,11 +104,13 @@ This ownership work completes the Store foundation required by
   membership, and atomic snapshot-cut capture is owned by the authorized Store
   snapshot subsystem. Cycle invokes both operations without assembling their
   authority or reaching into Store database state.
-- Complete: the final boundary audit found no production command that continues
-  a Store operation through raw database or storage access. Host-write capture,
-  pre-Store join/bootstrap, closed routing validation, schema reads, and fault
-  injection retain their purpose-specific database access without interpreting
-  remote Store authority.
+- In progress: the final boundary audit found three remaining ownership leaks:
+  blocked-write recovery is still assembled by the application handle,
+  snapshot policy and publication are still assembled by cycle, and pull still
+  carries `RegistrationPredecessorAuthority`. Host-write capture, pre-Store
+  join/bootstrap, closed routing validation, schema reads, and fault injection
+  retain their purpose-specific database access without interpreting remote
+  Store authority.
 - Complete: abandonment, device exclusion, Owner promotion, package
   preparation, write preparation, and write publication implementation modules
   are private.
@@ -128,6 +130,10 @@ This ownership work completes the Store foundation required by
 - Complete: application and cycle commands enter the concrete Store owner,
   implementation modules are private, and exposed Store-root values are closed
   application or persistence results rather than workflow entry points.
+- Complete: candidate-cleanup absence verification is a `StoreDatabase`
+  transition. Acknowledgement, exclusion, membership, reclaim, and terminal
+  cleanup workflows no longer reach through `StoreDatabase::sqlite()` to
+  continue that Store transition on raw `Database`.
 
 ## Final dependency direction
 
@@ -332,9 +338,10 @@ commits wholly or rolls back.
    private; per-cycle membership/key refresh, atomic snapshot-cut capture,
    manual membership conflict resolution, and Circle creation, rename, and
    restart enter their Store owners.
-1. **Complete.** Run boundary searches, focused failure-injection tests, strict
-   lint, repository hooks, and manual rules review; then update dependent plans
-   to the sealed one-protocol shape.
+1. **In progress.** Finish blocked-write recovery, snapshot orchestration, and
+   registration-predecessor authority ownership; then run boundary searches,
+   focused failure-injection tests, strict lint, repository hooks, and manual
+   rules review and update dependent plans to the sealed one-protocol shape.
 
 ## Commit boundaries
 
@@ -382,5 +389,6 @@ Store operation enters the Store owner and stays there through authority,
 remote effects, retries, cleanup, and durable completion; and all searches and
 verification gates support those statements.
 
-That boundary is now the implemented Store foundation. Remaining product work
-continues in `plans/circles.md`.
+The Store foundation is not complete until the three ownership leaks named
+above are removed and the verification commands and provider-capability
+documentation describe the current repository.

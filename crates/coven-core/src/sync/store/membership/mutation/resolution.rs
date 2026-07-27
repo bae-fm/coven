@@ -285,7 +285,6 @@ async fn finish_nonactivating_resolution(
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         persistence
             .database
-            .sqlite()
             .mark_candidate_cleanup_absent(target.object)
             .await?;
     }
@@ -484,7 +483,6 @@ async fn execute_resolution_mutation(
                         .map_err(|error| InviteError::Crypto(error.to_string()))?;
                     persistence
                         .database
-                        .sqlite()
                         .mark_candidate_cleanup_absent(target.object)
                         .await?;
                 }

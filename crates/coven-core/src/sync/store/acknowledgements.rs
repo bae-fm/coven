@@ -239,13 +239,14 @@ pub(super) async fn finish_nonactivating_acknowledgement(
     storage: &dyn SyncStorage,
     acknowledgement: crate::sync::store_commit::StoreAckRef,
 ) -> Result<(), crate::sync::store::StoreError> {
-    let db = database.sqlite();
     if let Some(target) = database
         .acknowledgement_cleanup_target(acknowledgement.clone())
         .await?
     {
         crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
-        db.mark_candidate_cleanup_absent(target.object).await?;
+        database
+            .mark_candidate_cleanup_absent(target.object)
+            .await?;
     }
     database
         .complete_nonactivating_acknowledgement(acknowledgement)

@@ -1165,7 +1165,6 @@ async fn resume_device_exclusion_candidate(
     storage: &dyn SyncStorage,
     operation: &mut Box<DurableStoreDeviceExclusionOperation>,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-    let db = database.sqlite();
     match operation.as_ref() {
         DurableStoreDeviceExclusionOperation::CandidateNonactivating { .. } => {
             for target in Box::pin(
@@ -1176,7 +1175,9 @@ async fn resume_device_exclusion_candidate(
             .await?
             {
                 crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
-                db.mark_candidate_cleanup_absent(target.object).await?;
+                database
+                    .mark_candidate_cleanup_absent(target.object)
+                    .await?;
             }
             **operation = Box::pin(
                 database.complete_nonactivating_store_device_exclusion(operation.as_ref().clone()),
@@ -1193,7 +1194,9 @@ async fn resume_device_exclusion_candidate(
             .await?
             {
                 crate::sync::store_objects::delete_exact_object(storage, &target.object).await?;
-                db.mark_candidate_cleanup_absent(target.object).await?;
+                database
+                    .mark_candidate_cleanup_absent(target.object)
+                    .await?;
             }
             **operation = Box::pin(
                 database.complete_store_device_exclusion_replacement_cleanup(
