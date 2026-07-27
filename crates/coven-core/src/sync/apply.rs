@@ -136,6 +136,7 @@ pub fn resolve_and_apply_changeset(
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
 /// a grossly-future incoming `_updated_at` (see `arbitrate_row_conflict`).
+#[cfg(any(test, feature = "test-utils"))]
 pub fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],
@@ -158,6 +159,7 @@ pub fn resolve_and_apply_changeset_with_schema(
 /// caller. Rows, exact row-bound blob locators, durable cleanup intents, and the
 /// receiver's position can therefore commit as one database operation. The caller
 /// must roll back when the returned result reports an FK or non-FK constraint conflict.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
     conn: &Connection,
     changeset: ValidatedChangeset<B>,
