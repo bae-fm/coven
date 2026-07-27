@@ -12,6 +12,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use crate::blob::retry::entry_in_backoff;
 use crate::blob::BlobTransitionObserver;
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation, OutboxUploadState};
@@ -63,22 +64,9 @@ async fn create_with_progress(
     result
 }
 
-/// Minimum delay before a failed upload entry is retried, keyed on its prior
-/// `attempt_count`. Exponential (`30s · 2^(n-1)`) capped at one hour: the base
-/// equals the sync-loop interval so the first retry rides the next natural
-/// cycle, and the cap keeps a persistently-failing entry retrying hourly rather
-/// than every cycle. A freshly-queued entry (`attempt_count == 0`) is eligible
-/// immediately.
-pub(crate) fn backoff_window(attempt_count: i64) -> chrono::Duration {
-    if attempt_count <= 0 {
-        return chrono::Duration::zero();
-    }
-    let n = (attempt_count - 1) as u32;
-    chrono::Duration::seconds(crate::sync::backoff::backoff_secs(n, 3600) as i64)
-}
-
 /// Record a failed upload attempt and notify the observer. The entry is left
-/// queued; it becomes eligible for retry again after [`backoff_window`]. Uploads
+/// queued; it becomes eligible for retry again once its backoff window (see
+/// `blob::retry`) has elapsed. Uploads
 /// additionally notify the observer, so the caller passes the upload's `file_id`.
 async fn record_failure(
     db: &Database,
@@ -302,28 +290,6 @@ enum EntryOutcome {
         made_remote: bool,
         created_this_pass: bool,
     },
-}
-
-/// Whether `entry` is still inside its retry backoff window and must be skipped this
-/// pass. A corrupt `last_attempt_at` is logged and treated as ready — an entry is
-/// never stranded on an unparseable timestamp.
-fn entry_in_backoff(entry: &OutboxEntry, now: chrono::DateTime<chrono::Utc>) -> bool {
-    let Some(last) = entry.last_attempt_at.as_deref() else {
-        return false;
-    };
-    match chrono::DateTime::parse_from_rfc3339(last) {
-        Ok(last_dt) => {
-            let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-            elapsed < backoff_window(entry.attempt_count)
-        }
-        Err(e) => {
-            warn!(
-                "Outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                entry.id
-            );
-            false
-        }
-    }
 }
 
 /// The next queued entry ready to attempt now — skipping any still inside its

@@ -109,6 +109,7 @@ pub mod delete;
 pub mod local_cleanup;
 pub mod local_files;
 pub mod locator;
+mod retry;
 #[cfg(test)]
 mod row_ref_tests;
 pub mod transition;
