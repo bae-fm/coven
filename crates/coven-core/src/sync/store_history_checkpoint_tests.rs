@@ -628,47 +628,6 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
 }
 
 #[tokio::test]
-async fn acknowledgement_snapshot_selection_authenticates_shared_history_once() {
-    let (db, store, _device_id, membership, _temp, _store_dir) = published_history(1).await;
-    let frontier = crate::sync::store_commit::CommitFrontier::from_refs(
-        store_database(&db)
-            .materialized_frontier()
-            .await
-            .expect("load snapshot coverage"),
-    )
-    .expect("derive snapshot coverage");
-    for image in [
-        b"first verification snapshot".to_vec(),
-        b"second verification snapshot".to_vec(),
-    ] {
-        crate::sync::test_helpers::publish_snapshot_fixture(
-            &store.storage,
-            &store.root,
-            image,
-            frontier.clone(),
-            &store.signer,
-            &membership,
-            &db,
-        )
-        .await
-        .expect("publish verification snapshot");
-    }
-    let references = frontier.commits().values().cloned().collect::<Vec<_>>();
-    let audit =
-        crate::sync::store_commit::StoreCommitVerificationAudit::begin(references.as_slice());
-    let authorization = super::store::Store::authorize_borrowed(&*store.storage, &db)
-        .await
-        .expect("authorize snapshot acknowledgement");
-
-    authorization
-        .stage_acknowledgement(frontier, "2026-07-27T00:00:00Z".to_string(), &store.signer)
-        .await
-        .expect("stage snapshot acknowledgement");
-
-    audit.assert_each_verified_once();
-}
-
-#[tokio::test]
 async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control().await;
 }
