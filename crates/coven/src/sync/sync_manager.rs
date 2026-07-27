@@ -220,10 +220,10 @@ impl SyncManager {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
-    pub(crate) async fn abandon_merge_candidate(
+    pub(crate) async fn discard_blocked_write(
         &self,
         write_id: coven_core::WriteId,
-    ) -> Result<coven_core::sync::store::MergeCandidateAbandonment, SyncError> {
+    ) -> Result<Vec<coven_core::WriteId>, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let device_id = self
@@ -237,9 +237,9 @@ impl SyncManager {
         Store::load(self.database.clone(), Arc::clone(loop_handle.storage()))
             .await
             .map_err(|error| SyncError::Protocol(error.to_string()))?
-            .abandon_candidate(&device_id, &identity, write_id)
+            .discard_blocked_write(&device_id, &identity, write_id)
             .await
-            .map_err(|error| SyncError::Protocol(error.to_string()))
+            .map_err(SyncError::from)
     }
 
     // =========================================================================

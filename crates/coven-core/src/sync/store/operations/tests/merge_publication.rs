@@ -333,18 +333,18 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .await
         .expect("block prepared Merge candidate");
 
-    assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
+    let store = Store::load(fixture.database.clone(), Arc::new(fixture.storage))
+        .await
+        .expect("load Store write recovery owner");
+    let discarded = store
+        .discard_blocked_write(
             &fixture.device_id,
             &fixture.keypair,
             fixture.write_id.clone(),
         )
         .await
-        .expect("publish candidate abandonment"),
-        MergeCandidateAbandonment::Abandoned,
-    );
+        .expect("abandon and discard the blocked candidate");
+    assert_eq!(discarded, vec![fixture.write_id.clone()]);
     assert!(
         !crate::sync::store::database::StoreDatabase::new(&fixture.db)
             .merge_candidate_cleanup_pending(&fixture.write_id)
@@ -373,13 +373,6 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         &fixture.home,
         &fixture.commit_ref.object
     ));
-    assert_eq!(
-        store_database(&fixture.db)
-            .discard_blocked_write(&fixture.write_id)
-            .await
-            .expect("reverse the abandoned write"),
-        crate::sync::store::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()])
-    );
     assert!(matches!(
         fixture.db.write_status(&fixture.write_id).await.unwrap(),
         crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)

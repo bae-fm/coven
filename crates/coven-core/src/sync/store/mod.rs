@@ -41,8 +41,6 @@ mod registration;
 mod retained_replay;
 mod snapshot;
 
-#[doc(hidden)]
-pub use abandonment::MergeCandidateAbandonment;
 pub use circle_controls::CircleOperationError;
 pub(crate) use circle_controls::{
     CircleCurrentState, CircleOperationJournal, VerifiedCircleImage, VerifiedStreamActivations,

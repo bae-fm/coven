@@ -104,8 +104,12 @@ This ownership work completes the Store foundation required by
   membership, and atomic snapshot-cut capture is owned by the authorized Store
   snapshot subsystem. Cycle invokes both operations without assembling their
   authority or reaching into Store database state.
-- In progress: the final boundary audit found two remaining ownership leaks:
-  blocked-write recovery is still assembled by the application handle, and
+- Complete: the loaded Store owns remote blocked-write discard through
+  abandonment, cleanup, and the final atomic local reversal. The application
+  handle retains the offline local-only discard attempt, but it neither
+  interprets remote outcomes nor continues Store database transitions after
+  remote work.
+- In progress: the final boundary audit found one remaining ownership leak:
   snapshot policy and publication are still assembled by cycle. Host-write
   capture, pre-Store join/bootstrap, closed routing validation, schema reads,
   and fault injection retain their purpose-specific database access without
@@ -341,10 +345,12 @@ commits wholly or rolls back.
    private; per-cycle membership/key refresh, atomic snapshot-cut capture,
    manual membership conflict resolution, and Circle creation, rename, and
    restart enter their Store owners.
-1. **In progress.** Finish blocked-write recovery and snapshot orchestration;
-   then run boundary searches, focused failure-injection tests, strict lint,
-   repository hooks, and manual rules review and update dependent plans to the
-   sealed one-protocol shape.
+1. **Complete.** Keep the offline local-only blocked-write discard at the
+   application boundary, but move remote abandonment, outcome interpretation,
+   cleanup, and final local reversal into the loaded Store.
+1. **In progress.** Finish snapshot orchestration; then run boundary searches,
+   focused failure-injection tests, strict lint, repository hooks, and manual
+   rules review and update dependent plans to the sealed one-protocol shape.
 
 ## Commit boundaries
 
@@ -392,6 +398,6 @@ Store operation enters the Store owner and stays there through authority,
 remote effects, retries, cleanup, and durable completion; and all searches and
 verification gates support those statements.
 
-The Store foundation is not complete until the two ownership leaks named above
-are removed and the verification commands and provider-capability documentation
-describe the current repository.
+The Store foundation is not complete until the snapshot ownership leak named
+above is removed and the verification commands and provider-capability
+documentation describe the current repository.

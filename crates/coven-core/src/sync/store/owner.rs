@@ -230,20 +230,47 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub async fn abandon_candidate(
+    pub async fn discard_blocked_write(
         &self,
         device_id: &str,
         identity: &UserKeypair,
         write_id: crate::WriteId,
-    ) -> Result<abandonment::MergeCandidateAbandonment, crate::sync::store::StoreError> {
-        abandonment::abandon_merge_candidate(
+    ) -> Result<Vec<crate::WriteId>, crate::sync::store::StoreError> {
+        if let BlockedWriteDiscard::Discarded(discarded) =
+            self.database().discard_blocked_write(&write_id).await?
+        {
+            return Ok(discarded);
+        }
+
+        match abandonment::abandon_merge_candidate(
             self.database(),
             &**self.storage(),
             device_id,
             identity,
-            write_id,
+            write_id.clone(),
         )
-        .await
+        .await?
+        {
+            abandonment::MergeCandidateAbandonment::NotRequired => {
+                return Err(StoreError::InvalidOutbound(
+                    "blocked Merge candidate has no abandonment authority".to_string(),
+                ));
+            }
+            abandonment::MergeCandidateAbandonment::Abandoned => {}
+            abandonment::MergeCandidateAbandonment::CandidateActivated => {
+                return Err(StoreError::InvalidOutbound(
+                    "Merge candidate activated before abandonment and cannot be discarded"
+                        .to_string(),
+                ));
+            }
+        }
+
+        match self.database().discard_blocked_write(&write_id).await? {
+            BlockedWriteDiscard::Discarded(discarded) => Ok(discarded),
+            BlockedWriteDiscard::RemoteResolutionRequired => Err(StoreError::InvalidOutbound(
+                "Merge candidate remains unresolved after abandonment".to_string(),
+            )),
+        }
     }
 
     #[doc(hidden)]

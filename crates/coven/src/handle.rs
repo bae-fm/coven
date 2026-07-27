@@ -357,42 +357,13 @@ impl CovenHandle {
             return Ok(discarded);
         }
 
-        let abandonment = self
-            .sync_manager()
+        self.sync_manager()
             .ok_or_else(|| {
                 crate::CovenError::CandidateResolution("sync is not connected".to_string())
             })?
-            .abandon_merge_candidate(write_id.clone())
+            .discard_blocked_write(write_id.clone())
             .await
-            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
-        match abandonment {
-            coven_core::sync::store::MergeCandidateAbandonment::NotRequired => {
-                return Err(crate::CovenError::CandidateResolution(
-                    "blocked Merge candidate has no abandonment authority".to_string(),
-                ));
-            }
-            coven_core::sync::store::MergeCandidateAbandonment::Abandoned => {}
-            coven_core::sync::store::MergeCandidateAbandonment::CandidateActivated => {
-                return Err(crate::CovenError::CandidateResolution(
-                    "Merge candidate activated before abandonment and cannot be discarded"
-                        .to_string(),
-                ));
-            }
-        }
-
-        match self
-            .database
-            .discard_blocked_write(write_id)
-            .await
-            .map_err(crate::CovenError::from)?
-        {
-            coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) => Ok(discarded),
-            coven_core::sync::store::BlockedWriteDiscard::RemoteResolutionRequired => {
-                Err(crate::CovenError::CandidateResolution(
-                    "Merge candidate remains unresolved after abandonment".to_string(),
-                ))
-            }
-        }
+            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))
     }
 
     /// Read the current durable status of one write.

@@ -16,7 +16,7 @@ use crate::sync::store_objects::StoreObjectError;
 use super::operations::load_local_store_authority;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeCandidateAbandonment {
+pub(crate) enum MergeCandidateAbandonment {
     NotRequired,
     Abandoned,
     CandidateActivated,
