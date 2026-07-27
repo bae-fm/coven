@@ -12,7 +12,7 @@ use bytes::Bytes;
 use reqwest::StatusCode;
 
 use super::http::range_content_header;
-use super::CloudHomeError;
+use super::{combine_cleanup_failure, CloudHomeError};
 
 fn cancellation_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
@@ -177,19 +177,6 @@ impl RangePutUploader {
 
     pub(super) fn mark_completed(&mut self) {
         self.completed = true;
-    }
-}
-
-fn combine_cleanup_failure(
-    operation: CloudHomeError,
-    cleanup: Result<(), CloudHomeError>,
-) -> CloudHomeError {
-    match cleanup {
-        Ok(()) => operation,
-        Err(cleanup) => CloudHomeError::CleanupFailed {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
     }
 }
 
