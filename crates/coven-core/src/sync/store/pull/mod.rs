@@ -120,8 +120,10 @@ pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_e
 pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
 pub(crate) use discovery::*;
 pub(crate) use history::*;
+#[cfg(test)]
+pub(in crate::sync::store) use join_bootstrap::prepare_device_join_bootstrap;
 pub(in crate::sync::store) use join_bootstrap::{
-    materialize_device_join_activation, prepare_device_join_bootstrap,
+    materialize_device_join_activation, verify_attempt_and_prepare_device_join_bootstrap,
 };
 pub(crate) use local_device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,

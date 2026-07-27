@@ -329,29 +329,24 @@ pub fn bootstrap_joining_device<'a>(
         ))
         .await?
         .value;
-        let verified_attempt = Box::pin(crate::sync::store::load_verified_device_join_attempt_ref(
-            storage,
-            &offer.store_root,
-            &bootstrap.bootstrap.publication_authorization.attempt,
-            &attempt_owner,
-        ))
+        let (verified_attempt, bootstrap_plan) = Box::pin(
+            crate::sync::store::pull::verify_attempt_and_prepare_device_join_bootstrap(
+                storage,
+                &offer.store_root,
+                &bootstrap.bootstrap.publication_authorization.attempt,
+                &attempt_owner,
+                &bootstrap
+                    .bootstrap
+                    .publication_authorization
+                    .attempt_activation,
+            ),
+        )
         .await?;
         if verified_attempt.value.expected_registration
             != bootstrap.bootstrap.request.expected_registration
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let bootstrap_plan = Box::pin(crate::sync::store::prepare_device_join_bootstrap(
-            storage,
-            &offer.store_root,
-            &verified_attempt.value.bootstrap_cut,
-            &bootstrap
-                .bootstrap
-                .publication_authorization
-                .attempt_activation,
-            &verified_attempt.value.membership,
-        ))
-        .await?;
         let proof = Box::pin(crate::sync::store::bootstrap_pending_device(
             database,
             storage,

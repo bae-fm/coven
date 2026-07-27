@@ -44,46 +44,60 @@ pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
     evidence: LoadedDeviceJoinAttemptEvidence,
 ) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
     Box::pin(async move {
-        let frontier = &evidence.attempt.value.bootstrap_cut.0;
         let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-        verify_merge_history_authority(
+        verify_device_join_attempt_evidence_with_history(
             &mut history_verifier,
             storage,
             root,
-            frontier,
-            &evidence.attempt.value.membership,
+            evidence,
         )
-        .await?;
-        let access = &evidence.attempt.value.provider_approval.access_grant;
-        let verified = history_verifier
-            .history()
-            .commits
-            .get(&access.activation)
-            .ok_or_else(|| {
-                StorePullError::Database(
-                    "provider-access activation is outside the verified Merge bootstrap history"
-                        .to_string(),
-                )
-            })?;
-        if !verify_merge_provider_administrator(
-            &verified.predecessor_membership,
-            &access.grant.administrator_grant,
-            &verified.verified.value().author_registration,
-            &evidence
-                .attempt
-                .value
-                .provider_approval
-                .request
-                .offer
-                .provider_admin,
-        ) {
-            return Err(StorePullError::Database(
-                "device join attempt lacks exact Merge provider-administrator authority"
-                    .to_string(),
-            ));
-        }
-        Ok(evidence.attempt)
+        .await
     })
+}
+
+pub(super) async fn verify_device_join_attempt_evidence_with_history(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    evidence: LoadedDeviceJoinAttemptEvidence,
+) -> Result<VerifiedObject<DeviceJoinAttempt>, StorePullError> {
+    let frontier = &evidence.attempt.value.bootstrap_cut.0;
+    verify_merge_history_authority(
+        history_verifier,
+        storage,
+        root,
+        frontier,
+        &evidence.attempt.value.membership,
+    )
+    .await?;
+    let access = &evidence.attempt.value.provider_approval.access_grant;
+    let verified = history_verifier
+        .history()
+        .commits
+        .get(&access.activation)
+        .ok_or_else(|| {
+            StorePullError::Database(
+                "provider-access activation is outside the verified Merge bootstrap history"
+                    .to_string(),
+            )
+        })?;
+    if !verify_merge_provider_administrator(
+        &verified.predecessor_membership,
+        &access.grant.administrator_grant,
+        &verified.verified.value().author_registration,
+        &evidence
+            .attempt
+            .value
+            .provider_approval
+            .request
+            .offer
+            .provider_admin,
+    ) {
+        return Err(StorePullError::Database(
+            "device join attempt lacks exact Merge provider-administrator authority".to_string(),
+        ));
+    }
+    Ok(evidence.attempt)
 }
 
 pub(super) fn verify_commit_join_evidence<'a>(

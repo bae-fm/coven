@@ -93,9 +93,10 @@ impl StoreDatabase {
             }
 
             for prepared in &plan.commits {
+                let commit = prepared.commit.value();
                 if !represented.contains(&prepared.reference)
-                    && (prepared.commit.store_package().is_some()
-                        || !prepared.commit.circle_packages().is_empty())
+                    && (commit.store_package().is_some()
+                        || !commit.circle_packages().is_empty())
                 {
                     return Err(DbError::Message(format!(
                         "device join bootstrap cannot advance over unmaterialized row data at {}/{}",
@@ -123,18 +124,19 @@ impl StoreDatabase {
                     }
                     continue;
                 }
+                let commit = prepared.commit.value();
                 crate::sync::store::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,
-                    &prepared.commit,
+                    commit,
                     &prepared.registrations,
                 )?;
                 let circle_activations =
-                    VerifiedCircleActivations::none(&prepared.commit, &prepared.reference)
+                    VerifiedCircleActivations::none(commit, &prepared.reference)
                         .map_err(|error| DbError::Message(error.to_string()))?;
                 let activation = &prepared.activation;
                 let materialization = VerifiedMergeMaterialization::verify(
                     &root,
-                    &prepared.commit,
+                    commit,
                     &prepared.reference,
                     &prepared.registrations,
                     &prepared.device_operations,
@@ -147,7 +149,10 @@ impl StoreDatabase {
                     None,
                 )?;
                 StoreDatabaseTransaction::new(&tx)
-                    .record_verified_merge_materialization(materialization)?;
+                    .record_operation_verified_merge_materialization(
+                        materialization,
+                        &prepared.commit,
+                    )?;
             }
             tx.commit().map_err(DbError::from)
         })

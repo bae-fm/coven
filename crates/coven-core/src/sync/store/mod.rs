@@ -526,6 +526,7 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     .await
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_device_join_bootstrap<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,

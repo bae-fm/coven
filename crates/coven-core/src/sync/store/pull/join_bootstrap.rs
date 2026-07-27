@@ -1,6 +1,7 @@
 use super::*;
 use crate::sync::store_objects::load_founder_registration;
 
+#[cfg(test)]
 pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
@@ -9,84 +10,140 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
     membership_state: &'a StoreMembershipStateRef,
 ) -> StorePullFuture<'a, DeviceJoinBootstrapPlan> {
     Box::pin(async move {
-        load_device_join_authorization(storage, root, membership_state).await?;
         let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-        let founder = Box::pin(load_founder_registration(storage, root)).await?;
-        let founder_reference =
-            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-        let genesis = history_verifier.history().genesis.clone();
+        prepare_device_join_bootstrap_with_history(
+            &mut history_verifier,
+            storage,
+            root,
+            coverage,
+            attempt_activation,
+            membership_state,
+        )
+        .await
+    })
+}
 
-        let mut pending = history_cut_references(coverage);
-        pending.push(attempt_activation.clone());
-        history_verifier.verify_refs(pending).await?;
-        let activation = history_verifier
-            .history()
-            .commits
-            .get(attempt_activation)
-            .ok_or_else(|| {
-                StorePullError::Database(
-                    "device join attempt activation is absent from its graph".into(),
-                )
-            })?;
-        if activation
-            .verified
-            .value()
-            .order
-            .predecessor_cut()
-            .map_err(|error| StorePullError::Database(error.to_string()))?
-            != *coverage
-        {
+async fn prepare_device_join_bootstrap_with_history(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    coverage: &StoreHistoryCut,
+    attempt_activation: &StoreBatchCommitRef,
+    membership_state: &StoreMembershipStateRef,
+) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
+    load_device_join_authorization(storage, root, membership_state).await?;
+    let founder = Box::pin(load_founder_registration(storage, root)).await?;
+    let founder_reference =
+        StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+    let genesis = history_verifier.history().genesis.clone();
+
+    let mut pending = history_cut_references(coverage);
+    pending.push(attempt_activation.clone());
+    history_verifier.verify_refs(pending).await?;
+    let activation = history_verifier
+        .history()
+        .commits
+        .get(attempt_activation)
+        .ok_or_else(|| {
+            StorePullError::Database(
+                "device join attempt activation is absent from its graph".into(),
+            )
+        })?;
+    if activation
+        .verified
+        .value()
+        .order
+        .predecessor_cut()
+        .map_err(|error| StorePullError::Database(error.to_string()))?
+        != *coverage
+    {
+        return Err(StorePullError::Database(
+            "device join attempt activation predecessor differs from its signed bootstrap cut"
+                .to_string(),
+        ));
+    }
+    if &activation.verified.value().membership_state != membership_state {
+        return Err(StorePullError::Database(
+            "device join attempt activation differs from its exact verified membership state"
+                .to_string(),
+        ));
+    }
+
+    let history = history_verifier.history();
+    let mut emitted = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(history.commits.len());
+    while emitted.len() != history.commits.len() {
+        let next = history.commits.iter().find_map(|(reference, verified)| {
+            (!emitted.contains(reference)
+                && commit_predecessor_references(verified.verified.value())
+                    .iter()
+                    .all(|dependency| emitted.contains(dependency)))
+            .then(|| reference.clone())
+        });
+        let Some(reference) = next else {
             return Err(StorePullError::Database(
-                "device join attempt activation predecessor differs from its signed bootstrap cut"
-                    .to_string(),
+                "verified device join bootstrap history has an unresolved predecessor".to_string(),
             ));
-        }
-        if &activation.verified.value().membership_state != membership_state {
-            return Err(StorePullError::Database(
-                "device join attempt activation differs from its exact verified membership state"
-                    .to_string(),
-            ));
-        }
+        };
+        let verified = &history.commits[&reference];
+        ordered.push(DeviceJoinBootstrapCommit {
+            reference: reference.clone(),
+            commit: verified.verified.clone(),
+            registrations: verified.registrations.clone(),
+            device_operations: verified.operations.clone(),
+            activation: DeviceJoinBootstrapActivation {
+                head: verified.activation_head.clone(),
+                object: verified.activation_head_object.clone(),
+                history_summary: verified.history.summary.clone(),
+            },
+        });
+        emitted.insert(reference);
+    }
 
-        let history = history_verifier.history();
-        let mut emitted = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(history.commits.len());
-        while emitted.len() != history.commits.len() {
-            let next = history.commits.iter().find_map(|(reference, verified)| {
-                (!emitted.contains(reference)
-                    && commit_predecessor_references(verified.verified.value())
-                        .iter()
-                        .all(|dependency| emitted.contains(dependency)))
-                .then(|| reference.clone())
-            });
-            let Some(reference) = next else {
-                return Err(StorePullError::Database(
-                    "verified device join bootstrap history has an unresolved predecessor"
-                        .to_string(),
-                ));
-            };
-            let verified = &history.commits[&reference];
-            ordered.push(DeviceJoinBootstrapCommit {
-                reference: reference.clone(),
-                commit: verified.verified.value().clone(),
-                registrations: verified.registrations.clone(),
-                device_operations: verified.operations.clone(),
-                activation: DeviceJoinBootstrapActivation {
-                    head: verified.activation_head.clone(),
-                    object: verified.activation_head_object.clone(),
-                    history_summary: verified.history.summary.clone(),
-                },
-            });
-            emitted.insert(reference);
-        }
+    Ok(DeviceJoinBootstrapPlan {
+        founder_reference,
+        founder: founder.value,
+        founder_bytes: founder.bytes,
+        genesis,
+        commits: ordered,
+    })
+}
 
-        Ok(DeviceJoinBootstrapPlan {
-            founder_reference,
-            founder: founder.value,
-            founder_bytes: founder.bytes,
-            genesis,
-            commits: ordered,
-        })
+pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'a>(
+    storage: &'a dyn SyncStorage,
+    root: &'a StoreRootRef,
+    attempt: &'a super::store_commit::DeviceJoinAttemptRef,
+    attempt_owner: &'a StoreDeviceRegistration,
+    attempt_activation: &'a StoreBatchCommitRef,
+) -> StorePullFuture<
+    'a,
+    (
+        super::store_objects::VerifiedObject<super::store_commit::DeviceJoinAttempt>,
+        DeviceJoinBootstrapPlan,
+    ),
+> {
+    Box::pin(async move {
+        let evidence =
+            load_device_join_attempt_evidence_ref(storage, root, attempt, attempt_owner).await?;
+        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+        let verified_attempt =
+            super::device_join_attempt::verify_device_join_attempt_evidence_with_history(
+                &mut history_verifier,
+                storage,
+                root,
+                evidence,
+            )
+            .await?;
+        let plan = prepare_device_join_bootstrap_with_history(
+            &mut history_verifier,
+            storage,
+            root,
+            &verified_attempt.value.bootstrap_cut,
+            attempt_activation,
+            &verified_attempt.value.membership,
+        )
+        .await?;
+        Ok((verified_attempt, plan))
     })
 }
 

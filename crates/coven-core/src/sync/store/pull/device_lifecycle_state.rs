@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct DeviceJoinBootstrapCommit {
     pub reference: StoreBatchCommitRef,
-    pub commit: StoreBatchCommit,
+    pub commit: VerifiedStoreBatchCommit,
     pub registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
     pub device_operations: VerifiedStoreDeviceOperations,
     pub activation: DeviceJoinBootstrapActivation,

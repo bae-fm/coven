@@ -199,11 +199,21 @@ mod tests {
     use super::*;
     use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestStore};
 
-    #[tokio::test]
-    async fn provider_access_verification_authenticates_its_activation_once() {
+    struct ProviderAccessFixture {
+        owner: UserKeypair,
+        member: UserKeypair,
+        db: crate::database::Database,
+        store: TestStore,
+        membership: MembershipChain,
+        _pending_dir: tempfile::TempDir,
+        pending: crate::sync::store::DeviceJoinJournalDatabase,
+        approval: crate::sync::store::DeviceProviderAdmissionApproval,
+    }
+
+    async fn provider_access_fixture(label: &str) -> ProviderAccessFixture {
         let owner = UserKeypair::generate();
         let db = open_test_db();
-        let store = TestStore::create(&db, "provider-access-verification", owner.clone())
+        let store = TestStore::create(&db, label, owner.clone())
             .await
             .expect("create provider-access verification Store");
         let database = StoreDatabase::new(&db);
@@ -217,7 +227,7 @@ mod tests {
             None,
             crate::sync::membership::MemberRole::Member,
             &crate::encryption::EncryptionService::from_key([42; 32]),
-            "provider-access-verification",
+            label,
             "Provider access verification",
             &database,
         )
@@ -269,25 +279,141 @@ mod tests {
         )
         .await
         .expect("authorize provider access");
+        ProviderAccessFixture {
+            owner,
+            member,
+            db,
+            store,
+            membership,
+            _pending_dir: pending_dir,
+            pending,
+            approval,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_access_verification_authenticates_its_activation_once() {
+        let fixture = provider_access_fixture("provider-access-verification").await;
+        let database = StoreDatabase::new(&fixture.db);
         let administrator = database
             .activated_store_device_registration(
-                approval.request.offer.provider_admin.administrator.clone(),
+                fixture
+                    .approval
+                    .request
+                    .offer
+                    .provider_admin
+                    .administrator
+                    .clone(),
             )
             .await
             .expect("load provider administrator registration");
         let audit = crate::sync::store_commit::StoreCommitVerificationAudit::begin(
-            std::slice::from_ref(&approval.access_grant.activation),
+            std::slice::from_ref(&fixture.approval.access_grant.activation),
         );
 
         crate::sync::store::verify_accepted_provider_access_activation(
-            store.storage.as_ref(),
-            &store.root,
-            &approval.access_grant,
-            &approval.request.offer.provider_admin,
+            fixture.store.storage.as_ref(),
+            &fixture.store.root,
+            &fixture.approval.access_grant,
+            &fixture.approval.request.offer.provider_admin,
             &administrator,
         )
         .await
         .expect("verify accepted provider access");
+
+        audit.assert_each_verified_once();
+    }
+
+    #[tokio::test]
+    async fn joining_device_bootstrap_authenticates_its_history_once() {
+        let fixture = provider_access_fixture("join-bootstrap-verification").await;
+        let ProviderAccessFixture {
+            owner,
+            member,
+            db,
+            store,
+            membership,
+            _pending_dir,
+            pending,
+            approval,
+        } = fixture;
+        let database = StoreDatabase::new(&db);
+        let registration_request = crate::sync::store::prepare_device_registration_request(
+            &pending,
+            store.storage.as_ref(),
+            None,
+            &member,
+            approval,
+        )
+        .await
+        .expect("prepare bootstrap verification registration");
+        let provisional = crate::sync::store::accept_device_registration_request(
+            &database,
+            store.storage.as_ref(),
+            &membership,
+            &owner,
+            registration_request,
+        )
+        .await
+        .expect("activate bootstrap verification attempt");
+        let provider_ready = crate::sync::store::publish_device_provider_challenge(
+            &database,
+            store.storage.as_ref(),
+            None,
+            provisional,
+        )
+        .await
+        .expect("publish bootstrap verification readiness");
+        let joining_db = open_test_db();
+        store
+            .open_into(&joining_db)
+            .await
+            .expect("open Store on joining device");
+        let attempt_ref = &provider_ready.bootstrap.publication_authorization.attempt;
+        let owner_registration = crate::sync::store_objects::load_registration_ref(
+            store.storage.as_ref(),
+            &store.root,
+            &provider_ready
+                .bootstrap
+                .request
+                .approval
+                .request
+                .offer
+                .owner_registration,
+        )
+        .await
+        .expect("load bootstrap attempt owner")
+        .value;
+        let attempt = crate::sync::store_objects::load_owner_signed_device_join_attempt_ref(
+            store.storage.as_ref(),
+            &store.root,
+            attempt_ref,
+            &owner_registration,
+        )
+        .await
+        .expect("load bootstrap attempt");
+        let references = attempt
+            .value
+            .bootstrap_cut
+            .0
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let audit =
+            crate::sync::store_commit::StoreCommitVerificationAudit::begin(references.as_slice());
+        let joining_database = StoreDatabase::new(&joining_db);
+
+        crate::sync::store::bootstrap_joining_device(
+            &joining_database,
+            &pending,
+            store.storage.as_ref(),
+            None,
+            &member,
+            provider_ready,
+            "2026-07-27T00:00:00Z",
+        )
+        .await
+        .expect("bootstrap joining device");
 
         audit.assert_each_verified_once();
     }
