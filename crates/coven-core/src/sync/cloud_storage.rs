@@ -33,7 +33,12 @@ use crate::sync::store_commit::ObjectHash;
 /// fork could reuse.
 const KEY_TAG_MAGIC: &[u8; 4] = b"CKF1";
 const KEY_FINGERPRINT_LEN: usize = 32;
-const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
+
+/// How many bytes of key tag a sealed object carries before its payload — for a
+/// blob, before the [`SealedBlobHeader`] that names its chunk size. The public
+/// sibling of [`SEALED_BLOB_HEADER_LEN`], so a reader outside this crate can
+/// locate a stored blob's header in the object's bytes.
+pub const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the store key (the default); a `Plaintext` home stores

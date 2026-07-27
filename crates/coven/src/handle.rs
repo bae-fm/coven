@@ -485,7 +485,7 @@ impl CovenHandle {
             self.observer.clone(),
             self.open_guard.clone(),
             self.sync_status_tx.clone(),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            self.blob_chunking,
         ));
         Box::pin(start(manager.clone())).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
@@ -2151,6 +2151,152 @@ mod tests {
         assert_eq!(
             read, plaintext,
             "read_blob fetched the blob's plaintext from the injected test home",
+        );
+    }
+
+    /// The chunk size a host sets through
+    /// [`CovenBuilder::blob_chunking`](crate::CovenBuilder::blob_chunking) is what
+    /// the connected sync manager seals under. The receipt is the stored object's
+    /// own header: it names the configured size, so the setting decides how little
+    /// a later ranged read can fetch. A connect path that builds its manager or its
+    /// storage on `BlobChunking::DEFAULT` instead seals at 64 KiB and this fails.
+    #[tokio::test]
+    async fn connected_seal_honors_the_handles_configured_blob_chunking() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_connected_seal_honors_the_handles_configured_chunking(),
+                )
+                .await
+                .expect("configured-chunking handle task");
+            })
+            .await;
+    }
+
+    async fn run_connected_seal_honors_the_handles_configured_chunking() {
+        test_keyring::install();
+
+        // Distinctive on both axes: neither number is `BlobChunking::DEFAULT`'s
+        // (64 KiB chunk, 1 MiB window), so a dropped configuration is visible
+        // rather than coinciding with the default.
+        const CHUNK: u32 = 4096;
+        let chunking = crate::sync::cloud_storage::BlobChunking::new(
+            std::num::NonZeroU32::new(CHUNK).expect("nonzero chunk"),
+            std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
+        );
+
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = host_blob_test_db("images");
+
+        let mut config = Config::with_defaults(
+            "lib-chunking".to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        config.cloud_home.storage = HomeStorage::Opaque;
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let signer = crate::keys::UserKeypair::generate();
+        let store = TestStore::create(&db, "lib-chunking", signer.clone())
+            .await
+            .expect("create exact test Store");
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            .resolve("lib-chunking", &store_dir);
+        // Holds the loop off the upload queue so this test's explicit
+        // `drain_uploads` is the call that seals the object.
+        let upload_pause = Arc::new(PausedUploadDrain::new());
+
+        let handle = CovenHandle::new(
+            db.clone(),
+            // `read_db`: this test never calls `sql_read`, and the test db is
+            // `:memory:` (no shareable read-only companion), so the writer clone
+            // stands in.
+            db.clone(),
+            db.stamper(),
+            store_dir.clone(),
+            config_provider,
+            StoreKeys::new("lib-chunking".to_string()),
+            test_key_custody(),
+            identity_custody,
+            Arc::new(SystemClock),
+            None,
+            Some(upload_pause.clone()),
+            StoreOpenGuard::acquire_for_test(&store_dir),
+            chunking,
+        );
+
+        let home = store.home.clone();
+        handle
+            .connect_sync_with_test_home(
+                home.clone(),
+                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            )
+            .await
+            .expect("connect over the injected test home");
+
+        // Several chunks' worth of plaintext, so the configured size frames the
+        // object rather than fitting inside one chunk either way.
+        let plaintext: Vec<u8> = (0..3 * CHUNK as usize + 17)
+            .map(|value| (value % 251) as u8)
+            .collect();
+        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .make_remote("notes", "note-cover-1", false)
+            .await
+            .expect("queue the exact row/blob transition");
+        tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
+            .await
+            .expect("the loop reaches the paused upload drain");
+
+        upload_pause.resume();
+        let outcome = handle
+            .drain_uploads()
+            .await
+            .expect("drain the prepared exact blob through the public handle");
+        assert_eq!(outcome.uploaded, 1);
+        assert!(outcome.failures.failures().is_empty());
+
+        let blob = handle
+            .row_blob_ref("note_photos", "cover-1")
+            .await
+            .expect("capture Remote row after exact upload");
+        let object = blob
+            .stored()
+            .expect("published blob has exact storage")
+            .object();
+        let exact = home
+            .clone()
+            .exact_slot_storage()
+            .expect("test home supports exact object slots");
+        let at_rest = exact
+            .read_at(object.slot())
+            .await
+            .expect("the exact blob object exists");
+
+        // `[key tag][header][chunks]` — the header the sealer wrote is what every
+        // later reader frames the object by.
+        let header = crate::encryption::SealedBlobHeader::parse(
+            &at_rest[crate::sync::cloud_storage::KEY_TAG_LEN..],
+        )
+        .expect("stored blob carries a sealed header");
+        assert_eq!(
+            header.chunk_size().get(),
+            CHUNK,
+            "the sealed blob is framed at the chunking the handle was built with",
+        );
+        assert_eq!(header.plaintext_len(), plaintext.len() as u64);
+
+        let read = handle
+            .read_blob(&blob)
+            .await
+            .expect("read through the handle");
+        assert_eq!(
+            read, plaintext,
+            "the blob sealed at the configured chunk size reads back whole",
         );
     }
 

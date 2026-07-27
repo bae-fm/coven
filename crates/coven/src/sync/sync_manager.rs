@@ -441,7 +441,8 @@ impl SyncManager {
             blob_paths,
             config.store_id.clone(),
             keypair,
-        )?;
+        )?
+        .with_blob_chunking(self.blob_chunking);
         let initialization = self.store_initialization().await?;
         let components = crate::sync::cycle::init_sync_over_storage(
             &self.database,
