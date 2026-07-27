@@ -158,7 +158,7 @@ impl StoreBatchCommitDeletionTarget {
         &self,
         expected_store_root_hash: ObjectHash,
         author: &StoreDeviceRegistration,
-    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+    ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
         let commit = self.verify_exact_candidate(expected_store_root_hash, author)?;
         if matches!(&commit.body, StoreCommitBody::AbandonCandidates { .. }) {
             return Err(StoreProtocolError::Malformed(
@@ -172,7 +172,7 @@ impl StoreBatchCommitDeletionTarget {
         &self,
         expected_store_root_hash: ObjectHash,
         author: &StoreDeviceRegistration,
-    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+    ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
         self.verify_exact_candidate(expected_store_root_hash, author)
     }
 
@@ -180,19 +180,22 @@ impl StoreBatchCommitDeletionTarget {
         &self,
         expected_store_root_hash: ObjectHash,
         author: &StoreDeviceRegistration,
-    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+    ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
         self.object
             .verify(&self.canonical_signed_bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        let commit: StoreBatchCommit = serde_json::from_slice(&self.canonical_signed_bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let commit = VerifiedStoreBatchCommit::parse_prepared(
+            &self.canonical_signed_bytes,
+            expected_store_root_hash,
+            self.coord.clone(),
+            self.object.clone(),
+            author,
+        )?;
         if commit.to_bytes() != self.canonical_signed_bytes {
             return Err(StoreProtocolError::Malformed(
                 "candidate commit bytes are not canonical".to_string(),
             ));
         }
-        commit.verify_at(expected_store_root_hash, &self.coord, author)?;
-        StoreBatchCommitRef::from_commit(&commit, self.coord.clone(), self.object.clone())?;
         Ok(commit)
     }
 }

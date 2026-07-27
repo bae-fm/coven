@@ -576,14 +576,7 @@ impl VerifiedMergeWinner {
             .map_err(|error| {
                 crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
             })?;
-        let reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| {
-            crate::sync::remote_object::RemoteObjectRecordError::InvalidProof(error.to_string())
-        })?;
+        let reference = commit.reference().clone();
         if self.expected.store_root_hash != self.store_root_hash
             || commit.store_root_hash != self.store_root_hash
             || self.expected.author_registration != commit.author_registration

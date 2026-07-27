@@ -3895,12 +3895,7 @@ impl VerifiedCandidateNonactivation {
         let commit = candidate
             .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
             .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let candidate_reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = commit.reference().clone();
         let dependency_reference = dependency.candidate_reference()?;
         let value = Self {
             evidence: Box::new(
@@ -3934,12 +3929,7 @@ impl VerifiedCandidateNonactivation {
         let commit = candidate
             .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
             .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
-        let candidate_reference = StoreBatchCommitRef::from_commit(
-            &commit,
-            candidate.coord.clone(),
-            candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let candidate_reference = commit.reference().clone();
         if authority.durable.candidate != candidate {
             return Err(RemoteObjectRecordError::InvalidProof(
                 "verified dependent retraction authority names another candidate".to_string(),
