@@ -194,9 +194,9 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let activation_commit =
-            crate::sync::store::pull::load_verified_commit(storage, &root, &activation_commit_ref)
-                .await?;
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -272,9 +272,9 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let activation_commit =
-            crate::sync::store::pull::load_verified_commit(storage, &root, &activation_commit_ref)
-                .await?;
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -365,9 +365,9 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let activation_commit =
-            crate::sync::store::pull::load_verified_commit(storage, &root, &activation_commit_ref)
-                .await?;
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -893,9 +893,9 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let activation_commit =
-            crate::sync::store::pull::load_verified_commit(storage, &root, &activation_commit_ref)
-                .await?;
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"

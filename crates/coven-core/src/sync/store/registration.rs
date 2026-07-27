@@ -1645,19 +1645,20 @@ mod tests {
         )
         .await
         .expect("recover Owner device");
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+                .await
+                .expect("create Store commit verifier");
         for reference in database
             .materialized_frontier()
             .await
             .expect("load materialized Store frontier")
             .into_values()
         {
-            let commit = crate::sync::store::pull::load_verified_commit(
-                &store.storage,
-                &store.root,
-                &reference,
-            )
-            .await
-            .expect("load materialized recovery commit");
+            let commit = commit_verifier
+                .load_ref(&reference)
+                .await
+                .expect("load materialized recovery commit");
             if commit.value().author_registration == registration {
                 return (store, db, registration, reference);
             }

@@ -78,12 +78,9 @@ impl AuthorizedStore<'_> {
                 .local_store_root_ref()
                 .await?
                 .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-            let activation = crate::sync::store::pull::load_verified_commit(
-                self.storage(),
-                &root,
-                &activation_commit_ref,
-            )
-            .await?;
+            let mut commit_verifier =
+                crate::sync::store::pull::StoreCommitVerifier::new(self.storage(), &root).await?;
+            let activation = commit_verifier.load_ref(&activation_commit_ref).await?;
             let activation_commit = activation.value();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(

@@ -54,15 +54,6 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 }
 
-pub(crate) async fn load_verified_commit(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    reference: &StoreBatchCommitRef,
-) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
-    let root_value = load_store_protocol_root(storage, root).await?.value;
-    load_verified_commit_at_root(storage, root, &root_value, reference).await
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CommitCoverageError {
     #[error(transparent)]
@@ -72,8 +63,7 @@ pub(crate) enum CommitCoverageError {
 }
 
 pub(crate) async fn commit_position_covers(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, CommitCoverageError> {
@@ -83,7 +73,7 @@ pub(crate) async fn commit_position_covers(
     }
     let mut cursor = covering.clone();
     while cursor.coord.sequence() > covered.coord.sequence() {
-        let commit = load_verified_commit(storage, root, &cursor).await?;
+        let commit = commit_verifier.load_ref(&cursor).await?;
         cursor = commit.value().order.predecessor().cloned().ok_or(
             CommitCoverageError::MissingAncestry {
                 commit_hash: cursor.commit_hash,
@@ -110,9 +100,12 @@ pub(crate) async fn history_cut_covers(
 ) -> Result<bool, StorePullError> {
     let covering = cut.0.get(&covered.coord.stream_id);
     match covering {
-        Some(covering) => commit_position_covers(storage, root, covering, covered)
-            .await
-            .map_err(coverage_error),
+        Some(covering) => {
+            let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+            commit_position_covers(&mut commit_verifier, covering, covered)
+                .await
+                .map_err(coverage_error)
+        }
         None => Ok(false),
     }
 }

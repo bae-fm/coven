@@ -102,15 +102,16 @@ impl ReclaimJourneyFixture {
             .expect("load local device id")
             .expect("local device id exists");
 
+        let mut commit_verifier =
+            crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+                .await
+                .expect("create Store commit verifier");
         let mut packages = Vec::new();
         for activation in activations {
-            let commit = crate::sync::store::pull::load_verified_commit(
-                &store.storage,
-                &store.root,
-                &activation,
-            )
-            .await
-            .expect("load package activation");
+            let commit = commit_verifier
+                .load_ref(&activation)
+                .await
+                .expect("load package activation");
             let package = commit
                 .value()
                 .store_package()
@@ -583,13 +584,14 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .publish_changeset("founder", 1, &changeset, db.schema_version())
         .await
         .expect("publish target package activation");
-    let target_commit = crate::sync::store::pull::load_verified_commit(
-        &store.storage,
-        &store.root,
-        &target_activation,
-    )
-    .await
-    .expect("load target activation");
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+            .await
+            .expect("create Store commit verifier");
+    let target_commit = commit_verifier
+        .load_ref(&target_activation)
+        .await
+        .expect("load target activation");
     let target_package = target_commit
         .value()
         .store_package()

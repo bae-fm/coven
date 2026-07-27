@@ -1404,19 +1404,16 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         crate::WriteStatus::Published(position) => position.commit,
         status => panic!("pre-close Circle write was not published: {status:?}"),
     };
-    let package_commit = crate::sync::store::pull::load_verified_commit(
-        &store.storage,
-        &store.root,
-        &package_commit_ref,
-    )
-    .await
-    .expect("load pre-close Circle package commit");
-    let package_author = package_commit.author();
-    let package_commit = package_commit.value();
     let mut commit_verifier =
         crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
             .await
             .expect("create Store commit verifier");
+    let package_commit = commit_verifier
+        .load_ref(&package_commit_ref)
+        .await
+        .expect("load pre-close Circle package commit");
+    let package_author = package_commit.author();
+    let package_commit = package_commit.value();
     assert_eq!(package_commit.circle_packages().len(), 1);
     let historical_locator = crate::blob::locator::BlobLocator::opaque(
         "files",
@@ -1907,13 +1904,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     ));
     assert!(!store.home.exact_reads().contains(&package_slot));
 
-    let successor_commit = crate::sync::store::pull::load_verified_commit(
-        &store.storage,
-        &store.root,
-        &successor_commit_ref,
-    )
-    .await
-    .expect("load exact successor Circle commit");
+    let successor_commit = commit_verifier
+        .load_ref(&successor_commit_ref)
+        .await
+        .expect("load exact successor Circle commit");
     let successor_author = successor_commit.author();
     let successor_commit = successor_commit.value();
     let device_signer = successor_author
@@ -2686,13 +2680,16 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         crate::WriteStatus::Published(position) => *position,
         status => panic!("old-epoch member write did not publish after reopen: {status:?}"),
     };
-    let member_package_commit = crate::sync::store::pull::load_verified_commit(
+    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
         &fixture.store.storage,
         &fixture.store.root,
-        published.commit(),
     )
     .await
-    .expect("load the member's published old-epoch package commit");
+    .expect("create Store commit verifier");
+    let member_package_commit = commit_verifier
+        .load_ref(published.commit())
+        .await
+        .expect("load the member's published old-epoch package commit");
     let member_package = member_package_commit
         .value()
         .circle_packages()
@@ -2976,13 +2973,16 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let activation_commit = crate::sync::store::pull::load_verified_commit(
+    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
         &fixture.store.storage,
         &fixture.store.root,
-        &activation_commit_ref,
     )
     .await
-    .expect("load closing activation commit");
+    .expect("create Store commit verifier");
+    let activation_commit = commit_verifier
+        .load_ref(&activation_commit_ref)
+        .await
+        .expect("load closing activation commit");
     let author = activation_commit.author();
     let activation_commit = activation_commit.value();
     let previous_control = activation_commit
@@ -3076,13 +3076,16 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let activation_commit = crate::sync::store::pull::load_verified_commit(
+    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
         &fixture.store.storage,
         &fixture.store.root,
-        &activation_commit_ref,
     )
     .await
-    .expect("load closing activation commit");
+    .expect("create Store commit verifier");
+    let activation_commit = commit_verifier
+        .load_ref(&activation_commit_ref)
+        .await
+        .expect("load closing activation commit");
     let previous_control = activation_commit
         .value()
         .circle_controls()
@@ -4269,10 +4272,14 @@ async fn circle_package_in(
     store: &TestStore,
     commit_ref: &StoreBatchCommitRef,
 ) -> crate::sync::store_commit::CirclePackageRef {
-    let commit =
-        crate::sync::store::pull::load_verified_commit(&store.storage, &store.root, commit_ref)
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
             .await
-            .expect("load the exact Circle package commit");
+            .expect("create Store commit verifier");
+    let commit = commit_verifier
+        .load_ref(commit_ref)
+        .await
+        .expect("load the exact Circle package commit");
     let [package] = commit.value().circle_packages() else {
         panic!("the commit must carry exactly one Circle package");
     };

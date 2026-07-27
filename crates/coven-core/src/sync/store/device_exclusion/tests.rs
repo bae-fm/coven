@@ -514,10 +514,14 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .await
         .expect("read exclusion activation position")
         .expect("exclusion activation position exists");
-    let activation_commit =
-        crate::sync::store::pull::load_verified_commit(&store.storage, &store.root, &activation)
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
             .await
-            .expect("load exclusion activation commit");
+            .expect("create Store commit verifier");
+    let activation_commit = commit_verifier
+        .load_ref(&activation)
+        .await
+        .expect("load exclusion activation commit");
     assert!(activation_commit
         .value()
         .device_exclusion_outcomes()

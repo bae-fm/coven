@@ -713,12 +713,11 @@ pub async fn observe_device_join_abandonment(
     .await?
     .value;
     abandonment.abandonment.verify(&object, &owner)?;
-    let activation = crate::sync::store::pull::load_verified_commit(
-        storage,
-        root,
-        &abandonment.abandonment_activation,
-    )
-    .await?;
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(storage, root).await?;
+    let activation = commit_verifier
+        .load_ref(&abandonment.abandonment_activation)
+        .await?;
     if activation.author() != &owner
         || !activation
             .value()

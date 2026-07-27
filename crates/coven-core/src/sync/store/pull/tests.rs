@@ -724,7 +724,11 @@ async fn load_commit(
     fixture: &EffectiveAccessFixture,
     reference: &StoreBatchCommitRef,
 ) -> StoreBatchCommit {
-    load_verified_commit(&fixture.store.storage, &fixture.store.root, reference)
+    let mut commit_verifier = StoreCommitVerifier::new(&fixture.store.storage, &fixture.store.root)
+        .await
+        .expect("create Store commit verifier");
+    commit_verifier
+        .load_ref(reference)
         .await
         .expect("load effective-access commit")
         .value()
@@ -1726,7 +1730,11 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("load earlier Owner position")
         .expect("earlier Owner published the membership control");
-    let earlier_value = load_verified_commit(&store.storage, &store.root, &earlier_control)
+    let mut commit_verifier = StoreCommitVerifier::new(&store.storage, &store.root)
+        .await
+        .expect("create Store commit verifier");
+    let earlier_value = commit_verifier
+        .load_ref(&earlier_control)
         .await
         .expect("load traversal-earlier control");
     let Some(crate::sync::store_commit::StoreControl { transition }) =
@@ -1797,7 +1805,8 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("load later Owner position")
         .expect("later Owner published the data commit");
 
-    let later_value = load_verified_commit(&store.storage, &store.root, &later_commit)
+    let later_value = commit_verifier
+        .load_ref(&later_commit)
         .await
         .expect("load later concurrent commit");
     let later_predecessors = commit_predecessor_references(later_value.value());

@@ -1302,6 +1302,9 @@ async fn prepare_audience_blob_reclaim_authorizations(
     membership: &MembershipChain,
     root: &StoreRootRef,
 ) -> Result<(), StoreReclaimError> {
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
+        .await
+        .map_err(StoreReclaimError::Object)?;
     for (blob, owners) in database.stored_blob_reclaim_candidates().await? {
         if !database.stored_blob_is_row_orphaned(blob.clone()).await? {
             continue;
@@ -1317,7 +1320,8 @@ async fn prepare_audience_blob_reclaim_authorizations(
         // not which commit. Probe only that dimension.
         let mut binding = None;
         for owner in &owners {
-            let commit = super::pull::load_verified_commit(storage, root, owner)
+            let commit = commit_verifier
+                .load_ref(owner)
                 .await
                 .map_err(StoreReclaimError::Object)?;
             if let Some(package) =
@@ -1710,6 +1714,9 @@ async fn exact_circle_package_targets(
     circle_id: CircleId,
     coverage: &CommitFrontier,
 ) -> Result<Vec<(StoreBatchCommitRef, CirclePackageRef)>, StoreReclaimError> {
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
+        .await
+        .map_err(StoreReclaimError::Object)?;
     let mut targets = BTreeMap::new();
     for tip in frontier_refs(coverage) {
         let mut cursor = Some(tip.clone());
@@ -1717,7 +1724,8 @@ async fn exact_circle_package_targets(
             if targets.contains_key(&reference) {
                 break;
             }
-            let commit = super::pull::load_verified_commit(storage, root, &reference)
+            let commit = commit_verifier
+                .load_ref(&reference)
                 .await
                 .map_err(StoreReclaimError::Object)?;
             if let Some(package) = commit
@@ -2466,11 +2474,13 @@ async fn verify_store_package_reclaim_claim(
                 .to_string(),
         ));
     }
-    let commit = super::pull::load_verified_commit(storage, root, &claim.target.activation).await?;
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
+        .await
+        .map_err(StoreReclaimError::Object)?;
+    let commit = commit_verifier.load_ref(&claim.target.activation).await?;
     if commit.value().store_package() != Some(&claim.target.package)
         || !snapshot_covers_target(
-            storage,
-            root,
+            &mut commit_verifier,
             &snapshot.meta.coverage,
             &claim.target.activation,
         )
@@ -2648,12 +2658,15 @@ async fn verify_circle_package_snapshot_coverage_claim(
                 .to_string(),
         ));
     }
-    let commit = super::pull::load_verified_commit(storage, root, &claim.target.activation).await?;
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
+        .await
+        .map_err(StoreReclaimError::Object)?;
+    let commit = commit_verifier.load_ref(&claim.target.activation).await?;
     if !commit
         .value()
         .circle_packages()
         .contains(&claim.target.package)
-        || !snapshot_covers_target(storage, root, cut, &claim.target.activation).await?
+        || !snapshot_covers_target(&mut commit_verifier, cut, &claim.target.activation).await?
     {
         return Err(StoreReclaimError::Authorization(
             "Circle reclaim target is not the exact package covered by its snapshot".to_string(),
@@ -2778,14 +2791,13 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
 }
 
 async fn snapshot_covers_target(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
     coverage: &CommitFrontier,
     target: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
     let covering = coverage.0.get(&target.coord.stream_id);
     match covering {
-        Some(covering) => position_covers(storage, root, covering, target).await,
+        Some(covering) => position_covers(commit_verifier, covering, target).await,
         None => Ok(false),
     }
 }
@@ -3233,12 +3245,11 @@ fn frontier_refs(frontier: &CommitFrontier) -> Vec<&StoreBatchCommitRef> {
 }
 
 async fn position_covers(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
-    super::pull::commit_position_covers(storage, root, covering, covered)
+    super::pull::commit_position_covers(commit_verifier, covering, covered)
         .await
         .map_err(|error| match error {
             super::pull::CommitCoverageError::Object(error) => StoreReclaimError::Object(error),
@@ -3259,6 +3270,9 @@ async fn exact_package_targets(
     )>,
     StoreReclaimError,
 > {
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, root)
+        .await
+        .map_err(StoreReclaimError::Object)?;
     let mut targets = BTreeMap::new();
     for tip in frontier_refs(coverage) {
         let mut cursor = Some(tip.clone());
@@ -3266,7 +3280,8 @@ async fn exact_package_targets(
             if targets.contains_key(&reference) {
                 break;
             }
-            let commit = super::pull::load_verified_commit(storage, root, &reference)
+            let commit = commit_verifier
+                .load_ref(&reference)
                 .await
                 .map_err(StoreReclaimError::Object)?;
             if let Some(package) = commit.value().store_package().cloned() {
