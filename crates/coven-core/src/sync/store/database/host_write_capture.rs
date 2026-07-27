@@ -20,6 +20,11 @@ enum AudienceBlobMoveMaterialization<'a> {
     PreparedTransition,
 }
 
+enum StoreWriteSqlAuthority {
+    Host,
+    Coven,
+}
+
 impl StoreDatabase {
     fn start_host_change_journal_on<'c>(
         conn: &'c Connection,
@@ -487,6 +492,7 @@ impl StoreDatabase {
             blob_decls,
             routing_encryption,
             blob_staging.map(AudienceBlobMoveMaterialization::Host),
+            StoreWriteSqlAuthority::Host,
             write_id,
             f,
         )
@@ -499,6 +505,7 @@ impl StoreDatabase {
         blob_decls: &BlobDecls,
         routing_encryption: Option<&EncryptionService>,
         blob_materialization: Option<AudienceBlobMoveMaterialization<'_>>,
+        sql_authority: StoreWriteSqlAuthority,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -514,7 +521,10 @@ impl StoreDatabase {
                 .map_err(E::from)?;
             let mut journal =
                 Self::start_host_change_journal_on(&tx, synced_tables).map_err(E::from)?;
-            let value = Self::run_host_sql_on(&tx, || f(&tx))?;
+            let value = match sql_authority {
+                StoreWriteSqlAuthority::Host => Self::run_host_sql_on(&tx, || f(&tx))?,
+                StoreWriteSqlAuthority::Coven => f(&tx)?,
+            };
             let mut captured =
                 Self::drain_host_change_journal(&mut journal, synced_tables).map_err(E::from)?;
             gate::validate_scoped_foreign_key_audiences(&tx, gates)
@@ -693,6 +703,7 @@ impl StoreDatabase {
             &blob_decls,
             routing_encryption,
             blob_materialization,
+            StoreWriteSqlAuthority::Coven,
             write_id,
             f,
         )
