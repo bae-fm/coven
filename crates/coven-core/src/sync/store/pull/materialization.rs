@@ -256,21 +256,13 @@ async fn reference_is_materialized(
 
 pub(crate) async fn verify_merge_commit_currently_materialized(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     reference: &StoreBatchCommitRef,
 ) -> Result<(), StorePullError> {
     let stream_id = reference.coord.stream_id.to_string();
     let coverage = database.snapshot_coverage_frontier().await?;
-    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
-    match reference_is_materialized(
-        database,
-        &mut commit_verifier,
-        &coverage,
-        &stream_id,
-        reference,
-    )
-    .await?
+    match reference_is_materialized(database, commit_verifier, &coverage, &stream_id, reference)
+        .await?
     {
         MaterializedCheck::Yes => Ok(()),
         MaterializedCheck::Missing => Err(StorePullError::Database(
