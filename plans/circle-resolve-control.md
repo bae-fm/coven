@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned. Implements the `plans/circles.md` requirement: "Concurrent valid
+Implemented. Implements the `plans/circles.md` requirement: "Concurrent valid
 roster or control successors are retained and surface `ControlConflict` …
 The Owner resolves the conflict with a signed transition that names the
 complete conflicting set and the chosen successor state."
@@ -134,6 +134,10 @@ construct conflicts; reuse those fixtures for end-to-end):
 6. Restart mid-operation (kill between journal insert and publication, and
    between publication and activation) → resume completes idempotently
    (existing resume fixtures pattern).
+7. Two concurrent epoch closes → direct resolution to either closing branch is
+   refused; cancelling the local waiting close reopens that exact branch while
+   retaining the other close, then resolving to the reopened branch collapses
+   the conflict.
 
 ## Out of scope
 
@@ -179,7 +183,7 @@ re-resolution is the roster-conflict-resolution machinery listed out of scope, a
 until it exists such a resolution fails loud at activation rather than dropping a
 losing roster head.
 
-## Follow-up 2: resolving to a closing (`EpochClose`) branch is refused, typed
+## Resolving a closing (`EpochClose`) branch
 
 A resolution is a *successor* control — it necessarily has a new control
 coordinate. An epoch close binds its participant responses to the closing
@@ -199,6 +203,13 @@ not fix the coordinate-bound responses.
 Decision: refuse it with a typed `CircleOperationError::ResolveToClosingBranch`
 (replacing the prior untyped `InvalidCurrentState` the `active_epoch()` check
 produced), checked at the command before drafting. The Owner resolves to a
-non-closing branch to discard the close instead. Two concurrent *closes* (no
-non-closing branch) are left refused rather than silently broken — resolving them
-needs cancel-while-conflicted, a separate concern.
+non-closing branch to discard the close instead.
+
+When every retained branch is closing, the device that owns a waiting close
+operation cancels its exact branch by the operation-derived `close_id`.
+Cancellation is valid while the Circle is conflicted: its reopening control
+covers that close only, so the other close remains retained rather than being
+silently discarded. The Owner then resolves the remaining conflict to the
+reopened branch. This preserves create-once response binding and gives
+concurrent closes an explicit exit without introducing a second settlement
+mechanism.

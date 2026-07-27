@@ -538,7 +538,7 @@ fn open_routing_db() -> Database {
 }
 
 #[tokio::test]
-async fn resolving_to_a_closing_branch_is_refused_typed() {
+async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     use crate::sync::cycle::{init_sync_over_storage, StoreInitialization};
     use crate::sync::membership::MemberRole;
 
@@ -623,24 +623,20 @@ async fn resolving_to_a_closing_branch_is_refused_typed() {
         .await
         .expect("device 2 pulls the with-member Circle");
 
-    // Device 1 removes the member — an epoch close. Device 2 concurrently renames
-    // from the same pre-removal control, so the close and the rename fork.
-    components
-        .remove_circle_member(circle_id, member_pubkey.clone())
+    // Each founder device removes the same member from the shared predecessor
+    // without seeing the other's close, producing two concurrent close controls.
+    Store::load(StoreDatabase::new(&db1), store.storage.clone())
         .await
-        .expect("activate Circle epoch close");
+        .expect("load device 1 Store")
+        .remove_circle_member(&device1, circle_id, member_pubkey.clone(), &founder)
+        .await
+        .expect("device 1 authors an epoch close");
     Store::load(StoreDatabase::new(&db2), store.storage.clone())
         .await
         .expect("load device 2 Store")
-        .rename_circle(
-            &device2,
-            "0000000001300-0000-device2",
-            circle_id,
-            "Renamed",
-            &founder,
-        )
+        .remove_circle_member(&device2, circle_id, member_pubkey, &founder)
         .await
-        .expect("device 2 authors a concurrent successor");
+        .expect("device 2 authors a concurrent epoch close");
 
     let (_dir1, dir1) = temp_store_dir();
     Store::authorize_borrowed(&*store.storage, &db1)
@@ -648,15 +644,15 @@ async fn resolving_to_a_closing_branch_is_refused_typed() {
         .expect("authorize device 1 pull")
         .pull(&dir1, &founder, Some(&routing()))
         .await
-        .expect("device 1 pulls the concurrent rename");
+        .expect("device 1 pulls the concurrent close");
     let branches = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
         .expect("read conflict branches")
-        .expect("the close and the rename conflict");
-    assert_eq!(branches.len(), 2, "the close and the rename conflict");
+        .expect("the two closes conflict");
+    assert_eq!(branches.len(), 2, "the two closes conflict");
 
-    let mut closing = None;
+    let mut closing = Vec::new();
     for branch in &branches {
         let activation = StoreDatabase::new(&db1)
             .verified_circle_activation(circle_id, branch.clone())
@@ -667,10 +663,10 @@ async fn resolving_to_a_closing_branch_is_refused_typed() {
             activation.control.value.state(),
             crate::sync::circle::CircleControlState::EpochClose(_)
         ) {
-            closing = Some(branch.clone());
+            closing.push(branch.clone());
         }
     }
-    let closing = closing.expect("one conflicting branch is the epoch close");
+    assert_eq!(closing.len(), 2, "both conflict branches are epoch closes");
 
     // Resolving to the closing branch is refused with the typed reason: a
     // resolution successor under a new control coordinate would strand the close's
@@ -679,13 +675,72 @@ async fn resolving_to_a_closing_branch_is_refused_typed() {
     let error = Store::load(StoreDatabase::new(&db1), store.storage.clone())
         .await
         .expect("load device 1 Store")
-        .resolve_circle_control(&device1, circle_id, closing, &founder)
+        .resolve_circle_control(&device1, circle_id, closing[0].clone(), &founder)
         .await
         .expect_err("resolving to the closing branch is refused");
     assert!(
         matches!(&error, CircleOperationError::ResolveToClosingBranch { circle_id: id }
             if *id == circle_id),
         "{error}"
+    );
+
+    // Device 1 can still cancel its exact close while the Circle is conflicted.
+    // The cancellation reopens that branch without covering the other close, so
+    // the Circle remains conflicted until the Owner explicitly selects the
+    // reopened branch.
+    Store::load(StoreDatabase::new(&db1), store.storage.clone())
+        .await
+        .expect("load device 1 Store")
+        .cancel_circle_epoch_close(&device1, circle_id, &founder)
+        .await
+        .expect("cancel device 1's close while conflicted");
+    let after_cancel = StoreDatabase::new(&db1)
+        .circle_control_conflict_branches(circle_id)
+        .await
+        .expect("read conflict after cancellation")
+        .expect("cancelling one close retains the other branch");
+    let mut reopened = None;
+    let mut closing_count = 0;
+    for branch in &after_cancel {
+        let activation = StoreDatabase::new(&db1)
+            .verified_circle_activation(circle_id, branch.clone())
+            .await
+            .expect("read post-cancellation branch activation")
+            .expect("post-cancellation branch is retained");
+        match activation.control.value.state() {
+            crate::sync::circle::CircleControlState::ActiveEpoch(_) => {
+                assert!(
+                    reopened.replace(branch.clone()).is_none(),
+                    "cancellation produces one active successor"
+                );
+            }
+            crate::sync::circle::CircleControlState::EpochClose(_) => closing_count += 1,
+            crate::sync::circle::CircleControlState::Deleted(_) => {
+                panic!("cancellation cannot introduce a deleted branch")
+            }
+        }
+    }
+    let reopened = reopened.expect("one branch is the cancelled close's active successor");
+    assert_eq!(closing_count, 1, "the concurrent close remains retained");
+    Store::load(StoreDatabase::new(&db1), store.storage.clone())
+        .await
+        .expect("load device 1 Store")
+        .resolve_circle_control(&device1, circle_id, reopened, &founder)
+        .await
+        .expect("resolve to the reopened branch");
+    let circles = StoreDatabase::new(&db1)
+        .get_circles(
+            &keys::public_key_hex(&founder),
+            BTreeSet::from([keys::public_key_hex(&founder)]),
+        )
+        .await
+        .expect("read resolved Circle");
+    assert!(
+        matches!(
+            circles.as_slice(),
+            [CircleInfo::Active { id, .. }] if *id == circle_id
+        ),
+        "cancel then resolve restores an active Circle"
     );
 }
 

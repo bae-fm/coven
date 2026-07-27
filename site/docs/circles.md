@@ -263,6 +263,15 @@ is the exit path out of a conflict, so it is callable regardless of
 rotation-required state; a branch discovered since the command resurfaces as a
 new conflict rather than being silently dropped.
 
+An epoch-close branch cannot be chosen directly: participant responses bind to
+that closing control, and moving the close under a new control would strand
+responses already written to create-once slots. If every retained branch is an
+epoch close, the device with a local waiting close first calls
+`cancel_close(circle.id)`. That reopens its exact close branch while retaining
+the other close branches. The Owner then calls `resolve` with the reopened
+active branch. Cancellation explicitly withdraws the local removal; resolution
+explicitly rejects the remaining close branches.
+
 ## Member removal and epoch close
 
 Removing a member always closes the old epoch before any future write, so that
@@ -296,7 +305,8 @@ An Owner can settle a stuck close two ways:
 // bootstrap before it can write or acknowledge again.
 circles.exclude_close_device(family, device_id).await?;
 
-// Cancel the whole close, restoring the frozen epoch byte-for-byte.
+// Cancel the local waiting close, restoring its frozen epoch byte-for-byte.
+// This also works when that close is one branch of a control conflict.
 let cancel_op = circles.cancel_close(family).await?;
 ```
 

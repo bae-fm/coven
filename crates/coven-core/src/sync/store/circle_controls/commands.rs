@@ -500,7 +500,7 @@ impl Store {
             return Err(CircleOperationError::ResolveToClosingBranch { circle_id });
         }
         let chosen_state =
-            chosen_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
+            retained_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
         let previous_control = chosen_activation.reference.clone();
         let mut losing_branches = Vec::new();
         for branch in &branches {
@@ -552,11 +552,14 @@ impl Store {
         .await
     }
 
-    /// Cancel the Circle's in-flight epoch close by settling its one outcome slot
-    /// with an Owner-signed cancellation and activating a reopening control that
-    /// restores the frozen epoch. Refuses if no local close operation is waiting
-    /// for responses — a close whose outcome already won the slot has moved out of
-    /// the waiting state and cannot be cancelled.
+    /// Cancel the local device's in-flight epoch close by settling its one outcome
+    /// slot with an Owner-signed cancellation and activating a reopening control
+    /// that restores the frozen epoch. When concurrent controls have made the
+    /// Circle conflicted, the durable operation's close id selects its exact
+    /// retained branch; reopening that branch leaves the other branches visible
+    /// for an explicit control resolution. Refuses if no local close operation is
+    /// waiting for responses — a close whose outcome already won the slot has
+    /// moved out of the waiting state and cannot be cancelled.
     pub(crate) async fn cancel_circle_epoch_close(
         &self,
         device_id: &str,
@@ -586,9 +589,9 @@ impl Store {
                 )));
             }
         };
-        let (current, activation_commit_ref) = database
-            .circle_closing_context(circle_id, &identity_pubkey)
-            .await?;
+        let (current, reference) =
+            local_close_cancellation_context(database, circle_id, &identity_pubkey, &journal)
+                .await?;
         let crate::sync::circle::CircleControlState::EpochClose(close) =
             current.control.value.state()
         else {
@@ -604,32 +607,6 @@ impl Store {
                 journal.operation_id
             )));
         }
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let (activation_commit, _) = crate::sync::store::pull::load_commit_with_author(
-            storage,
-            &root,
-            &activation_commit_ref,
-        )
-        .await?;
-        if activation_commit.candidate_family() != current.candidate_family {
-            return Err(CircleOperationError::InvalidState(format!(
-                "Circle {circle_id} closing state differs from its activating Store commit"
-            )));
-        }
-        let reference = activation_commit
-            .circle_controls()
-            .iter()
-            .find(|reference| {
-                reference.circle_id() == circle_id && reference.control() == &current.control.coord
-            })
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle {circle_id} closing control is absent from its activating Store commit"
-                ))
-            })?;
         let prepared = Box::pin(prepare_circle_operation_request(
             database,
             storage,
@@ -639,7 +616,7 @@ impl Store {
                 circle_id,
                 member_pubkey,
                 current,
-                previous_control: reference.clone(),
+                previous_control: reference,
             })),
             signer,
         ))
@@ -1055,29 +1032,27 @@ async fn resume_discarding_circle_operations(
     Ok(())
 }
 
-/// Materialize the chosen conflicting branch's authoring inputs from its
-/// retained verified activation. A conflicted Circle exposes no single
-/// `authoring_state`, so the resolution reads the chosen branch's roster,
-/// metadata, keyring, and access leaf directly from that branch's retained
-/// activation.
-fn chosen_branch_authoring_state(
+/// Build one retained branch's authoring inputs from its verified activation.
+/// A conflicted Circle exposes no single `authoring_state`, so a command reads
+/// the branch's roster, metadata, keyring, and access leaf from that activation.
+fn retained_branch_authoring_state(
     circle_id: CircleId,
     identity_pubkey: &str,
     activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
 ) -> Result<CircleAuthoringState, CircleOperationError> {
     let access = activation.local_access.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(format!(
-            "Circle {circle_id} chosen branch has no retained local access"
+            "Circle {circle_id} retained branch has no local access"
         ))
     })?;
     let active = access.active.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(format!(
-            "Circle {circle_id} control resolution requires active access to the chosen branch"
+            "Circle {circle_id} retained branch has no active access"
         ))
     })?;
     if access.leaf.value.recipient_pubkey != identity_pubkey {
         return Err(CircleOperationError::InvalidState(format!(
-            "Circle {circle_id} chosen branch belongs to another local identity"
+            "Circle {circle_id} retained branch belongs to another local identity"
         )));
     }
     Ok(CircleAuthoringState {
@@ -1086,6 +1061,86 @@ fn chosen_branch_authoring_state(
         access: access.leaf.value.clone(),
         roster: active.roster.clone(),
         metadata: active.metadata.clone(),
+    })
+}
+
+/// Resolve the exact retained close branch named by the local waiting operation.
+/// A resolved Circle reads its single closing state. A conflicted Circle dispatches
+/// over the authoritative retained branch set and requires exactly one branch to
+/// carry the operation-derived close id.
+async fn local_close_cancellation_context(
+    database: &StoreDatabase,
+    circle_id: CircleId,
+    identity_pubkey: &str,
+    journal: &super::CircleOperationJournal,
+) -> Result<(CircleAuthoringState, CircleControlRef), CircleOperationError> {
+    let close_id =
+        crate::sync::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id);
+    let Some(branches) = database.circle_control_conflict_branches(circle_id).await? else {
+        let (current, _) = database
+            .circle_closing_context(circle_id, identity_pubkey)
+            .await?;
+        let crate::sync::circle::CircleControlState::EpochClose(close) =
+            current.control.value.state()
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle close-cancellation context is active".to_string(),
+            ));
+        };
+        if close.close_id != close_id {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle operation {} differs from its close id",
+                journal.operation_id
+            )));
+        }
+        let activation = database
+            .verified_circle_activation(circle_id, current.control.coord.clone())
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} closing control has no retained activation"
+                ))
+            })?;
+        if activation.control != current.control {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} closing state differs from its retained activation"
+            )));
+        }
+        return Ok((current, activation.reference));
+    };
+
+    let mut selected = None;
+    for branch in branches {
+        let activation = database
+            .verified_circle_activation(circle_id, branch)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} conflict omits a retained branch activation"
+                ))
+            })?;
+        let crate::sync::circle::CircleControlState::EpochClose(close) =
+            activation.control.value.state()
+        else {
+            continue;
+        };
+        if close.close_id != close_id {
+            continue;
+        }
+        let current = retained_branch_authoring_state(circle_id, identity_pubkey, &activation)?;
+        if selected
+            .replace((current, activation.reference.clone()))
+            .is_some()
+        {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} conflict repeats close {close_id}"
+            )));
+        }
+    }
+    selected.ok_or_else(|| {
+        CircleOperationError::InvalidState(format!(
+            "Circle {circle_id} conflict does not retain local close {close_id}"
+        ))
     })
 }
 

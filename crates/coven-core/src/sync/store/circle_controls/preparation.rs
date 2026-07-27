@@ -291,24 +291,18 @@ pub(super) async fn prepare_circle_activation_objects(
     let mut metadata_heads =
         previous_objects.map_or_else(Vec::new, |objects| objects.metadata_heads.clone());
     // A control-conflict resolution covers the losing branches too: union their
-    // already-published heads and entries into the seed so the resolution's
-    // activation objects carry the merged frontier the resolved control names.
-    // Heads collapse to one per author stream at its deepest position, matching
-    // the control frontier the draft built; entries and resolutions merge by
-    // coordinate. `roster_frontier` already reflects the merged frontier — it is
-    // read from the draft control the resolution shaped.
+    // already-published objects into the seed so the resolution can verify both
+    // its merged current frontier and historical authority references. Roster
+    // heads are an object inventory: collapsing them by author stream would
+    // discard the older head that created an Owner grant. Metadata heads carry
+    // the current frontier because their signed predecessor links provide their
+    // history. The draft control separately carries the signed current
+    // frontiers that the resolution shaped.
     for branch in merged_branch_objects {
         roster_entries.extend(branch.roster_entries.clone());
         roster_resolutions.extend(branch.roster_resolutions.clone());
         metadata_entries.extend(branch.metadata_entries.clone());
-        for head in &branch.roster_heads {
-            crate::sync::circle::merge_frontier_head(
-                &mut roster_heads,
-                head.clone(),
-                |head| head.coord.stream_key(),
-                |head| head.coord.seq,
-            );
-        }
+        roster_heads.extend(branch.roster_heads.iter().cloned());
         for head in &branch.metadata_heads {
             crate::sync::circle::merge_frontier_head(
                 &mut metadata_heads,
@@ -319,6 +313,7 @@ pub(super) async fn prepare_circle_activation_objects(
         }
     }
     roster_heads.sort();
+    roster_heads.dedup();
     metadata_heads.sort_by_key(|head| head.coord.stream_key());
     let mut prepared = BTreeMap::new();
     let mut stream_activations = Vec::new();
