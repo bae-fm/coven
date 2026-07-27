@@ -1376,6 +1376,7 @@ impl MembershipChain {
         Self::from_entries_with_coords_and_heads_and_provider_admin(entries, heads, provider_admin)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn from_entries_with_coords_and_provider_admin(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         provider_admin: super::provider::ProviderAdminState,
