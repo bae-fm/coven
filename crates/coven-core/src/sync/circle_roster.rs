@@ -1182,21 +1182,10 @@ impl CircleRosterChain {
                 return Err(CircleRosterError::InvalidEntry(index));
             }
         }
-        let checkpoint_by_stream = resolution_checkpoint.as_ref().map(|checkpoint| {
-            checkpoint
-                .raw_heads
-                .iter()
-                .map(|coord| (coord.stream_key(), coord))
-                .collect::<BTreeMap<_, _>>()
-        });
-        let reduction_entries = entries.iter().filter(|entry| {
-            checkpoint_by_stream.as_ref().is_none_or(|heads| {
-                heads
-                    .get(&entry.coord().stream_key())
-                    .is_none_or(|head| entry.seq > head.seq)
-            })
-        });
-        let normalized = reduction_entries
+        let checkpoint_heads = resolution_checkpoint
+            .as_ref()
+            .map_or_else(Vec::new, |checkpoint| checkpoint.raw_heads.clone());
+        let normalized = causal_grants::entries_beyond_checkpoint(&entries, &checkpoint_heads)
             .map(|entry| CausalEntry {
                 coord: entry.coord(),
                 previous_hash: entry.previous_hash,
@@ -1275,27 +1264,12 @@ impl CircleRosterChain {
             .collect::<Vec<_>>();
         let reduction = match &resolution_checkpoint {
             Some(checkpoint) => {
-                let seeds = checkpoint
-                    .grants
-                    .iter()
-                    .map(|(grant, state)| {
-                        let record = state.record();
-                        let record = causal_grants::CausalSeedGrant {
-                            member_pubkey: record.member_pubkey.clone(),
-                            assignment: record.role,
-                        };
-                        (
-                            grant.clone(),
-                            match state {
-                                GrantState::Active { .. } => GrantState::Active { record },
-                                GrantState::Tombstoned { .. } => GrantState::Tombstoned {
-                                    record,
-                                    retirements: GrantRetirements::new(()),
-                                },
-                            },
-                        )
-                    })
-                    .collect();
+                let seeds = causal_grants::checkpoint_seed_grants(&checkpoint.grants, |record| {
+                    causal_grants::CausalSeedGrant {
+                        member_pubkey: record.member_pubkey.clone(),
+                        assignment: record.role,
+                    }
+                });
                 causal_grants::reduce_from_checkpoint(
                     &normalized,
                     &checkpoint.raw_heads,

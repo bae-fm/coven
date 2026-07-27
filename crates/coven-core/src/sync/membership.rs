@@ -3517,45 +3517,19 @@ fn reduce_store_membership_from_checkpoint(
     entries: &[MembershipEntry],
     checkpoint: &MembershipResolutionCheckpoint,
 ) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
-    let checkpoint_by_stream = checkpoint
-        .raw_heads
-        .iter()
-        .map(|coord| (coord.stream_key(), coord))
-        .collect::<BTreeMap<_, _>>();
-    let suffix = entries
-        .iter()
-        .filter(|entry| {
-            checkpoint_by_stream
-                .get(&entry.coord().stream_key())
-                .is_none_or(|head| entry.seq > head.seq)
-        })
+    let suffix = causal_grants::entries_beyond_checkpoint(entries, &checkpoint.raw_heads)
         .cloned()
         .collect::<Vec<_>>();
     let normalized = normalize_store_membership(&suffix);
-    let seeds = checkpoint
-        .grants
-        .iter()
-        .map(|(grant, state)| {
-            let record = state.record();
-            let record = causal_grants::CausalSeedGrant {
-                member_pubkey: record.member_pubkey.clone(),
-                assignment: StoreAssignment {
-                    role: record.role.clone(),
-                    provider_account_email: record.provider_account_email.clone(),
-                },
-            };
-            (
-                grant.clone(),
-                match state {
-                    GrantState::Active { .. } => GrantState::Active { record },
-                    GrantState::Tombstoned { .. } => GrantState::Tombstoned {
-                        record,
-                        retirements: GrantRetirements::new(()),
-                    },
-                },
-            )
-        })
-        .collect();
+    let seeds = causal_grants::checkpoint_seed_grants(&checkpoint.grants, |record| {
+        causal_grants::CausalSeedGrant {
+            member_pubkey: record.member_pubkey.clone(),
+            assignment: StoreAssignment {
+                role: record.role.clone(),
+                provider_account_email: record.provider_account_email.clone(),
+            },
+        }
+    });
     causal_grants::reduce_from_checkpoint(
         &normalized,
         &checkpoint.raw_heads,

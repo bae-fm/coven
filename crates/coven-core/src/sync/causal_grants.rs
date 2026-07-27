@@ -363,6 +363,55 @@ pub(crate) trait CausalHistoryEntry {
     fn dependencies(&self) -> &[Self::Coord];
 }
 
+/// The entries a checkpoint has not already absorbed: those standing beyond
+/// their stream's checkpointed head, plus any stream the checkpoint never saw.
+///
+/// A resumed chain replays only this suffix, because the checkpoint already
+/// carries the reduced state of everything at or below its heads.
+pub(crate) fn entries_beyond_checkpoint<'a, E: CausalHistoryEntry>(
+    entries: &'a [E],
+    raw_heads: &[E::Coord],
+) -> impl Iterator<Item = &'a E> {
+    let heads = raw_heads
+        .iter()
+        .map(|coord| (coord.stream_key(), coord.seq()))
+        .collect::<BTreeMap<_, _>>();
+    entries.iter().filter(move |entry| {
+        let coord = entry.coord();
+        heads
+            .get(&coord.stream_key())
+            .is_none_or(|head| coord.seq() > *head)
+    })
+}
+
+/// Turn a checkpoint's own grant records into reducer seeds.
+///
+/// `seed` states how one domain's record names its member and assignment; the
+/// rest is the rule both callers must agree on — a grant the checkpoint had
+/// already retired seeds as retired, carrying the checkpoint itself as its
+/// evidence, so replaying a suffix can never resurrect it.
+pub(crate) fn checkpoint_seed_grants<R, T: Ord, A: CausalAssignment>(
+    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
+    seed: impl Fn(&R) -> CausalSeedGrant<A>,
+) -> BTreeMap<MembershipGrantId, GrantState<CausalSeedGrant<A>, ()>> {
+    grants
+        .iter()
+        .map(|(grant, state)| {
+            let record = seed(state.record());
+            (
+                grant.clone(),
+                match state {
+                    GrantState::Active { .. } => GrantState::Active { record },
+                    GrantState::Tombstoned { .. } => GrantState::Tombstoned {
+                        record,
+                        retirements: GrantRetirements::new(()),
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
 /// Every coordinate reachable from `frontier` by walking dependencies.
 ///
 /// A coordinate with no entry in `entries` is included but not walked through —
