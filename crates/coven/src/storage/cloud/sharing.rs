@@ -8,6 +8,7 @@
 //! supplies those differences.
 
 use super::http::{ensure_ok, ok_json, NotFound};
+use super::oauth_rest::PageTokenTracker;
 use super::oauth_session::OAuthSession;
 use super::CloudHomeError;
 
@@ -20,6 +21,7 @@ pub(super) async fn permission_by_email(
     next_page: &impl Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
 ) -> Result<Option<serde_json::Value>, CloudHomeError> {
     let mut page_url = list_url.to_string();
+    let mut page_tokens = PageTokenTracker::new("permission listing");
     loop {
         let resp = session
             .api_call(|token| session.client().get(&page_url).bearer_auth(token))
@@ -42,7 +44,7 @@ pub(super) async fn permission_by_email(
         let Some(next_url) = next_page(&json)? else {
             return Ok(None);
         };
-        page_url = next_url;
+        page_url = page_tokens.record(&next_url)?;
     }
 }
 
@@ -123,10 +125,21 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// How the fake provider ends its second listing page.
+    #[derive(Clone, Copy)]
+    enum SecondPageEnd {
+        /// No cursor — the listing is complete.
+        Complete,
+        /// The page-two cursor again, which is how a provider sends a scan round
+        /// the same page forever.
+        RepeatsItsCursor,
+    }
+
     #[derive(Clone)]
     struct FakePermissionsState {
         requests: Arc<Mutex<Vec<String>>>,
         target_on_second_page: bool,
+        second_page_end: SecondPageEnd,
         delete_status: StatusCode,
         deleted: Arc<AtomicBool>,
     }
@@ -151,17 +164,25 @@ mod tests {
                 ))
                 .expect("build page one response"),
             (Method::GET, "/permissions", Some("page=2")) => {
-                let body = if state.target_on_second_page
+                let permissions = if state.target_on_second_page
                     && !state.deleted.load(Ordering::SeqCst)
                 {
-                    r#"{"permissions":[{"id":"target","email":"target@example.com"}]}"#
+                    r#"[{"id":"target","email":"target@example.com"}]"#
                 } else {
-                    r#"{"permissions":[{"id":"second","email":"second@example.com"}]}"#
+                    r#"[{"id":"second","email":"second@example.com"}]"#
+                };
+                let next = match state.second_page_end {
+                    SecondPageEnd::Complete => String::new(),
+                    SecondPageEnd::RepeatsItsCursor => {
+                        r#","next":"/permissions?page=2""#.to_string()
+                    }
                 };
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "application/json")
-                    .body(Body::from(body))
+                    .body(Body::from(format!(
+                        r#"{{"permissions":{permissions}{next}}}"#
+                    )))
                     .expect("build page two response")
             }
             (Method::DELETE, "/permissions/target", None) => {
@@ -180,6 +201,7 @@ mod tests {
 
     async fn spawn_permissions_endpoint(
         target_on_second_page: bool,
+        second_page_end: SecondPageEnd,
         delete_status: StatusCode,
     ) -> (
         String,
@@ -195,6 +217,7 @@ mod tests {
         let state = FakePermissionsState {
             requests: requests.clone(),
             target_on_second_page,
+            second_page_end,
             delete_status,
             deleted: Arc::new(AtomicBool::new(false)),
         };
@@ -232,10 +255,11 @@ mod tests {
     async fn revoke_against_fake(
         label: &str,
         target_on_second_page: bool,
+        second_page_end: SecondPageEnd,
         delete_status: StatusCode,
     ) -> Result<(Arc<Mutex<Vec<String>>>, tokio::sync::oneshot::Sender<()>), CloudHomeError> {
         let (endpoint, requests, shutdown) =
-            spawn_permissions_endpoint(target_on_second_page, delete_status).await;
+            spawn_permissions_endpoint(target_on_second_page, second_page_end, delete_status).await;
         let session = session(label);
         let list_url = format!("{endpoint}/permissions");
         let next_base = endpoint.clone();
@@ -258,9 +282,14 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_absent_finds_permission_on_second_page_and_verifies_removal() {
-        let (requests, shutdown) = revoke_against_fake("found", true, StatusCode::NO_CONTENT)
-            .await
-            .expect("revoke target on second page");
+        let (requests, shutdown) = revoke_against_fake(
+            "found",
+            true,
+            SecondPageEnd::Complete,
+            StatusCode::NO_CONTENT,
+        )
+        .await
+        .expect("revoke target on second page");
 
         assert_eq!(
             requests.lock().unwrap().as_slice(),
@@ -277,9 +306,14 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_absent_accepts_absent_member_after_scanning_all_pages() {
-        let (requests, shutdown) = revoke_against_fake("absent", false, StatusCode::NO_CONTENT)
-            .await
-            .expect("already absent is the desired state");
+        let (requests, shutdown) = revoke_against_fake(
+            "absent",
+            false,
+            SecondPageEnd::Complete,
+            StatusCode::NO_CONTENT,
+        )
+        .await
+        .expect("already absent is the desired state");
         assert_eq!(
             requests.lock().unwrap().as_slice(),
             ["GET /permissions", "GET /permissions?page=2"]
@@ -289,9 +323,14 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_absent_accepts_delete_404_then_verifies_absence() {
-        let (requests, shutdown) = revoke_against_fake("delete-404", true, StatusCode::NOT_FOUND)
-            .await
-            .expect("404 delete means already absent");
+        let (requests, shutdown) = revoke_against_fake(
+            "delete-404",
+            true,
+            SecondPageEnd::Complete,
+            StatusCode::NOT_FOUND,
+        )
+        .await
+        .expect("404 delete means already absent");
 
         assert_eq!(
             requests.lock().unwrap().as_slice(),
@@ -304,5 +343,27 @@ mod tests {
             ]
         );
         let _ = shutdown.send(());
+    }
+
+    /// A provider that hands back a cursor it already gave sends the scan round
+    /// the same page forever. The scan refuses the repeat instead of paging on.
+    #[tokio::test]
+    async fn repeated_page_cursor_is_refused_rather_than_paged_forever() {
+        let revoke = revoke_against_fake(
+            "cursor-loop",
+            false,
+            SecondPageEnd::RepeatsItsCursor,
+            StatusCode::NO_CONTENT,
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), revoke)
+            .await
+            .expect("a repeated cursor must end the scan, not page forever");
+
+        let error = outcome.expect_err("a repeated page cursor is refused");
+        assert!(
+            matches!(&error, CloudHomeError::Transport(message)
+                if message.contains("repeated page token")),
+            "got {error:?}",
+        );
     }
 }
