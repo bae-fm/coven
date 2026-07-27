@@ -1095,22 +1095,6 @@ mod tests {
     }
 
     #[test]
-    fn into_tokens_errors_when_success_response_missing_access_token() {
-        let body = r#"{}"#;
-        let result = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock);
-        match result {
-            Err(OAuthError::TokenExchange(msg)) => {
-                assert!(
-                    msg.contains("missing access_token"),
-                    "expected access_token error, got: {msg}",
-                );
-            }
-            other => panic!("expected TokenExchange, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn into_tokens_missing_access_token_error_does_not_include_tokens() {
         let body = r#"{"refresh_token":"refresh-token-that-must-not-be-logged"}"#;
         let result = parse_token_response(body)
