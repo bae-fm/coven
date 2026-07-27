@@ -168,8 +168,9 @@ protocol directly, and every Store operation enters the concrete Store owner.
 
 - no `Serial`, `WritePolicy`, coordinated-head, conditional-write, or
   provisional-branch production type remains;
-- no coordination storage trait, capability probe, configuration, error, mock,
-  or provider implementation remains;
+- no global-head coordination storage trait, capability probe, configuration,
+  error, mock, or provider implementation remains; create-once exact object
+  slots remain required for immutable publication;
 - no persisted enum retains a dead Serial variant;
 - no parser accepts superseded Serial objects;
 - no database schema, journal, recovery path, or fixture retains Serial state;
@@ -355,9 +356,9 @@ commits wholly or rolls back.
    cleanup, and final local reversal into the loaded Store.
 1. **Complete.** Move snapshot cadence, authorization, capture, retry, Store
    publication, and Circle publication behind the loaded Store.
-1. Run boundary searches, focused failure-injection tests, strict lint,
-   repository hooks, and manual rules review; then update dependent plans to
-   the sealed one-protocol shape.
+1. **In progress.** Run boundary searches, focused failure-injection tests,
+   strict lint, repository hooks, and manual rules review; then update dependent
+   plans to the sealed one-protocol shape.
 
 ## Commit boundaries
 
@@ -371,14 +372,19 @@ find no dead alternative introduced by that boundary. Rebase onto
 Run after each applicable boundary and at the final seal:
 
 ```sh
-rg -i "serial|writepolicy|write_policy|coordination|conditional head|provisional branch" \
-  crates/coven-core coven-uniffi coven-ffi docs README.md
+rg -n '\bSerial\b|WritePolicy|write_policy|coordinated[_ -]head|conditional head|provisional branch' \
+  crates site/docs README.md
 rg "Option<&.*Coordination|coordination: Option|StoreOperationPreparation|StoreOperationPublicationMode" \
   crates/coven-core/src
-rg "super::super::|crate::sync::store::merge" \
-  crates/coven-core/src/sync --glob '!store/**'
-rg "use crate::sync::store_pull::\*|crate::sync::store::package_preparation" \
-  crates/coven-core/src/sync/store
+rg 'crate::sync::store::(database|membership|operations|snapshot)::' \
+  crates/coven-core/src/sync --glob '!crates/coven-core/src/sync/store/**'
+rg 'crate::sync::store_pull|sync::store_pull' crates
+
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+scripts/check-lib-only.sh
+cargo test --all-features
+(cd site && npm run build)
 ```
 
 Every remaining textual match must describe an unrelated meaning or be removed.
@@ -405,6 +411,4 @@ Store operation enters the Store owner and stays there through authority,
 remote effects, retries, cleanup, and durable completion; and all searches and
 verification gates support those statements.
 
-The Store foundation is not complete until the verification commands and
-provider-capability documentation describe the current repository and the
-listed verification gates pass.
+The Store foundation is not complete until the listed verification gates pass.

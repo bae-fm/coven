@@ -18,7 +18,8 @@ Circle work must not reintroduce any removed coordinated protocol shape:
 - no `Serial`, `WritePolicy`, policy selector, mode flag, or engine dispatch;
 - no global mutable head, conditional head advance, provisional branch, or
   branch-conflict result;
-- no conditional-write storage capability or capability probe;
+- no global-head coordination capability or compare-and-swap head probe;
+  create-once exact object slots remain required for immutable publication;
 - no policy-shaped enum with one surviving variant;
 - no alternate package, snapshot, acknowledgement, membership, recovery,
   Circle-control, or database path;
@@ -42,7 +43,8 @@ rebuild the deleted choice.
 ### Complete foundation
 
 - The coordinated protocol, its public configuration, wire variants, database
-  state, storage capability, and runtime implementation are removed.
+  state, global-head storage capability, and runtime implementation are
+  removed.
 - `sync::store::Store` is the concrete protocol owner.
 - Store operation planning, package preparation, candidate publication,
   abandonment, pull, and snapshot workflows live below that owner.
@@ -923,19 +925,13 @@ A Circle-only or control-only transaction does not synthesize an empty Store
 package. Circle packages have no independent sequence, cursor, or activation
 head: the enclosing Store commit coordinate orders and activates them.
 
-Every package is encrypted for its audience, signed by the author, bound to the
-schema-routing contract and audience key fingerprint, and addressed by an
-immutable exact locator. The author's signature and the contract and
-fingerprint bindings are transitive where the object layering already makes
-them exact: the signed commit pins each package's ciphertext size and content
-hash, the sealed object names its key fingerprint in its authenticated header,
-and Circle package refs additionally carry the fingerprint in the signed
-commit body. No separate per-package signature exists or is required. The author's signature and the contract and
-fingerprint bindings are transitive where the object layering already makes
-them exact: the signed commit pins each package's ciphertext size and content
-hash, the sealed object names its key fingerprint in its authenticated header,
-and Circle package refs additionally carry the fingerprint in the signed
-commit body. No separate per-package signature exists or is required.
+Every package is encrypted for its audience, bound to the schema-routing
+contract and audience key fingerprint, and addressed by an immutable exact
+locator. The author's signed Store commit pins each package's ciphertext size
+and content hash. The sealed object names its key fingerprint in its
+authenticated header, and Circle package refs also carry that fingerprint in
+the signed commit body. These bindings authenticate the package and its author;
+there is no separate per-package signature.
 
 ### Candidate ownership
 
@@ -1288,8 +1284,8 @@ removed protocol shape. Every match must be an explicit prohibition in a design
 document or an unrelated ordinary-language use:
 
 ```sh
-rg -i "serial|writepolicy|write_policy|coordination|conditional head|provisional branch" \
-  crates coven-ffi coven-uniffi docs README.md plans
+rg -n '\bSerial\b|WritePolicy|write_policy|coordinated[_ -]head|conditional head|provisional branch' \
+  crates site/docs README.md
 rg "StoreEngine|CycleEngine|AuthorizedCycleEngine|store_engine" crates
 ```
 

@@ -13,6 +13,14 @@ There is no runtime protocol mode, global transaction sequencer, mutable shared
 head, conditional-head storage requirement, provisional transaction branch, or
 alternate wire format.
 
+Storage does require create-once exact object slots. That capability prevents
+one immutable publication from replacing another at the same reserved
+location; it neither chooses a global transaction order nor advances a mutable
+head. Built-in providers supply exact slots internally. A custom S3 endpoint
+requires a local operator assertion that it implements standard conditional
+create requests, and invite or restore data cannot make that assertion for
+another device.
+
 ## Guarantees
 
 - A successful host transaction is durable locally and receives one `WriteId`.
@@ -103,6 +111,11 @@ The oldest durable write is prepared against current verified membership,
 device, and stream authority. Preparation allocates every exact immutable
 object slot and persists canonical bytes or a reproducible spool before remote
 mutation.
+
+Provider reachability probes do not claim to prove durability or create-once
+semantics. Store construction requires the configured provider's exact-slot
+adapter, while custom S3 support depends on the operator assertion described
+above.
 
 A candidate family is derived from:
 
