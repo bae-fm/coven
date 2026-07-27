@@ -1737,6 +1737,19 @@ impl StoreDatabase {
             reference,
             &input_hash,
         )?;
+        Self::open_retained_merge_history_checkpoint_on(conn, reference, &retained)
+    }
+
+    pub(super) fn open_retained_merge_history_checkpoint_on(
+        conn: &Connection,
+        reference: &StoreBatchCommitRef,
+        retained: &OwnedVerifiedMergeMaterialization,
+    ) -> Result<crate::sync::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+        if retained.commit_ref() != reference {
+            return Err(DbError::Message(
+                "retained Merge checkpoint materialization names another commit".to_string(),
+            ));
+        }
         let head_ref = crate::sync::store_commit::StoreDeviceHeadRef {
             head_hash: retained.activation_head().head_hash(),
             object: retained.activation_head_object().clone(),

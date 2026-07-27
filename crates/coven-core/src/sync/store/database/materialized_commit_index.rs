@@ -43,8 +43,24 @@ impl StoreDatabase {
         &self,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let cache = self.retained_merge_materialization_cache();
         self.database
-            .call(move |conn| Self::load_retained_merge_materialization_by_ref_on(conn, &reference))
+            .call(move |conn| {
+                let mut cache = cache.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
+                Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)?
+                    .into_iter()
+                    .find(|materialization| materialization.commit_ref() == &reference)
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "retained Merge materialization is absent at its exact coordinate"
+                                .to_string(),
+                        )
+                    })
+            })
             .await
     }
 
@@ -52,12 +68,35 @@ impl StoreDatabase {
         &self,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<crate::sync::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
+        let cache = self.retained_merge_materialization_cache();
         self.database
             .call(move |conn| {
+                let retained = {
+                    let mut cache = cache.lock().map_err(|_| {
+                        DbError::Message(
+                            "retained Merge materialization cache lock is poisoned".to_string(),
+                        )
+                    })?;
+                    Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)?
+                };
                 references
                     .iter()
                     .map(|reference| {
-                        Self::load_retained_merge_history_checkpoint_on(conn, reference)
+                        match retained
+                            .iter()
+                            .find(|materialization| materialization.commit_ref() == reference)
+                        {
+                            Some(materialization) => {
+                                Self::open_retained_merge_history_checkpoint_on(
+                                    conn,
+                                    reference,
+                                    materialization,
+                                )
+                            }
+                            None => {
+                                Self::load_retained_merge_history_checkpoint_on(conn, reference)
+                            }
+                        }
                     })
                     .collect()
             })
