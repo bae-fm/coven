@@ -214,18 +214,9 @@ impl CloudKitCloudHome {
         owner_name: String,
         zone_name: String,
     ) -> Self {
-        Self::new_shared_with_ids(ops, Arc::new(UuidProvider), owner_name, zone_name)
-    }
-
-    pub(crate) fn new_shared_with_ids(
-        ops: Arc<dyn CloudKitOps>,
-        ids: IdRef,
-        owner_name: String,
-        zone_name: String,
-    ) -> Self {
         Self {
             ops,
-            ids,
+            ids: Arc::new(UuidProvider),
             scope: CloudKitScope::Shared {
                 owner_name,
                 zone_name,
@@ -667,12 +658,21 @@ fn verify_chunk_manifest(
     Ok(())
 }
 
-fn chunk_manifest_has_all_parts(manifest: &ChunkManifest, chunks: &[(usize, String)]) -> bool {
-    chunks.len() == manifest.part_count
-        && chunks
-            .iter()
-            .enumerate()
-            .all(|(expected, (actual, _))| *actual == expected)
+/// After a manifest read came back NotFound: distinguish a truly absent object
+/// from one whose chunk parts exist without their manifest — a torn write,
+/// surfaced as transport corruption rather than a clean miss.
+fn missing_or_unassembled(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    key: String,
+) -> CloudHomeError {
+    match ops.list_records(scope, &format!("{key}.part")) {
+        Ok(chunks) if chunks.is_empty() => CloudHomeError::NotFound(key),
+        Ok(_) => CloudHomeError::Transport(format!(
+            "CloudKit object {key} has chunk records but no manifest"
+        )),
+        Err(error) => error,
+    }
 }
 
 fn read_chunk(
@@ -977,13 +977,7 @@ impl CloudHome for CloudKitCloudHome {
                 Err(e) => return Err(e),
             }
 
-            let chunks = ops.list_records(&scope, &format!("{key}.part"))?;
-            if chunks.is_empty() {
-                return Err(CloudHomeError::NotFound(key));
-            }
-            Err(CloudHomeError::Transport(format!(
-                "CloudKit object {key} has chunk records but no manifest"
-            )))
+            Err(missing_or_unassembled(&*ops, &scope, key))
         })
         .await
     }
@@ -1053,13 +1047,7 @@ impl CloudHome for CloudKitCloudHome {
                 Err(e) => return Err(e),
             }
 
-            let chunks = ops.list_records(&scope, &format!("{key}.part"))?;
-            if chunks.is_empty() {
-                return Err(CloudHomeError::NotFound(key));
-            }
-            Err(CloudHomeError::Transport(format!(
-                "CloudKit object {key} has chunk records but no manifest"
-            )))
+            Err(missing_or_unassembled(&*ops, &scope, key))
         })
         .await
     }
@@ -1112,7 +1100,7 @@ impl CloudHome for CloudKitCloudHome {
                 Err(e) => return Err(e),
             };
             let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
-            Ok(chunk_manifest_has_all_parts(&manifest, &chunks))
+            Ok(verify_chunk_manifest(&key, &manifest, &chunks).is_ok())
         })
         .await
     }

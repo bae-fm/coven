@@ -1172,26 +1172,42 @@ impl GoogleDriveCloudHome {
         }
     }
 
-    async fn read_at_slot(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+    /// Verify the slot, issue the exact-read GET (`alt=media`, optionally with a
+    /// `Range` header), and check its status — the shared preamble of the three
+    /// exact-read paths, which diverge only in what they do with the response
+    /// body. The Dropbox backend factors its equivalent the same way.
+    async fn send_exact_read(
+        &self,
+        slot: &ObjectSlot,
+        range: Option<&str>,
+    ) -> Result<reqwest::Response, CloudHomeError> {
         self.verify_slot(slot).await?;
         let file_id = self.validate_slot(slot)?.to_string();
         let response = self
             .session
             .api_call(|token| {
-                supports_all_drives(
+                let request = supports_all_drives(
                     self.client()
                         .get(format!("{}/files/{file_id}", self.drive_api)),
                 )
                 .bearer_auth(token)
-                .query(&[("alt", "media")])
+                .query(&[("alt", "media")]);
+                match range {
+                    Some(range) => request.header("Range", range),
+                    None => request,
+                }
             })
             .await?;
-        let response = ensure_ok(
+        ensure_ok(
             response,
             &format!("read exact {}", slot.logical_key()),
             NotFound::Status,
         )
-        .await?;
+        .await
+    }
+
+    async fn read_at_slot(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+        let response = self.send_exact_read(slot, None).await?;
         ok_bytes(
             response,
             &format!("read exact body for {}", slot.logical_key()),
@@ -1204,25 +1220,7 @@ impl GoogleDriveCloudHome {
         slot: &ObjectSlot,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        self.verify_slot(slot).await?;
-        let file_id = self.validate_slot(slot)?.to_string();
-        let response = self
-            .session
-            .api_call(|token| {
-                supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{file_id}", self.drive_api)),
-                )
-                .bearer_auth(token)
-                .query(&[("alt", "media")])
-            })
-            .await?;
-        let response = ensure_ok(
-            response,
-            &format!("read exact {}", slot.logical_key()),
-            NotFound::Status,
-        )
-        .await?;
+        let response = self.send_exact_read(slot, None).await?;
         response_to_file(
             response,
             destination,
@@ -1578,22 +1576,8 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        self.verify_slot(slot).await?;
-        let file_id = self.validate_slot(slot)?.to_string();
         let range = super::range_header(start, end);
-        let response = self
-            .session
-            .api_call(|token| {
-                supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{file_id}", self.drive_api)),
-                )
-                .bearer_auth(token)
-                .header("Range", &range)
-                .query(&[("alt", "media")])
-            })
-            .await?;
-        let response = ensure_ok(response, "read exact Drive range", NotFound::Status).await?;
+        let response = self.send_exact_read(slot, Some(&range)).await?;
         validated_range_bytes(response, "read exact Drive range", start, end).await
     }
     async fn read_at_to_file(

@@ -134,6 +134,18 @@ pub(crate) struct SyncManager {
 }
 
 impl SyncManager {
+    /// The running loop's config when a loop is active, else a fresh read from
+    /// the config provider — the pair every out-of-loop membership command
+    /// starts from before gating on "is sync configured at all".
+    fn resolved_config(&self) -> (Option<Arc<SyncLoopHandle>>, Config) {
+        let active_loop = self.sync_loop_handle();
+        let config = active_loop
+            .as_ref()
+            .map(|handle| handle.config().clone())
+            .unwrap_or_else(|| (self.config_provider)());
+        (active_loop, config)
+    }
+
     async fn storage_for_command(
         &self,
         config: &Config,
@@ -639,11 +651,7 @@ impl SyncManager {
     // =========================================================================
 
     pub(crate) async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
-        let active_loop = self.sync_loop_handle();
-        let config = active_loop
-            .as_ref()
-            .map(|handle| handle.config().clone())
-            .unwrap_or_else(|| (self.config_provider)());
+        let (active_loop, config) = self.resolved_config();
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
@@ -663,11 +671,7 @@ impl SyncManager {
     pub(crate) async fn membership_conflict(
         &self,
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        let active_loop = self.sync_loop_handle();
-        let config = active_loop
-            .as_ref()
-            .map(|handle| handle.config().clone())
-            .unwrap_or_else(|| (self.config_provider)());
+        let (active_loop, config) = self.resolved_config();
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
@@ -690,11 +694,7 @@ impl SyncManager {
     /// trustworthy floor is a network read, not a pure function of local config
     /// and keyring state.
     pub(crate) async fn generate_restore_code(&self) -> Result<String, SyncError> {
-        let active_loop = self.sync_loop_handle();
-        let config = active_loop
-            .as_ref()
-            .map(|handle| handle.config().clone())
-            .unwrap_or_else(|| (self.config_provider)());
+        let (active_loop, config) = self.resolved_config();
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
