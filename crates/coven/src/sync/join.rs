@@ -303,10 +303,6 @@ fn require_join_oauth(
     })
 }
 
-struct JoinCloudHome {
-    home: Arc<dyn CloudHome>,
-}
-
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
@@ -314,7 +310,7 @@ async fn build_cloud_home_for_join(
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
-) -> Result<JoinCloudHome, BootstrapError> {
+) -> Result<Arc<dyn CloudHome>, BootstrapError> {
     use crate::storage::cloud::*;
 
     #[cfg(not(feature = "oauth-providers"))]
@@ -339,31 +335,27 @@ async fn build_cloud_home_for_join(
                 custom_s3_exact_slots,
             )
             .await?;
-            Ok(JoinCloudHome { home: Arc::new(s3) })
+            Ok(Arc::new(s3))
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
-            Ok(JoinCloudHome {
-                home: Arc::new(google_drive::GoogleDriveCloudHome::new(
-                    folder_id.clone(),
-                    tokens,
-                    lib_ks.clone(),
-                    clock,
-                )?),
-            })
+            Ok(Arc::new(google_drive::GoogleDriveCloudHome::new(
+                folder_id.clone(),
+                tokens,
+                lib_ks.clone(),
+                clock,
+            )?))
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
-            Ok(JoinCloudHome {
-                home: Arc::new(dropbox::DropboxCloudHome::new(
-                    folder_path.clone(),
-                    tokens,
-                    lib_ks.clone(),
-                    clock,
-                )?),
-            })
+            Ok(Arc::new(dropbox::DropboxCloudHome::new(
+                folder_path.clone(),
+                tokens,
+                lib_ks.clone(),
+                clock,
+            )?))
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::OneDrive {
@@ -371,15 +363,13 @@ async fn build_cloud_home_for_join(
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
-            Ok(JoinCloudHome {
-                home: Arc::new(onedrive::OneDriveCloudHome::new(
-                    drive_id.clone(),
-                    folder_id.clone(),
-                    tokens,
-                    lib_ks.clone(),
-                    clock,
-                )?),
-            })
+            Ok(Arc::new(onedrive::OneDriveCloudHome::new(
+                drive_id.clone(),
+                folder_id.clone(),
+                tokens,
+                lib_ks.clone(),
+                clock,
+            )?))
         }
         #[cfg(not(feature = "oauth-providers"))]
         CloudHomeJoinInfo::GoogleDrive { .. }
@@ -391,9 +381,7 @@ async fn build_cloud_home_for_join(
             let ops = cloudkit_ops.ok_or_else(|| {
                 BootstrapError::Provider("CloudKit driver not provided".to_string())
             })?;
-            Ok(JoinCloudHome {
-                home: Arc::new(cloudkit::CloudKitCloudHome::new_private(ops)),
-            })
+            Ok(Arc::new(cloudkit::CloudKitCloudHome::new_private(ops)))
         }
         CloudHomeJoinInfo::CloudKitShare {
             share_url,
@@ -415,7 +403,7 @@ async fn build_cloud_home_for_join(
                 owner_name.clone(),
                 zone_name.clone(),
             ));
-            Ok(JoinCloudHome { home })
+            Ok(home)
         }
     }
 }
@@ -505,7 +493,7 @@ impl DeviceJoinClient {
         self.require_offer(&offer)?;
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
-        let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
+        let exact = cloud.clone().exact_slot_storage().ok_or_else(|| {
             BootstrapError::Provider("provider has no exact-slot adapter".to_string())
         })?;
         let binding = exact
@@ -882,10 +870,10 @@ impl DeviceJoinClient {
         )?)
     }
 
-    async fn build_cloud_home(&self) -> Result<JoinCloudHome, BootstrapError> {
+    async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
-            return Ok(JoinCloudHome { home: home.clone() });
+            return Ok(home.clone());
         }
         build_cloud_home_for_join(
             &self.code.join_info,
@@ -907,7 +895,7 @@ impl DeviceJoinClient {
     pub(crate) async fn transport_storage(&self) -> Result<CloudSyncStorage, BootstrapError> {
         let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
-        self.plaintext_storage(cloud.home, &signer)
+        self.plaintext_storage(cloud, &signer)
     }
 
     fn plaintext_storage(
@@ -929,7 +917,7 @@ impl DeviceJoinClient {
         signer: &UserKeypair,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let cloud = self.build_cloud_home().await?;
-        let bootstrap_storage = self.plaintext_storage(cloud.home.clone(), signer)?;
+        let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
         let encryption = unwrap_store_keyring(
             &bootstrap_storage,
             signer,
@@ -939,12 +927,12 @@ impl DeviceJoinClient {
             &self.code.membership_floor.0,
         )
         .await?;
-        let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
+        let exact = cloud.clone().exact_slot_storage().ok_or_else(|| {
             BootstrapError::Provider("provider has no exact-slot adapter".to_string())
         })?;
         let keyring = MasterKeyring::from(encryption.clone());
         let storage = CloudSyncStorage::new(
-            cloud.home,
+            cloud,
             CloudCipher::Encrypted(encryption),
             BlobPathScheme::for_storage(HomeStorage::Opaque),
             self.code.store_id.clone(),
