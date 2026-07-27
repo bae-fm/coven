@@ -18,9 +18,9 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink, PhysicalObjectLocator,
-    RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, require_logical_slot, BlobBody, BoxPartSink, CloudAccessOutcome,
+    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
+    PartSink, RevokeOutcome, UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -230,22 +230,11 @@ impl DropboxCloudHome {
         Ok(())
     }
 
-    fn validate_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        slot.validate()?;
-        if slot.physical() != &PhysicalObjectLocator::LogicalKey {
-            return Err(CloudHomeError::Configuration(format!(
-                "Dropbox slot for {} must use its logical path",
-                slot.logical_key()
-            )));
-        }
-        Ok(())
-    }
-
     async fn send_exact_read(
         &self,
         slot: &ObjectSlot,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
         let path = Self::namespace_path(slot.logical_key());
@@ -294,7 +283,7 @@ impl DropboxCloudHome {
         slot: &ObjectSlot,
         metadata: &serde_json::Value,
     ) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "Dropbox")?;
         let expected_path = Self::namespace_path(slot.logical_key());
         let matches = metadata[".tag"].as_str() == Some("file")
             && metadata["id"].as_str().is_some_and(|id| !id.is_empty())
@@ -309,7 +298,7 @@ impl DropboxCloudHome {
     }
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
         let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
@@ -633,19 +622,6 @@ enum DropboxSessionCompletion {
     CreateOnly,
 }
 
-fn combine_dropbox_cleanup_failure(
-    operation: CloudHomeError,
-    cleanup: Result<(), CloudHomeError>,
-) -> CloudHomeError {
-    match cleanup {
-        Ok(()) => operation,
-        Err(cleanup) => CloudHomeError::CleanupFailed {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
-    }
-}
-
 #[async_trait]
 impl super::PartSink for DropboxSessionSink<'_> {
     fn part_size(&self) -> usize {
@@ -793,7 +769,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
             self.key
         ));
         let cleanup = self.abort().await;
-        Err(combine_dropbox_cleanup_failure(operation, cleanup))
+        Err(combine_cleanup_failure(operation, cleanup))
     }
 }
 
@@ -1282,17 +1258,13 @@ impl ExactSlotStorage for DropboxCloudHome {
         })
     }
 
-    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
-        ObjectSlot::logical(logical_key.to_string())
-    }
-
     async fn create_at(
         &self,
         slot: &ObjectSlot,
         mut body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "Dropbox")?;
         let key = slot.logical_key();
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
@@ -1322,18 +1294,18 @@ impl ExactSlotStorage for DropboxCloudHome {
                         "create {key}: upload body ended after {offset} of {total} bytes"
                     ));
                     let cleanup = sink.abort().await;
-                    return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+                    return Err(combine_cleanup_failure(operation, cleanup));
                 }
                 Err(operation) => {
                     let cleanup = sink.abort().await;
-                    return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+                    return Err(combine_cleanup_failure(operation, cleanup));
                 }
             };
             let length = part.len() as u64;
             let is_last = offset + length >= total;
             if let Err(operation) = sink.send_part(part, offset, is_last).await {
                 let cleanup = sink.abort().await;
-                return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+                return Err(combine_cleanup_failure(operation, cleanup));
             }
             offset += length;
             progress(offset);
@@ -1345,7 +1317,7 @@ impl ExactSlotStorage for DropboxCloudHome {
             "create {key}: upload session ended without committing its final part"
         ));
         let cleanup = sink.abort().await;
-        Err(combine_dropbox_cleanup_failure(operation, cleanup))
+        Err(combine_cleanup_failure(operation, cleanup))
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
@@ -1619,7 +1591,7 @@ mod tests {
             .await
             .expect_err("opaque Dropbox read must fail");
         assert!(
-            read_error.to_string().contains("must use its logical path"),
+            read_error.to_string().contains("must use its logical key"),
             "{read_error}"
         );
         let delete_error = ExactSlotStorage::delete_at(&home, &slot)
@@ -1628,7 +1600,7 @@ mod tests {
         assert!(
             delete_error
                 .to_string()
-                .contains("must use its logical path"),
+                .contains("must use its logical key"),
             "{delete_error}"
         );
 

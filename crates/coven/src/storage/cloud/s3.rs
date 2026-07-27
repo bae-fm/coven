@@ -15,9 +15,9 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink, PhysicalObjectLocator,
-    RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, range_header, require_logical_slot, BlobBody, CloudAccessOutcome,
+    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
+    PartSink, RevokeOutcome, UploadProgress,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -494,30 +494,6 @@ impl S3PartSink {
     }
 }
 
-fn combine_cleanup_failure(
-    operation: CloudHomeError,
-    cleanup: Result<(), CloudHomeError>,
-) -> CloudHomeError {
-    match cleanup {
-        Ok(()) => operation,
-        Err(cleanup) => CloudHomeError::CleanupFailed {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
-    }
-}
-
-fn validate_slot(slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-    slot.validate()?;
-    if slot.physical() != &PhysicalObjectLocator::LogicalKey {
-        return Err(CloudHomeError::Transport(format!(
-            "S3 slot for {} must use its logical key as the physical locator",
-            slot.logical_key(),
-        )));
-    }
-    Ok(())
-}
-
 fn s3_access_key_id_hash(access_key_id: &str) -> coven_core::sync::store_commit::ObjectHash {
     const DOMAIN: &[u8] = b"coven.s3-access-key-id.v1\0";
     let mut material = Vec::with_capacity(DOMAIN.len() + access_key_id.len());
@@ -774,7 +750,7 @@ impl S3CloudHome {
         body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        validate_slot(slot)?;
+        require_logical_slot(slot, "S3")?;
         self.append_create_only(slot.logical_key(), body, progress)
             .await
     }
@@ -813,7 +789,7 @@ impl S3CloudHome {
         slot: &ObjectSlot,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        validate_slot(slot)?;
+        require_logical_slot(slot, "S3")?;
         let full = self.full_key(slot.logical_key());
         let key = slot.logical_key().to_string();
         let client = self.client.clone();
@@ -1154,10 +1130,6 @@ impl ExactSlotStorage for S3CloudHome {
         Ok(binding)
     }
 
-    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
-        ObjectSlot::logical(logical_key.to_string())
-    }
-
     async fn create_at(
         &self,
         slot: &ObjectSlot,
@@ -1167,7 +1139,7 @@ impl ExactSlotStorage for S3CloudHome {
         S3CloudHome::create_at_slot(self, slot, body, progress).await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
-        validate_slot(slot)?;
+        require_logical_slot(slot, "S3")?;
         S3CloudHome::read(self, slot.logical_key()).await
     }
     async fn read_range_at(
@@ -1176,7 +1148,7 @@ impl ExactSlotStorage for S3CloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        validate_slot(slot)?;
+        require_logical_slot(slot, "S3")?;
         S3CloudHome::read_range(self, slot.logical_key(), start, end).await
     }
     async fn read_at_to_file(
@@ -1187,7 +1159,7 @@ impl ExactSlotStorage for S3CloudHome {
         S3CloudHome::read_exact_to_file(self, slot, destination).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        validate_slot(slot)?;
+        require_logical_slot(slot, "S3")?;
         S3CloudHome::delete(self, slot.logical_key()).await
     }
 }
@@ -2026,6 +1998,35 @@ mod tests {
         assert!(delete_error
             .to_string()
             .contains("must use its logical key"));
+    }
+
+    /// A slot whose physical locator this device built wrong is a fault in the
+    /// caller, not a transient failure of the network. Retrying it re-runs the
+    /// same deterministic rejection forever.
+    #[tokio::test]
+    async fn an_opaque_s3_locator_is_not_retryable() {
+        let home = S3CloudHome::new(
+            "retryability-test".to_string(),
+            "us-east-1".to_string(),
+            Some("http://127.0.0.1:9".to_string()),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        )
+        .await
+        .expect("construct home");
+        let slot = ObjectSlot::opaque("protocol/copy".to_string(), "protocol/other".to_string())
+            .expect("build opaque S3 locator");
+
+        let error = ExactSlotStorage::read_at(&home, &slot)
+            .await
+            .expect_err("opaque S3 read must fail");
+
+        assert!(
+            !error.is_retryable(),
+            "a malformed slot must not be retried: {error}"
+        );
     }
 
     #[tokio::test]

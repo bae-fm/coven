@@ -644,17 +644,44 @@ pub trait PartSink: Send {
 /// A boxed [`PartSink`] borrowing its home for `'a`.
 pub type BoxPartSink<'a> = Box<dyn PartSink + 'a>;
 
-async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> CloudHomeError {
-    if matches!(&operation, CloudHomeError::CleanupFailed { .. }) {
-        return operation;
+/// Reject a slot that does not address its object by its own logical key.
+///
+/// A slot carrying the wrong locator was built wrong by this device, so the
+/// failure is a fault rather than a transient one: it is reported as
+/// [`CloudHomeError::Configuration`] so that retrying never re-runs the same
+/// deterministic rejection.
+pub fn require_logical_slot(slot: &ObjectSlot, provider: &str) -> Result<(), CloudHomeError> {
+    slot.validate()?;
+    if slot.physical() != &PhysicalObjectLocator::LogicalKey {
+        return Err(CloudHomeError::Configuration(format!(
+            "{provider} slot for {} must use its logical key",
+            slot.logical_key()
+        )));
     }
-    match sink.abort().await {
+    Ok(())
+}
+
+/// Report an operation's failure, folding in a second failure that happened
+/// while cleaning up after it. Both are kept: the cleanup failure is what left
+/// remote state behind, the operation failure is why cleanup ran at all.
+pub fn combine_cleanup_failure(
+    operation: CloudHomeError,
+    cleanup: Result<(), CloudHomeError>,
+) -> CloudHomeError {
+    match cleanup {
         Ok(()) => operation,
         Err(cleanup) => CloudHomeError::CleanupFailed {
             operation: Box::new(operation),
             cleanup: Box::new(cleanup),
         },
     }
+}
+
+async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> CloudHomeError {
+    if matches!(&operation, CloudHomeError::CleanupFailed { .. }) {
+        return operation;
+    }
+    combine_cleanup_failure(operation, sink.abort().await)
 }
 
 /// The central upload driver: pick single-request vs multipart by size and pump
@@ -742,7 +769,12 @@ pub trait ExactSlotStorage: Send + Sync {
         }
     }
 
-    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError>;
+    /// Name the slot that holds `logical_key`. A provider that addresses objects
+    /// by the key itself allocates nothing; one that mints its own object id
+    /// overrides this and returns an opaque locator.
+    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        ObjectSlot::logical(logical_key.to_string())
+    }
 
     async fn create_at(
         &self,

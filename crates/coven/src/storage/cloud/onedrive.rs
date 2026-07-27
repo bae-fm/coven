@@ -17,9 +17,9 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::resumable::{RangePutSink, RangePutUploader};
 use super::{
-    sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PhysicalObjectLocator,
-    RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, require_logical_slot, sharing, BlobBody, BoxPartSink,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -147,17 +147,6 @@ impl OneDriveCloudHome {
             })
     }
 
-    fn validate_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        slot.validate()?;
-        if slot.physical() != &PhysicalObjectLocator::LogicalKey {
-            return Err(CloudHomeError::Configuration(format!(
-                "OneDrive slot for {} must use its logical key",
-                slot.logical_key()
-            )));
-        }
-        Ok(())
-    }
-
     async fn commit_deferred_append(
         &self,
         key: &str,
@@ -204,7 +193,7 @@ impl OneDriveCloudHome {
     }
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "OneDrive")?;
         let response = self
             .session
             .api_call(|token| {
@@ -257,19 +246,6 @@ fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> C
         );
     }
     CloudHomeError::Transport(format!("write {key} (HTTP {status}): {body}"))
-}
-
-fn combine_onedrive_cleanup_failure(
-    operation: CloudHomeError,
-    cleanup: Result<(), CloudHomeError>,
-) -> CloudHomeError {
-    match cleanup {
-        Ok(()) => operation,
-        Err(cleanup) => CloudHomeError::CleanupFailed {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
-    }
 }
 
 /// Files at or below this size go up as a single PUT; larger files use a resumable
@@ -410,7 +386,7 @@ impl OneDriveCloudHome {
         mut body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "OneDrive")?;
         let full_logical_key = slot.logical_key();
         let upload_url = self
             .create_upload_session(
@@ -443,11 +419,11 @@ impl OneDriveCloudHome {
                         "append {full_logical_key}: upload body ended before the final part"
                     ));
                     let cleanup = uploader.abort().await;
-                    return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+                    return Err(combine_cleanup_failure(operation, cleanup));
                 }
                 Err(operation) => {
                     let cleanup = uploader.abort().await;
-                    return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+                    return Err(combine_cleanup_failure(operation, cleanup));
                 }
             };
             let length = part.len() as u64;
@@ -465,7 +441,7 @@ impl OneDriveCloudHome {
                     "append {full_logical_key}: deferred upload published before explicit commit"
                 ));
                 let cleanup = self.delete_at_slot(slot).await;
-                return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+                return Err(combine_cleanup_failure(operation, cleanup));
             }
         }
         let result = self
@@ -478,7 +454,7 @@ impl OneDriveCloudHome {
             }
             Err(operation) => {
                 let cleanup = uploader.abort().await;
-                Err(combine_onedrive_cleanup_failure(operation, cleanup))
+                Err(combine_cleanup_failure(operation, cleanup))
             }
         }
     }
@@ -510,7 +486,7 @@ impl OneDriveCloudHome {
     }
 
     async fn delete_at_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        self.validate_slot(slot)?;
+        require_logical_slot(slot, "OneDrive")?;
         match self.verify_slot(slot).await {
             Ok(()) => {}
             Err(CloudHomeError::NotFound(_)) => return Ok(()),
@@ -788,10 +764,6 @@ impl ExactSlotStorage for OneDriveCloudHome {
                 principal: ProviderPrincipalId::OneDrive { user_id },
             },
         })
-    }
-
-    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
-        ObjectSlot::logical(logical_key.to_string())
     }
 
     async fn create_at(

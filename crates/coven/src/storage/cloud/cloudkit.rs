@@ -16,9 +16,9 @@ use bytes::Bytes;
 use crate::id_provider::{IdRef, UuidProvider};
 
 use super::{
-    BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, ObjectSlot, PhysicalObjectLocator,
-    RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, require_logical_slot, BlobBody, CloudAccessOutcome, CloudAccessState,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject,
+    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
 };
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -823,19 +823,6 @@ impl CloudKitPartSink {
     }
 }
 
-fn combine_cloudkit_cleanup_failure(
-    operation: CloudHomeError,
-    cleanup: Result<(), CloudHomeError>,
-) -> CloudHomeError {
-    match cleanup {
-        Ok(()) => operation,
-        Err(cleanup) => CloudHomeError::CleanupFailed {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
-    }
-}
-
 impl Drop for CloudKitPartSink {
     fn drop(&mut self) {
         if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
@@ -890,7 +877,7 @@ impl super::PartSink for CloudKitPartSink {
                 self.key, self.index, self.written_len, manifest.part_count, manifest.total_len
             ));
             let cleanup = self.abort().await;
-            return Err(combine_cloudkit_cleanup_failure(operation, cleanup));
+            return Err(combine_cleanup_failure(operation, cleanup));
         }
         let manifest_key = chunk_manifest_key(&self.key);
         let manifest_data = encode_chunk_manifest(manifest);
@@ -907,7 +894,7 @@ impl super::PartSink for CloudKitPartSink {
         .await?
         {
             let cleanup = self.abort().await;
-            return Err(combine_cloudkit_cleanup_failure(operation, cleanup));
+            return Err(combine_cleanup_failure(operation, cleanup));
         }
 
         // The manifest is published, so the object is now readable. The remaining
@@ -1198,17 +1185,6 @@ impl CloudHome for CloudKitCloudHome {
 
 const EXACT_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-exact-manifest-v1\0";
 
-fn validate_cloudkit_slot(slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-    slot.validate()?;
-    if slot.physical() != &PhysicalObjectLocator::LogicalKey {
-        return Err(CloudHomeError::Configuration(format!(
-            "CloudKit slot for {} must use its logical key",
-            slot.logical_key()
-        )));
-    }
-    Ok(())
-}
-
 fn exact_part_key(logical_key: &str, index: usize) -> String {
     format!("{logical_key}.exact-part{index}")
 }
@@ -1465,17 +1441,13 @@ impl ExactSlotStorage for CloudKitCloudHome {
         ))
     }
 
-    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
-        ObjectSlot::logical(logical_key.to_string())
-    }
-
     async fn create_at(
         &self,
         slot: &ObjectSlot,
         mut body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        validate_cloudkit_slot(slot)?;
+        require_logical_slot(slot, "CloudKit")?;
         let total_len = usize::try_from(body.len()).map_err(|_| {
             CloudHomeError::Transport(format!(
                 "CloudKit object {:?} is too large for this platform",
@@ -1587,7 +1559,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
-        validate_cloudkit_slot(slot)?;
+        require_logical_slot(slot, "CloudKit")?;
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let logical_key = slot.logical_key().to_string();
@@ -1603,7 +1575,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        validate_cloudkit_slot(slot)?;
+        require_logical_slot(slot, "CloudKit")?;
         let start = usize::try_from(start)
             .map_err(|_| CloudHomeError::Configuration("range start is too large".to_string()))?;
         let end = usize::try_from(end)
@@ -1638,7 +1610,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        validate_cloudkit_slot(slot)?;
+        require_logical_slot(slot, "CloudKit")?;
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let logical_key = slot.logical_key().to_string();
