@@ -214,18 +214,20 @@ impl Database {
     ) -> Result<(), DbError> {
         let encoded = serde_json::to_string(stored)
             .map_err(|error| DbError::Message(format!("serialize stored blob ref: {error}")))?;
-        conn.execute(
-            "INSERT INTO cloud_outbox (operation, stored_ref, created_at)
-             VALUES ('delete', ?1, ?2)
-             ON CONFLICT(stored_ref) DO UPDATE SET
-               created_at = excluded.created_at,
-               attempt_count = 0,
-               last_error = NULL,
-               last_attempt_at = NULL",
-            (encoded, created_at),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+        crate::database::with_coven_sql_authority(|| {
+            conn.execute(
+                "INSERT INTO cloud_outbox (operation, stored_ref, created_at)
+                 VALUES ('delete', ?1, ?2)
+                 ON CONFLICT(stored_ref) DO UPDATE SET
+                   created_at = excluded.created_at,
+                   attempt_count = 0,
+                   last_error = NULL,
+                   last_attempt_at = NULL",
+                (encoded, created_at),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
     }
 
     /// Every upload the durable queue is still holding, oldest first.

@@ -196,10 +196,44 @@ pub(crate) const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
+thread_local! {
+    /// How many Coven-owned write operations are on the current call stack.
+    ///
+    /// The host-SQL authorizer denies statements that mutate Coven's reserved
+    /// tables, but Coven's own entry points are documented to run inside the
+    /// host's write closure (`register_external_blob`, `enqueue_blob_delete`,
+    /// `clear_external_blob` all bind to the row version the same write
+    /// produced). Those operations announce themselves through this depth so
+    /// the authorizer can tell "Coven writing its own bookkeeping" apart from
+    /// "host SQL reaching into it" — the statement text is identical; the
+    /// caller is not. Thread-local is sound because a write closure and every
+    /// statement it executes run synchronously on one thread.
+    static COVEN_SQL_AUTHORITY_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` with Coven's own SQL authority, so the host-SQL authorizer permits
+/// the reserved-table writes it performs. Panic-safe: the depth restores when
+/// the guard drops.
+pub(crate) fn with_coven_sql_authority<R>(f: impl FnOnce() -> R) -> R {
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            COVEN_SQL_AUTHORITY_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        }
+    }
+    COVEN_SQL_AUTHORITY_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _guard = DepthGuard;
+    f()
+}
+
 pub(crate) fn authorize_host_sql(
     context: rusqlite::hooks::AuthContext<'_>,
 ) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
+
+    if COVEN_SQL_AUTHORITY_DEPTH.with(|depth| depth.get()) > 0 {
+        return Authorization::Allow;
+    }
 
     let mutates_coven_table = match context.action {
         AuthAction::Delete { table_name }

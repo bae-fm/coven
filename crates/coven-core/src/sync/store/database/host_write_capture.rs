@@ -939,4 +939,43 @@ mod tests {
             .expect("query protocol state after refused host write");
         assert!(!stored);
     }
+
+    /// Coven's own entry points are documented to run inside the host's write
+    /// closure (an external-blob registration or delete enqueue commits with
+    /// the row change that motivated it), so the reserved-table writes they
+    /// perform must pass the very authorizer that refuses the host's.
+    #[test]
+    fn coven_owned_writes_pass_the_host_sql_authorizer() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
+
+        StoreDatabase::run_host_sql_on(&conn, || {
+            crate::database::with_coven_sql_authority(|| {
+                conn.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES ('coven-owned', 'yes')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+            })?;
+            conn.execute(
+                "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .expect_err("host SQL after the Coven-owned write is still refused");
+
+        let stored: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM protocol_state WHERE key = 'coven-owned'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query protocol state after the authorized Coven write");
+        assert!(stored, "the Coven-owned write commits");
+    }
 }

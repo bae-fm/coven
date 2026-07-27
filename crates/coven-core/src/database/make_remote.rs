@@ -19,8 +19,9 @@ impl Database {
         let size = i64::try_from(reference.plaintext_size()).map_err(|_| {
             DbError::Message("external blob plaintext size exceeds SQLite INTEGER".to_string())
         })?;
-        conn.execute(
-            "INSERT INTO local_blob_refs
+        super::with_coven_sql_authority(|| {
+            conn.execute(
+                "INSERT INTO local_blob_refs
              (table_name, row_id, column_name, row_stamp, namespace, blob_id,
               path, plaintext_size, plaintext_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -30,38 +31,41 @@ impl Database {
                path = excluded.path,
                plaintext_size = excluded.plaintext_size,
                plaintext_hash = excluded.plaintext_hash",
-            rusqlite::params![
-                reference.table(),
-                reference.row_id(),
-                reference.column(),
-                reference.row_stamp(),
-                &reference.blob().namespace,
-                &reference.blob().id,
-                path,
-                size,
-                reference.plaintext_hash().to_string(),
-            ],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+                rusqlite::params![
+                    reference.table(),
+                    reference.row_id(),
+                    reference.column(),
+                    reference.row_stamp(),
+                    &reference.blob().namespace,
+                    &reference.blob().id,
+                    path,
+                    size,
+                    reference.plaintext_hash().to_string(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
     }
 
     pub fn clear_external_blob_on(
         conn: &Connection,
         reference: &RowBlobRef,
     ) -> Result<(), DbError> {
-        conn.execute(
-            "DELETE FROM local_blob_refs WHERE table_name = ?1 AND row_id = ?2
-             AND column_name = ?3 AND row_stamp = ?4",
-            rusqlite::params![
-                reference.table(),
-                reference.row_id(),
-                reference.column(),
-                reference.row_stamp(),
-            ],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+        super::with_coven_sql_authority(|| {
+            conn.execute(
+                "DELETE FROM local_blob_refs WHERE table_name = ?1 AND row_id = ?2
+                 AND column_name = ?3 AND row_stamp = ?4",
+                rusqlite::params![
+                    reference.table(),
+                    reference.row_id(),
+                    reference.column(),
+                    reference.row_stamp(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
     }
 
     pub fn insert_make_remote_intent_on(

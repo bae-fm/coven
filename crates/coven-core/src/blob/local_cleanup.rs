@@ -199,13 +199,14 @@ fn record_durable_intent(
     intent: &LocalBlobCleanupIntent,
 ) -> Result<(), DbError> {
     let persisted_identity = intent.persisted_identity()?;
-    let inserted = conn
-        .execute(
+    let inserted = crate::database::with_coven_sql_authority(|| {
+        conn.execute(
             "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id, copy_identity)
              VALUES (?1, ?2, ?3)",
             (intent.namespace(), intent.blob_id(), persisted_identity),
         )
-        .map_err(DbError::from)?;
+        .map_err(DbError::from)
+    })?;
     if inserted == 0 {
         debug!(
             namespace = %intent.namespace(),
