@@ -681,17 +681,17 @@ fn object_hash_is_strict_lowercase_hex() {
 fn canonical_commit_round_trip_and_literal_bytes() {
     let fixture = fixture();
     let bytes = fixture.commit.to_bytes();
-    let parsed = StoreBatchCommit::parse_at(
+    let parsed = VerifiedStoreBatchCommit::parse(
         &bytes,
         fixture.root_ref.store_root_hash,
-        &fixture.commit_ref.coord,
+        &fixture.commit_ref,
         &fixture.registration,
     )
     .expect("parse commit");
     parsed
         .verify_store_package(&fixture.package)
         .expect("verify package");
-    assert_eq!(parsed, fixture.commit);
+    assert_eq!(parsed.value(), &fixture.commit);
     assert!(fixture
         .commit
         .canonical_signed_bytes()
@@ -757,10 +757,10 @@ fn unknown_fields_and_versions_are_rejected() {
     let fixture = fixture();
     let mut value = serde_json::to_value(&fixture.commit).unwrap();
     value["unknown"] = serde_json::json!(true);
-    assert!(StoreBatchCommit::parse_at(
+    assert!(VerifiedStoreBatchCommit::parse(
         &serde_json::to_vec(&value).unwrap(),
         fixture.root_ref.store_root_hash,
-        &fixture.commit_ref.coord,
+        &fixture.commit_ref,
         &fixture.registration,
     )
     .is_err());
@@ -768,10 +768,10 @@ fn unknown_fields_and_versions_are_rejected() {
     let mut value = serde_json::to_value(&fixture.commit).unwrap();
     value["version"] = serde_json::json!(2);
     assert!(matches!(
-        StoreBatchCommit::parse_at(
+        VerifiedStoreBatchCommit::parse(
             &serde_json::to_vec(&value).unwrap(),
             fixture.root_ref.store_root_hash,
-            &fixture.commit_ref.coord,
+            &fixture.commit_ref,
             &fixture.registration,
         ),
         Err(StoreProtocolError::UnsupportedVersion(2))

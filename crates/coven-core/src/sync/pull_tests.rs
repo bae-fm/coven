@@ -1071,7 +1071,7 @@ async fn publish_exact_membership_entry(
 
 struct ExactPublishedCommit {
     reference: crate::sync::store_commit::StoreBatchCommitRef,
-    commit: crate::sync::store_commit::StoreBatchCommit,
+    commit: crate::sync::store_commit::VerifiedStoreBatchCommit,
     registration: crate::sync::store_commit::StoreDeviceRegistration,
     device_signer: UserKeypair,
     head: StoreDeviceHead,
@@ -1093,41 +1093,15 @@ async fn load_exact_published_commit_as(
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration};
 
-    let context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let bytes = storage
-        .read_protocol_object(
-            &context,
-            &reference.object,
-            &crate::sync::store_commit::semantic_prefix_from_exact_object(
-                &reference.object,
-                ".json",
-            )
-            .expect("derive exact Store commit semantic prefix"),
-        )
+    let mut commit_verifier =
+        crate::sync::store::StoreCommitVerifier::new(&storage.storage, &storage.root)
+            .await
+            .expect("open Store commit verifier");
+    let commit = commit_verifier
+        .load_ref(&reference)
         .await
-        .expect("read exact published Store commit");
-    let unverified: crate::sync::store_commit::StoreBatchCommit =
-        serde_json::from_slice(&bytes).expect("parse exact published Store commit");
-    let registration = crate::sync::store_objects::load_registration_ref(
-        &storage.storage,
-        &storage.root,
-        &unverified.author_registration,
-    )
-    .await
-    .expect("load exact published Store registration")
-    .value;
-    let commit = crate::sync::store_objects::load_commit_ref(
-        &storage.storage,
-        storage.root.store_root_hash,
-        &reference,
-        &registration,
-    )
-    .await
-    .expect("verify exact published Store commit")
-    .value;
+        .expect("verify exact published Store commit");
+    let registration = commit.author().clone();
     let device_signer = registration
         .device_signer(identity)
         .expect("derive exact published Store device signer");
@@ -1366,15 +1340,12 @@ async fn resign_exact_commit(
         .commit
         .store_package()
         .expect("test Store commit carries a Store package");
-    let package_bytes = crate::sync::store_objects::load_store_package(
-        &storage.storage,
-        &graph.reference,
-        &graph.commit,
-    )
-    .await
-    .expect("load exact Store package")
-    .expect("exact Store package exists")
-    .value;
+    let package_bytes =
+        crate::sync::store_objects::load_store_package(&storage.storage, &graph.commit)
+            .await
+            .expect("load exact Store package")
+            .expect("exact Store package exists")
+            .value;
     let predecessor = match &membership_authority {
         Some(authority) => authority.clone(),
         None => graph
@@ -3193,7 +3164,6 @@ async fn push_stamps_the_dbs_schema_version() {
     .expect("Store commit slot");
     assert_eq!(
         commit
-            .value
             .store_package()
             .expect("outgoing Store commit carries a Store package")
             .schema_version,
@@ -8413,7 +8383,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
             .expect("load updater Store commit")
             .expect("updater Store commit is materialized");
     assert_eq!(
-        update_commit.value.order.dependencies().get(&insert_stream),
+        update_commit.order.dependencies().get(&insert_stream),
         Some(&insert_position),
         "the update commit captures the exact insert dependency",
     );

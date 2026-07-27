@@ -959,17 +959,6 @@ impl StoreBatchCommit {
         serde_json::to_vec(self).expect("StoreBatchCommit serialization cannot fail")
     }
 
-    pub fn parse_at(
-        bytes: &[u8],
-        expected_store_root_hash: ObjectHash,
-        expected_coord: &StoreCommitCoord,
-        author: &StoreDeviceRegistration,
-    ) -> Result<Self, StoreProtocolError> {
-        let commit: Self = crate::sync::store_objects::decode_protocol_object(bytes)?;
-        commit.verify_at(expected_store_root_hash, expected_coord, author)?;
-        Ok(commit)
-    }
-
     pub fn verify_at(
         &self,
         expected_store_root_hash: ObjectHash,

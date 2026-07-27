@@ -1833,6 +1833,10 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         continuation.registration.device_id,
     )
     .expect("parse continuation Store registration");
+    let mut commit_verifier =
+        crate::sync::store::StoreCommitVerifier::new(components.storage().as_ref(), &store_root)
+            .await
+            .expect("open continuation Store commit verifier");
     let mut expected_device_snapshots = snapshot_coverage
         .values()
         .cloned()
@@ -1843,15 +1847,11 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             break;
         }
         expected_device_snapshots.insert(cursor.clone());
-        let commit = crate::sync::store_objects::load_commit_ref(
-            components.storage().as_ref(),
-            store_root.store_root_hash,
-            &cursor,
-            &source_registration,
-        )
-        .await
-        .expect("load continuation ancestry")
-        .value;
+        let commit = commit_verifier
+            .load_ref(&cursor)
+            .await
+            .expect("load continuation ancestry");
+        assert_eq!(commit.author(), &source_registration);
         cursor = commit
             .order
             .predecessor()

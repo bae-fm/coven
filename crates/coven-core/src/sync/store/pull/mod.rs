@@ -89,7 +89,11 @@ mod support;
 mod terminal_authority;
 mod terminal_cleanup;
 
-pub(crate) use ancestry::*;
+pub use ancestry::StoreCommitVerifier;
+pub(crate) use ancestry::{
+    commit_position_covers, history_cut_covers, load_device_join_attempt_evidence_ref,
+    load_provider_access_activation, CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
+};
 pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
@@ -418,7 +422,7 @@ pub fn pull_store_commits<'a>(
                     &history_verifier.history().commits,
                     commit_predecessor_references(&commit),
                 )?;
-                let package = match load_store_package(storage, &commit_ref, &commit).await {
+                let package = match load_store_package(storage, &verified.verified).await {
                     Ok(package) => package.map(|package| package.value),
                     Err(error) => {
                         held.push(held_package(&commit_ref, &commit, held_object_error(error)));

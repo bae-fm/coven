@@ -125,11 +125,23 @@ pub enum StoreProtocolError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct VerifiedStoreBatchCommit {
+#[doc(hidden)]
+pub struct VerifiedStoreBatchCommit {
     store_root_hash: ObjectHash,
     reference: StoreBatchCommitRef,
     value: StoreBatchCommit,
     author: StoreDeviceRegistration,
+}
+
+fn parse_store_batch_commit(
+    bytes: &[u8],
+    expected_store_root_hash: ObjectHash,
+    expected_coord: &StoreCommitCoord,
+    author: &StoreDeviceRegistration,
+) -> Result<StoreBatchCommit, StoreProtocolError> {
+    let commit: StoreBatchCommit = crate::sync::store_objects::decode_protocol_object(bytes)?;
+    commit.verify_at(expected_store_root_hash, expected_coord, author)?;
+    Ok(commit)
 }
 
 impl VerifiedStoreBatchCommit {
@@ -140,7 +152,7 @@ impl VerifiedStoreBatchCommit {
         object: ExactObjectRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let value = StoreBatchCommit::parse_at(bytes, store_root_hash, &coord, author)?;
+        let value = parse_store_batch_commit(bytes, store_root_hash, &coord, author)?;
         let reference = StoreBatchCommitRef::from_commit(&value, coord, object)?;
         Ok(Self {
             store_root_hash,
@@ -156,7 +168,7 @@ impl VerifiedStoreBatchCommit {
         reference: &StoreBatchCommitRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let value = StoreBatchCommit::parse_at(bytes, store_root_hash, &reference.coord, author)?;
+        let value = parse_store_batch_commit(bytes, store_root_hash, &reference.coord, author)?;
         reference.verify_commit(&value)?;
         Ok(Self {
             store_root_hash,
@@ -166,19 +178,19 @@ impl VerifiedStoreBatchCommit {
         })
     }
 
-    pub(crate) fn store_root_hash(&self) -> ObjectHash {
+    pub fn store_root_hash(&self) -> ObjectHash {
         self.store_root_hash
     }
 
-    pub(crate) fn reference(&self) -> &StoreBatchCommitRef {
+    pub fn reference(&self) -> &StoreBatchCommitRef {
         &self.reference
     }
 
-    pub(crate) fn value(&self) -> &StoreBatchCommit {
+    pub fn value(&self) -> &StoreBatchCommit {
         &self.value
     }
 
-    pub(crate) fn author(&self) -> &StoreDeviceRegistration {
+    pub fn author(&self) -> &StoreDeviceRegistration {
         &self.author
     }
 }

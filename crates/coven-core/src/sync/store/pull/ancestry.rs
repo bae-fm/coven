@@ -1,6 +1,7 @@
 use super::*;
 
-pub(crate) struct StoreCommitVerifier<'a> {
+#[doc(hidden)]
+pub struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
     root: StoreRootRef,
     verified_root: super::store_commit::StoreProtocolRoot,
@@ -8,7 +9,7 @@ pub(crate) struct StoreCommitVerifier<'a> {
 }
 
 impl<'a> StoreCommitVerifier<'a> {
-    pub(crate) async fn new(
+    pub async fn new(
         storage: &'a dyn SyncStorage,
         root: &StoreRootRef,
     ) -> Result<Self, StoreObjectError> {
@@ -21,7 +22,7 @@ impl<'a> StoreCommitVerifier<'a> {
         })
     }
 
-    pub(crate) async fn load_ref(
+    pub async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
     ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {

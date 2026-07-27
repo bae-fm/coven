@@ -611,7 +611,7 @@ async fn publish_effective_access_row_with_id(
 async fn load_commit(
     fixture: &EffectiveAccessFixture,
     reference: &StoreBatchCommitRef,
-) -> StoreBatchCommit {
+) -> VerifiedStoreBatchCommit {
     let mut commit_verifier = StoreCommitVerifier::new(&fixture.store.storage, &fixture.store.root)
         .await
         .expect("create Store commit verifier");
@@ -619,8 +619,6 @@ async fn load_commit(
         .load_ref(reference)
         .await
         .expect("load effective-access commit")
-        .value()
-        .clone()
 }
 
 #[test]
@@ -1715,15 +1713,14 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         .founder_device_authority()
         .await
         .expect("load founder authority");
-    let commit = crate::sync::store_objects::load_commit_ref(
-        &store.storage,
-        store.root.store_root_hash,
-        &third,
-        &founder,
-    )
-    .await
-    .expect("load third exact commit")
-    .value;
+    let mut commit_verifier = StoreCommitVerifier::new(&store.storage, &store.root)
+        .await
+        .expect("create Store commit verifier");
+    let commit = commit_verifier
+        .load_ref(&third)
+        .await
+        .expect("load third exact commit");
+    assert_eq!(commit.author(), &founder);
     let stream_id = commit_stream_id(&first.coord);
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
@@ -1736,9 +1733,6 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let target = crate::sync::test_helpers::open_test_db();
     let target_database = StoreDatabase::new(&target);
 
-    let mut commit_verifier = StoreCommitVerifier::new(&store.storage, &store.root)
-        .await
-        .expect("create Store commit verifier");
     let readiness = readiness(
         &target_database,
         &mut commit_verifier,
@@ -2235,7 +2229,6 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     assert_eq!(access.key_fingerprint, package_ref.key_fingerprint);
     let decrypted = load_circle_package(
         fixture.store.storage.as_ref(),
-        &package_commit_ref,
         &package_commit,
         &package_ref,
         access.encryption,

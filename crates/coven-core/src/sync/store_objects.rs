@@ -12,17 +12,17 @@ use super::storage::{
     SyncStorage,
 };
 use super::store_commit::{
-    ack_slot_prefix, commit_semantic_prefix, device_exclusion_outcome_semantic_prefix,
+    ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
     device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
     device_join_outcome_semantic_prefix, founder_registration_semantic_prefix, head_slot_prefix,
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix,
     package_semantic_prefix, provider_access_grant_semantic_prefix, registration_semantic_prefix,
     store_protocol_root_logical_key, CirclePackageRef, DeviceJoinAttempt, DeviceJoinAttemptRef,
     DeviceJoinOutcome, DeviceJoinOutcomeRef, ObjectHash, OwnerRecoveryNode, OwnerRecoveryNodeRef,
-    StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal,
-    StoreDeviceExclusionProposalRef, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
+    StoreAck, StoreAckRef, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome,
+    StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef,
+    StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreProtocolError, StoreProtocolRoot, StoreRootRef, VerifiedStoreBatchCommit,
 };
 
 #[derive(Debug)]
@@ -804,47 +804,6 @@ pub async fn load_owner_recovery_node_ref(
     .await
 }
 
-pub fn load_commit_ref<'a>(
-    storage: &'a dyn SyncStorage,
-    store_root_hash: ObjectHash,
-    reference: &'a StoreBatchCommitRef,
-    author: &'a StoreDeviceRegistration,
-) -> StoreObjectFuture<'a, VerifiedObject<StoreBatchCommit>> {
-    Box::pin(async move {
-        let semantic_prefix =
-            super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
-                .map_err(|source| StoreObjectError::InvalidObject {
-                    semantic_prefix: "Store candidate commit".to_string(),
-                    key: reference.object.slot().logical_key().to_string(),
-                    source: Box::new(source),
-                })?;
-        let context = ProtocolObjectContext::signed_plaintext(
-            store_root_hash,
-            ProtocolObjectDomain::StoreCommit,
-        );
-        let expected_reference = reference.clone();
-        let expected_author = author.clone();
-        Box::pin(load_exact_object(
-            storage,
-            &context,
-            &reference.object,
-            &semantic_prefix,
-            reference.commit_hash,
-            move |bytes| {
-                let commit = StoreBatchCommit::parse_at(
-                    bytes,
-                    store_root_hash,
-                    &expected_reference.coord,
-                    &expected_author,
-                )?;
-                expected_reference.verify_commit(&commit)?;
-                Ok(commit)
-            },
-        ))
-        .await
-    })
-}
-
 pub async fn load_head_ref(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -885,24 +844,13 @@ pub async fn load_head_ref(
     .await
 }
 
-pub async fn load_store_package(
+pub(crate) async fn load_store_package(
     storage: &dyn SyncStorage,
-    reference: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
+    verified: &VerifiedStoreBatchCommit,
 ) -> Result<Option<VerifiedObject<Vec<u8>>>, StoreObjectError> {
+    let reference = verified.reference();
+    let commit = verified.value();
     let stream_id = commit_stream_id(&reference.coord);
-    reference
-        .verify_commit(commit)
-        .map_err(|source| StoreObjectError::InvalidObject {
-            semantic_prefix: commit_semantic_prefix(
-                commit.candidate_family(),
-                &stream_id,
-                reference.coord.sequence(),
-                reference.commit_hash,
-            ),
-            key: reference.object.slot().logical_key().to_string(),
-            source: Box::new(source),
-        })?;
     let Some(package) = commit.store_package() else {
         return Ok(None);
     };
@@ -932,26 +880,15 @@ pub async fn load_store_package(
     .map(Some)
 }
 
-pub async fn load_circle_package(
+pub(crate) async fn load_circle_package(
     storage: &dyn SyncStorage,
-    reference: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
+    verified: &VerifiedStoreBatchCommit,
     package: &CirclePackageRef,
     encryption: crate::encryption::EncryptionService,
 ) -> Result<VerifiedObject<Vec<u8>>, StoreObjectError> {
+    let reference = verified.reference();
+    let commit = verified.value();
     let stream_id = commit_stream_id(&reference.coord);
-    reference
-        .verify_commit(commit)
-        .map_err(|source| StoreObjectError::InvalidObject {
-            semantic_prefix: commit_semantic_prefix(
-                commit.candidate_family(),
-                &stream_id,
-                reference.coord.sequence(),
-                reference.commit_hash,
-            ),
-            key: reference.object.slot().logical_key().to_string(),
-            source: Box::new(source),
-        })?;
     if !commit
         .circle_packages()
         .iter()

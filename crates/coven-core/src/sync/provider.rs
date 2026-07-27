@@ -1816,16 +1816,20 @@ pub async fn publish_cross_principal_challenge(
     {
         return invalid("activated join attempt differs from the challenge publication context");
     }
-    let activation = crate::sync::store_objects::load_commit_ref(
-        protocol_storage,
-        context.root.store_root_hash,
-        &authorization.attempt_activation,
-        activation_author,
-    )
-    .await
-    .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
+    let mut commit_verifier =
+        crate::sync::store::StoreCommitVerifier::new(protocol_storage, &context.root)
+            .await
+            .map_err(|error| {
+                ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
+            })?;
+    let activation = commit_verifier
+        .load_ref(&authorization.attempt_activation)
+        .await
+        .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
+    if activation.author() != activation_author {
+        return invalid("activation commit has another authenticated author");
+    }
     if !activation
-        .value
         .device_join_attempt_decisions()
         .iter()
         .any(|decision| {

@@ -781,7 +781,6 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     .expect("the owner materialized its outcome activation");
     assert!(
         activation_commit
-            .value
             .order
             .predecessor_cut()
             .expect("the outcome activation declares a predecessor cut")

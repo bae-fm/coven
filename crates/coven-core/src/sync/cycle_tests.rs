@@ -248,20 +248,14 @@ async fn store_package_exists(
     stream_id: &str,
     sequence: u64,
 ) -> bool {
-    let Some((reference, commit)) =
+    let Some((_reference, commit)) =
         load_exact_materialized_commit(db, &storage.storage, stream_id, sequence)
             .await
             .expect("load exact materialized Store commit")
     else {
         return false;
     };
-    match crate::sync::store_objects::load_store_package(
-        &storage.storage,
-        &reference,
-        &commit.value,
-    )
-    .await
-    {
+    match crate::sync::store_objects::load_store_package(&storage.storage, &commit).await {
         Ok(package) => package.is_some(),
         Err(crate::sync::store_objects::StoreObjectError::Storage(
             crate::sync::storage::StorageError::NotFound(_),
@@ -3778,15 +3772,15 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .local_blob_write_authority()
         .await
         .expect("load local Store registration");
-    let commit = crate::sync::store_objects::load_commit_ref(
-        &storage.storage,
-        storage.root.store_root_hash,
-        &after,
-        &registration,
-    )
-    .await
-    .expect("load empty-cycle acknowledgement commit")
-    .value;
+    let mut commit_verifier =
+        crate::sync::store::StoreCommitVerifier::new(&storage.storage, &storage.root)
+            .await
+            .expect("open Store commit verifier");
+    let commit = commit_verifier
+        .load_ref(&after)
+        .await
+        .expect("load empty-cycle acknowledgement commit");
+    assert_eq!(commit.author(), &registration);
     assert_eq!(
         commit.order.predecessor(),
         before.as_ref(),
@@ -3981,19 +3975,15 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     let stream_id = local_store_stream_id(&db).await;
     let mut published_blob_ids = Vec::new();
     for seq in [1, 2] {
-        let (commit_ref, commit) =
+        let (_commit_ref, commit) =
             load_exact_materialized_commit(&db, &storage.storage, &stream_id, seq)
                 .await
                 .expect("load exact materialized commit")
                 .expect("write has a commit");
-        let package = crate::sync::store_objects::load_store_package(
-            &storage.storage,
-            &commit_ref,
-            &commit.value,
-        )
-        .await
-        .expect("load exact Store package")
-        .expect("commit has a package");
+        let package = crate::sync::store_objects::load_store_package(&storage.storage, &commit)
+            .await
+            .expect("load exact Store package")
+            .expect("commit has a package");
         let package = crate::sync::audience_package::AudiencePackage::parse(&package.value)
             .expect("parse exact audience package");
         for binding in package.blob_bindings() {
@@ -4774,9 +4764,9 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
             .expect("load retried exact Store commit")
             .expect("retried exact Store commit exists");
     assert_eq!(published_ref, published);
-    assert_eq!(published_commit.value.write_id, write_id);
+    assert_eq!(published_commit.write_id, write_id);
     assert!(
-        published_commit.value.store_package().is_some(),
+        published_commit.store_package().is_some(),
         "the blob Store write carries an exact Store package reference",
     );
     let activated_blob = stored_blob_for_row(&db, "note_photos", "lazyblob")

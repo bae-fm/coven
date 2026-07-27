@@ -304,15 +304,15 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         .founder_device_authority()
         .await
         .expect("load founder authority");
-    let activated = crate::sync::store_objects::load_commit_ref(
-        &store.storage,
-        store.root.store_root_hash,
-        &activation,
-        &founder,
-    )
-    .await
-    .expect("load package activation")
-    .value;
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+            .await
+            .expect("open Store commit verifier");
+    let activated = commit_verifier
+        .load_ref(&activation)
+        .await
+        .expect("load package activation");
+    assert_eq!(activated.author(), &founder);
     let package = activated
         .store_package()
         .expect("activation carries Store package")
@@ -376,7 +376,7 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         }),
         evidence_ref,
         StoreReclaimAuthority {
-            membership: activated.membership_state,
+            membership: activated.membership_state.clone(),
             owner_grant: store.protocol_root.descriptor.founder_grant.clone(),
         },
         &store.signer,

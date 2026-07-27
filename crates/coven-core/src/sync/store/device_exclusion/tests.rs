@@ -2090,12 +2090,8 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("excluded candidate carries its Store package");
     assert_eq!(candidate_graph_objects, vec![store_package.object.clone()]);
     assert!(matches!(
-        crate::sync::store_objects::load_store_package(
-            &store.storage,
-            &candidate_ref,
-            &candidate.commit.value,
-        )
-        .await,
+        crate::sync::store_objects::load_store_package(&store.storage, &candidate.commit.value,)
+            .await,
         Err(crate::sync::store_objects::StoreObjectError::Storage(
             crate::sync::storage::StorageError::NotFound(_)
         ))
@@ -2478,20 +2474,13 @@ async fn finish_prepared_exclusion_cleanup(
             Err(crate::sync::storage::StorageError::NotFound(_))
         ));
     }
-    for (reference, commit) in [
-        (
-            &candidates.candidate.head.value.commit,
-            &candidates.candidate.commit.value,
-        ),
-        (
-            &candidates.authority.head.value.commit,
-            &candidates.authority.commit.value,
-        ),
+    for commit in [
+        &candidates.candidate.commit.value,
+        &candidates.authority.commit.value,
     ] {
         if commit.store_package().is_some() {
             assert!(matches!(
-                crate::sync::store_objects::load_store_package(&store.storage, reference, commit,)
-                    .await,
+                crate::sync::store_objects::load_store_package(&store.storage, commit).await,
                 Err(crate::sync::store_objects::StoreObjectError::Storage(
                     crate::sync::storage::StorageError::NotFound(_)
                 ))

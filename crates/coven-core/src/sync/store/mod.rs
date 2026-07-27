@@ -143,6 +143,8 @@ pub use owner::{Store, StoreRestoreMembership};
 #[doc(hidden)]
 pub use owner_promotion::OwnerPromotionError;
 pub(crate) use pull::install_circle_bootstrap_image_on;
+#[doc(hidden)]
+pub use pull::StoreCommitVerifier;
 pub(crate) use pull::VerifiedStoreSnapshotStability;
 #[cfg(test)]
 pub(crate) use pull::{

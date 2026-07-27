@@ -15,7 +15,6 @@ use crate::migration::Migration;
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::session::{BlobDecl, SyncedTable};
-use crate::sync::storage::ProtocolObjectDomain;
 use crate::sync::store_commit::ObjectHash;
 
 #[cfg(test)]
@@ -1131,6 +1130,7 @@ pub async fn create_exact_protocol_object(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn load_exact_materialized_commit(
     db: &Database,
     storage: &dyn crate::sync::storage::SyncStorage,
@@ -1139,7 +1139,7 @@ pub async fn load_exact_materialized_commit(
 ) -> Result<
     Option<(
         crate::sync::store_commit::StoreBatchCommitRef,
-        crate::sync::store_objects::VerifiedObject<crate::sync::store_commit::StoreBatchCommit>,
+        crate::sync::store_commit::VerifiedStoreBatchCommit,
     )>,
     String,
 > {
@@ -1156,36 +1156,13 @@ pub async fn load_exact_materialized_commit(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "materialized Store commit has no exact root authority".to_string())?;
-    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let bytes = storage
-        .read_protocol_object(
-            &context,
-            &reference.object,
-            &crate::sync::store_commit::semantic_prefix_from_exact_object(
-                &reference.object,
-                ".json",
-            )
-            .map_err(|error| error.to_string())?,
-        )
+    let mut commit_verifier = crate::sync::store::StoreCommitVerifier::new(storage, &root)
         .await
         .map_err(|error| error.to_string())?;
-    let unverified: crate::sync::store_commit::StoreBatchCommit =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let author = store_database
-        .activated_store_device_registration(unverified.author_registration)
+    let commit = commit_verifier
+        .load_ref(&reference)
         .await
         .map_err(|error| error.to_string())?;
-    let commit = crate::sync::store_objects::load_commit_ref(
-        storage,
-        root.store_root_hash,
-        &reference,
-        &author,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
     Ok(Some((reference, commit)))
 }
 

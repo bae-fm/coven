@@ -1412,8 +1412,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .load_ref(&package_commit_ref)
         .await
         .expect("load pre-close Circle package commit");
-    let package_author = package_commit.author();
-    let package_commit = package_commit.value();
+    let package_author = package_commit.author().clone();
     assert_eq!(package_commit.circle_packages().len(), 1);
     let historical_locator = crate::blob::locator::BlobLocator::opaque(
         "files",
@@ -1477,10 +1476,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         &mut commit_verifier,
         &store.storage,
         &store.root,
-        &package_commit_ref,
-        package_commit,
+        &package_commit,
         &[],
-        package_author,
+        &package_author,
         crate::sync::store::pull::LocalStoreMembership::Current,
     )
     .await
@@ -1820,10 +1818,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         &mut commit_verifier,
         &store.storage,
         &store.root,
-        &package_commit_ref,
-        package_commit,
+        &package_commit,
         &[],
-        package_author,
+        &package_author,
         crate::sync::store::pull::LocalStoreMembership::Current,
     )
     .await
@@ -1843,66 +1840,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .slot()
         .clone();
     assert!(store.home.exact_reads().contains(&package_slot));
-
-    let accepted_stream_position = cutoff
-        .commits()
-        .get(&package_commit_ref.coord.stream_id)
-        .expect("Circle cutoff covers the package author stream");
-    let mut beyond_cutoff = accepted_stream_position.clone();
-    beyond_cutoff.coord.sequence = beyond_cutoff
-        .coord
-        .sequence()
-        .checked_add(1)
-        .expect("test cutoff sequence has a successor");
-    beyond_cutoff.commit_hash = ObjectHash::digest(b"Circle package beyond cutoff");
-    store.home.clear_exact_reads();
-    let omitted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
-        &StoreDatabase::new(&db),
-        &mut commit_verifier,
-        &store.storage,
-        &store.root,
-        &beyond_cutoff,
-        package_commit,
-        &[],
-        package_author,
-        crate::sync::store::pull::LocalStoreMembership::Current,
-    )
-    .await
-    {
-        Ok(packages) => packages,
-        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
-            panic!("classify later Circle package against cutoff: {error}")
-        }
-        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
-            panic!("classify later Circle package against cutoff: {error}")
-        }
-    };
-    assert!(omitted_after_cutoff.is_empty());
-    assert!(!store.home.exact_reads().contains(&package_slot));
-
-    let mut cutoff_collision = accepted_stream_position.clone();
-    cutoff_collision.commit_hash = ObjectHash::digest(b"Circle cutoff coordinate collision");
-    store.home.clear_exact_reads();
-    let collision = crate::sync::store::pull::load_applicable_circle_packages(
-        &StoreDatabase::new(&db),
-        &mut commit_verifier,
-        &store.storage,
-        &store.root,
-        &cutoff_collision,
-        package_commit,
-        &[],
-        package_author,
-        crate::sync::store::pull::LocalStoreMembership::Current,
-    )
-    .await;
-    assert!(matches!(
-        collision,
-        Err(crate::sync::store::pull::PullCircleActivationError::Database(error))
-            if error
-                .to_string()
-                .contains("conflicts with its accepted epoch cutoff")
-    ));
-    assert!(!store.home.exact_reads().contains(&package_slot));
 
     let successor_commit = commit_verifier
         .load_ref(&successor_commit_ref)
@@ -2042,6 +1979,13 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         candidate_commit_object.reference().clone(),
     )
     .expect("bind combined Circle candidate reference");
+    let verified_candidate = crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+        &candidate_commit.to_bytes(),
+        store.root.store_root_hash,
+        &candidate_commit_ref,
+        successor_author,
+    )
+    .expect("authenticate combined Circle candidate");
     assert!(!cutoff.covers_commit(&candidate_commit_ref));
     candidate_commit
         .verify_circle_package(circle_id, &candidate_package_bytes)
@@ -2055,8 +1999,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             &mut commit_verifier,
             &store.storage,
             &store.root,
-            &candidate_commit_ref,
-            &candidate_commit,
+            &verified_candidate,
             std::slice::from_ref(&activation),
             successor_author,
             crate::sync::store::pull::LocalStoreMembership::Current,

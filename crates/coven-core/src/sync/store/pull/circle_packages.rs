@@ -44,13 +44,14 @@ pub(crate) async fn load_applicable_circle_packages(
     commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
+    verified: &VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
     local_store_membership: LocalStoreMembership,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
     let db = database.sqlite();
+    let commit_ref = verified.reference();
+    let commit = verified.value();
     if commit.circle_packages().is_empty() {
         return Ok(Vec::new());
     }
@@ -216,7 +217,7 @@ pub(crate) async fn load_applicable_circle_packages(
         };
         let context = access.encryption;
         let blob_protection = BlobSpoolProtection::Opaque(context.clone());
-        let package = load_circle_package(storage, commit_ref, commit, reference, context)
+        let package = load_circle_package(storage, verified, reference, context)
             .await
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
         loaded.push(LoadedCirclePackage {
