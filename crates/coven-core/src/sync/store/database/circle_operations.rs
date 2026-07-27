@@ -1253,17 +1253,11 @@ impl StoreDatabase {
         circle_id: crate::sync::circle::CircleId,
     ) -> Result<(), DbError> {
         let circle_id = circle_id.to_string();
-        for table in [
-            "circle_access_cache",
-            "circle_roster_cache",
-            "circle_metadata_cache",
-        ] {
-            conn.execute(
-                &format!("DELETE FROM {table} WHERE circle_id = ?1"),
-                [&circle_id],
-            )
-            .map_err(DbError::from)?;
-        }
+        conn.execute(
+            "DELETE FROM circle_access_cache WHERE circle_id = ?1",
+            [&circle_id],
+        )
+        .map_err(DbError::from)?;
         Ok(())
     }
 
@@ -1304,12 +1298,8 @@ impl StoreDatabase {
                 ));
             }
         }
-        conn.execute_batch(
-            "DELETE FROM circle_access_cache;
-             DELETE FROM circle_roster_cache;
-             DELETE FROM circle_metadata_cache;",
-        )
-        .map_err(DbError::from)?;
+        conn.execute_batch("DELETE FROM circle_access_cache;")
+            .map_err(DbError::from)?;
         Ok(())
     }
 

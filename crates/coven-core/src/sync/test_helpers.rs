@@ -603,37 +603,11 @@ fn install_test_circle_current_state(
     if active {
         conn.execute(
             "INSERT INTO circle_access_cache
-             (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
-             VALUES (?1, ?2, ?3, 'active', ?4)",
-            rusqlite::params![
-                creation.circle_id.to_string(),
-                &control_coord,
-                owner_pubkey,
-                serde_json::to_vec(&own_access.leaf.value).expect("serialize test Circle access"),
-            ],
+             (circle_id, control_coord, owner_pubkey, disposition)
+             VALUES (?1, ?2, ?3, 'active')",
+            rusqlite::params![creation.circle_id.to_string(), &control_coord, owner_pubkey,],
         )
         .expect("insert test Circle access history");
-        conn.execute(
-            "INSERT INTO circle_roster_cache (circle_id, control_coord, roster_bytes)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                creation.circle_id.to_string(),
-                &control_coord,
-                serde_json::to_vec(&creation.resolved_roster())
-                    .expect("serialize test Circle roster"),
-            ],
-        )
-        .expect("insert test Circle roster history");
-        conn.execute(
-            "INSERT INTO circle_metadata_cache (circle_id, control_coord, metadata_bytes)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                creation.circle_id.to_string(),
-                &control_coord,
-                serde_json::to_vec(&creation.metadata).expect("serialize test Circle metadata"),
-            ],
-        )
-        .expect("insert test Circle metadata history");
     }
     conn.execute(
         "INSERT INTO circle_current_state (circle_id, state) VALUES (?1, ?2)",

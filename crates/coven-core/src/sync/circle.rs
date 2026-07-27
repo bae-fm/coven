@@ -1361,10 +1361,6 @@ mod tests {
             .expect("read cached access owner");
         assert_eq!(cached_owner, author_pubkey);
         db.call(|conn| {
-            conn.execute("DELETE FROM circle_metadata_cache", [])
-                .map_err(crate::database::DbError::from)?;
-            conn.execute("DELETE FROM circle_roster_cache", [])
-                .map_err(crate::database::DbError::from)?;
             conn.execute("DELETE FROM circle_access_cache", [])
                 .map(|_| ())
                 .map_err(crate::database::DbError::from)

@@ -832,8 +832,6 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
     "circle_control_activations",
     "circle_access_cache",
     "circle_bootstrap_coverage",
-    "circle_roster_cache",
-    "circle_metadata_cache",
     "circle_current_state",
     "retained_merge_materializations",
     "retained_replay_objects",

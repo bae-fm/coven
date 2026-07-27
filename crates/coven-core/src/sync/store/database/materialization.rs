@@ -847,42 +847,18 @@ impl StoreDatabaseTransaction<'_, '_> {
                     crate::sync::circle::CircleAccessDisposition::Active { .. } => "active",
                     crate::sync::circle::CircleAccessDisposition::Inactive => "inactive",
                 };
-                let access_bytes = serde_json::to_vec(&access.leaf.value).map_err(|error| {
-                    DbError::Message(format!("serialize verified circle access: {error}"))
-                })?;
                 conn.execute(
                     "INSERT INTO circle_access_cache
-                     (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (circle_id, control_coord, owner_pubkey, disposition)
+                     VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![
                         &circle_id,
                         &control_coord,
                         &access.leaf.value.owner_pubkey,
                         disposition,
-                        access_bytes,
                     ],
                 )
                 .map_err(DbError::from)?;
-                if let Some(active) = &access.active {
-                    let roster_bytes = serde_json::to_vec(&active.roster).map_err(|error| {
-                        DbError::Message(format!("serialize activated circle roster: {error}"))
-                    })?;
-                    conn.execute(
-                        "INSERT INTO circle_roster_cache (circle_id, control_coord, roster_bytes)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![&circle_id, &control_coord, roster_bytes,],
-                    )
-                    .map_err(DbError::from)?;
-                    let metadata_bytes = serde_json::to_vec(&active.metadata).map_err(|error| {
-                        DbError::Message(format!("serialize activated circle metadata: {error}"))
-                    })?;
-                    conn.execute(
-                        "INSERT INTO circle_metadata_cache
-                         (circle_id, control_coord, metadata_bytes) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![&circle_id, &control_coord, metadata_bytes,],
-                    )
-                    .map_err(DbError::from)?;
-                }
             }
             conn.execute(
                 "INSERT INTO circle_current_state (circle_id, state) VALUES (?1, ?2)

@@ -553,30 +553,7 @@ macro_rules! coven_tables {
     control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
     owner_pubkey TEXT NOT NULL,
     disposition TEXT NOT NULL CHECK (disposition IN ('active', 'inactive')),
-    access_bytes BLOB NOT NULL,
     PRIMARY KEY (circle_id, control_coord, owner_pubkey),
-    FOREIGN KEY (circle_id, control_coord)
-        REFERENCES circle_control_activations(circle_id, control_coord)
-"
-        );
-        $visit!(
-            circle_roster_cache,
-            "
-    circle_id TEXT NOT NULL,
-    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
-    roster_bytes BLOB NOT NULL,
-    PRIMARY KEY (circle_id, control_coord),
-    FOREIGN KEY (circle_id, control_coord)
-        REFERENCES circle_control_activations(circle_id, control_coord)
-"
-        );
-        $visit!(
-            circle_metadata_cache,
-            "
-    circle_id TEXT NOT NULL,
-    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
-    metadata_bytes BLOB NOT NULL,
-    PRIMARY KEY (circle_id, control_coord),
     FOREIGN KEY (circle_id, control_coord)
         REFERENCES circle_control_activations(circle_id, control_coord)
 "

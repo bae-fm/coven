@@ -1009,9 +1009,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
                 .query_row(
                     "SELECT
                          (SELECT COUNT(*) FROM circle_current_state),
-                         (SELECT COUNT(*) FROM circle_access_cache)
-                       + (SELECT COUNT(*) FROM circle_roster_cache)
-                       + (SELECT COUNT(*) FROM circle_metadata_cache)",
+                         (SELECT COUNT(*) FROM circle_access_cache)",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
