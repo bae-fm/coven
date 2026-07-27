@@ -13,7 +13,9 @@ pub(in crate::sync::store) async fn prepare_acknowledgement_activation_for_test(
 
 #[doc(hidden)]
 pub struct Store {
-    context: StoreContext,
+    database: StoreDatabase,
+    storage: Arc<CloudSyncStorage>,
+    store_root: StoreRootRef,
 }
 
 #[doc(hidden)]
@@ -162,27 +164,21 @@ impl Store {
             );
         }
         Ok(Self {
-            context: StoreContext {
-                database,
-                storage,
-                store_root,
-            },
+            database,
+            storage,
+            store_root,
         })
     }
     pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
-        self.context.storage()
+        &self.storage
     }
 
     pub(crate) fn store_root(&self) -> &StoreRootRef {
-        self.context.store_root()
+        &self.store_root
     }
 
     pub(crate) fn database(&self) -> &StoreDatabase {
-        self.context.database()
-    }
-
-    pub(crate) fn cloud_storage(&self) -> &Arc<CloudSyncStorage> {
-        self.storage()
+        &self.database
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {

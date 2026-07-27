@@ -877,7 +877,7 @@ impl SyncComponents {
     }
 
     pub fn storage(&self) -> &std::sync::Arc<CloudSyncStorage> {
-        self.store.cloud_storage()
+        self.store.storage()
     }
 
     pub fn hlc(&self) -> &std::sync::Arc<Hlc> {

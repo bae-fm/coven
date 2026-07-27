@@ -583,23 +583,3 @@ pub(crate) async fn verify_owner_promotion_acceptance(
         .await
         .map(|()| VerifiedOwnerPromotionAcceptance)
 }
-
-pub(super) struct StoreContext {
-    database: StoreDatabase,
-    storage: Arc<CloudSyncStorage>,
-    store_root: StoreRootRef,
-}
-
-impl StoreContext {
-    fn database(&self) -> &StoreDatabase {
-        &self.database
-    }
-
-    fn storage(&self) -> &Arc<CloudSyncStorage> {
-        &self.storage
-    }
-
-    fn store_root(&self) -> &StoreRootRef {
-        &self.store_root
-    }
-}
