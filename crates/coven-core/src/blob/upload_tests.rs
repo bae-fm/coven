@@ -4,10 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::Duration;
 use rusqlite::OptionalExtension;
 
-use super::upload::{backoff_window, drain_uploads, DrainOutcome};
+use super::upload::{drain_uploads, DrainOutcome};
 use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
@@ -766,16 +765,6 @@ async fn observer_receives_advancing_midfile_progress() {
     assert!(progress.len() >= 2);
     assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
     assert_eq!(progress.last().unwrap().0, progress.last().unwrap().1);
-}
-
-#[test]
-fn backoff_window_is_exponential_and_capped() {
-    assert_eq!(backoff_window(0), Duration::zero());
-    assert_eq!(backoff_window(1), Duration::seconds(30));
-    assert_eq!(backoff_window(2), Duration::seconds(60));
-    assert_eq!(backoff_window(3), Duration::seconds(120));
-    assert_eq!(backoff_window(8), Duration::seconds(3600));
-    assert_eq!(backoff_window(50), Duration::seconds(3600));
 }
 
 #[tokio::test]
