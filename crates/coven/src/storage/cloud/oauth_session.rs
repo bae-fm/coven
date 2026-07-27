@@ -321,7 +321,7 @@ mod tests {
                 builder.body(Body::from("body")).expect("build response")
             }
         });
-        let (url, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (url, shutdown_tx) = crate::storage::cloud::test_server::spawn_test_server(app).await;
         (url, hits, shutdown_tx)
     }
 

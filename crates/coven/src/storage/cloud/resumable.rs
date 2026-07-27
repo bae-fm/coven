@@ -350,7 +350,7 @@ mod tests {
     }
 
     async fn spawn_incomplete_upload_endpoint() -> (String, tokio::sync::oneshot::Sender<()>) {
-        crate::storage::cloud::http::spawn_test_server(
+        crate::storage::cloud::test_server::spawn_test_server(
             Router::new().fallback(incomplete_upload_endpoint),
         )
         .await
@@ -364,7 +364,7 @@ mod tests {
     }
 
     async fn spawn_successful_upload_endpoint() -> (String, tokio::sync::oneshot::Sender<()>) {
-        crate::storage::cloud::http::spawn_test_server(
+        crate::storage::cloud::test_server::spawn_test_server(
             Router::new().fallback(successful_upload_endpoint),
         )
         .await
@@ -399,7 +399,8 @@ mod tests {
         let app = Router::new()
             .fallback(failed_upload_endpoint)
             .with_state(delete_count.clone());
-        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (endpoint, shutdown_tx) =
+            crate::storage::cloud::test_server::spawn_test_server(app).await;
         (endpoint, delete_count, shutdown_tx)
     }
 
@@ -432,7 +433,7 @@ mod tests {
     async fn spawn_failed_upload_and_cancel_endpoint() -> (String, tokio::sync::oneshot::Sender<()>)
     {
         let delete_count = Arc::new(AtomicUsize::new(0));
-        crate::storage::cloud::http::spawn_test_server(
+        crate::storage::cloud::test_server::spawn_test_server(
             Router::new()
                 .fallback(failed_upload_and_cancel_endpoint)
                 .with_state(delete_count),

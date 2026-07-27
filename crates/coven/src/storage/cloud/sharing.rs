@@ -220,7 +220,8 @@ mod tests {
             .fallback(fake_permissions_endpoint)
             .with_state(state);
 
-        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (endpoint, shutdown_tx) =
+            crate::storage::cloud::test_server::spawn_test_server(app).await;
         (endpoint, requests, shutdown_tx)
     }
 

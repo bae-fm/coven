@@ -1465,7 +1465,8 @@ mod tests {
         let app = Router::new()
             .fallback(immutable_copy_endpoint)
             .with_state(requests.clone());
-        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (endpoint, shutdown_tx) =
+            crate::storage::cloud::test_server::spawn_test_server(app).await;
         (
             home().with_endpoints(endpoint.clone(), endpoint),
             requests,
@@ -1620,7 +1621,8 @@ mod tests {
         let app = Router::new()
             .fallback(binding_and_close_endpoint)
             .with_state(requests.clone());
-        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (endpoint, shutdown_tx) =
+            crate::storage::cloud::test_server::spawn_test_server(app).await;
         (
             home().with_endpoints(endpoint.clone(), endpoint),
             requests,
@@ -1717,7 +1719,7 @@ mod tests {
 
     #[tokio::test]
     async fn authoritative_listing_rejects_a_repeated_cursor() {
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new().fallback(repeated_cursor_endpoint),
         )
         .await;

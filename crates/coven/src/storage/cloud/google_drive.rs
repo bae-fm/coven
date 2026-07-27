@@ -1737,7 +1737,8 @@ mod tests {
         let app = Router::new()
             .fallback(immutable_copy_endpoint)
             .with_state(requests.clone());
-        let (endpoint, shutdown_tx) = crate::storage::cloud::http::spawn_test_server(app).await;
+        let (endpoint, shutdown_tx) =
+            crate::storage::cloud::test_server::spawn_test_server(app).await;
         (
             home()
                 .with_endpoints(endpoint.clone(), endpoint)
@@ -1855,7 +1856,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_create_rejects_a_non_utf8_location_header() {
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new().fallback(malformed_location_endpoint),
         )
         .await;
@@ -2190,7 +2191,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_identity_listing_rejects_a_repeated_page_token() {
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new().fallback(repeated_file_identity_page_endpoint),
         )
         .await;
@@ -2239,7 +2240,7 @@ mod tests {
     #[tokio::test]
     async fn exact_slot_identity_lookup_includes_shared_drives() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new()
                 .fallback(shared_drive_listing_endpoint)
                 .with_state(requests.clone()),
@@ -2291,7 +2292,7 @@ mod tests {
     #[tokio::test]
     async fn generated_id_collision_preserves_the_pre_existing_file() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new()
                 .fallback(generated_id_collision_endpoint)
                 .with_state(requests.clone()),
@@ -2397,7 +2398,7 @@ mod tests {
     #[tokio::test]
     async fn ambiguous_exact_create_preserves_the_logical_key_matched_commit() {
         let state = AmbiguousCreateState::default();
-        let (endpoint, shutdown) = crate::storage::cloud::http::spawn_test_server(
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
             Router::new()
                 .fallback(ambiguous_create_endpoint)
                 .with_state(state.clone()),

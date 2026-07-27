@@ -146,6 +146,8 @@ pub(crate) mod storage {
         pub(crate) mod setup;
         #[cfg(feature = "oauth-providers")]
         mod sharing;
+        #[cfg(test)]
+        mod test_server;
 
         #[cfg(feature = "oauth-providers")]
         fn require_oauth_token(
