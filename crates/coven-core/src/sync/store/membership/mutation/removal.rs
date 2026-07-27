@@ -1138,9 +1138,7 @@ pub(crate) async fn complete_revoke_rotation_adoption(
     let gate = database
         .complete_local_rotation_adoption(intent_hash, adopted_generation)
         .await?;
-    pending_rotation
-        .install_durable_gate(gate)
-        .map_err(InviteError::InvalidDurableMutation)?;
+    pending_rotation.install_durable_gate(gate);
     Ok(())
 }
 

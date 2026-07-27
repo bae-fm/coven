@@ -9,6 +9,7 @@
 //! control-plane and recipient-sealed objects).
 
 use async_trait::async_trait;
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -231,10 +232,19 @@ pub enum RotationPendingState {
 /// structural half of the invariant: this device must never seal under a
 /// generation the store has already superseded.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RotationGate {
-    local: Option<LocalRotation>,
-    peer_committed_generation: Option<u64>,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RotationGate {
+    /// This device's own rotation, with no unadopted peer generation.
+    Local(LocalRotation),
+    /// A generation the store committed that this device has not adopted, with
+    /// no local rotation of its own.
+    Peer { generation: NonZeroU64 },
+    /// Both facts at once: this device's rotation, and a peer generation it has
+    /// not adopted.
+    LocalAndPeer {
+        local: LocalRotation,
+        peer_generation: NonZeroU64,
+    },
 }
 
 /// This device's own rotation: a candidate it may still publish or lose, or its
@@ -243,19 +253,22 @@ pub(crate) struct RotationGate {
 /// one or the other, never both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum LocalRotation {
+pub(crate) enum LocalRotation {
     Candidate {
-        generation: u64,
+        generation: NonZeroU64,
         mutation: crate::sync::store_commit::ObjectHash,
     },
     Committed {
-        generation: u64,
+        generation: NonZeroU64,
         mutation: crate::sync::store_commit::ObjectHash,
     },
 }
 
 impl LocalRotation {
-    fn generation(&self) -> u64 {
+    /// Reported through [`PendingRotation::pending_generation`], which exists for
+    /// status reporting in tests and for hosts built with `test-utils`.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn generation(&self) -> NonZeroU64 {
         match self {
             Self::Candidate { generation, .. } | Self::Committed { generation, .. } => *generation,
         }
@@ -263,183 +276,226 @@ impl LocalRotation {
 }
 
 impl RotationGate {
-    pub(crate) fn empty() -> Self {
-        Self {
-            local: None,
-            peer_committed_generation: None,
+    /// This device's own rotation, if the gate holds one.
+    fn local(&self) -> Option<LocalRotation> {
+        match self {
+            Self::Local(local) | Self::LocalAndPeer { local, .. } => Some(*local),
+            Self::Peer { .. } => None,
         }
     }
 
-    pub(crate) fn generation(&self) -> Option<u64> {
-        self.local
-            .map(|local| local.generation())
-            .into_iter()
-            .chain(self.peer_committed_generation)
-            .max()
+    /// The unadopted peer generation, if the gate holds one.
+    fn peer(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Peer { generation }
+            | Self::LocalAndPeer {
+                peer_generation: generation,
+                ..
+            } => Some(*generation),
+            Self::Local(_) => None,
+        }
     }
 
-    fn pending_state(&self) -> Result<RotationPendingState, String> {
-        match (self.local, self.peer_committed_generation) {
-            (Some(LocalRotation::Candidate { generation, .. }), None) => {
-                Ok(RotationPendingState::Candidate { generation })
-            }
-            (Some(LocalRotation::Committed { generation, .. }), None) => {
-                Ok(RotationPendingState::LocalCommitted { generation })
-            }
-            (None, Some(generation)) => Ok(RotationPendingState::PeerCommitted { generation }),
-            (
-                Some(LocalRotation::Candidate {
-                    generation: candidate_generation,
-                    ..
-                }),
-                Some(peer_generation),
-            ) => Ok(RotationPendingState::CandidateAndPeer {
-                candidate_generation,
+    /// The gate holding both facts — `None` when neither is left, which is the
+    /// absence of a gate rather than an empty one.
+    fn from_parts(local: Option<LocalRotation>, peer: Option<NonZeroU64>) -> Option<Self> {
+        match (local, peer) {
+            (Some(local), Some(peer_generation)) => Some(Self::LocalAndPeer {
+                local,
                 peer_generation,
             }),
-            (
-                Some(LocalRotation::Committed {
-                    generation: local_generation,
-                    ..
-                }),
-                Some(peer_generation),
-            ) => Ok(RotationPendingState::LocalCommittedAndPeer {
-                local_generation,
+            (Some(local), None) => Some(Self::Local(local)),
+            (None, Some(generation)) => Some(Self::Peer { generation }),
+            (None, None) => None,
+        }
+    }
+
+    /// The gate `local` owns, keeping whatever peer fact came with it.
+    fn with_local(local: LocalRotation, peer: Option<NonZeroU64>) -> Self {
+        match peer {
+            Some(peer_generation) => Self::LocalAndPeer {
+                local,
                 peer_generation,
-            }),
-            (None, None) => Err("rotation gate names no pending rotation".to_string()),
+            },
+            None => Self::Local(local),
         }
     }
 
-    /// What a gate that came from outside the transitions below — a
-    /// `protocol_state` row — must still be checked for. The transitions
-    /// establish it themselves.
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.generation().is_none()
-            || self.local.is_some_and(|local| local.generation() == 0)
-            || self.peer_committed_generation == Some(0)
-        {
-            return Err("rotation gate is empty or names generation zero".to_string());
+    /// The newest generation the gate names. Reported through
+    /// [`PendingRotation::pending_generation`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn generation(&self) -> NonZeroU64 {
+        match self {
+            Self::Local(local) => local.generation(),
+            Self::Peer { generation } => *generation,
+            Self::LocalAndPeer {
+                local,
+                peer_generation,
+            } => local.generation().max(*peer_generation),
         }
-        Ok(())
     }
 
+    fn pending_state(&self) -> RotationPendingState {
+        match self {
+            Self::Local(LocalRotation::Candidate { generation, .. }) => {
+                RotationPendingState::Candidate {
+                    generation: generation.get(),
+                }
+            }
+            Self::Local(LocalRotation::Committed { generation, .. }) => {
+                RotationPendingState::LocalCommitted {
+                    generation: generation.get(),
+                }
+            }
+            Self::Peer { generation } => RotationPendingState::PeerCommitted {
+                generation: generation.get(),
+            },
+            Self::LocalAndPeer {
+                local: LocalRotation::Candidate { generation, .. },
+                peer_generation,
+            } => RotationPendingState::CandidateAndPeer {
+                candidate_generation: generation.get(),
+                peer_generation: peer_generation.get(),
+            },
+            Self::LocalAndPeer {
+                local: LocalRotation::Committed { generation, .. },
+                peer_generation,
+            } => RotationPendingState::LocalCommittedAndPeer {
+                local_generation: generation.get(),
+                peer_generation: peer_generation.get(),
+            },
+        }
+    }
+
+    /// Stage `mutation` as this device's rotation candidate, on whatever gate is
+    /// already open (`None` when none is).
     pub(crate) fn with_candidate(
-        mut self,
+        gate: Option<Self>,
         generation: u64,
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<Self, String> {
-        if generation == 0 {
+        let Some(generation) = NonZeroU64::new(generation) else {
             return Err("rotation candidate names generation zero".to_string());
-        }
+        };
         let candidate = LocalRotation::Candidate {
             generation,
             mutation,
         };
-        match self.local {
+        match gate.as_ref().and_then(Self::local) {
             Some(LocalRotation::Committed { .. }) => {
-                return Err("a committed local rotation already owns the gate".to_string())
+                Err("a committed local rotation already owns the gate".to_string())
             }
             Some(existing) if existing != candidate => {
-                return Err("another rotation candidate already owns the gate".to_string())
+                Err("another rotation candidate already owns the gate".to_string())
             }
-            Some(_) => {}
-            None => self.local = Some(candidate),
+            _ => Ok(Self::with_local(
+                candidate,
+                gate.as_ref().and_then(Self::peer),
+            )),
         }
-        self.validate()?;
-        Ok(self)
     }
 
+    /// Promote this device's staged candidate to its committed rotation.
     pub(crate) fn commit_candidate(
-        mut self,
+        gate: Option<Self>,
         generation: u64,
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<Self, String> {
+        let refusal = "rotation commit does not own the pending candidate gate";
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err(refusal.to_string());
+        };
         let committed = LocalRotation::Committed {
             generation,
             mutation,
         };
-        // Re-committing the rotation the gate already holds is the same fact
-        // arriving twice, not a second rotation.
-        if self.local == Some(committed) {
-            return Ok(self);
-        }
-        if self.local
+        let local = gate.as_ref().and_then(Self::local);
+        // The gate must hold this exact candidate — or already hold the commit,
+        // which is the same fact arriving twice rather than a second rotation.
+        if local
             != Some(LocalRotation::Candidate {
                 generation,
                 mutation,
             })
+            && local != Some(committed)
         {
-            return Err("rotation commit does not own the pending candidate gate".to_string());
+            return Err(refusal.to_string());
         }
-        self.local = Some(committed);
-        self.validate()?;
-        Ok(self)
+        Ok(Self::with_local(
+            committed,
+            gate.as_ref().and_then(Self::peer),
+        ))
     }
 
-    pub(crate) fn merge_peer_commit(mut self, generation: u64) -> Result<Self, String> {
-        if generation == 0 {
+    /// Record that the store committed `generation`. Forward-only: an older
+    /// generation never displaces a newer one already recorded.
+    pub(crate) fn merge_peer_commit(gate: Option<Self>, generation: u64) -> Result<Self, String> {
+        let Some(generation) = NonZeroU64::new(generation) else {
             return Err("committed rotation names generation zero".to_string());
-        }
-        if self
-            .peer_committed_generation
-            .is_none_or(|existing| generation > existing)
-        {
-            self.peer_committed_generation = Some(generation);
-        }
-        self.validate()?;
-        Ok(self)
+        };
+        let peer_generation = gate
+            .as_ref()
+            .and_then(Self::peer)
+            .map_or(generation, |recorded| recorded.max(generation));
+        Ok(match gate.as_ref().and_then(Self::local) {
+            Some(local) => Self::LocalAndPeer {
+                local,
+                peer_generation,
+            },
+            None => Self::Peer {
+                generation: peer_generation,
+            },
+        })
     }
 
     pub(crate) fn remove_candidate(
-        mut self,
+        self,
         generation: u64,
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<Option<Self>, String> {
-        if self.local
-            != Some(LocalRotation::Candidate {
-                generation,
-                mutation,
-            })
-        {
+        let lost = NonZeroU64::new(generation).map(|generation| LocalRotation::Candidate {
+            generation,
+            mutation,
+        });
+        if lost.is_none() || self.local() != lost {
             return Err("rotation loss does not own the pending candidate gate".to_string());
         }
-        self.local = None;
-        if self.peer_committed_generation.is_none() {
-            return Ok(None);
-        }
-        self.validate()?;
-        Ok(Some(self))
+        Ok(Self::from_parts(None, self.peer()))
     }
 
     pub(crate) fn replace_candidate_mutation(
-        mut self,
+        self,
         generation: u64,
         previous: crate::sync::store_commit::ObjectHash,
         replacement: crate::sync::store_commit::ObjectHash,
     ) -> Result<Self, String> {
-        if self.local
+        let refusal = "rotation candidate replacement lost its exact owner";
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err(refusal.to_string());
+        };
+        if self.local()
             != Some(LocalRotation::Candidate {
                 generation,
                 mutation: previous,
             })
         {
-            return Err("rotation candidate replacement lost its exact owner".to_string());
+            return Err(refusal.to_string());
         }
-        self.local = Some(LocalRotation::Candidate {
-            generation,
-            mutation: replacement,
-        });
-        self.validate()?;
-        Ok(self)
+        Ok(Self::with_local(
+            LocalRotation::Candidate {
+                generation,
+                mutation: replacement,
+            },
+            self.peer(),
+        ))
     }
 
     pub(crate) fn complete_local_adoption(
-        mut self,
+        self,
         generation: u64,
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<Option<Self>, String> {
-        match self.local {
+        match self.local() {
             Some(LocalRotation::Candidate { .. }) => {
                 return Err(
                     "rotation adoption cannot close while a candidate is pending".to_string(),
@@ -448,42 +504,28 @@ impl RotationGate {
             Some(LocalRotation::Committed {
                 generation: committed,
                 mutation: committed_mutation,
-            }) if committed == generation && committed_mutation == mutation => {
-                self.local = None;
-            }
+            }) if committed.get() == generation && committed_mutation == mutation => {}
             _ => return Err("rotation adoption does not own the committed gate".to_string()),
         }
-        if self
-            .peer_committed_generation
-            .is_some_and(|peer| peer <= generation)
-        {
-            self.peer_committed_generation = None;
-        }
-        if self.peer_committed_generation.is_none() {
-            return Ok(None);
-        }
-        self.validate()?;
-        Ok(Some(self))
+        // Adopting the local rotation adopts every peer generation it covers; a
+        // newer peer generation is a separate fact and stays.
+        Ok(Self::from_parts(
+            None,
+            self.peer().filter(|peer| peer.get() > generation),
+        ))
     }
 
     pub(crate) fn complete_peer_adoption(
-        mut self,
+        self,
         adopted_generation: u64,
     ) -> Result<Option<Self>, String> {
         if adopted_generation == 0 {
             return Err("adopted rotation names generation zero".to_string());
         }
-        if self
-            .peer_committed_generation
-            .is_some_and(|generation| generation <= adopted_generation)
-        {
-            self.peer_committed_generation = None;
-        }
-        if self.local.is_none() && self.peer_committed_generation.is_none() {
-            return Ok(None);
-        }
-        self.validate()?;
-        Ok(Some(self))
+        Ok(Self::from_parts(
+            self.local(),
+            self.peer().filter(|peer| peer.get() > adopted_generation),
+        ))
     }
 }
 
@@ -508,17 +550,11 @@ impl PendingRotation {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn mark_committed(&self, generation: u64) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
-        match gate.clone().merge_peer_commit(generation) {
-            Ok(next) => {
-                *recorded = Some(next);
-                Ok(())
-            }
-            Err(error) => {
-                *recorded = Some(gate);
-                Err(error)
-            }
-        }
+        *recorded = Some(RotationGate::merge_peer_commit(
+            recorded.clone(),
+            generation,
+        )?);
+        Ok(())
     }
 
     pub(crate) fn mark_candidate(
@@ -527,17 +563,12 @@ impl PendingRotation {
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
-        match gate.clone().with_candidate(generation, mutation) {
-            Ok(next) => {
-                *recorded = Some(next);
-                Ok(())
-            }
-            Err(error) => {
-                *recorded = Some(gate);
-                Err(error)
-            }
-        }
+        *recorded = Some(RotationGate::with_candidate(
+            recorded.clone(),
+            generation,
+            mutation,
+        )?);
+        Ok(())
     }
 
     pub(crate) fn mark_committed_mutation(
@@ -546,17 +577,12 @@ impl PendingRotation {
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        let gate = recorded.take().unwrap_or_else(RotationGate::empty);
-        match gate.clone().commit_candidate(generation, mutation) {
-            Ok(next) => {
-                *recorded = Some(next);
-                Ok(())
-            }
-            Err(error) => {
-                *recorded = Some(gate);
-                Err(error)
-            }
-        }
+        *recorded = Some(RotationGate::commit_candidate(
+            recorded.clone(),
+            generation,
+            mutation,
+        )?);
+        Ok(())
     }
 
     pub(crate) fn remove_candidate(
@@ -565,19 +591,11 @@ impl PendingRotation {
         mutation: crate::sync::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        let gate = recorded.take().ok_or_else(|| {
+        let gate = recorded.clone().ok_or_else(|| {
             "rotation candidate gate is absent during proven nonactivation".to_string()
         })?;
-        match gate.clone().remove_candidate(generation, mutation) {
-            Ok(next) => {
-                *recorded = next;
-                Ok(())
-            }
-            Err(error) => {
-                *recorded = Some(gate);
-                Err(error)
-            }
-        }
+        *recorded = gate.remove_candidate(generation, mutation)?;
+        Ok(())
     }
 
     pub(crate) fn replace_candidate_mutation(
@@ -587,22 +605,11 @@ impl PendingRotation {
         replacement: crate::sync::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
-        let gate = recorded.take().ok_or_else(|| {
+        let gate = recorded.clone().ok_or_else(|| {
             "rotation candidate gate is absent during candidate replacement".to_string()
         })?;
-        match gate
-            .clone()
-            .replace_candidate_mutation(generation, previous, replacement)
-        {
-            Ok(next) => {
-                *recorded = Some(next);
-                Ok(())
-            }
-            Err(error) => {
-                *recorded = Some(gate);
-                Err(error)
-            }
-        }
+        *recorded = Some(gate.replace_candidate_mutation(generation, previous, replacement)?);
+        Ok(())
     }
 
     /// The recorded committed generation, if any is pending — for status
@@ -613,19 +620,15 @@ impl PendingRotation {
             .read()
             .unwrap()
             .as_ref()
-            .and_then(RotationGate::generation)
+            .map(|gate| gate.generation().get())
     }
 
     pub(crate) fn gate(&self) -> Option<RotationGate> {
         self.0.read().unwrap().clone()
     }
 
-    pub(crate) fn install_durable_gate(&self, gate: Option<RotationGate>) -> Result<(), String> {
-        if let Some(gate) = &gate {
-            gate.validate()?;
-        }
+    pub(crate) fn install_durable_gate(&self, gate: Option<RotationGate>) {
         *self.0.write().unwrap() = gate;
-        Ok(())
     }
 
     /// Check `cipher` against the committed generation, if one is pending. A
@@ -637,11 +640,8 @@ impl PendingRotation {
             CloudCipher::Plaintext => return Ok(()),
         };
         if let Some(gate) = self.gate() {
-            let state = gate
-                .pending_state()
-                .expect("in-memory rotation gate must be validated before installation");
             return Err(RotationPending {
-                state,
+                state: gate.pending_state(),
                 live_generation,
             });
         }
@@ -666,9 +666,7 @@ pub async fn restore_pending_rotation(
                 "persisted rotation gate is invalid: {error}"
             ))
         })?;
-        pending_rotation
-            .install_durable_gate(Some(gate))
-            .map_err(crate::database::DbError::Message)?;
+        pending_rotation.install_durable_gate(Some(gate));
     }
     Ok(())
 }
@@ -2318,81 +2316,104 @@ mod tests {
         assert_eq!(cipher.open(stored, aad).unwrap(), plaintext);
     }
 
+    /// A committed local rotation is this device's own published fact. A peer
+    /// generation that happens to name the same number is not it, and cannot be
+    /// committed as though it were.
     #[test]
     fn peer_rotation_cannot_stand_in_for_the_exact_local_candidate() {
         let mutation = ObjectHash::digest(b"local rotation mutation");
-        let gate = RotationGate::empty()
-            .merge_peer_commit(2)
-            .expect("record peer rotation");
+        let gate = RotationGate::merge_peer_commit(None, 2).expect("record peer rotation");
 
-        assert!(gate.commit_candidate(2, mutation).is_err());
+        assert!(RotationGate::commit_candidate(Some(gate), 2, mutation).is_err());
     }
 
     #[test]
     fn local_adoption_cannot_close_another_local_rotation() {
         let adopted = ObjectHash::digest(b"adopted local rotation");
         let other = ObjectHash::digest(b"other local rotation");
-        let gate = RotationGate {
-            local: Some(LocalRotation::Committed {
-                generation: 3,
-                mutation: other,
-            }),
-            peer_committed_generation: None,
-        };
+        let gate = RotationGate::Local(LocalRotation::Committed {
+            generation: NonZeroU64::new(3).unwrap(),
+            mutation: other,
+        });
 
         assert!(gate.complete_local_adoption(2, adopted).is_err());
     }
 
-    /// A gate read back from `protocol_state` still has to name a rotation, and a
-    /// real one: generation zero is no generation. A gate holding both a candidate
-    /// and a committed local rotation needs no check — [`LocalRotation`] cannot
-    /// express it.
+    /// A gate reaches the type from its `protocol_state` row without passing
+    /// through any transition, so the refusals the transitions enforce have to
+    /// hold at parse. Naming no rotation, naming generation zero, and holding
+    /// both a candidate and a committed local rotation are all shapes the type
+    /// cannot express — deserializing one fails rather than yielding a gate.
     #[test]
-    fn rotation_gate_rejects_empty_and_generation_zero() {
-        assert!(RotationGate::empty().validate().is_err());
-        assert!(RotationGate {
-            local: None,
-            peer_committed_generation: Some(0),
+    fn a_persisted_gate_that_names_no_real_rotation_fails_to_parse() {
+        let mutation = serde_json::to_string(&ObjectHash::digest(b"rotation owner"))
+            .expect("serialize mutation");
+        let candidate = format!(r#"{{"generation":2,"mutation":{mutation}}}"#);
+        let zero = format!(r#"{{"generation":0,"mutation":{mutation}}}"#);
+        for encoded in [
+            // Names no rotation at all.
+            "{}".to_string(),
+            // Generation zero is no generation, local or peer.
+            r#"{"peer":{"generation":0}}"#.to_string(),
+            format!(r#"{{"local":{{"candidate":{zero}}}}}"#),
+            // A candidate and a committed local rotation at once — the shape the
+            // gate used to hold and a validator used to refuse.
+            format!(r#"{{"candidate":{candidate},"local_committed":{candidate}}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<RotationGate>(&encoded).is_err(),
+                "parsed a gate that names no real rotation: {encoded}",
+            );
         }
-        .validate()
-        .is_err());
-        assert!(RotationGate {
-            local: Some(LocalRotation::Candidate {
-                generation: 0,
-                mutation: ObjectHash::digest(b"rotation owner"),
-            }),
-            peer_committed_generation: None,
-        }
-        .validate()
-        .is_err());
+    }
+
+    /// The gate a round trip through `protocol_state` must survive: parsing what
+    /// the transitions produce yields the same gate.
+    #[test]
+    fn a_persisted_gate_round_trips() {
+        let mutation = ObjectHash::digest(b"round trip");
+        let gate = RotationGate::merge_peer_commit(
+            Some(RotationGate::with_candidate(None, 2, mutation).expect("stage candidate")),
+            3,
+        )
+        .expect("record peer rotation");
+        let encoded = serde_json::to_string(&gate).expect("serialize gate");
+        assert_eq!(
+            serde_json::from_str::<RotationGate>(&encoded).expect("parse gate"),
+            gate
+        );
+        assert_eq!(
+            gate.pending_state(),
+            RotationPendingState::CandidateAndPeer {
+                candidate_generation: 2,
+                peer_generation: 3,
+            }
+        );
     }
 
     #[test]
     fn local_adoption_clears_the_same_peer_fact_but_preserves_a_newer_one() {
         let mutation = ObjectHash::digest(b"local removal");
-        let committed = RotationGate::empty()
-            .with_candidate(2, mutation)
-            .unwrap()
-            .commit_candidate(2, mutation)
-            .unwrap();
+        let committed = RotationGate::commit_candidate(
+            Some(RotationGate::with_candidate(None, 2, mutation).unwrap()),
+            2,
+            mutation,
+        )
+        .unwrap();
         assert_eq!(
-            committed
-                .clone()
-                .merge_peer_commit(2)
+            RotationGate::merge_peer_commit(Some(committed.clone()), 2)
                 .unwrap()
                 .complete_local_adoption(2, mutation)
                 .unwrap(),
             None
         );
         assert_eq!(
-            committed
-                .merge_peer_commit(3)
+            RotationGate::merge_peer_commit(Some(committed), 3)
                 .unwrap()
                 .complete_local_adoption(2, mutation)
                 .unwrap()
                 .unwrap()
-                .pending_state()
-                .unwrap(),
+                .pending_state(),
             RotationPendingState::PeerCommitted { generation: 3 }
         );
     }

@@ -72,9 +72,7 @@ impl AuthorizedStore<'_> {
                             .complete_peer_rotation_adoption(live_keyring.current_generation())
                             .await
                             .map_err(AuthorizationRefreshError::Database)?;
-                        pending_rotation
-                            .install_durable_gate(gate)
-                            .map_err(AuthorizationRefreshError::InvalidState)?;
+                        pending_rotation.install_durable_gate(gate);
                     }
                     debug!("refresh: wrapped store key is already held by the live keyring");
                 } else {
@@ -83,9 +81,7 @@ impl AuthorizedStore<'_> {
                         .record_peer_rotation(merged.current_generation())
                         .await
                         .map_err(AuthorizationRefreshError::Database)?;
-                    pending_rotation
-                        .install_durable_gate(Some(gate))
-                        .map_err(AuthorizationRefreshError::InvalidState)?;
+                    pending_rotation.install_durable_gate(Some(gate));
                     match custody {
                         None => {
                             info!(
@@ -114,9 +110,7 @@ impl AuthorizedStore<'_> {
                                 .complete_peer_rotation_adoption(adopted_generation)
                                 .await
                                 .map_err(AuthorizationRefreshError::Database)?;
-                            pending_rotation
-                                .install_durable_gate(gate)
-                                .map_err(AuthorizationRefreshError::InvalidState)?;
+                            pending_rotation.install_durable_gate(gate);
                             info!(%fingerprint, "Adopted rotated store key");
                         }
                     }
