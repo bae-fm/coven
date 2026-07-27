@@ -236,12 +236,12 @@ impl StoreDatabase {
             return Ok(());
         };
         let existing = Self::load_rotation_gate_on(tx)?;
-        let gate = existing
-            .as_ref()
-            .map(|(_, gate)| gate.clone())
-            .unwrap_or_else(crate::sync::cloud_storage::RotationGate::empty)
-            .with_candidate(generation, mutation)
-            .map_err(DbError::Message)?;
+        let gate = crate::sync::cloud_storage::RotationGate::with_candidate(
+            existing.as_ref().map(|(_, gate)| gate.clone()),
+            generation,
+            mutation,
+        )
+        .map_err(DbError::Message)?;
         Self::replace_rotation_gate_on(tx, existing.as_ref(), Some(gate), "candidate staging")
     }
 
@@ -260,7 +260,6 @@ impl StoreDatabase {
             let gate =
                 serde_json::from_str::<crate::sync::cloud_storage::RotationGate>(&encoded)
                     .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
-            gate.validate().map_err(DbError::Message)?;
             Ok((encoded, gate))
         })
         .transpose()
@@ -322,12 +321,11 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?;
-                let next = existing
-                    .as_ref()
-                    .map(|(_, gate)| gate.clone())
-                    .unwrap_or_else(crate::sync::cloud_storage::RotationGate::empty)
-                    .merge_peer_commit(generation)
-                    .map_err(DbError::Message)?;
+                let next = crate::sync::cloud_storage::RotationGate::merge_peer_commit(
+                    existing.as_ref().map(|(_, gate)| gate.clone()),
+                    generation,
+                )
+                .map_err(DbError::Message)?;
                 Self::replace_rotation_gate_on(
                     &tx,
                     existing.as_ref(),
@@ -896,11 +894,12 @@ impl StoreDatabase {
         let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
             DbError::Message("rotation gate is absent during candidate activation".to_string())
         })?;
-        let gate = existing
-            .1
-            .clone()
-            .commit_candidate(generation, intent_hash)
-            .map_err(DbError::Message)?;
+        let gate = crate::sync::cloud_storage::RotationGate::commit_candidate(
+            Some(existing.1.clone()),
+            generation,
+            intent_hash,
+        )
+        .map_err(DbError::Message)?;
         Self::replace_rotation_gate_on(tx, Some(&existing), Some(gate), "membership activation")
     }
 
