@@ -23,12 +23,6 @@ const CIRCLE_ID_FOUNDER_DOMAIN: &str = "coven.circle-id-founder.v1";
 const CIRCLE_EPOCH_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-epoch-id-generation.v1\0";
 const ACCESS_LEAF_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-access-leaf-id-generation.v1\0";
 
-pub const CIRCLE_CONTROL_PREFIX: &str = "circle-control/";
-pub const CIRCLE_ROSTER_PREFIX: &str = "circles/";
-pub const CIRCLE_METADATA_PREFIX: &str = "circles/";
-pub const CIRCLE_ACCESS_LEAF_PREFIX: &str = "circles/";
-pub const CIRCLE_ACCESS_ENVELOPE_PREFIX: &str = "circles/";
-
 /// A self-certifying 128-bit circle identity encoded as canonical lowercase base32.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CircleId([u8; 16]);

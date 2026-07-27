@@ -356,52 +356,6 @@ impl StoreBatchCommit {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn signed_with_control(
-        store_root_hash: ObjectHash,
-        write_id: WriteId,
-        coord: StoreCommitCoord,
-        author_registration: StoreDeviceRegistrationRef,
-        author: &StoreDeviceRegistration,
-        order: StoreCommitOrder,
-        membership_state: StoreMembershipStateRef,
-        device_state: StoreDeviceStateRef,
-        membership_authority: StoreOperationMembershipAuthority,
-        control: Option<StoreControl>,
-        package: Option<StorePackageInput<'_>>,
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        Self::signed_operations(
-            store_root_hash,
-            write_id,
-            coord,
-            author_registration,
-            author,
-            order,
-            membership_state,
-            device_state,
-            membership_authority,
-            StoreCommitOperationsInput {
-                acknowledgement: None,
-                circle_acknowledgements: Vec::new(),
-                control,
-                device_join_attempt_decisions: Vec::new(),
-                device_join_outcomes: Vec::new(),
-                device_join_cleanup_receipts: Vec::new(),
-                provider_access_grants: Vec::new(),
-                provider_access_withdrawals: Vec::new(),
-                device_registrations: Vec::new(),
-                device_exclusion_proposals: Vec::new(),
-                device_exclusion_outcomes: Vec::new(),
-                stream_activations: Vec::new(),
-                circle_controls: Vec::new(),
-                store_package: package,
-                circle_packages: &[],
-            },
-            signer,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn signed_with_registrations(
         store_root_hash: ObjectHash,
         write_id: WriteId,

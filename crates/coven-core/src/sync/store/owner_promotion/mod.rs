@@ -6,7 +6,6 @@ mod error;
 mod finalization;
 mod journal;
 mod request;
-mod status;
 
 pub use error::OwnerPromotionError;
 pub(crate) use journal::{OwnerPromotionJournal, OwnerPromotionJournalTransition};

@@ -2283,12 +2283,6 @@ struct FounderRosterObjects {
     resolved: ResolvedCircleRoster,
 }
 
-struct PreparedAccessMaterial {
-    value: CircleAccessLeaf,
-    bytes: Vec<u8>,
-    leaf_hash: ObjectHash,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn prepare_access_material(
     store_root_hash: ObjectHash,
@@ -2304,7 +2298,7 @@ fn prepare_access_material(
     bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
     ids: &dyn crate::id_provider::IdProvider,
     signer: &UserKeypair,
-) -> Result<Vec<PreparedAccessMaterial>, CircleTransitionError> {
+) -> Result<Vec<PreparedAccessLeaf>, CircleTransitionError> {
     let author_pubkey = keys::public_key_hex(signer);
     store_members
         .iter()
@@ -2345,9 +2339,9 @@ fn prepare_access_material(
                 serde_json::to_vec(&value).expect("circle access serialization cannot fail");
             let bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
             let leaf_hash = ObjectHash::digest(&bytes);
-            Ok(PreparedAccessMaterial {
-                value,
+            Ok(PreparedAccessLeaf {
                 bytes,
+                value,
                 leaf_hash,
             })
         })
@@ -2359,7 +2353,7 @@ fn prepare_access_envelopes(
     candidate_family: super::store_commit::CandidateFamilyId,
     circle_id: CircleId,
     control: &PreparedCircleControl,
-    leaves: Vec<PreparedAccessMaterial>,
+    leaves: Vec<PreparedAccessLeaf>,
     proofs: Vec<Vec<MerkleStep>>,
     signer: &UserKeypair,
 ) -> Vec<PreparedCircleAccess> {
@@ -2386,14 +2380,7 @@ fn prepare_access_envelopes(
                 signature: String::new(),
             };
             envelope.signature = keys::sign_hex(signer, &envelope.canonical_bytes()).1;
-            PreparedCircleAccess {
-                leaf: PreparedAccessLeaf {
-                    bytes: leaf.bytes,
-                    value: leaf.value,
-                    leaf_hash: leaf.leaf_hash,
-                },
-                envelope,
-            }
+            PreparedCircleAccess { leaf, envelope }
         })
         .collect()
 }

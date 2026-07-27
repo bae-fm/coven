@@ -139,10 +139,6 @@ pub enum StoreProtocolError {
     },
 }
 
-pub fn protocol_prefix() -> &'static str {
-    STORE_PROTOCOL_PREFIX
-}
-
 pub fn store_protocol_root_logical_key() -> &'static str {
     STORE_PROTOCOL_ROOT_SEMANTIC_PATH
 }
@@ -209,12 +205,6 @@ pub fn provider_access_grant_semantic_prefix(
     grant_id: &crate::sync::provider::ProviderAccessGrantId,
 ) -> String {
     format!("{STORE_PROVIDER_ACCESS_GRANT_PREFIX}{}", grant_id.0)
-}
-
-pub fn provider_access_withdrawal_semantic_prefix(
-    grant_id: &crate::sync::provider::ProviderAccessGrantId,
-) -> String {
-    format!("{STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX}{}", grant_id.0)
 }
 
 pub fn owner_recovery_semantic_prefix(
@@ -299,10 +289,6 @@ pub fn head_slot_prefix(device_id: &str, seq: u64) -> String {
     format!("{STORE_HEAD_PREFIX}{device_id}/{seq}")
 }
 
-pub fn head_semantic_prefix(device_id: &str, seq: u64, head_hash: ObjectHash) -> String {
-    format!("{}/{head_hash}", head_slot_prefix(device_id, seq))
-}
-
 pub fn registration_slot_prefix(device_id: &str) -> String {
     format!("{STORE_DEVICE_REGISTRATION_PREFIX}{device_id}")
 }
@@ -323,24 +309,8 @@ pub fn ack_slot_prefix(device_id: &str, revision: u64) -> String {
     format!("{STORE_ACK_PREFIX}{device_id}/{revision}")
 }
 
-pub fn ack_semantic_prefix(device_id: &str, revision: u64, ack_hash: ObjectHash) -> String {
-    format!("{}/{ack_hash}", ack_slot_prefix(device_id, revision))
-}
-
 pub fn circle_ack_slot_prefix(circle_id: CircleId, device_id: &str, sequence: u64) -> String {
     format!("circles/{circle_id}/acks/{device_id}/{sequence}")
-}
-
-pub fn circle_ack_semantic_prefix(
-    circle_id: CircleId,
-    device_id: &str,
-    sequence: u64,
-    ack_hash: ObjectHash,
-) -> String {
-    format!(
-        "{}/{ack_hash}",
-        circle_ack_slot_prefix(circle_id, device_id, sequence)
-    )
 }
 
 pub fn circle_snapshot_slot_prefix(

@@ -458,15 +458,13 @@ async fn run_single_sync_cycle_with_authorization(
         Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
         Box::pin(reclaim_cycle_packages(device_id, user_keypair, post_pull)).await?;
     }
-    let core_status = super::status::build_sync_status(
-        &completed.store_pull.visible_heads,
-        device_id,
-        Some(&completed.sync_time),
-    );
     Ok(SyncCycleResult {
         changesets_applied: completed.store_pull.changesets_applied,
         held_positions: completed.store_pull.held_positions,
-        device_activity: core_status.other_devices,
+        device_activity: super::status::other_device_activity(
+            &completed.store_pull.visible_heads,
+            device_id,
+        ),
         sync_time: completed.sync_time,
         asset_downloads_failed: completed.store_pull.asset_downloads_failed,
         local_blob_cleanup_pending: completed.local_blob_cleanup_pending,

@@ -1,8 +1,7 @@
-/// Sync status derived from device heads.
-///
-/// After each pull, the caller has the full list of `DeviceHead`s. This
-/// module provides a type to summarize that into a human-readable status
-/// for the UI: when we last synced, and what other devices are doing.
+//! Per-device activity derived from the device heads a pull fetched: what every
+//! other device in the store has published, for a host to render "which devices
+//! synced, and how far".
+
 use super::store::VerifiedStoreDeviceHead;
 
 /// Activity summary for a single remote device.
@@ -12,32 +11,17 @@ pub struct DeviceActivity {
     /// Hex-encoded Ed25519 public key the device's head verified against — the
     /// member the device belongs to. Empty only for a head that carried no author.
     pub author: String,
+    /// The device's highest published head sequence.
     pub last_seq: u64,
-    /// RFC 3339 timestamp of the device's last sync. None if the head
-    /// carried no timestamp.
-    pub last_sync: Option<String>,
 }
 
-/// Sync status derived from the heads fetched during a pull.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncStatus {
-    /// When this device last synced (RFC 3339). None if never synced.
-    pub last_sync_time: Option<String>,
-    /// Activity of other devices.
-    pub other_devices: Vec<DeviceActivity>,
-}
-
-/// Build a `SyncStatus` from a list of device heads.
-///
-/// `our_device_id` identifies the local device so its head can be
-/// separated from the "other devices" list.
-/// `local_sync_time` is the RFC 3339 timestamp of when *we* last
-/// completed a sync cycle (tracked locally, not from the heads).
-pub fn build_sync_status(
+/// The activity of every device other than this one, read off the heads a pull
+/// fetched. `our_device_id` identifies the local device so its own head is left
+/// out; each remaining device is reported once, at its highest head sequence.
+pub fn other_device_activity(
     heads: &[VerifiedStoreDeviceHead],
     our_device_id: &str,
-    local_sync_time: Option<&str>,
-) -> SyncStatus {
+) -> Vec<DeviceActivity> {
     let mut other_devices: Vec<DeviceActivity> = Vec::new();
 
     for head in heads {
@@ -49,7 +33,6 @@ pub fn build_sync_status(
             device_id: head.author.device_id.to_string(),
             author: head.author.author_pubkey.clone(),
             last_seq: head.head.slot_sequence(),
-            last_sync: None,
         };
         match other_devices
             .iter_mut()
@@ -61,8 +44,5 @@ pub fn build_sync_status(
         }
     }
 
-    SyncStatus {
-        last_sync_time: local_sync_time.map(|s| s.to_string()),
-        other_devices,
-    }
+    other_devices
 }

@@ -88,7 +88,6 @@ mod ordered_map_entries {
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
 
-pub(crate) const STORE_PROTOCOL_PREFIX: &str = "store-v1/";
 pub const STORE_PROTOCOL_ROOT_SEMANTIC_PATH: &str = "store-v1/store-protocol-root";
 pub const STORE_PROTOCOL_ROOT_LOGICAL_KEY: &str = "store-v1/store-protocol-root.json";
 pub(crate) const STORE_CANDIDATE_PREFIX: &str = "store-v1/candidates/";
@@ -104,8 +103,6 @@ pub(crate) const STORE_DEVICE_EXCLUSION_PROPOSAL_PREFIX: &str =
 pub(crate) const STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX: &str =
     "store-v1/device-exclusion-outcomes/";
 pub(crate) const STORE_PROVIDER_ACCESS_GRANT_PREFIX: &str = "store-v1/provider-access/grants/";
-pub(crate) const STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX: &str =
-    "store-v1/provider-access/withdrawals/";
 pub(crate) const STORE_OWNER_RECOVERY_PREFIX: &str = "store-v1/recovery/";
 pub(crate) const STORE_SNAPSHOT_META_PREFIX: &str = "store-v1/snapshots/";
 pub(crate) const STORE_SNAPSHOT_IMAGE_PREFIX: &str = "store-v1/snapshot-images/";

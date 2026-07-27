@@ -70,18 +70,6 @@ trait AtomicChunkSource {
     async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error>;
 }
 
-struct PlaintextAtomicChunkSource<'a>(&'a mut dyn PlaintextChunkReader);
-
-#[async_trait]
-impl AtomicChunkSource for PlaintextAtomicChunkSource<'_> {
-    type Error = PlaintextChunkError;
-
-    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error> {
-        let chunk = self.0.next_chunk(1 << 20).await?;
-        Ok((!chunk.is_empty()).then(|| Bytes::from(chunk)))
-    }
-}
-
 struct ByteStreamAtomicChunkSource<E> {
     stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
 }
@@ -669,19 +657,6 @@ async fn copy_open_file_atomic_with_facts(
     Ok(facts)
 }
 
-pub async fn write_stream_atomic(
-    path: &Path,
-    source: &mut dyn PlaintextChunkReader,
-) -> Result<u64, StreamWriteError> {
-    let mut source = PlaintextAtomicChunkSource(source);
-    write_atomic_chunks(path, &mut source)
-        .await
-        .map_err(|error| match error {
-            AtomicChunkWriteError::Source(error) => StreamWriteError::Source(error),
-            AtomicChunkWriteError::Local(error) => StreamWriteError::Local(error),
-        })
-}
-
 pub async fn write_byte_stream_atomic<E: Send>(
     path: &Path,
     stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
@@ -944,33 +919,10 @@ fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
-
-    struct ChunkSource {
-        chunks: VecDeque<Result<Vec<u8>, PlaintextChunkError>>,
-    }
-
-    impl ChunkSource {
-        fn new(chunks: impl IntoIterator<Item = Result<Vec<u8>, PlaintextChunkError>>) -> Self {
-            Self {
-                chunks: chunks.into_iter().collect(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl PlaintextChunkReader for ChunkSource {
-        async fn next_chunk(&mut self, _max: usize) -> Result<Vec<u8>, PlaintextChunkError> {
-            match self.chunks.pop_front() {
-                Some(chunk) => chunk,
-                None => Ok(Vec::new()),
-            }
-        }
-    }
 
     struct WarningSubscriber {
         warnings: Arc<AtomicUsize>,
@@ -1262,70 +1214,6 @@ mod tests {
         assert_eq!(sync_count.load(Ordering::SeqCst), 2);
         assert!(!destination.exists());
         assert!(!staged_path.exists());
-    }
-
-    #[tokio::test]
-    async fn streamed_write_commits_all_chunks() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let path = tmp.path().join("streamed.bin");
-        let mut source = ChunkSource::new([
-            Ok(b"first ".to_vec()),
-            Ok(b"second".to_vec()),
-            Ok(Vec::new()),
-        ]);
-
-        let written = write_stream_atomic(&path, &mut source)
-            .await
-            .expect("stream write");
-
-        assert_eq!(written, 12);
-        assert_eq!(
-            read(&path).await.expect("read streamed file"),
-            b"first second"
-        );
-        let mut reader = open_reader(&path).await.expect("open streamed file");
-        assert_eq!(
-            reader.next_chunk(6).await.expect("read first chunk"),
-            b"first "
-        );
-        assert_eq!(
-            reader.next_chunk(6).await.expect("read second chunk"),
-            b"second"
-        );
-        assert!(reader
-            .next_chunk(6)
-            .await
-            .expect("read end of streamed file")
-            .is_empty());
-        assert!(temp_entries(tmp.path()).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn streamed_source_failure_preserves_destination_and_removes_temp() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let path = tmp.path().join("streamed.bin");
-        write_atomic(&path, b"committed")
-            .await
-            .expect("seed destination");
-        let mut source = ChunkSource::new([
-            Ok(b"partial".to_vec()),
-            Err(PlaintextChunkError::InvalidContent(
-                "source failed".to_string(),
-            )),
-        ]);
-
-        let error = write_stream_atomic(&path, &mut source)
-            .await
-            .expect_err("source failure");
-
-        assert_eq!(
-            error,
-            StreamWriteError::Source(PlaintextChunkError::InvalidContent(
-                "source failed".to_string(),
-            ))
-        );
-        assert_eq!(read(&path).await.expect("read destination"), b"committed");
-        assert!(temp_entries(tmp.path()).await.is_empty());
     }
 
     #[tokio::test]

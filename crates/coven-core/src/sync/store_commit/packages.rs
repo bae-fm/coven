@@ -385,37 +385,6 @@ pub struct OwnerPromotionAcceptance {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum OwnerPromotionStatus {
-    Preparing {
-        member_registration: StoreDeviceRegistrationRef,
-    },
-    RequestPending {
-        request: OwnerPromotionRequest,
-    },
-    AwaitingAcceptance {
-        request: OwnerPromotionRequest,
-        activation: OwnerPromotionRequestActivation,
-    },
-    AcceptanceReady {
-        acceptance: OwnerPromotionAcceptance,
-    },
-    FinalizationPending {
-        acceptance: OwnerPromotionAcceptance,
-    },
-    Finalized {
-        membership: StoreMembershipStateRef,
-    },
-    Nonactivated {
-        request: OwnerPromotionRequest,
-    },
-    Stale {
-        acceptance: OwnerPromotionAcceptance,
-        reason: OwnerPromotionStaleReason,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerPromotionStaleReason {
     MergeFinalizationPointOccupied { winner: MembershipHeadRef },
     MergeActivationRejected,

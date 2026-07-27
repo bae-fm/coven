@@ -16,8 +16,7 @@ use super::store_commit::{
     device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
     device_join_outcome_semantic_prefix, founder_registration_semantic_prefix, head_slot_prefix,
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix,
-    package_semantic_prefix, provider_access_grant_semantic_prefix,
-    provider_access_withdrawal_semantic_prefix, registration_semantic_prefix,
+    package_semantic_prefix, provider_access_grant_semantic_prefix, registration_semantic_prefix,
     store_protocol_root_logical_key, CirclePackageRef, DeviceJoinAttempt, DeviceJoinAttemptRef,
     DeviceJoinOutcome, DeviceJoinOutcomeRef, ObjectHash, OwnerRecoveryNode, OwnerRecoveryNodeRef,
     StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
@@ -61,23 +60,6 @@ pub struct VerifiedReclaimReceipt {
     pub executor: StoreDeviceRegistration,
 }
 
-pub async fn load_provider_access_grant_ref(
-    storage: &dyn SyncStorage,
-    store_root: &StoreRootRef,
-    reference: &super::provider::StoreMemberProviderAccessGrantRef,
-    administrator: &StoreDeviceRegistration,
-) -> Result<VerifiedObject<super::provider::StoreMemberProviderAccessGrant>, StoreObjectError> {
-    let verified_root = load_store_protocol_root(storage, store_root).await?;
-    load_provider_access_grant_ref_with_root(
-        storage,
-        store_root,
-        &verified_root.value,
-        reference,
-        administrator,
-    )
-    .await
-}
-
 pub(crate) fn load_provider_access_grant_ref_with_root<'a>(
     storage: &'a dyn SyncStorage,
     store_root: &'a StoreRootRef,
@@ -113,42 +95,6 @@ pub(crate) fn load_provider_access_grant_ref_with_root<'a>(
         )
         .await
     })
-}
-
-pub async fn load_provider_access_withdrawal_ref(
-    storage: &dyn SyncStorage,
-    store_root: &StoreRootRef,
-    reference: &super::provider::StoreMemberProviderAccessWithdrawalReceiptRef,
-    administrator: &StoreDeviceRegistration,
-) -> Result<
-    VerifiedObject<super::provider::StoreMemberProviderAccessWithdrawalReceipt>,
-    StoreObjectError,
-> {
-    let context = ProtocolObjectContext::signed_plaintext(
-        store_root.store_root_hash,
-        ProtocolObjectDomain::ProviderAccessWithdrawal,
-    );
-    let semantic_prefix = provider_access_withdrawal_semantic_prefix(&reference.grant_id);
-    let expected = reference.clone();
-    let administrator = administrator.clone();
-    load_exact_object(
-        storage,
-        &context,
-        &reference.object,
-        &semantic_prefix,
-        reference.receipt_hash,
-        move |bytes| {
-            let receipt: super::provider::StoreMemberProviderAccessWithdrawalReceipt =
-                serde_json::from_slice(bytes)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            expected
-                .verify(&receipt)
-                .and_then(|()| receipt.verify(&administrator))
-                .map_err(|_| StoreProtocolError::ProviderAccessMismatch)?;
-            Ok(receipt)
-        },
-    )
-    .await
 }
 
 #[derive(Debug, thiserror::Error)]

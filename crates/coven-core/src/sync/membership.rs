@@ -1364,18 +1364,6 @@ impl MembershipChain {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn from_entries_with_coords(
-        entries: Vec<(MembershipCoord, MembershipEntry)>,
-    ) -> Result<Self, MembershipError> {
-        let values = entries
-            .iter()
-            .map(|(_, entry)| entry.clone())
-            .collect::<Vec<_>>();
-        let provider_admin = test_provider_admin_genesis(&values)?;
-        Self::from_entries_with_coords_and_provider_admin(entries, provider_admin)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn from_entries_with_coords_and_heads(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
         heads: Vec<(MembershipHeadRef, AuthorHead)>,
@@ -1813,14 +1801,6 @@ impl MembershipChain {
             .any(|(_, record)| record.role.is_owner())
     }
 
-    pub fn authorizes_write_at(&self, coord: &MembershipCoord, pubkey: &str) -> bool {
-        self.active_grants_for(pubkey).iter().any(|(_, record)| {
-            record.role.can_write()
-                && record.creation_authority
-                    == MembershipGrantCreationAuthority::Entry(coord.clone())
-        })
-    }
-
     pub fn authorizes_write_authority(
         &self,
         authority: &MembershipGrantCreationAuthority,
@@ -1948,16 +1928,6 @@ impl MembershipChain {
             .into_iter()
             .next()
             .and_then(|(_, record)| record.provider_account_email.as_deref())
-    }
-
-    pub fn write_grant_coord(&self, pubkey: &str) -> Option<MembershipCoord> {
-        self.active_grants_for(pubkey)
-            .into_iter()
-            .find(|(_, record)| record.role.can_write())
-            .and_then(|(_, record)| match &record.creation_authority {
-                MembershipGrantCreationAuthority::Entry(coord) => Some(coord.clone()),
-                MembershipGrantCreationAuthority::ConflictResolution(_) => None,
-            })
     }
 
     pub fn write_grant_authority(&self, pubkey: &str) -> Option<MembershipGrantCreationAuthority> {
@@ -4050,12 +4020,6 @@ fn map_store_causal_error(error: CausalGrantError<MembershipCoord>) -> Membershi
             MembershipError::RevocationCycleTooWide { sources, maximum }
         }
     }
-}
-
-pub fn derive_founder_grant_id(store_id: &str, owner_pubkey: &str) -> MembershipGrantId {
-    MembershipGrantId(ObjectHash::digest(
-        format!("coven.membership-founder-grant.v1\0{store_id}\0{owner_pubkey}").as_bytes(),
-    ))
 }
 
 pub(crate) fn derive_founder_stream_id(store_id: &str, owner_pubkey: &str) -> AuthorStreamId {

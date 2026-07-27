@@ -555,23 +555,6 @@ impl SealedBlobOpener {
         }
         Ok(plaintext)
     }
-
-    /// Serve plaintext `start..end` from exactly the sealed bytes of the chunks
-    /// covering it. Deriving the chunk set here rather than taking it means the
-    /// bytes fetched and the bytes opened cannot disagree.
-    pub fn open_range(
-        &self,
-        sealed: &[u8],
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<u8>, SealedBlobError> {
-        let chunks = self.header.covering_chunks(start, end)?;
-        let window = self.header.plaintext_span(chunks.clone());
-        let plaintext = self.open_chunks(chunks, sealed)?;
-        let from = (start - window.start) as usize;
-        let to = (end - window.start) as usize;
-        Ok(plaintext[from..to].to_vec())
-    }
 }
 
 #[derive(Error, Debug)]

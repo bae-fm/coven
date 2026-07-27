@@ -14,7 +14,6 @@ use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::migration::Migration;
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
-use crate::sync::membership::{MembershipChain, MembershipEntry};
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::ProtocolObjectDomain;
 use crate::sync::store_commit::ObjectHash;
@@ -970,17 +969,6 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
     .map_err(DbError::from)
 }
 
-pub fn test_sync_routing_hash() -> crate::sync::store_commit::ObjectHash {
-    let conn = Connection::open_in_memory().expect("open schema-contract database");
-    create_synced_schema(&conn).expect("create schema-contract tables");
-    crate::sync::routing_contract::SyncRoutingContract::from_connection(
-        &conn,
-        &test_synced_tables(),
-    )
-    .expect("resolve test sync-schema contract")
-    .hash()
-}
-
 /// Open a [`Database`] over a fresh in-memory connection with the synthetic test
 /// schema and the [`test_synced_tables`] synced set. The returned stamper is
 /// dropped (tests stamp `_updated_at` literally in their SQL).
@@ -1227,11 +1215,6 @@ pub async fn load_exact_materialized_commit(
     .await
     .map_err(|error| error.to_string())?;
     Ok(Some((reference, commit)))
-}
-
-/// A membership chain rooted at the exact founder entry carried by Store protocol root.
-pub fn bootstrap_chain(founder: MembershipEntry) -> MembershipChain {
-    MembershipChain::from_entries(vec![founder]).unwrap()
 }
 
 pub async fn create_exact_test_store(
@@ -2084,10 +2067,6 @@ impl TestStore {
             UserKeypair::generate(),
         ))
         .await
-    }
-
-    pub async fn with_keypair(signer: UserKeypair) -> Self {
-        Box::pin(Self::with_store_and_keypair("test-store", signer)).await
     }
 
     pub async fn with_store_and_keypair(store_id: &str, signer: UserKeypair) -> Self {

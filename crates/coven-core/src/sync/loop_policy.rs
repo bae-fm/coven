@@ -177,7 +177,6 @@ mod tests {
                 device_id: format!("dev-{i}"),
                 author: format!("author-{i}"),
                 last_seq: i as u64,
-                last_sync: Some("2026-07-03T00:00:00Z".to_string()),
             })
             .collect()
     }

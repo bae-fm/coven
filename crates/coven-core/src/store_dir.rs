@@ -248,30 +248,6 @@ impl StoreDir {
         Ok(format!("{namespace}/{uploader}/{}", Self::id_shard(id)?))
     }
 
-    /// Parse a hashed blob cloud key `{namespace}/{uploader}/{ab}/{cd}/{id}` back
-    /// into `(namespace, uploader, id)`, or `None` when it is not one — a wrong
-    /// segment count, or a shard that does not rebuild (e.g. a plain
-    /// `{namespace}/{cloud_path}` key that happens to have five segments). The
-    /// inverse of [`Self::uploader_hashed_key`], and the single place the layout is
-    /// parsed, shared by the GC, the blob→row lookup, and share authorization.
-    pub fn parse_uploader_hashed_key(cloud_key: &str) -> Option<(String, String, String)> {
-        let mut parts = cloud_key.split('/');
-        let namespace = parts.next()?;
-        let uploader = parts.next()?;
-        let _ab = parts.next()?;
-        let _cd = parts.next()?;
-        let id = parts.next()?;
-        if parts.next().is_some() {
-            return None;
-        }
-        match Self::uploader_hashed_key(namespace, uploader, id) {
-            Ok(rebuilt) if rebuilt == cloud_key => {
-                Some((namespace.to_string(), uploader.to_string(), id.to_string()))
-            }
-            _ => None,
-        }
-    }
-
     pub fn storage_dir(&self) -> PathBuf {
         self.path.join("storage")
     }

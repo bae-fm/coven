@@ -2239,24 +2239,6 @@ pub async fn complete_cross_principal_probe(
     Ok(receipt)
 }
 
-pub async fn cleanup_published_cross_principal_challenge(
-    administrator: &dyn ExactSlotStorage,
-    challenge: &CrossPrincipalProbeChallenge,
-    context: &CrossPrincipalChallengeContext,
-    store: &StoreProviderBinding,
-    administrator_signing_pubkey: &str,
-) -> Result<(), ProviderProbeError> {
-    challenge.verify(context, store, administrator_signing_pubkey)?;
-    let live = administrator
-        .provider_binding()
-        .await
-        .map_err(StorageError::from)?;
-    if live.store != *store || live.device != context.administrator_binding {
-        return invalid("cross-principal administrator does not match challenge cleanup");
-    }
-    cleanup_exact_slot(administrator, &challenge.administrator_object.slot).await
-}
-
 async fn advance_cross_completion(
     journal: &dyn ProviderProbeJournal,
     durable: &mut ProviderProbeJournalRecord,

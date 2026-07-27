@@ -9,7 +9,7 @@ use crate::sync::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionFinalization, OwnerPromotionId,
     OwnerPromotionRequest, OwnerPromotionRequestActivation, OwnerPromotionStaleReason,
-    OwnerPromotionStatus, StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
+    StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
 };
 use crate::sync::wrapped_store_key::PreparedWrappedStoreKey;
 
@@ -466,53 +466,6 @@ impl OwnerPromotionJournal {
             },
             state,
         ))
-    }
-
-    pub(super) fn status(&self) -> OwnerPromotionStatus {
-        match &self.state {
-            OwnerPromotionJournalState::Allocated => OwnerPromotionStatus::Preparing {
-                member_registration: self.target.clone(),
-            },
-            OwnerPromotionJournalState::RequestPrepared { request, .. } => {
-                OwnerPromotionStatus::RequestPending {
-                    request: request.clone(),
-                }
-            }
-            OwnerPromotionJournalState::AwaitingAcceptance {
-                request,
-                activation,
-            } => OwnerPromotionStatus::AwaitingAcceptance {
-                request: request.clone(),
-                activation: activation.clone(),
-            },
-            OwnerPromotionJournalState::AcceptanceReady { acceptance } => {
-                OwnerPromotionStatus::AcceptanceReady {
-                    acceptance: acceptance.clone(),
-                }
-            }
-            OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
-            | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. } => {
-                OwnerPromotionStatus::FinalizationPending {
-                    acceptance: acceptance.clone(),
-                }
-            }
-            OwnerPromotionJournalState::Finalized { membership, .. } => {
-                OwnerPromotionStatus::Finalized {
-                    membership: membership.clone(),
-                }
-            }
-            OwnerPromotionJournalState::Nonactivated { request, .. } => {
-                OwnerPromotionStatus::Nonactivated {
-                    request: request.clone(),
-                }
-            }
-            OwnerPromotionJournalState::Stale {
-                acceptance, reason, ..
-            } => OwnerPromotionStatus::Stale {
-                acceptance: acceptance.clone(),
-                reason: reason.clone(),
-            },
-        }
     }
 
     fn validate_contents(&self) -> Result<(), OwnerPromotionError> {

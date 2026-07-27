@@ -251,21 +251,6 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    pub fn make_remote_intent_retain_pinned(
-        conn: &Connection,
-        root_table: &str,
-        root_id: &str,
-    ) -> Result<Option<bool>, DbError> {
-        conn.query_row(
-            "SELECT retain_pinned FROM blob_make_remote_intents
-             WHERE root_table = ?1 AND root_id = ?2",
-            (root_table, root_id),
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DbError::from)
-    }
-
     /// The user's own file behind a row's blob, or `None` when the row has no
     /// external registration.
     ///

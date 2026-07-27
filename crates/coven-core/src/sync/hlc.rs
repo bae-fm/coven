@@ -280,15 +280,6 @@ impl UpdatedAtStamper {
     pub fn stamp(&self) -> String {
         self.hlc.now().to_string()
     }
-
-    /// A standalone stamper over a fresh in-memory HLC, for tests that need a
-    /// real stamper without opening coven. Not for production — production
-    /// stampers come from the open path so they share the seeded, pull-advanced
-    /// clock.
-    #[cfg(feature = "test-utils")]
-    pub fn for_test() -> Self {
-        Self::new(Arc::new(Hlc::new("test-device".to_string())))
-    }
 }
 
 /// The OS wall clock in epoch milliseconds — the same physical source [`Hlc`]
