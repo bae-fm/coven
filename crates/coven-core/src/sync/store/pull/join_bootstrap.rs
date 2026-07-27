@@ -130,8 +130,6 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
             })?;
-            let authority =
-                RegistrationPredecessorAuthority(&verified_commit.predecessor_membership);
             let (authorized_predecessor, recovery_author) =
                 predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
                     .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -154,7 +152,7 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
                 root,
                 &commit,
                 &authorized_predecessor,
-                carries_lifecycle.then_some(&authority),
+                carries_lifecycle.then_some(&verified_commit.predecessor_membership),
             )
             .await
             .map_err(|error| match error {

@@ -292,8 +292,6 @@ async fn resolve_candidate_device_operations(
                         .to_string(),
                 ));
             }
-            let authority =
-                RegistrationPredecessorAuthority(&merge_candidate.predecessor_membership);
             let resolver = DeviceStateResolver::Database(database);
             load_commit_device_operations(
                 Some(&resolver),
@@ -301,7 +299,7 @@ async fn resolve_candidate_device_operations(
                 root,
                 &candidate.commit,
                 &state,
-                Some(&authority),
+                Some(&merge_candidate.predecessor_membership),
             )
             .await
             .map_err(|error| match error {

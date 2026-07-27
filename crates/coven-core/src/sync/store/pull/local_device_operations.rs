@@ -22,7 +22,6 @@ pub(crate) async fn load_local_commit_device_operations(
         ));
     }
     verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
-    let authority = RegistrationPredecessorAuthority(membership);
     let resolver = DeviceStateResolver::Database(database);
     Box::pin(load_commit_device_operations(
         Some(&resolver),
@@ -30,7 +29,7 @@ pub(crate) async fn load_local_commit_device_operations(
         root,
         commit,
         &state,
-        Some(&authority),
+        Some(membership),
     ))
     .await
     .map_err(|error| match error {

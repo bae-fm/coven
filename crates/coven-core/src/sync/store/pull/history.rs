@@ -1218,7 +1218,6 @@ async fn verify_merge_history_refs_impl(
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
-        let authority = RegistrationPredecessorAuthority(&membership);
         let (authorized_predecessor, recovery_author) =
             predecessor_with_recovery_author(predecessor_state.clone(), &commit, &registrations)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -1240,7 +1239,7 @@ async fn verify_merge_history_refs_impl(
             root,
             &commit,
             &authorized_predecessor,
-            Some(&authority),
+            Some(&membership),
         ))
         .await
         .map_err(|error| match error {

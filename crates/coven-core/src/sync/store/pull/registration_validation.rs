@@ -16,14 +16,13 @@ pub(super) async fn load_merge_commit_registrations(
         super::device_join_attempt::verify_commit_join_evidence(commit, loaded, accepted)
             .await
             .map_err(registration_attempt_error)?;
-    let predecessor = RegistrationPredecessorAuthority(predecessor_membership);
     load_commit_registrations_with_root(
         storage,
         root,
         root_value,
         commit,
         activating_author,
-        Some(&predecessor),
+        Some(predecessor_membership),
         &join_evidence,
     )
     .await

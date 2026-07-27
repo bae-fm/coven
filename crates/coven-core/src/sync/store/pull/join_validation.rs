@@ -5,14 +5,14 @@ pub(super) async fn validate_commit_join_abandonments(
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
             "device join abandonment activation has no exact predecessor authority".to_string(),
         )
     })?;
-    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
             "device join abandonment activation author is not an active Owner".to_string(),
         ));
@@ -291,7 +291,7 @@ pub(crate) async fn load_commit_join_evidence(
 
 pub(super) fn validate_commit_join_cleanup_receipts(
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
@@ -299,7 +299,7 @@ pub(super) fn validate_commit_join_cleanup_receipts(
             "device join cleanup activation has no exact predecessor authority".to_string(),
         )
     })?;
-    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
             "device join cleanup activation author is not an active Owner".to_string(),
         ));
@@ -311,7 +311,8 @@ pub(super) fn validate_commit_join_cleanup_receipts(
             )
         })?;
         let expected_administrator = &attempt.provider_approval.request.offer.provider_admin;
-        if !predecessor.verifies_provider_administrator(
+        if !predecessor_verifies_provider_administrator(
+            predecessor,
             &loaded.receipt.provider_admin_grant,
             &loaded.receipt.executor,
             expected_administrator,
@@ -331,7 +332,7 @@ pub(super) async fn validate_commit_join_outcomes(
     root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<
     BTreeMap<super::store_commit::DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
@@ -342,7 +343,7 @@ pub(super) async fn validate_commit_join_outcomes(
             "device join outcome activation has no exact predecessor authority".to_string(),
         )
     })?;
-    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
             "device join outcome activation author is not an active Owner at its predecessor"
                 .to_string(),
@@ -426,7 +427,7 @@ pub(super) async fn validate_commit_join_outcomes(
 pub(super) fn validate_commit_join_attempts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
@@ -435,7 +436,7 @@ pub(super) fn validate_commit_join_attempts(
                 .to_string(),
         )
     })?;
-    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
             "device join attempt activation author is not an active Owner at its predecessor"
                 .to_string(),
@@ -461,7 +462,8 @@ pub(super) fn validate_commit_join_attempts(
         if attempt.owner_registration != commit.author_registration
             || attempt.membership != commit.membership_state
             || attempt.bootstrap_cut != bootstrap_cut
-            || !predecessor.verifies_owner(
+            || !predecessor_verifies_owner(
+                predecessor,
                 &attempt.membership,
                 &activating_author.author_pubkey,
                 &attempt.owner_grant,
@@ -482,13 +484,13 @@ pub(crate) async fn registration_activation(
     activated: &ActivatedStoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     activating_author: &StoreDeviceRegistration,
-    predecessor: &RegistrationPredecessorAuthority<'_>,
+    predecessor: &MembershipChain,
     verified_join_outcomes: &BTreeMap<
         super::store_commit::DeviceJoinOutcomeRef,
         VerifiedCommitJoinOutcome,
     >,
 ) -> Result<StoreDeviceRegistrationActivation, RegistrationLoadError> {
-    if !predecessor.verifies_active_owner(&activating_author.author_pubkey) {
+    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
         return Err(RegistrationLoadError::Invalid(
             "registration activation commit author is not an active Owner at its predecessor"
                 .to_string(),
@@ -515,7 +517,8 @@ pub(crate) async fn registration_activation(
             let owner = &verified.owner;
             if attempt.expected_registration != *registration
                 || attempt.registration_slot != *activated.registration.object.slot()
-                || !predecessor.verifies_owner(
+                || !predecessor_verifies_owner(
+                    predecessor,
                     &attempt.membership,
                     &owner.author_pubkey,
                     &attempt.owner_grant,
@@ -594,7 +597,8 @@ pub(crate) async fn registration_activation(
                 || node_value.readiness.registration != activated.registration
                 || node_value.next_slot == *node.object.slot()
                 || registration.author_pubkey != node_value.owner_pubkey
-                || !predecessor.verifies_owner(
+                || !predecessor_verifies_owner(
+                    predecessor,
                     &node_value.membership,
                     &node_value.owner_pubkey,
                     &node_value.owner_grant,

@@ -24,69 +24,57 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
     }
 }
 
-pub(crate) struct RegistrationPredecessorAuthority<'a>(pub(crate) &'a MembershipChain);
+fn predecessor_provider_admin_state(
+    predecessor: &MembershipChain,
+) -> Option<&super::provider::ProviderAdminState> {
+    let super::membership::MembershipStatus::Resolved(resolved) = predecessor.status() else {
+        return None;
+    };
+    Some(resolved.provider_admin.combined_state())
+}
 
-impl RegistrationPredecessorAuthority<'_> {
-    fn provider_admin_state(&self) -> Option<&super::provider::ProviderAdminState> {
-        {
-            let chain = self.0;
-            let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
-                return None;
-            };
-            Some(resolved.provider_admin.combined_state())
-        }
-    }
+pub(crate) fn predecessor_verifies_owner(
+    predecessor: &MembershipChain,
+    membership: &StoreMembershipStateRef,
+    owner_pubkey: &str,
+    owner_grant: &super::membership::MembershipGrantId,
+) -> bool {
+    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
+        return false;
+    };
+    StoreMembershipStateRef::from_parts(
+        predecessor.head_refs().to_vec(),
+        predecessor.resolution_refs().to_vec(),
+        membership.recovery().to_vec(),
+        resolved.state_hash,
+    )
+    .is_ok_and(|expected| membership == &expected)
+        && predecessor.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
+}
 
-    pub(crate) fn verifies_owner(
-        &self,
-        membership: &StoreMembershipStateRef,
-        owner_pubkey: &str,
-        owner_grant: &super::membership::MembershipGrantId,
-    ) -> bool {
-        {
-            let chain = self.0;
-            let MembershipStatus::Resolved(resolved) = chain.status() else {
-                return false;
-            };
-            StoreMembershipStateRef::from_parts(
-                chain.head_refs().to_vec(),
-                chain.resolution_refs().to_vec(),
-                membership.recovery().to_vec(),
-                resolved.state_hash,
-            )
-            .is_ok_and(|expected| membership == &expected)
-                && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
-        }
-    }
+pub(crate) fn predecessor_verifies_provider_administrator(
+    predecessor: &MembershipChain,
+    grant_id: &super::provider::ProviderAdminGrantId,
+    executor: &StoreDeviceRegistrationRef,
+    expected: &super::provider::ProviderAdminGrantRecord,
+) -> bool {
+    let Some(state) = predecessor_provider_admin_state(predecessor) else {
+        return false;
+    };
+    state.authorizes(grant_id, executor)
+        && state
+            .records()
+            .get(grant_id)
+            .is_some_and(|record| record == expected)
+}
 
-    pub(crate) fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
-        self.0.is_owner_now(owner_pubkey)
-    }
-
-    pub(crate) fn verifies_provider_administrator(
-        &self,
-        grant_id: &super::provider::ProviderAdminGrantId,
-        executor: &StoreDeviceRegistrationRef,
-        expected: &super::provider::ProviderAdminGrantRecord,
-    ) -> bool {
-        let Some(state) = self.provider_admin_state() else {
-            return false;
-        };
-        state.authorizes(grant_id, executor)
-            && state
-                .records()
-                .get(grant_id)
-                .is_some_and(|record| record == expected)
-    }
-
-    fn verifies_provider_administrator_grant(
-        &self,
-        grant_id: &super::provider::ProviderAdminGrantId,
-        executor: &StoreDeviceRegistrationRef,
-    ) -> bool {
-        self.provider_admin_state()
-            .is_some_and(|state| state.authorizes(grant_id, executor))
-    }
+fn predecessor_verifies_provider_administrator_grant(
+    predecessor: &MembershipChain,
+    grant_id: &super::provider::ProviderAdminGrantId,
+    executor: &StoreDeviceRegistrationRef,
+) -> bool {
+    predecessor_provider_admin_state(predecessor)
+        .is_some_and(|state| state.authorizes(grant_id, executor))
 }
 
 pub(crate) struct LoadedDeviceJoinCleanupActivation {
@@ -272,7 +260,7 @@ async fn validate_commit_reclaim_authorization(
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimAuthorizationRef,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -285,7 +273,8 @@ async fn validate_commit_reclaim_authorization(
     let evidence = &opened.evidence.value;
     let authorization = &opened.authorization.value;
     let owner_authorized = authorization.authority.membership == commit.membership_state
-        && predecessor.verifies_owner(
+        && predecessor_verifies_owner(
+            predecessor,
             &authorization.authority.membership,
             &evidence.author_pubkey,
             &authorization.authority.owner_grant,
@@ -490,7 +479,7 @@ async fn validate_commit_reclaim_receipt(
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimReceiptRef,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -512,8 +501,11 @@ async fn validate_commit_reclaim_receipt(
     if receipt_executor != commit.author_registration
         || executor != *activating_author
         || provider_admin_state != commit.membership_state
-        || !predecessor
-            .verifies_provider_administrator_grant(&provider_admin_grant, &receipt_executor)
+        || !predecessor_verifies_provider_administrator_grant(
+            predecessor,
+            &provider_admin_grant,
+            &receipt_executor,
+        )
     {
         return Err(RegistrationLoadError::Invalid(
             "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
@@ -543,7 +535,7 @@ pub(crate) async fn load_commit_registrations_with_root(
     root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {

@@ -236,7 +236,7 @@ pub(crate) async fn load_commit_device_operations(
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
     predecessor_state: &ResolvedStoreDeviceState,
-    predecessor_authority: Option<&RegistrationPredecessorAuthority<'_>>,
+    predecessor_membership: Option<&MembershipChain>,
 ) -> Result<VerifiedStoreDeviceOperations, RegistrationLoadError> {
     if commit.device_exclusion_proposals().is_empty()
         && commit.device_exclusion_outcomes().is_empty()
@@ -244,7 +244,7 @@ pub(crate) async fn load_commit_device_operations(
         return VerifiedStoreDeviceOperations::without_exclusions(commit)
             .map_err(|error| RegistrationLoadError::Invalid(error.to_string()));
     }
-    let authority = predecessor_authority.ok_or_else(|| {
+    let predecessor = predecessor_membership.ok_or_else(|| {
         RegistrationLoadError::Invalid(
             "device exclusion activation has no exact predecessor membership authority".to_string(),
         )
@@ -261,7 +261,8 @@ pub(crate) async fn load_commit_device_operations(
                 predecessor_state,
                 &proposal.owner_registration,
             )
-            || !authority.verifies_owner(
+            || !predecessor_verifies_owner(
+                predecessor,
                 &commit.membership_state,
                 &opened.owner.author_pubkey,
                 &proposal.owner_grant,
@@ -296,7 +297,8 @@ pub(crate) async fn load_commit_device_operations(
             }
         };
         if !device_state_has_active_registration(predecessor_state, owner_registration)
-            || !authority.verifies_owner(
+            || !predecessor_verifies_owner(
+                predecessor,
                 &commit.membership_state,
                 &outcome.owner.author_pubkey,
                 owner_grant,
