@@ -12,7 +12,7 @@ pub(crate) use image::{
     verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience,
 };
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -44,6 +44,188 @@ enum SnapshotCutProjection {
 }
 
 impl super::AuthorizedStore<'_> {
+    pub(crate) async fn publish_due_snapshots(
+        &self,
+        device_id: &str,
+        store_dir: &crate::store_dir::StoreDir,
+        keypair: &UserKeypair,
+        created_at: &str,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        rotation_pending: bool,
+    ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
+        let resumed = drain_outbound_store_snapshot(self.storage(), self.database())
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "publish pending Store snapshot",
+                    error,
+                )
+            })?
+            .is_some();
+        if resumed || rotation_pending {
+            return Ok(());
+        }
+
+        let local_position = self
+            .database()
+            .latest_local_store_position()
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "read local Store snapshot cadence position",
+                    error,
+                )
+            })?;
+        let local_seq = local_position
+            .as_ref()
+            .map_or(0, |reference| reference.coord.sequence());
+        let last_snapshot = self
+            .database()
+            .latest_local_store_snapshot()
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "read latest local Store snapshot",
+                    error,
+                )
+            })?;
+        let last_snapshot_position = match last_snapshot.as_ref() {
+            None => None,
+            Some(snapshot) => Some(self.snapshot_position(snapshot, device_id, keypair).await?),
+        };
+        let hours_since = match last_snapshot.as_ref() {
+            None => None,
+            Some(snapshot) => {
+                let current =
+                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
+                        crate::sync::cycle::SyncCycleFailure::operation(
+                            "read Store snapshot cadence",
+                            SnapshotError::PublicationState(format!(
+                                "cycle timestamp is invalid: {error}"
+                            )),
+                        )
+                    })?;
+                let previous = chrono::DateTime::parse_from_rfc3339(&snapshot.meta.created_at)
+                    .map_err(|error| {
+                        crate::sync::cycle::SyncCycleFailure::operation(
+                            "read Store snapshot cadence",
+                            SnapshotError::PublicationState(format!(
+                                "published Store snapshot has an invalid creation time: {error}"
+                            )),
+                        )
+                    })?;
+                Some(current.signed_duration_since(previous).num_hours().max(0) as u64)
+            }
+        };
+        let initial_snapshot = local_seq == 0 && last_snapshot.is_none();
+        if !initial_snapshot
+            && !should_create_snapshot(local_seq, last_snapshot_position, hours_since)
+        {
+            return Ok(());
+        }
+
+        let author_pubkey = hex::encode(keypair.public_key());
+        if let Err(reason) = super::membership::authorize_loaded_membership_author(
+            Some(self.membership()),
+            &author_pubkey,
+            super::membership::MembershipAuthorRequirement::Owner,
+        ) {
+            info!(
+                device = %author_pubkey,
+                %reason,
+                "Snapshot skipped: this device may not author a snapshot"
+            );
+            return Ok(());
+        }
+
+        if initial_snapshot {
+            info!("Initial sync: pushing snapshot of existing store data");
+        } else {
+            info!("Snapshot policy triggered, creating snapshot");
+        }
+
+        let snapshot = self
+            .capture_snapshot_cut(
+                store_dir.as_ref().to_path_buf(),
+                self.db().synced_tables().to_vec(),
+                routing_encryption,
+            )
+            .await;
+        match snapshot {
+            Ok(cut) => {
+                let meta = push_store_snapshot(
+                    self.storage(),
+                    self.store_root().store_root_hash,
+                    cut.snapshot,
+                    cut.coverage,
+                    self.db().schema_version(),
+                    keypair,
+                    created_at.to_string(),
+                    self.membership(),
+                    self.database(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::sync::cycle::SyncCycleFailure::operation("publish Store snapshot", error)
+                })?;
+                info!(
+                    local_seq,
+                    snapshot = %meta.snapshot_hash(),
+                    "Snapshot created and pushed"
+                );
+            }
+            Err(error) => warn!("Failed to create snapshot: {error}"),
+        }
+
+        if let Err(error) = self
+            .push_circle_snapshots(
+                store_dir.as_ref().to_path_buf(),
+                self.db().schema_version(),
+                keypair,
+                created_at,
+                routing_encryption,
+            )
+            .await
+        {
+            warn!("Failed to author Circle snapshots: {error}");
+        }
+        Ok(())
+    }
+
+    async fn snapshot_position(
+        &self,
+        snapshot: &crate::database::PublishedStoreSnapshot,
+        device_id: &str,
+        identity: &UserKeypair,
+    ) -> Result<u64, crate::sync::cycle::SyncCycleFailure> {
+        let (root, registration, _, _) =
+            crate::sync::store::operations::load_local_store_authority(
+                self.database(),
+                device_id,
+                identity,
+            )
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::from(format!(
+                    "load local Store snapshot cadence authority: {error}"
+                ))
+            })?;
+        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &registration,
+            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        )
+        .to_string();
+        Ok(snapshot
+            .meta
+            .coverage
+            .clone()
+            .into_refs()
+            .remove(&stream_id)
+            .map(|reference| reference.coord.sequence())
+            .unwrap_or(0))
+    }
+
     pub(crate) async fn capture_snapshot_cut(
         &self,
         temp_dir: std::path::PathBuf,

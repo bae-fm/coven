@@ -515,10 +515,6 @@ impl AuthorizedStore<'_> {
         .await
     }
 
-    pub(crate) async fn after_pull(&self) -> Result<&Self, SyncCycleFailure> {
-        Ok(self)
-    }
-
     pub(crate) async fn gc_tombstones(
         &self,
         cloud_home: &dyn CloudHome,
@@ -572,72 +568,6 @@ impl AuthorizedStore<'_> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))
-    }
-
-    pub(crate) async fn snapshot_position(
-        &self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
-        device_id: &str,
-        identity: &UserKeypair,
-    ) -> Result<u64, SyncCycleFailure> {
-        let (root, registration, _, _) =
-            crate::sync::store::operations::load_local_store_authority(
-                self.database(),
-                device_id,
-                identity,
-            )
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::from(format!(
-                    "load local Store snapshot cadence authority: {error}"
-                ))
-            })?;
-        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-            root.store_root_hash,
-            &registration,
-            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        )
-        .to_string();
-        Ok(super::snapshot_position_for_stream(snapshot, &stream_id))
-    }
-
-    pub(crate) async fn push_snapshot(
-        &self,
-        snapshot: crate::sync::store::snapshot::CreatedSnapshot,
-        coverage: CommitFrontier,
-        schema_version: u32,
-        identity: &UserKeypair,
-        created_at: String,
-    ) -> Result<crate::sync::store_commit::SnapshotMeta, SyncCycleFailure> {
-        snapshot::push_store_snapshot(
-            self.storage(),
-            self.store_root().store_root_hash,
-            snapshot,
-            coverage,
-            schema_version,
-            identity,
-            created_at,
-            &self.membership,
-            self.database(),
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish Store snapshot", error))
-    }
-
-    pub(crate) async fn drain_snapshot(&self) -> Result<bool, SyncCycleFailure> {
-        snapshot::drain_outbound_store_snapshot(self.storage(), self.database())
-            .await
-            .map(|snapshot| snapshot.is_some())
-            .map_err(|error| SyncCycleFailure::operation("publish pending Store snapshot", error))
-    }
-
-    pub(crate) fn may_author_snapshot(&self, author_pubkey: &str) -> Result<(), String> {
-        crate::sync::store::membership::authorize_loaded_membership_author(
-            Some(&self.membership),
-            author_pubkey,
-            crate::sync::store::membership::MembershipAuthorRequirement::Owner,
-        )
-        .map_err(|error| error.to_string())
     }
 }
 

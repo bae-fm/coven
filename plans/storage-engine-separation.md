@@ -109,11 +109,16 @@ This ownership work completes the Store foundation required by
   handle retains the offline local-only discard attempt, but it neither
   interprets remote outcomes nor continues Store database transitions after
   remote work.
-- In progress: the final boundary audit found one remaining ownership leak:
-  snapshot policy and publication are still assembled by cycle. Host-write
-  capture, pre-Store join/bootstrap, closed routing validation, schema reads,
-  and fault injection retain their purpose-specific database access without
-  interpreting remote Store authority.
+- Complete: snapshot cadence, Owner authorization, stable-cut capture, retry,
+  Store publication, and Circle publication are one Store operation. Cycle
+  supplies cycle context and consumes its terminal result without reading
+  snapshot state or assembling publication. Cadence reads the signed timestamp
+  from the latest published snapshot; the unwritten `last_snapshot_time`
+  protocol-state key is absent.
+- Complete: the final boundary audit found no cycle or application path that
+  interprets remote Store authority. Host-write capture, pre-Store
+  join/bootstrap, closed routing validation, schema reads, and fault injection
+  retain their purpose-specific database access.
 - Complete: abandonment, device exclusion, Owner promotion, package
   preparation, write preparation, and write publication implementation modules
   are private.
@@ -348,9 +353,11 @@ commits wholly or rolls back.
 1. **Complete.** Keep the offline local-only blocked-write discard at the
    application boundary, but move remote abandonment, outcome interpretation,
    cleanup, and final local reversal into the loaded Store.
-1. **In progress.** Finish snapshot orchestration; then run boundary searches,
-   focused failure-injection tests, strict lint, repository hooks, and manual
-   rules review and update dependent plans to the sealed one-protocol shape.
+1. **Complete.** Move snapshot cadence, authorization, capture, retry, Store
+   publication, and Circle publication behind the loaded Store.
+1. Run boundary searches, focused failure-injection tests, strict lint,
+   repository hooks, and manual rules review; then update dependent plans to
+   the sealed one-protocol shape.
 
 ## Commit boundaries
 
@@ -398,6 +405,6 @@ Store operation enters the Store owner and stays there through authority,
 remote effects, retries, cleanup, and durable completion; and all searches and
 verification gates support those statements.
 
-The Store foundation is not complete until the snapshot ownership leak named
-above is removed and the verification commands and provider-capability
-documentation describe the current repository.
+The Store foundation is not complete until the verification commands and
+provider-capability documentation describe the current repository and the
+listed verification gates pass.

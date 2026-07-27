@@ -182,7 +182,6 @@ pub(crate) use retained_replay::{
 pub(crate) use snapshot::drain_outbound_store_snapshot;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use snapshot::push_store_snapshot;
-pub(crate) use snapshot::should_create_snapshot;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use snapshot::CreatedSnapshot;
 #[doc(hidden)]
@@ -603,18 +602,4 @@ impl StoreContext {
     fn store_root(&self) -> &StoreRootRef {
         &self.store_root
     }
-}
-
-pub(super) fn snapshot_position_for_stream(
-    snapshot: &crate::database::PublishedStoreSnapshot,
-    stream_id: &str,
-) -> u64 {
-    snapshot
-        .meta
-        .coverage
-        .clone()
-        .into_refs()
-        .remove(stream_id)
-        .map(|reference| reference.coord.sequence())
-        .unwrap_or(0)
 }

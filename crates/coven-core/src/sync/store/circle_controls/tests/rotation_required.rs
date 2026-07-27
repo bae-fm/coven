@@ -1026,6 +1026,28 @@ async fn write_circle_document(
     .expect("capture Circle content");
 }
 
+async fn publish_store_snapshot_cut(
+    authorized: &crate::sync::store::AuthorizedStore<'_>,
+    cut: crate::sync::store::snapshot::SnapshotCut,
+    db: &Database,
+    signer: &UserKeypair,
+    created_at: &str,
+) {
+    crate::sync::store::push_store_snapshot(
+        authorized.storage(),
+        authorized.store_root().store_root_hash,
+        cut.snapshot,
+        cut.coverage,
+        db.schema_version(),
+        signer,
+        created_at.to_string(),
+        authorized.membership(),
+        authorized.database(),
+    )
+    .await
+    .expect("publish the Store snapshot");
+}
+
 async fn setup_active_member_circle_snapshot(
     name: &str,
     mode: CircleFixtureMode,
@@ -1132,16 +1154,7 @@ async fn setup_active_member_circle_snapshot(
         .await
         .expect("capture the Store snapshot cut");
     let coverage = cut.coverage.clone();
-    authorized
-        .push_snapshot(
-            cut.snapshot,
-            cut.coverage,
-            db.schema_version(),
-            &signer,
-            "2026-07-24T01:00:00Z".to_string(),
-        )
-        .await
-        .expect("publish the Store snapshot");
+    publish_store_snapshot_cut(&authorized, cut, &db, &signer, "2026-07-24T01:00:00Z").await;
     crate::sync::store::stage_store_acknowledgement_for_test(
         &db,
         &store.storage,
@@ -1517,16 +1530,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage.clone();
-    authorized
-        .push_snapshot(
-            cut.snapshot,
-            cut.coverage,
-            db.schema_version(),
-            &signer,
-            "2026-07-24T01:00:00Z".to_string(),
-        )
-        .await
-        .expect("publish the post-close Store snapshot");
+    publish_store_snapshot_cut(&authorized, cut, &db, &signer, "2026-07-24T01:00:00Z").await;
     crate::sync::store::stage_store_acknowledgement_for_test(
         &db,
         &store.storage,
@@ -1832,16 +1836,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage.clone();
-    authorized
-        .push_snapshot(
-            cut.snapshot,
-            cut.coverage,
-            db.schema_version(),
-            &signer,
-            "2026-07-24T02:00:01Z".to_string(),
-        )
-        .await
-        .expect("publish the post-close Store snapshot");
+    publish_store_snapshot_cut(&authorized, cut, &db, &signer, "2026-07-24T02:00:01Z").await;
     crate::sync::store::stage_store_acknowledgement_for_test(
         &db,
         &store.storage,

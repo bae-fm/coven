@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::blob::{BlobScope, CacheFill, Provenance};
-use crate::clock::SystemClock;
+use crate::clock::{FixedClock, SystemClock};
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -5048,6 +5048,117 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
     })
     .await
     .expect("snapshot cadence orchestration completes");
+}
+
+#[tokio::test]
+async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
+    tokio::spawn(async {
+        let owner = UserKeypair::generate();
+        let db = open_test_db();
+        let storage = cycle_test_store(&db, &owner).await;
+        let source = open_test_db();
+        let first = capture_bytes(
+            &source,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('time-cadence-1', 'First', NULL, 1, \
+                         '0000000001000-0000-source', '2026-01-01')",
+            ],
+        )
+        .await;
+        let second = capture_bytes(
+            &source,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('time-cadence-2', 'Second', NULL, 1, \
+                         '0000000002000-0000-source', '2026-01-01')",
+            ],
+        )
+        .await;
+
+        let at_snapshot = storage
+            .publish_changeset("local", 1, &first, SCHEMA_VERSION)
+            .await
+            .expect("publish Store commit before snapshot");
+        let membership = storage
+            .open_into(&db)
+            .await
+            .expect("open Store before publishing timed snapshot");
+        crate::sync::store::push_store_snapshot(
+            &storage.storage,
+            storage.store_root_hash(),
+            crate::sync::store::CreatedSnapshot {
+                db_image: b"time-cadence-snapshot".to_vec(),
+                blobs: Vec::new(),
+            },
+            crate::sync::store_commit::CommitFrontier(BTreeMap::from([(
+                at_snapshot.coord.stream_id,
+                at_snapshot,
+            )])),
+            db.schema_version(),
+            &owner,
+            T0.to_string(),
+            &membership,
+            &crate::sync::store::StoreDatabase::new(&db),
+        )
+        .await
+        .expect("publish timed snapshot");
+        storage
+            .publish_changeset("local", 2, &second, SCHEMA_VERSION)
+            .await
+            .expect("publish one Store commit after snapshot");
+
+        crate::sync::store::anchor_owner_membership(
+            &storage.storage,
+            &store_database(&db),
+            &storage.root,
+            storage.protocol_root(),
+            &storage.protocol_founder_keypair(),
+        )
+        .await
+        .expect("initialize timed snapshot membership");
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("read timed snapshot device")
+            .expect("timed snapshot device exists");
+        let (_temp, store_dir) = temp_store_dir();
+        let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+            [25u8; 32],
+        )));
+        let now = chrono::DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
+            .expect("parse timed snapshot clock")
+            .with_timezone(&chrono::Utc);
+        run_single_sync_cycle(
+            &storage.storage,
+            &device_id,
+            &Hlc::new("local".to_string()),
+            &FixedClock(now),
+            &db,
+            &cipher,
+            &PendingRotation::none(),
+            &owner,
+            None,
+            &store_dir,
+            None,
+            None,
+        )
+        .await
+        .expect("run timed snapshot cycle");
+
+        assert_eq!(
+            store_database(&db)
+                .latest_local_store_snapshot()
+                .await
+                .expect("read timed Store snapshot")
+                .expect("time cadence publishes another snapshot")
+                .reference
+                .generation,
+            1,
+        );
+    })
+    .await
+    .expect("snapshot time cadence orchestration completes");
 }
 
 /// The prepared-write retry stamps the acknowledgement with an RFC 3339

@@ -8,8 +8,6 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
-use std::str::FromStr;
-
 use tracing::{info, warn};
 
 use crate::blob::BlobTransitionObserver;
@@ -169,21 +167,6 @@ mod sync_cycle_failure_tests {
         );
 
         assert!(!SyncCycleFailure::operation("register", error).is_offline());
-    }
-}
-
-async fn read_protocol_state<T>(db: &Database, key: &str) -> Result<Option<T>, String>
-where
-    T: FromStr,
-    T::Err: std::fmt::Display,
-{
-    match db.get_protocol_state(key).await {
-        Ok(Some(value)) => value
-            .parse::<T>()
-            .map(Some)
-            .map_err(|e| format!("Corrupt {key} value: {e}")),
-        Ok(None) => Ok(None),
-        Err(e) => Err(format!("Failed to read {key}: {e}")),
     }
 }
 
@@ -399,7 +382,6 @@ async fn run_single_sync_cycle_with_authorization(
     authorization: AuthorizedStore<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let prepared = match Box::pin(prepare_cycle_before_pull(
-        device_id,
         hlc,
         clock,
         cipher,
@@ -420,15 +402,12 @@ async fn run_single_sync_cycle_with_authorization(
     let store_pull = authorization
         .pull(store_dir, user_keypair, routing_encryption)
         .await?;
-    let post_pull = authorization.after_pull().await?;
     let completed = Box::pin(complete_cycle_after_pull(
         device_id,
         hlc,
-        clock,
         user_keypair,
         store_dir,
         &authorization,
-        post_pull,
         routing_encryption,
         prepared,
         store_pull,
@@ -456,7 +435,12 @@ async fn run_single_sync_cycle_with_authorization(
                 })?;
         }
         Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
-        Box::pin(reclaim_cycle_packages(device_id, user_keypair, post_pull)).await?;
+        Box::pin(reclaim_cycle_packages(
+            device_id,
+            user_keypair,
+            &authorization,
+        ))
+        .await?;
     }
     Ok(SyncCycleResult {
         changesets_applied: completed.store_pull.changesets_applied,
@@ -475,9 +459,6 @@ async fn run_single_sync_cycle_with_authorization(
 }
 
 struct PreparedCycle {
-    last_snapshot_time: Option<chrono::DateTime<chrono::Utc>>,
-    last_snapshot_position: Option<u64>,
-    has_snapshot: bool,
     sync_time: String,
     resume_drain_promptly: bool,
     rotation_pending: Option<RotationPending>,
@@ -498,7 +479,6 @@ struct CompletedPullCycle {
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_cycle_before_pull(
-    device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
     cipher: &dyn CloudCipherAccess,
@@ -586,23 +566,6 @@ async fn prepare_cycle_before_pull(
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
         .map_or(0, |reference| reference.coord.sequence());
-    let last_snapshot_time: Option<chrono::DateTime<chrono::Utc>> =
-        read_protocol_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
-            .await?
-            .map(|time| time.with_timezone(&chrono::Utc));
-    let last_snapshot = database
-        .latest_local_store_snapshot()
-        .await
-        .map_err(|error| format!("read latest exact Store snapshot: {error}"))?;
-    let last_snapshot_position = match last_snapshot.as_ref() {
-        None => None,
-        Some(snapshot) => Some(
-            authorization
-                .snapshot_position(snapshot, device_id, user_keypair)
-                .await?,
-        ),
-    };
-    let has_snapshot = last_snapshot.is_some();
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
     // One wall-clock reading for this whole cycle. Store acknowledgements and
@@ -653,9 +616,6 @@ async fn prepare_cycle_before_pull(
     }
 
     Ok(CycleBeforePull::Continue(PreparedCycle {
-        last_snapshot_time,
-        last_snapshot_position,
-        has_snapshot,
         sync_time,
         resume_drain_promptly,
         rotation_pending,
@@ -666,11 +626,9 @@ async fn prepare_cycle_before_pull(
 async fn complete_cycle_after_pull(
     device_id: &str,
     hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
     user_keypair: &UserKeypair,
     store_dir: &StoreDir,
     authorization: &AuthorizedStore<'_>,
-    post_pull: &AuthorizedStore<'_>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     prepared: PreparedCycle,
     store_pull: super::store::StorePullResult,
@@ -678,23 +636,17 @@ async fn complete_cycle_after_pull(
     let database = authorization.database();
     let db = database.sqlite();
     let PreparedCycle {
-        last_snapshot_time,
-        last_snapshot_position,
-        has_snapshot,
         sync_time,
         resume_drain_promptly,
         rotation_pending,
     } = prepared;
-    let tables = db.synced_tables();
-
     // Pull installs the membership state that decides whether this active member
     // may register before registration is ensured.
     if rotation_pending.is_none() {
         authorization.ensure_active_registration().await?;
     }
 
-    let staged_store_batch = if rotation_pending.is_none() {
-        let mut staged_any = false;
+    if rotation_pending.is_none() {
         loop {
             let staged = authorization
                 .prepare_pending_store_write(device_id, &sync_time, user_keypair, store_dir)
@@ -702,7 +654,6 @@ async fn complete_cycle_after_pull(
             if !staged {
                 break;
             }
-            staged_any = true;
             let published = authorization
                 .drain_store_writes()
                 .await
@@ -711,10 +662,7 @@ async fn complete_cycle_after_pull(
                 info!(published, "Published Store writes");
             }
         }
-        staged_any
-    } else {
-        false
-    };
+    }
 
     let local_seq = database
         .latest_local_store_position()
@@ -738,100 +686,16 @@ async fn complete_cycle_after_pull(
     .await
     .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
-    // Check snapshot policy.
-    let hours_since = last_snapshot_time.map(|t| {
-        let elapsed = clock.now().signed_duration_since(t);
-        elapsed.num_hours().max(0) as u64
-    });
-
-    // Initial sync: the store has data but no Store write published it (for example,
-    // a provider was connected to an existing store). Publish a snapshot so the
-    // existing data reaches the cloud.
-    let is_initial_sync = local_seq == 0 && !has_snapshot && !staged_store_batch;
-
-    // The snapshot is the second channel that propagates rows to peers. It
-    // applies the same row-level gate as the changeset push, captures every
-    // surviving blob row in the immutable cut, and publishes that exact blob
-    // closure before activating the snapshot metadata.
-    // Owner-only snapshots: a snapshot restates the whole catalog — the image a new
-    // device bootstraps from wholesale — so only a current Owner may author one.
-    // Decide whether a snapshot is both due and permitted BEFORE create_snapshot
-    // (the VACUUM), so a non-owner never builds an image, publishes one readers
-    // would reject, or runs the reclaim a publish triggers. A non-owner's rows still
-    // propagate via the changeset push above.
-    let resumed_snapshot = authorization.drain_snapshot().await?;
-    let snapshot_due = !resumed_snapshot
-        && (is_initial_sync
-            || super::store::should_create_snapshot(
-                local_seq,
-                last_snapshot_position,
-                hours_since,
-            ));
-    let may_snapshot = if rotation_pending.is_some() {
-        // A snapshot restates and re-seals the whole catalog under the store key —
-        // exactly the kind of new cloud content the pending rotation must block.
-        false
-    } else if snapshot_due {
-        // Judge against the post-pull membership authority using the same
-        // current-Owner rule as readers. A verified non-owner skips the snapshot.
-        let our_pk = hex::encode(user_keypair.public_key());
-        let authorized = post_pull.may_author_snapshot(&our_pk);
-        match authorized {
-            Ok(()) => true,
-            Err(reason) => {
-                info!(device = %our_pk, %reason, "Snapshot skipped: this device may not author a snapshot");
-                false
-            }
-        }
-    } else {
-        false
-    };
-
-    if may_snapshot {
-        if is_initial_sync {
-            info!("Initial sync: pushing snapshot of existing store data");
-        } else {
-            info!("Snapshot policy triggered, creating snapshot");
-        }
-
-        // Scratch the snapshot copy in the store dir, not the shared system
-        // temp dir: create_snapshot writes a fixed `snapshot.db` filename, so two
-        // stores syncing concurrently (or parallel tests) would otherwise race
-        // on one `/tmp/snapshot.db`. A store's own cycles run serially.
-        let temp_dir = store_dir.as_ref().to_path_buf();
-        let snapshot_result = authorization
-            .capture_snapshot_cut(temp_dir, tables.to_vec(), routing_encryption)
-            .await;
-
-        match snapshot_result {
-            Ok(cut) => {
-                let meta = authorization
-                    .push_snapshot(
-                        cut.snapshot,
-                        cut.coverage,
-                        db.schema_version(),
-                        user_keypair,
-                        sync_time.clone(),
-                    )
-                    .await?;
-                info!(local_seq, snapshot = %meta.snapshot_hash(), "Snapshot created and pushed");
-            }
-            Err(e) => warn!("Failed to create snapshot: {e}"),
-        }
-
-        if let Err(e) = authorization
-            .push_circle_snapshots(
-                store_dir.as_ref().to_path_buf(),
-                db.schema_version(),
-                user_keypair,
-                &sync_time,
-                routing_encryption,
-            )
-            .await
-        {
-            warn!("Failed to author Circle snapshots: {e}");
-        }
-    }
+    authorization
+        .publish_due_snapshots(
+            device_id,
+            store_dir,
+            user_keypair,
+            &sync_time,
+            routing_encryption,
+            rotation_pending.is_some(),
+        )
+        .await?;
 
     Ok(CompletedPullCycle {
         store_pull,
@@ -845,9 +709,12 @@ async fn complete_cycle_after_pull(
 async fn reclaim_cycle_packages(
     device_id: &str,
     user_keypair: &UserKeypair,
-    post_pull: &AuthorizedStore<'_>,
+    authorization: &AuthorizedStore<'_>,
 ) -> Result<(), SyncCycleFailure> {
-    match post_pull.reclaim_packages(device_id, user_keypair).await {
+    match authorization
+        .reclaim_packages(device_id, user_keypair)
+        .await
+    {
         Ok(result) if result.packages_deleted > 0 => info!(
             packages = result.packages_deleted,
             copies = result.physical_copies_deleted,
