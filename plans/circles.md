@@ -313,10 +313,10 @@ rebuild the deleted choice.
    cancellation, the epoch-close device-exclusion slot competition, command, and
    outcome cutoff, Store-member-removal rotation blocking, control-conflict
    resolution, and terminal deletion are implemented. Durable operation recovery
-   types the block reason (`AuthorityLost`), lets the initiator retry a blocked
-   operation from its captured phase, records finalization payloads
-   durable-first so a restart resumes them byte-identically as their exact
-   settlement kind, and discards an operation only with a verified
+   types both block reasons (`AuthorityLost` and `PositionLost`), lets the
+   initiator retry a blocked operation from its captured phase, records
+   finalization payloads durable-first so a restart resumes them byte-identically
+   as their exact settlement kind, and discards an operation only with a verified
    permanent-nonactivation proof — a different verified winner already holds the
    candidate's successor slot, the author was excluded, or an accepted Store
    commit tombstones the candidate's exact Store membership grant with a

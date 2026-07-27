@@ -568,6 +568,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     )
     .await
     .expect("prepare the operation queued behind the loser");
+    let second_id = second.operation_id.clone();
     StoreDatabase::new(&db)
         .insert_circle_operation(second.clone())
         .await
@@ -579,6 +580,21 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .await
         .expect("the resume queue drains past an operation that lost its position");
 
+    let second_after = StoreDatabase::new(&db)
+        .circle_operation(&second_id)
+        .await
+        .expect("read the operation queued behind the loser")
+        .expect("the operation queued behind the loser stays durable");
+    assert!(
+        matches!(
+            second_after.state(),
+            CircleOperationState::Blocked {
+                block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+            }
+        ),
+        "the queue advanced to and classified the next operation: {:?}",
+        second_after.state(),
+    );
     let blocked = StoreDatabase::new(&db)
         .circle_operation(&first.operation_id)
         .await

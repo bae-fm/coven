@@ -2,8 +2,7 @@
 
 ## Status
 
-Implemented, except the finalization-preparation audit (§4). Closes the
-durable-operation exit gaps from
+Implemented. Closes the durable-operation exit gaps from
 `plans/circles.md`: typed block reasons (`Blocked(CircleOperationBlock)`), "retry
 an operation idempotently", and "replace or discard only with verified
 nonactivation". The block reason is the typed `CircleOperationBlock`; a blocked
@@ -32,17 +31,16 @@ Replace `reason: String` in `CircleOperationProgress::Blocked`,
 
 ```rust
 pub enum CircleOperationBlock {
-    /// The author's exact grant no longer has current Store write
-    /// authority (today's only production block site,
-    /// `publication.rs:80-84`).
+    /// The author's exact grant no longer has current Store write authority.
     AuthorityLost { grant_id: MembershipGrantId },
+    /// A different verified commit took the operation's immutable device-stream
+    /// position between composition and publication.
+    PositionLost { winner_commit: ObjectHash },
 }
 ```
 
-One variant, because there is one producer — do not invent speculative
-variants; each future block site adds its own when it exists. The journal
-row serializes the typed value (greenfield wire/DB change; no compatibility
-reader). `get_circle_operations` surfaces it typed.
+Each variant corresponds to a production block site. The journal row serializes
+the typed value directly, and `get_circle_operations` surfaces it typed.
 
 ### 2. Retry
 
@@ -99,17 +97,11 @@ unseen candidate failed to activate.
 ### 4. Finalization preparation owns its uploads
 
 Rule: **no remote write before a durable journal row owns the exact object
-set.** Audit `finalize_ready_circle_epoch_closes` / preparation ordering
-(`close_responses.rs`, `preparation.rs:1394+`): any path that generates
-random material (the successor Circle key) or uploads prerequisites before
-`begin_circle_operation_finalization` records the `Finalizing` payload must
-be reordered: prepare the complete payload in memory → record it in the
-journal transaction → then upload each step idempotently. Restart then
-resumes from the recorded payload and never regenerates keys or slots, so
-no orphaned uploads exist. If the audit finds preparation is already
-durable-first, this item reduces to a test proving it (kill between
-payload-record and first upload; kill between two uploads; assert exact
-resume with identical object keys).
+set.** Finalization prepares the complete payload in memory, records its exact
+successor key, slots, objects, and settlement kind in the journal transaction,
+then uploads each step idempotently. Restart resumes from that recorded payload
+without regenerating keys or slots. Fault tests stop between the payload record
+and first upload and between uploads, then verify byte-identical resumption.
 
 ## Correctness cases
 
@@ -143,10 +135,7 @@ resume with identical object keys).
    activation) → resume produces byte-identical objects; storage holds no
    object outside the journal's manifest at any point.
 6. Retry idempotence: double retry, retry-of-active-operation refusal.
-
-## Out of scope
-
-- New block producers (each lifecycle feature adds its own variant with
-  its code).
-- The application-facing operation-inspection API shape (API plan; the
-  typed state here is its substrate).
+7. Lose the prepared stream position to a verified competing commit →
+   operation becomes typed `PositionLost`, the queue advances past it, retry
+   re-observes the winner and re-blocks, and discard verifies the winner before
+   clearing the operation.

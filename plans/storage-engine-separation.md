@@ -7,9 +7,9 @@ whose verified, dependency-ready commits converge through deterministic Merge
 application.
 
 Remove the coordinated Serial protocol completely. There is no policy selector,
-second protocol implementation, conditional global head, provisional branch, Serial conflict,
-coordination capability, compatibility reader, or migration for earlier Coven
-development states.
+second protocol implementation, conditional global head, provisional branch,
+Serial conflict, coordination capability, compatibility reader, or migration
+for earlier Coven development states.
 
 The remaining Store implementation has one concrete protocol owner. Domain and
 cycle entry points call operations on that owner; policy-neutral modules retain

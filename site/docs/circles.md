@@ -219,11 +219,13 @@ operation id, its Circle, its
   responses.
 - `Finalizing` — the successor commit, outcome, and bootstraps are staged and
   about to publish.
-- `Blocked { block }` — the operation cannot publish. The one block reason today
-  is [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock), meaning the
-  author's exact store grant no longer has current write authority. The
-  initiator calls `circles.retry_operation(op_id).await?` once authority is
-  restored.
+- `Blocked { block }` — the operation cannot publish.
+  [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock) means the author's
+  exact store grant no longer has current write authority; the initiator calls
+  `circles.retry_operation(op_id).await?` once authority is restored.
+  `PositionLost` means another verified commit took the operation's immutable
+  device-stream position. Retrying rechecks that winner and remains blocked; the
+  initiator discards the operation and re-issues the command.
 - `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
   exact-deleting the candidate's exclusive objects before clearing the durable
   operation.

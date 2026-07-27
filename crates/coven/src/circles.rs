@@ -83,8 +83,9 @@ pub enum CircleError {
     /// activate.
     #[error("circle operation {operation_id} discard requires verified permanent nonactivation")]
     DiscardRequiresNonactivation { operation_id: CircleOperationId },
-    /// A durable operation cannot publish because its author lost signed
-    /// authority; the initiator may retry it once authority is restored.
+    /// A durable operation cannot publish. The typed block says whether the
+    /// initiator may retry after restoring authority or must discard and re-issue
+    /// an operation whose immutable stream position was taken.
     #[error("circle operation for {circle_id} is blocked: {block}")]
     Blocked {
         circle_id: CircleId,

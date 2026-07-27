@@ -18,7 +18,8 @@ typed public errors with stable identifiers are on `main`.
 - Internal state: `CircleInfo { Active { …, rotation_required }, Conflicted
   { branches }, Deleted { id } }`; `CircleCurrentState`
   (Active/Closing/Inactive/ControlConflict/Deleted) plus the
-  rotation-required derivation; `CircleOperationBlock::AuthorityLost`;
+  rotation-required derivation; `CircleOperationBlock::{AuthorityLost,
+  PositionLost}`;
   `WriteBlock::RotationRequired`; `CircleOperationError` typed variants
   (RotationRequired, NotConflicted, ChosenBranchNotRetained, NoCloseToCancel,
   NoCloseToExclude, DeviceNotACloseParticipant, Conflicted, Deleted,
@@ -143,7 +144,8 @@ site guide documents the same operation and error surface.
 2. Exhaustive `CircleState` mapping test over constructed
    `CircleCurrentState` + membership inputs (every variant × rotation).
 3. Blocked-operation surface: authority-revoked fixture → operations()
-   shows typed AuthorityLost; retry_operation round-trips.
+   shows typed `AuthorityLost`; a competing verified stream head shows typed
+   `PositionLost`; retry_operation round-trips each reason.
 4. close_status surface across a close with one response and one exclusion.
 5. Error mapping: each internal refusal surfaces its public variant with
    stable identifiers (rename-on-deleted, resolve-on-nonconflicted,
