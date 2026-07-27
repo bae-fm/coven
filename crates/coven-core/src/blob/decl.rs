@@ -43,8 +43,6 @@ pub enum BlobDeclError {
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.
     Sqlite(rusqlite::Error),
-    /// A row's declared size column is not an integer.
-    InvalidSizeValue { table: String, value: String },
     /// A row's declared size column is negative.
     InvalidSize { table: String, value: i64 },
     /// New and old changeset walks produced different row counts.
@@ -88,12 +86,6 @@ impl std::fmt::Display for BlobDeclError {
                 )
             }
             BlobDeclError::Sqlite(e) => write!(f, "blob declaration schema read failed: {e}"),
-            BlobDeclError::InvalidSizeValue { table, value } => {
-                write!(
-                    f,
-                    "blob declaration found non-integer size in {table}: {value:?}"
-                )
-            }
             BlobDeclError::InvalidSize { table, value } => {
                 write!(f, "blob declaration found invalid size in {table}: {value}")
             }

@@ -161,10 +161,6 @@ pub enum BlobCacheError {
     /// configuration — when a Remote blob needed it. A configuration fault, not a
     /// disk I/O error.
     StorageSetup(String),
-    /// The old-value and new-value walks of one changeset disagreed on row count.
-    /// They are two views of the same changeset; a mismatch means cleanup cannot
-    /// pair updated rows with their previous blob ids.
-    ChangesetWalkMismatch { old_count: usize, new_count: usize },
     /// A registered external blob ref (a user-provided Local blob's user-owned
     /// file) points at a file that is no longer there — the user moved, renamed, or
     /// deleted it. Terminal: an external blob has no cloud copy to fall back to, so
@@ -204,35 +200,6 @@ pub enum BlobCacheError {
     /// ref), not a cache miss to fall through — surfaced loud so the host repairs or
     /// re-imports.
     NoExternalRef { id: String },
-    /// A Remote blob fetched whole from the cloud came back with a plaintext length
-    /// that disagrees with the row's declared size. The bytes are not what the row
-    /// describes, so they are refused before caching or returning: caching them would
-    /// fail the read's own length check on every later read, warning and refetching
-    /// the same wrong object forever. Terminal like the length checks the cache-hit
-    /// and file-download paths run.
-    CloudSizeMismatch {
-        namespace: String,
-        id: String,
-        expected: u64,
-        actual: u64,
-    },
-    /// A Remote blob fetched from the cloud decrypted to plaintext whose content
-    /// hash disagrees with the author-signed hash on the blob's row. The bytes are
-    /// not the ones the row's author pinned — a tampered object, a rolled-back
-    /// prior version, or a same-size object planted under a different uploader's
-    /// prefix — so they are refused before caching or returning. The row's hash is
-    /// the authority; a mismatch is tamper, never a cache miss to refetch.
-    CloudHashMismatch {
-        namespace: String,
-        id: String,
-        expected: String,
-        actual: String,
-    },
-    /// A blob's row carries no content hash, so a whole-blob download cannot be
-    /// verified against the author's signed value. The hash is a required column,
-    /// so an absent one is bad data (a row that predates the field, or a NULL where
-    /// a hash must be), surfaced rather than serving unverified bytes.
-    MissingContentHash { namespace: String, id: String },
     /// An authoritative local plaintext file exists at the exact path but its
     /// bytes differ from the row's signed size/hash.
     LocalIntegrity {
@@ -255,13 +222,6 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
             BlobCacheError::Metadata(e) => write!(f, "blob metadata error: {e}"),
             BlobCacheError::StorageSetup(e) => write!(f, "sync storage setup failed: {e}"),
-            BlobCacheError::ChangesetWalkMismatch {
-                old_count,
-                new_count,
-            } => write!(
-                f,
-                "changeset old/new walks disagree: {old_count} old rows, {new_count} new rows"
-            ),
             BlobCacheError::ExternalMissing { id, path, source } => write!(
                 f,
                 "external blob {id} could not be read at {}: {source}",
@@ -283,28 +243,6 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::NoExternalRef { id } => write!(
                 f,
                 "user-provided Local blob {id} has no registered external ref"
-            ),
-            BlobCacheError::CloudSizeMismatch {
-                namespace,
-                id,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "cloud blob {namespace}/{id} is {actual} bytes, expected {expected}"
-            ),
-            BlobCacheError::CloudHashMismatch {
-                namespace,
-                id,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "cloud blob {namespace}/{id} content hash is {actual}, expected {expected}"
-            ),
-            BlobCacheError::MissingContentHash { namespace, id } => write!(
-                f,
-                "blob {namespace}/{id} has no content hash to verify its bytes against"
             ),
             BlobCacheError::LocalIntegrity {
                 path,

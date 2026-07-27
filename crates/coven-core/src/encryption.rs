@@ -563,8 +563,6 @@ pub enum EncryptionError {
     Decryption(String),
     #[error("Key management error: {0}")]
     KeyManagement(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Why sealing or opening a host's app-data failed.
