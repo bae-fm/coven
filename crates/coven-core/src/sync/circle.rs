@@ -371,6 +371,14 @@ pub enum CircleOperationBlock {
     AuthorityLost {
         grant_id: crate::sync::membership::MembershipGrantId,
     },
+    /// Another writer took this device's stream position between the operation's
+    /// composition and its publication. The candidate commit is bound to that
+    /// create-once head slot, so it can never activate there and no re-publish
+    /// can succeed: the operation is over, and its initiator discards it and
+    /// re-issues.
+    PositionLost {
+        winner_commit: crate::sync::store_commit::ObjectHash,
+    },
 }
 
 impl std::fmt::Display for CircleOperationBlock {
@@ -379,6 +387,11 @@ impl std::fmt::Display for CircleOperationBlock {
             Self::AuthorityLost { grant_id } => write!(
                 formatter,
                 "author grant {grant_id} no longer has current Store write authority"
+            ),
+            Self::PositionLost { winner_commit } => write!(
+                formatter,
+                "Store commit {winner_commit} took this device's stream position \
+                 before the operation published"
             ),
         }
     }

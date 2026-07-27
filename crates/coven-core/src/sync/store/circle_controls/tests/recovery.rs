@@ -547,3 +547,111 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
         ));
     }
 }
+
+/// A writer takes the operation's stream position between the composition that
+/// claimed it and the publication that uses it. The candidate commit is bound to
+/// that create-once head slot, so no republish can ever take it: the operation
+/// blocks, typed and visible, and — the point — the resume queue advances past it
+/// instead of retrying the loser forever and stranding every operation behind it.
+#[tokio::test]
+async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it() {
+    let db = open_test_db();
+    let (store, signer, first) = persist_merge_operation(&db, "recovery-position-lost").await;
+    let device_id = local_device_id(&db).await;
+    let second = prepare_circle_operation(
+        &db,
+        &store.storage,
+        &device_id,
+        "0000000002000-0000-creator",
+        "Second household",
+        &signer,
+    )
+    .await
+    .expect("prepare the operation queued behind the loser");
+    StoreDatabase::new(&db)
+        .insert_circle_operation(second.clone())
+        .await
+        .expect("persist the operation queued behind the loser");
+
+    publish_competing_store_head(&db, &store.storage, &signer, &first).await;
+
+    resume_circle_operations(&db, &store.storage, &signer)
+        .await
+        .expect("the resume queue drains past an operation that lost its position");
+
+    let blocked = StoreDatabase::new(&db)
+        .circle_operation(&first.operation_id)
+        .await
+        .expect("read the operation that lost its position")
+        .expect("a blocked operation stays durable");
+    assert!(
+        matches!(
+            blocked.state(),
+            CircleOperationState::Blocked {
+                block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+            }
+        ),
+        "the lost position blocks the operation: {:?}",
+        blocked.state(),
+    );
+
+    // The block is a fact reported to the initiator, so it has to be legible from
+    // the surface the initiator reads.
+    let reported = StoreDatabase::new(&db)
+        .get_circle_operations()
+        .await
+        .expect("list circle operations");
+    let loser = reported
+        .iter()
+        .find(|info| info.operation_id == first.operation_id)
+        .expect("the loser is still listed");
+    assert!(
+        matches!(
+            &loser.state,
+            CircleOperationState::Blocked {
+                block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+            }
+        ),
+        "the initiator can see why the operation stopped: {:?}",
+        loser.state,
+    );
+
+    assert!(
+        StoreDatabase::new(&db)
+            .oldest_pending_circle_operation()
+            .await
+            .expect("read the publish queue head")
+            .is_none_or(|pending| pending.operation_id != first.operation_id),
+        "the blocked loser is no longer the head of the publish queue",
+    );
+
+    // Retrying a permanently lost position must not re-wedge the queue: it
+    // unblocks, re-observes the same winner, and re-blocks typed.
+    let retried = retry_circle_operation(&db, &store.storage, &first.operation_id, &signer)
+        .await
+        .expect_err("a position that is gone cannot be retried into");
+    assert!(
+        matches!(
+            &retried,
+            CircleOperationError::Blocked {
+                block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+                ..
+            }
+        ),
+        "retry re-blocks typed rather than looping: {retried}",
+    );
+    assert!(
+        matches!(
+            StoreDatabase::new(&db)
+                .circle_operation(&first.operation_id)
+                .await
+                .expect("read the retried operation")
+                .expect("the retried operation stays durable")
+                .state(),
+            CircleOperationState::Blocked {
+                block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+            }
+        ),
+        "the retried operation is left blocked, not pending",
+    );
+}

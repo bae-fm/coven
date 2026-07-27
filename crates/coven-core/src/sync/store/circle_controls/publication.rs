@@ -9,12 +9,15 @@ use crate::sync::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
     CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
 };
-use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::storage::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
+use crate::sync::store_objects::StoreObjectError;
 
 pub(super) async fn publish_circle_operation(
     database: &StoreDatabase,
@@ -539,7 +542,7 @@ pub(super) async fn publish_circle_operation(
             &commit_bytes,
         )
         .await?;
-        append_step(
+        let published_head = append_step(
             database,
             storage,
             &mut journal,
@@ -554,7 +557,26 @@ pub(super) async fn publish_circle_operation(
             ),
             &head.to_bytes(),
         )
-        .await?;
+        .await;
+        if matches!(
+            &published_head,
+            Err(CircleOperationError::Object(StoreObjectError::Storage(
+                StorageError::SlotCollision(_)
+            )))
+        ) {
+            block_lost_position(
+                database,
+                storage,
+                &journal,
+                store_root_hash,
+                &head,
+                &commit,
+                operation_id,
+                circle_id,
+            )
+            .await?;
+        }
+        published_head?;
         database
             .activate_circle_operation(journal, verified)
             .await?;
@@ -675,6 +697,55 @@ async fn current_merge_authority(
             }
         }
     })
+}
+
+/// A different writer holds this device's head slot at the position the operation
+/// composed against. Mirroring `resolve_head_collision`, the occupant is observed
+/// and verified before anything is concluded from it: only a real winner ends the
+/// operation. The candidate commit is bound to that create-once slot, so no
+/// re-publish can ever take it — the operation is blocked as a fact reported to
+/// its initiator, who discards it and re-issues. An occupant that does not verify
+/// is not a lost race, and its loud failure is left to stand.
+#[allow(clippy::too_many_arguments)]
+async fn block_lost_position(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    journal: &CircleOperationJournal,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
+    head: &crate::sync::store_commit::StoreDeviceHead,
+    commit: &StoreBatchCommit,
+    operation_id: &CircleOperationId,
+    circle_id: crate::sync::circle::CircleId,
+) -> Result<(), CircleOperationError> {
+    let prepared_head = journal
+        .operation()
+        .prepared_objects
+        .get("store-head")
+        .ok_or_else(|| {
+            CircleOperationError::Journal(
+                "Merge Circle operation lacks its prepared Store head".to_string(),
+            )
+        })?;
+    let crate::sync::store::abandonment::ExcludedCandidateHeadObservation::MergeWinner(winner) =
+        crate::sync::store::abandonment::observe_excluded_candidate_head(
+            database,
+            storage,
+            store_root_hash,
+            head,
+            commit,
+            prepared_head.reference(),
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let block = crate::sync::circle::CircleOperationBlock::PositionLost {
+        winner_commit: winner.winner().commit.commit_hash,
+    };
+    database
+        .block_circle_operation(operation_id, block.clone())
+        .await?;
+    Err(CircleOperationError::Blocked { circle_id, block })
 }
 
 async fn append_step(

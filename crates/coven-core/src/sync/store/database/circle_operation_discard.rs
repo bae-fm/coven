@@ -118,7 +118,12 @@ impl StoreDatabase {
                         block:
                             crate::sync::circle::CircleOperationBlock::AuthorityLost { grant_id },
                     } => Some(grant_id),
-                    crate::sync::circle::CircleOperationState::Pending
+                    // A lost position needs no grant: its proof is the direct
+                    // observation of the winner that holds the head slot.
+                    crate::sync::circle::CircleOperationState::Blocked {
+                        block: crate::sync::circle::CircleOperationBlock::PositionLost { .. },
+                    }
+                    | crate::sync::circle::CircleOperationState::Pending
                     | crate::sync::circle::CircleOperationState::WaitingForCloseResponses
                     | crate::sync::circle::CircleOperationState::Finalizing
                     | crate::sync::circle::CircleOperationState::Discarding => None,
