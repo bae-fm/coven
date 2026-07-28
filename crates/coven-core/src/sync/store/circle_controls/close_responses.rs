@@ -16,7 +16,7 @@ use crate::sync::store_objects::StoreObjectError;
 
 impl AuthorizedStore<'_> {
     pub(crate) async fn finalize_ready_circle_epoch_closes(
-        &self,
+        &mut self,
         device_id: &str,
         metadata_stamp: &str,
         store_dir: &crate::store_dir::StoreDir,
@@ -27,15 +27,6 @@ impl AuthorizedStore<'_> {
         if journals.is_empty() {
             return Ok(());
         }
-        let root = self
-            .database()
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut history_verifier =
-            crate::sync::store::pull::MergeHistoryVerifier::new(self.storage(), &root)
-                .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for mut journal in journals {
             let member_pubkey = match &journal.intent {
                 CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
@@ -86,7 +77,9 @@ impl AuthorizedStore<'_> {
                     cutoff,
                 )
                 .await?;
-            let activation = history_verifier
+            let authority = self.operation_authority();
+            let activation = authority
+                .history_verifier
                 .commit_verifier()
                 .load_ref(&activation_commit_ref)
                 .await?;
@@ -119,8 +112,8 @@ impl AuthorizedStore<'_> {
                 }
             };
             let roster_chain = super::activation::load_circle_control_roster_chain(
-                self.database(),
-                history_verifier.commit_verifier(),
+                authority.database,
+                authority.history_verifier.commit_verifier(),
                 &activation,
                 reference,
                 &current.control,
@@ -139,8 +132,8 @@ impl AuthorizedStore<'_> {
                     ))
                 })?;
             let prepared = Box::pin(prepare_circle_operation_request(
-                &mut history_verifier,
-                self.database(),
+                authority.history_verifier,
+                authority.database,
                 device_id,
                 CircleOperationRequest::FinalizeEpochClose(Box::new(
                     CircleFinalizeEpochCloseRequest {
@@ -172,17 +165,18 @@ impl AuthorizedStore<'_> {
                 )));
             }
             journal.begin_finalization(prepared.operation().clone())?;
-            self.database()
+            authority
+                .database
                 .begin_circle_operation_finalization(journal.clone())
                 .await?;
             let routing_key = crate::sync::circle::derive_row_routing_key(
                 routing_encryption,
-                self.store_root().store_root_hash,
+                authority.history_verifier.root().store_root_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             Box::pin(publish_circle_operation_with_history(
-                self.database(),
-                &mut history_verifier,
+                authority.database,
+                authority.history_verifier,
                 &journal.operation_id,
                 identity,
                 Some(&routing_key),

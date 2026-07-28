@@ -438,7 +438,7 @@ async fn run_single_sync_cycle_with_authorization(
         Box::pin(reclaim_cycle_packages(
             device_id,
             user_keypair,
-            &authorization,
+            &mut authorization,
         ))
         .await?;
     }
@@ -709,7 +709,7 @@ async fn complete_cycle_after_pull(
 async fn reclaim_cycle_packages(
     device_id: &str,
     user_keypair: &UserKeypair,
-    authorization: &AuthorizedStore<'_>,
+    authorization: &mut AuthorizedStore<'_>,
 ) -> Result<(), SyncCycleFailure> {
     match authorization
         .reclaim_packages(device_id, user_keypair)

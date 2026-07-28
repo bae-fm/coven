@@ -1032,22 +1032,23 @@ pub enum StoreReclaimError {
 
 impl AuthorizedStore<'_> {
     pub(crate) async fn reclaim_packages(
-        &self,
+        &mut self,
         device_id: &str,
         identity: &UserKeypair,
     ) -> Result<StoreReclaimResult, StoreReclaimError> {
-        reclaim_store_packages(
-            self.database(),
-            self.storage(),
+        let authority = self.operation_authority();
+        reclaim_store_packages_with_history(
+            authority.database,
+            authority.history_verifier,
             device_id,
             identity,
-            self.store_root().store_root_hash,
-            self.membership(),
+            &*authority.membership,
         )
         .await
     }
 }
 
+#[cfg(test)]
 async fn reclaim_store_packages(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -1066,15 +1067,32 @@ async fn reclaim_store_packages(
             "reclamation root differs from the exact local Store root".to_string(),
         ));
     }
-    let mut commit_verifier = StoreCommitVerifier::new(storage, &root)
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root)
         .await
-        .map_err(StoreReclaimError::Object)?;
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    reclaim_store_packages_with_history(
+        database,
+        &mut history_verifier,
+        device_id,
+        identity_signer,
+        membership,
+    )
+    .await
+}
+
+async fn reclaim_store_packages_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    membership: &MembershipChain,
+) -> Result<StoreReclaimResult, StoreReclaimError> {
     let mut packages_deleted = Box::pin(resume_store_reclaim_operations(
         database,
         device_id,
         identity_signer,
         membership,
-        &mut commit_verifier,
+        history_verifier.commit_verifier(),
     ))
     .await?;
     if !membership.is_owner_now(&keys::public_key_hex(identity_signer)) {
@@ -1083,18 +1101,13 @@ async fn reclaim_store_packages(
             physical_copies_deleted: packages_deleted,
         });
     }
-    let mut history_verifier =
-        super::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
-            .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let registrations = database
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     // A missing or unstable Store snapshot leaves Store packages uncovered but must
     // not block Circle package reclamation, which carries its own Circle coverage.
-    let store_targets = match Box::pin(choose_snapshot(&mut history_verifier, &registrations)).await
-    {
+    let store_targets = match Box::pin(choose_snapshot(history_verifier, &registrations)).await {
         Ok(snapshot) => exact_package_targets(
             history_verifier.commit_verifier(),
             &snapshot.snapshot.meta.coverage,

@@ -1529,7 +1529,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .activated_store_device_registration(participant.registration.clone())
         .await
         .expect("load response author registration");
-    let authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+    let mut authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
         .await
         .expect("authorize Circle close response");
     authorized_store
@@ -3237,7 +3237,7 @@ async fn interrupted_cancellation_flow() {
 #[tokio::test]
 async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     let fixture = setup_closing_founder_circle("circle-finalize-durable-first").await;
-    let authorized =
+    let mut authorized =
         crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
             .await
             .expect("authorize Owner Store");

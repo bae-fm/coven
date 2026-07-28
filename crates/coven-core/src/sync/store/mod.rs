@@ -460,7 +460,7 @@ pub(crate) async fn reclaim_packages_for_test(
         .await
         .expect("read local device id")
         .expect("local device id is installed");
-    let store = Store::authorize_borrowed(storage, db)
+    let mut store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| reclaim::StoreReclaimError::Authorization(error.to_string()))?;
     store.reclaim_packages(&device_id, identity).await
