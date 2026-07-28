@@ -397,8 +397,15 @@ impl Store {
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
     {
-        crate::sync::store::membership::invite_member(
-            &**self.storage(),
+        let mut authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        let authority = authorization.operation_authority();
+        crate::sync::store::membership::invite_member_with_history(
+            authority.history_verifier,
+            authority.membership,
             self.storage().cloud_home(),
             identity,
             hlc,
@@ -408,7 +415,7 @@ impl Store {
             encryption,
             store_id,
             store_name,
-            self.database(),
+            authority.database,
         )
         .await
     }

@@ -130,8 +130,8 @@ pub use exact_chain::AnchoredChainError;
 pub(crate) use key_rotation::apply_key_rotation;
 pub(crate) use listing::{current_membership_floor, get_members, get_membership_conflict};
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) use merge::remove_member;
-pub(crate) use merge::{invite_member, remove_member_with_history};
+pub(crate) use merge::{invite_member, remove_member};
+pub(crate) use merge::{invite_member_with_history, remove_member_with_history};
 pub use mutation::{unwrap_store_keyring, InviteError};
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::*;
 
 /// Invite a member through Merge membership authority.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn invite_member<'a>(
     storage: &'a dyn SyncStorage,
     cloud_home: &'a dyn crate::storage::cloud::CloudHome,
@@ -34,6 +35,7 @@ pub(crate) fn invite_member<'a>(
         database,
     ))
 }
+#[cfg(any(test, feature = "test-utils"))]
 async fn invite_merge_member_impl(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
@@ -47,31 +49,62 @@ async fn invite_merge_member_impl(
     store_name: &str,
     database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
-    validate_invitation(user_keypair, public_key_hex, &role)?;
-
-    // Download existing membership entries
     let db = database.sqlite();
     let root_ref = required_store_root_ref(database).await?;
-    let store_root_hash = root_ref.store_root_hash;
-
-    // The founder is written once, when a store is created and first connects
-    // its cloud (issue #102) — never lazily here. An empty listing at invite time
-    // means the chain is missing (a fresh store that never founded, or a wiped
-    // `membership/*`); bootstrapping a new founder on the spot is the takeover
-    // primitive #104 describes, so refuse instead.
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let mut chain = Box::pin(load_current_exact_chain(
-        storage,
-        &root_ref,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root_ref)
+            .await
+            .map_err(|error| {
+                MembershipOpsError::Chain(AnchoredChainError::LoadFailed(error.to_string()))
+            })?;
+    let mut chain = load_current_exact_chain_with_history(
+        &mut history_verifier,
         Some(&pinned_owner),
         Some(database),
-    ))
+    )
     .await?;
-    require_resolved_membership(&chain)?;
+    invite_member_with_history(
+        &mut history_verifier,
+        &mut chain,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        invitee_email,
+        role,
+        encryption,
+        store_id,
+        store_name,
+        database,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn invite_member_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    chain: &mut MembershipChain,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    store_name: &str,
+    database: &crate::sync::store::database::StoreDatabase,
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    validate_invitation(user_keypair, public_key_hex, &role)?;
+    require_resolved_membership(chain)?;
+    let storage = history_verifier.storage();
+    let root_ref = history_verifier.root().clone();
+    let store_root_hash = root_ref.store_root_hash;
     let protocol_store_id = root_ref.store_root_id.to_string();
 
     // Create the invitation
@@ -80,7 +113,7 @@ async fn invite_merge_member_impl(
         storage,
         cloud_home,
         store_root_hash,
-        &mut chain,
+        chain,
         user_keypair,
         public_key_hex,
         invitee_email,
@@ -111,10 +144,9 @@ async fn invite_merge_member_impl(
     // heads are the floor the joiner seeds its watermark from, so a provider
     // can never roll the joiner back to a state before this invite.
     let membership_floor = chain.head_refs().to_vec();
-    let store_protocol_root =
-        crate::sync::store_objects::load_store_protocol_root(storage, &root_ref).await?;
-    if store_protocol_root.value.descriptor.store_root_id() != root_ref.store_root_id
-        || store_protocol_root.value.descriptor.founder_pubkey != owner_pubkey
+    let store_protocol_root = history_verifier.verified_root();
+    if store_protocol_root.descriptor.store_root_id() != root_ref.store_root_id
+        || store_protocol_root.descriptor.founder_pubkey != owner_pubkey
     {
         return Err(MembershipOpsError::Chain(AnchoredChainError::LoadFailed(
             "Store protocol root differs from the invite authority".to_string(),
