@@ -795,6 +795,7 @@ async fn exact_membership_chain(storage: &TestStore) -> MembershipChain {
 
 async fn exact_membership_registration(
     storage: &TestStore,
+    history_verifier: &crate::sync::store::MergeHistoryVerifier<'_>,
     chain: &MembershipChain,
     entry: &crate::sync::membership::MembershipEntry,
     signer: &UserKeypair,
@@ -808,16 +809,16 @@ async fn exact_membership_registration(
         &entry.author_owner_grant,
         entry.stream_id,
     ) {
-        let head = crate::sync::store::load_exact_membership_head(
-            &storage.storage,
-            &storage.root,
+        let head = crate::sync::store::load_exact_membership_head_with_history(
+            history_verifier,
             predecessor,
         )
         .await
         .expect("load exact predecessor membership head");
-        let registration = crate::sync::store_objects::load_registration_ref(
+        let registration = crate::sync::store_objects::load_registration_ref_with_root(
             &storage.storage,
             &storage.root,
+            history_verifier.verified_root(),
             &head.body.author_registration,
         )
         .await
@@ -947,9 +948,13 @@ async fn publish_exact_membership_entry(
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{membership_head_slot_prefix, StreamActivation, SuccessorLink};
 
+    let history_verifier =
+        crate::sync::store::MergeHistoryVerifier::new(&storage.storage, &storage.root)
+            .await
+            .expect("authenticate exact membership publication");
     let coord = entry.coord();
     let (registration_ref, registration, device_signer) =
-        exact_membership_registration(storage, chain, &entry, signer).await;
+        exact_membership_registration(storage, &history_verifier, chain, &entry, signer).await;
     let predecessor = chain
         .head_ref_for_stream(
             &coord.author_pubkey,
@@ -963,9 +968,8 @@ async fn publish_exact_membership_entry(
         .clone();
     let current_slot = match predecessor.as_ref() {
         Some(reference) => {
-            crate::sync::store::load_exact_membership_head(
-                &storage.storage,
-                &storage.root,
+            crate::sync::store::load_exact_membership_head_with_history(
+                &history_verifier,
                 reference,
             )
             .await

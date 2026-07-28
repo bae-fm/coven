@@ -229,17 +229,6 @@ pub fn load_store_protocol_root<'a>(
     })
 }
 
-pub fn load_registration_ref<'a>(
-    storage: &'a dyn SyncStorage,
-    store_root: &'a StoreRootRef,
-    reference: &'a StoreDeviceRegistrationRef,
-) -> StoreObjectFuture<'a, VerifiedObject<StoreDeviceRegistration>> {
-    Box::pin(async move {
-        let pinned_root = load_store_protocol_root(storage, store_root).await?.value;
-        load_registration_ref_with_root(storage, store_root, &pinned_root, reference).await
-    })
-}
-
 pub(crate) async fn load_registration_ref_with_root(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
@@ -265,14 +254,6 @@ pub(crate) async fn load_registration_ref_with_root(
         },
     )
     .await
-}
-
-pub async fn load_founder_registration(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
-    let root_value = load_store_protocol_root(storage, root).await?.value;
-    load_founder_registration_with_root(storage, root, &root_value).await
 }
 
 pub(crate) async fn load_founder_registration_with_root(

@@ -118,7 +118,8 @@ pub(crate) use membership::apply_key_rotation;
 pub(crate) use membership::unwrap_store_keyring_for_refs;
 #[cfg(test)]
 pub(crate) use membership::{
-    complete_revoke_rotation_adoption, load_exact_membership_head, revoke_member_durable,
+    complete_revoke_rotation_adoption, load_exact_membership_head,
+    load_exact_membership_head_with_history, revoke_member_durable,
     signed_wrapped_keyring_for_test,
 };
 #[cfg(any(test, feature = "test-utils"))]

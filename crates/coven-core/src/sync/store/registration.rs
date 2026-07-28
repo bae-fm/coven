@@ -84,9 +84,12 @@ pub(crate) async fn install_existing_founder_device(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &crate::sync::store_commit::StoreRootRef,
+    root_value: &crate::sync::store_commit::StoreProtocolRoot,
     signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
-    let founder = crate::sync::store_objects::load_founder_registration(storage, root).await?;
+    let founder =
+        crate::sync::store_objects::load_founder_registration_with_root(storage, root, root_value)
+            .await?;
     if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
         return Err(StoreRegistrationError::Invalid(
             "Store founder registration belongs to another identity".to_string(),

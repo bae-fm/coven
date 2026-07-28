@@ -1413,10 +1413,13 @@ mod tests {
         let root = crate::sync::store_objects::load_store_protocol_root(&storage, &root_ref)
             .await
             .expect("open exact opaque root");
-        let registration =
-            crate::sync::store_objects::load_founder_registration(&storage, &root_ref)
-                .await
-                .expect("open exact opaque founder registration");
+        let registration = crate::sync::store_objects::load_founder_registration_with_root(
+            &storage,
+            &root_ref,
+            &root.value,
+        )
+        .await
+        .expect("open exact opaque founder registration");
         let durable = crate::sync::store::database::StoreDatabase::new(&db)
             .latest_local_store_device_registration()
             .await

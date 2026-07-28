@@ -1124,10 +1124,13 @@ pub async fn bootstrap_from_snapshot(
     .await?;
     let coverage = snapshot.meta.coverage.clone();
     write_snapshot_db(target_path, &plaintext)?;
-    let founder_registration =
-        crate::sync::store_objects::load_founder_registration(storage, &expected_store_root)
-            .await
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+    let founder_registration = crate::sync::store_objects::load_founder_registration_with_root(
+        storage,
+        &expected_store_root,
+        &store_root.value,
+    )
+    .await
+    .map_err(|error| SnapshotError::Parse(error.to_string()))?;
     let target_path = std::fs::canonicalize(target_path)?;
     info!(
         num_positions = coverage.position_count(),

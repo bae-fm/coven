@@ -120,6 +120,7 @@ impl Store {
                 &database,
                 &*storage,
                 &store_root,
+                &protocol_root,
                 identity,
             )
             .await
