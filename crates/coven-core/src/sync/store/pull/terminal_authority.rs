@@ -336,8 +336,6 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     }
     let current_membership = load_merge_predecessor_membership_with_history(
         history_verifier,
-        storage,
-        root,
         &witness_commit.value().membership_state,
     )
     .await
@@ -364,8 +362,6 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     let candidate_author = candidate.author();
     let predecessor_membership = load_merge_predecessor_membership_with_history(
         history_verifier,
-        storage,
-        root,
         &candidate_commit.membership_state,
     )
     .await

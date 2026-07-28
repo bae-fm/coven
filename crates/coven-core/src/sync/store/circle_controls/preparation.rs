@@ -1272,8 +1272,6 @@ pub(super) async fn prepare_circle_operation_request(
     let (creation, commit, commit_ref, policy, prepared_objects) = {
         let current = crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
             history_verifier,
-            storage,
-            &root,
             &founder,
             database,
         )

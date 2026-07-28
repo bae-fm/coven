@@ -14,8 +14,6 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
             .await?;
     let membership = load_merge_predecessor_membership_with_history(
         history_verifier,
-        storage,
-        root,
         &activation.value().membership_state,
     )
     .await

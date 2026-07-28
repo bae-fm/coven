@@ -1657,7 +1657,6 @@ pub(crate) async fn select_staged_circle_decisions(
             history_verifier,
             query_db,
             storage,
-            root,
             restorer_identity,
             routing_key,
             circle_id,
@@ -1742,7 +1741,6 @@ async fn resolve_restorer_circle_access(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     query_db: &crate::sync::store::StoreDatabase,
     storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     restorer_identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     circle_id: CircleId,
@@ -1776,7 +1774,6 @@ async fn resolve_restorer_circle_access(
         history_verifier,
         query_db,
         storage,
-        root,
         &commit,
         &reference.reference,
         &reference.control,
@@ -2080,14 +2077,17 @@ pub(crate) async fn select_store_snapshot(
     let mut registrations = std::collections::BTreeMap::new();
     let mut resolutions = std::collections::BTreeSet::new();
     for reference in heads {
-        let head =
-            crate::sync::store::membership::load_exact_membership_head(storage, root, reference)
-                .await
-                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+        let head = crate::sync::store::membership::load_exact_membership_head_with_history(
+            &history_verifier,
+            reference,
+        )
+        .await
+        .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
         resolutions.extend(head.body.resolutions.iter().cloned());
-        let registration = crate::sync::store_objects::load_registration_ref(
+        let registration = crate::sync::store_objects::load_registration_ref_with_root(
             storage,
             root,
+            root_value,
             &head.body.author_registration,
         )
         .await
@@ -2097,12 +2097,8 @@ pub(crate) async fn select_store_snapshot(
     }
     let resolutions = resolutions.into_iter().collect::<Vec<_>>();
     let membership =
-        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_history(
+        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_history(
             &mut history_verifier,
-            storage,
-            root,
-            root_value,
-            &root_value.descriptor.founder_pubkey,
             heads,
             &resolutions,
         )

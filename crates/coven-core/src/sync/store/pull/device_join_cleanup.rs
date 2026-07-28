@@ -10,8 +10,6 @@ pub(in crate::sync::store) async fn verify_device_join_cleanup_activation(
 ) -> Result<crate::sync::store::JoinerJoinTerminal, StorePullError> {
     let membership = load_merge_predecessor_membership_with_history(
         history_verifier,
-        storage,
-        root,
         &activation.verified_commit.value().membership_state,
     )
     .await

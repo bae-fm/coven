@@ -21,6 +21,7 @@ pub(super) async fn verify_merge_history_authority(
     history_verifier
         .verify_refs(frontier.values().cloned())
         .await?;
+    let verified_root = history_verifier.verified_root().clone();
     let history = history_verifier.history();
     let device_state = if frontier.is_empty() {
         history.genesis.clone()
@@ -49,6 +50,7 @@ pub(super) async fn verify_merge_history_authority(
     let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
         storage,
         root,
+        &verified_root,
         membership_ref,
         &verified_membership_activations,
         None,

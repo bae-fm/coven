@@ -1132,6 +1132,14 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self.history
     }
 
+    pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
+        self.storage
+    }
+
+    pub(crate) fn root(&self) -> &'a StoreRootRef {
+        self.root
+    }
+
     pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
         self.commit_verifier.verified_root()
     }
@@ -1254,6 +1262,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
                 storage,
                 root,
+                &verified_root,
                 &commit.membership_state,
                 &verified_membership_prefix,
                 pending_resolution.as_ref(),

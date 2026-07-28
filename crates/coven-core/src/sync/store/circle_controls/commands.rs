@@ -24,23 +24,17 @@ use crate::sync::store_objects::StoreObjectError;
 /// finishing an in-flight close remain the paths out.
 async fn ensure_not_rotation_required(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     circle_id: CircleId,
 ) -> Result<(), CircleOperationError> {
-    let membership = crate::sync::store::pull::load_cycle_membership_with_history(
-        history_verifier,
-        storage,
-        database,
-        root,
-    )
-    .await
-    .map_err(|error| {
-        CircleOperationError::InvalidState(format!(
-            "load Store membership for Circle rotation check: {error}"
-        ))
-    })?;
+    let membership =
+        crate::sync::store::pull::load_cycle_membership_with_history(history_verifier, database)
+            .await
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "load Store membership for Circle rotation check: {error}"
+                ))
+            })?;
     let chain = membership;
     let active_store_members = chain
         .current_members()
@@ -216,8 +210,7 @@ impl Store {
             crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        ensure_not_rotation_required(database, storage, &root, &mut history_verifier, circle_id)
-            .await?;
+        ensure_not_rotation_required(database, &mut history_verifier, circle_id).await?;
         let activation_commit = history_verifier
             .commit_verifier()
             .load_ref(&activation_commit_ref)
@@ -303,8 +296,7 @@ impl Store {
             crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        ensure_not_rotation_required(database, storage, &root, &mut history_verifier, circle_id)
-            .await?;
+        ensure_not_rotation_required(database, &mut history_verifier, circle_id).await?;
         let activation_commit = history_verifier
             .commit_verifier()
             .load_ref(&activation_commit_ref)

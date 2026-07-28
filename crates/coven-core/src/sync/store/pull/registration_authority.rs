@@ -1,115 +1,53 @@
 use super::*;
 
-enum PredecessorMembershipAuthority<'operation, 'storage> {
-    Standalone,
-    History(&'operation mut MergeHistoryVerifier<'storage>),
-    VerifiedPrefix {
-        activations: &'operation VerifiedMergeMembershipPrefix,
-        pending_resolution: Option<&'operation VerifiedMergeConflictResolutionActivation>,
-    },
-}
-
 pub(crate) async fn load_merge_predecessor_membership(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,
 ) -> Result<MembershipChain, RegistrationLoadError> {
-    load_merge_predecessor_membership_impl(
-        storage,
-        root,
-        state,
-        PredecessorMembershipAuthority::Standalone,
-    )
-    .await
+    let mut history_verifier = MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    load_merge_predecessor_membership_with_history(&mut history_verifier, state).await
 }
 
 pub(crate) async fn load_merge_predecessor_membership_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     state: &StoreMembershipStateRef,
 ) -> Result<MembershipChain, RegistrationLoadError> {
-    load_merge_predecessor_membership_impl(
-        storage,
-        root,
-        state,
-        PredecessorMembershipAuthority::History(history_verifier),
+    Box::pin(
+        super::membership_ops::load_anchored_chain_at_exact_heads_with_history(
+            history_verifier,
+            &state.heads,
+            &state.resolutions,
+        ),
     )
     .await
+    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
 }
 
 pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
     state: &StoreMembershipStateRef,
     verified_activations: &VerifiedMergeMembershipPrefix,
     pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
 ) -> Result<MembershipChain, RegistrationLoadError> {
-    load_merge_predecessor_membership_impl(
-        storage,
-        root,
-        state,
-        PredecessorMembershipAuthority::VerifiedPrefix {
-            activations: verified_activations,
+    Box::pin(
+        super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+            storage,
+            root,
+            root_value,
+            &root_value.descriptor.founder_pubkey,
+            &state.heads,
+            &state.resolutions,
+            verified_activations,
             pending_resolution,
-        },
+        ),
     )
     .await
-}
-
-async fn load_merge_predecessor_membership_impl(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    state: &StoreMembershipStateRef,
-    authority: PredecessorMembershipAuthority<'_, '_>,
-) -> Result<MembershipChain, RegistrationLoadError> {
-    let root_value = load_store_protocol_root(storage, root)
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
-    let membership = match authority {
-        PredecessorMembershipAuthority::VerifiedPrefix {
-            activations,
-            pending_resolution,
-        } => Box::pin(
-            super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-                storage,
-                root,
-                &root_value,
-                &root_value.descriptor.founder_pubkey,
-                &state.heads,
-                &state.resolutions,
-                activations,
-                pending_resolution,
-            ),
-        )
-        .await,
-        PredecessorMembershipAuthority::History(history_verifier) => Box::pin(
-            super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_history(
-                history_verifier,
-                storage,
-                root,
-                &root_value,
-                &root_value.descriptor.founder_pubkey,
-                &state.heads,
-                &state.resolutions,
-            ),
-        )
-        .await,
-        PredecessorMembershipAuthority::Standalone => Box::pin(
-            super::membership_ops::load_anchored_chain_at_exact_heads_with_root(
-                storage,
-                root,
-                &root_value,
-                &root_value.descriptor.founder_pubkey,
-                &state.heads,
-                &state.resolutions,
-            ),
-        )
-        .await,
-    }
-    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    Ok(membership)
+    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
 }
 
 pub(crate) fn verify_merge_membership_state_ref(

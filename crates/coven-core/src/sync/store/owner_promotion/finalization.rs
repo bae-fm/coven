@@ -256,8 +256,6 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         let membership = Box::pin(load_current_merge_membership_with_history(
             history_verifier,
             database,
-            storage,
-            root,
         ))
         .await?;
         if let Some(winner) = membership.head_refs().iter().find(|head| {
@@ -377,8 +375,6 @@ fn prepare_merge_store_candidate<'a>(
         let membership = Box::pin(load_current_merge_membership_with_history(
             history_verifier,
             database,
-            storage,
-            root,
         ))
         .await?;
         let plan = Box::pin(crate::sync::store::operations::prepare_plan(
@@ -522,8 +518,6 @@ fn activate_owner_promotion_merge_head<'a>(
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let membership = finalized_merge_membership_ref(
             history_verifier,
-            storage,
-            root,
             &candidate_ref,
             &candidate_commit,
             &transition,
@@ -883,8 +877,6 @@ fn resume_owner_promotion_finalization<'a>(
 
 fn finalized_merge_membership_ref<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
     candidate_ref: &'a crate::sync::store_commit::StoreBatchCommitRef,
     candidate: &'a crate::sync::store_commit::StoreBatchCommit,
     transition: &'a PreparedMembershipTransition,
@@ -897,6 +889,7 @@ fn finalized_merge_membership_ref<'a>(
     >,
 > {
     Box::pin(async move {
+        let root = history_verifier.root().clone();
         if candidate.control()
             != Some(&crate::sync::store_commit::StoreControl {
                 transition: transition.transition.clone(),
@@ -916,14 +909,9 @@ fn finalized_merge_membership_ref<'a>(
             ));
         }
         let predecessor = &candidate.membership_state;
-        let root_value = history_verifier.verified_root().clone();
         let mut membership =
-            crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_history(
+            crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_history(
                 history_verifier,
-                storage,
-                root,
-                &root_value,
-                &root_value.descriptor.founder_pubkey,
                 &predecessor.heads,
                 &predecessor.resolutions,
             )
@@ -986,7 +974,7 @@ fn finalized_merge_membership_ref<'a>(
             owner_grant: grant_id.clone(),
             position: crate::sync::store_commit::OwnerRecoveryPosition::BeforeFirst {
                 activation: crate::sync::store_commit::OwnerRecoveryActivationId::derive(
-                    root,
+                    &root,
                     user_pubkey,
                     grant_id,
                     acceptance.anchors.recovery(),

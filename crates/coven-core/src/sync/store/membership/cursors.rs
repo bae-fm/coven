@@ -108,20 +108,11 @@ pub(crate) async fn load_and_persist_owner_anchor(
     let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(super::exact_chain::map_membership_history_error)?;
-    load_and_persist_owner_anchor_with_history(
-        &mut history_verifier,
-        storage,
-        root,
-        owner_pubkey,
-        database,
-    )
-    .await
+    load_and_persist_owner_anchor_with_history(&mut history_verifier, owner_pubkey, database).await
 }
 
 pub(crate) async fn load_and_persist_owner_anchor_with_history(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     owner_pubkey: &str,
     database: &StoreDatabase,
 ) -> Result<MembershipChain, AnchoredChainError> {
@@ -130,14 +121,12 @@ pub(crate) async fn load_and_persist_owner_anchor_with_history(
     let cursors = read_head_cursors(db)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
-    let chain = load_exact_anchored_chain_with_history(
-        history_verifier,
-        storage,
-        root,
-        &cursors,
-        Some(owner_pubkey),
-    )
-    .await?;
+    let chain =
+        load_exact_anchored_chain_with_history(history_verifier, &cursors, Some(owner_pubkey))
+            .await?;
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
+    let protocol_root = history_verifier.verified_root();
     let founder = chain.founder_coord().ok_or_else(|| {
         AnchoredChainError::LoadFailed("owner-anchored membership chain is empty".to_string())
     })?;
@@ -153,12 +142,17 @@ pub(crate) async fn load_and_persist_owner_anchor_with_history(
                 "owner-anchored membership chain has no exact founder head".to_string(),
             )
         })?;
-    let founder_head = load_exact_membership_head(storage, root, &founder_head_ref).await?;
+    let founder_head =
+        load_exact_membership_head_with_history(history_verifier, &founder_head_ref).await?;
     let founder_registration_ref = founder_head.body.author_registration.clone();
-    let founder_registration =
-        crate::sync::store_objects::load_registration_ref(storage, root, &founder_registration_ref)
-            .await
-            .map_err(map_membership_object_error)?;
+    let founder_registration = crate::sync::store_objects::load_registration_ref_with_root(
+        storage,
+        root,
+        protocol_root,
+        &founder_registration_ref,
+    )
+    .await
+    .map_err(map_membership_object_error)?;
     let founder_registration_bytes = founder_registration.bytes;
     let founder_registration = founder_registration.value;
     if founder_registration.author_pubkey != owner_pubkey
@@ -171,10 +165,6 @@ pub(crate) async fn load_and_persist_owner_anchor_with_history(
             "founder head registration is not activated by the Store root".to_string(),
         ));
     }
-    let protocol_root = crate::sync::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .map_err(map_membership_object_error)?
-        .value;
     if protocol_root.descriptor.founder_pubkey != owner_pubkey {
         return Err(AnchoredChainError::LoadFailed(
             "owner anchor differs from the Store root founder".to_string(),

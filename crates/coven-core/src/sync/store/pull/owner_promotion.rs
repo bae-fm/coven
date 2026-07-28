@@ -217,6 +217,7 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
     let membership = load_merge_predecessor_membership_with_verified_activations(
         storage,
         root,
+        &verified_root,
         &request.predecessor_membership,
         &verified_membership_activations,
         None,

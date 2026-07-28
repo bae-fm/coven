@@ -1387,7 +1387,6 @@ pub(crate) async fn resolve_local_circle_access(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit: &StoreBatchCommit,
     reference: &crate::sync::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
@@ -1402,13 +1401,7 @@ pub(crate) async fn resolve_local_circle_access(
         reference.objects(),
     )
     .await?;
-    let checkpoint_members = Box::pin(verify_control_membership(
-        history_verifier,
-        storage,
-        root,
-        control,
-    ))
-    .await?;
+    let checkpoint_members = Box::pin(verify_control_membership(history_verifier, control)).await?;
     let Some(resolved) = resolve_identity_access_leaf(
         &verified_access,
         checkpoint_members.as_slice(),

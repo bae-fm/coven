@@ -569,18 +569,9 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
     )
     .await
     .expect("open relocated membership history");
-    let verified_root = history_verifier.verified_root().clone();
-    load_anchored_chain_at_exact_heads_with_root_and_history(
-        &mut history_verifier,
-        &fixture.store.storage,
-        &fixture.store.root,
-        &verified_root,
-        &fixture.owner_pubkey,
-        &[relocated_ref],
-        &[],
-    )
-    .await
-    .expect_err("a membership head relocated outside its grant anchor must fail");
+    load_anchored_chain_at_exact_heads_with_history(&mut history_verifier, &[relocated_ref], &[])
+        .await
+        .expect_err("a membership head relocated outside its grant anchor must fail");
 }
 
 #[tokio::test]

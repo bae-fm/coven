@@ -463,8 +463,6 @@ pub fn pull_store_commits<'a>(
             }
             let membership = Box::pin(load_merge_predecessor_membership_with_history(
                 &mut history_verifier,
-                storage,
-                &root,
                 &materialization.commit().membership_state,
             ))
             .await

@@ -28,25 +28,18 @@ pub async fn load_cycle_membership(
     let mut history_verifier = super::MergeHistoryVerifier::new(storage, &root)
         .await
         .map_err(map_membership_verifier_error)?;
-    load_cycle_membership_with_history(&mut history_verifier, storage, database, &root).await
+    load_cycle_membership_with_history(&mut history_verifier, database).await
 }
 
 pub(crate) async fn load_cycle_membership_with_history(
     history_verifier: &mut super::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
     database: &crate::sync::store::database::StoreDatabase,
-    root: &crate::sync::store_commit::StoreRootRef,
 ) -> Result<MembershipChain, PullError> {
     let db = database.sqlite();
     let pinned_owner = db
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
-    if history_verifier.commit_verifier().root() != root {
-        return Err(PullError::MembershipTampered(
-            "membership verifier belongs to another Store root".to_string(),
-        ));
-    }
     let owner = pinned_owner.clone().unwrap_or_else(|| {
         history_verifier
             .verified_root()
@@ -56,8 +49,6 @@ pub(crate) async fn load_cycle_membership_with_history(
     });
     crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
         history_verifier,
-        storage,
-        root,
         &owner,
         database,
     )

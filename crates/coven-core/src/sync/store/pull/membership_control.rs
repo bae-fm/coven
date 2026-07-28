@@ -32,6 +32,7 @@ pub(crate) async fn verify_merge_membership_control(
         .verify_refs(commit_predecessor_references(commit))
         .await
         .map_err(|error| error.to_string())?;
+    let verified_root = history_verifier.verified_root().clone();
     let history = history_verifier.history();
     let states = history
         .commits
@@ -55,6 +56,7 @@ pub(crate) async fn verify_merge_membership_control(
     let predecessor_membership = load_merge_predecessor_membership_with_verified_activations(
         storage,
         root,
+        &verified_root,
         &commit.membership_state,
         &verified_membership_activations,
         pending_resolution.as_ref(),
@@ -286,9 +288,11 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         commit_predecessor_references(request_commit.verified.value()),
     )
     .map_err(|error| error.to_string())?;
+    let verified_root = commit_verifier.verified_root().clone();
     let request_membership = load_merge_predecessor_membership_with_verified_activations(
         storage,
         root,
+        &verified_root,
         &acceptance.request.predecessor_membership,
         &verified_membership_activations,
         None,

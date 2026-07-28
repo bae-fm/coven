@@ -20,20 +20,11 @@ pub(crate) async fn load_current_exact_chain(
     let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(map_membership_history_error)?;
-    load_current_exact_chain_with_history(
-        &mut history_verifier,
-        storage,
-        root,
-        owner_pubkey,
-        database,
-    )
-    .await
+    load_current_exact_chain_with_history(&mut history_verifier, owner_pubkey, database).await
 }
 
 pub(crate) async fn load_current_exact_chain_with_history(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     owner_pubkey: Option<&str>,
     database: Option<&StoreDatabase>,
 ) -> Result<MembershipChain, MembershipOpsError> {
@@ -49,8 +40,6 @@ pub(crate) async fn load_current_exact_chain_with_history(
     };
     let chain = Box::pin(load_exact_anchored_chain_with_history(
         history_verifier,
-        storage,
-        root,
         &cursors,
         owner_pubkey,
     ))
@@ -401,28 +390,16 @@ pub(crate) async fn load_exact_anchored_chain(
     let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(map_membership_history_error)?;
-    load_exact_anchored_chain_with_history(
-        &mut history_verifier,
-        storage,
-        root,
-        cursors,
-        owner_pubkey,
-    )
-    .await
+    load_exact_anchored_chain_with_history(&mut history_verifier, cursors, owner_pubkey).await
 }
 
 pub(crate) async fn load_exact_anchored_chain_with_history(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     cursors: &[MembershipHeadRef],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(AnchoredChainError::LoadFailed(
-            "membership history verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let root_value = history_verifier.verified_root().clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     if let Some(owner) = owner_pubkey {
@@ -541,6 +518,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn load_exact_membership_head(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -556,6 +534,19 @@ pub(crate) async fn load_exact_membership_head(
         &root_value,
         reference,
     ))
+    .await
+}
+
+pub(crate) async fn load_exact_membership_head_with_history(
+    history_verifier: &crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    reference: &MembershipHeadRef,
+) -> Result<AuthorHead, AnchoredChainError> {
+    load_exact_membership_head_with_root(
+        history_verifier.storage(),
+        history_verifier.root(),
+        history_verifier.verified_root(),
+        reference,
+    )
     .await
 }
 
@@ -616,54 +607,22 @@ fn load_exact_membership_head_with_root<'a>(
     })
 }
 
-pub(crate) async fn load_anchored_chain_at_exact_heads_with_root(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &crate::sync::store_commit::StoreProtocolRoot,
-    owner_pubkey: &str,
-    exact_heads: &[MembershipHeadRef],
-    exact_resolutions: &[StoreMembershipConflictResolutionRef],
-) -> Result<MembershipChain, AnchoredChainError> {
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
-        .await
-        .map_err(map_membership_history_error)?;
-    let mut activation_authority = MembershipActivationAuthority::History(&mut history_verifier);
-    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
-        &mut activation_authority,
-        storage,
-        root,
-        root_value,
-        owner_pubkey,
-        exact_heads,
-        exact_resolutions,
-        None,
-    ))
-    .await
-}
-
-pub(crate) async fn load_anchored_chain_at_exact_heads_with_root_and_history(
+pub(crate) async fn load_anchored_chain_at_exact_heads_with_history(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &crate::sync::store_commit::StoreProtocolRoot,
-    owner_pubkey: &str,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    if history_verifier.commit_verifier().root() != root
-        || history_verifier.verified_root() != root_value
-    {
-        return Err(AnchoredChainError::LoadFailed(
-            "membership history verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
+    let root_value = history_verifier.verified_root().clone();
+    let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
         storage,
         root,
-        root_value,
-        owner_pubkey,
+        &root_value,
+        &owner_pubkey,
         exact_heads,
         exact_resolutions,
         None,

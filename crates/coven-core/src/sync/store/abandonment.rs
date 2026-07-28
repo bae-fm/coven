@@ -519,8 +519,6 @@ async fn membership_revocation_candidate_nonactivation(
         }
         let membership = crate::sync::store::pull::load_merge_predecessor_membership_with_history(
             history_verifier,
-            storage,
-            root,
             &witness.commit().membership_state,
         )
         .await
