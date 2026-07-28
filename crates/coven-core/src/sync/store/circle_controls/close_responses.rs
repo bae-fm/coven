@@ -111,6 +111,7 @@ impl AuthorizedStore<'_> {
             };
             let roster_chain = super::activation::load_circle_control_roster_chain(
                 self.database(),
+                &mut commit_verifier,
                 self.storage(),
                 &root,
                 &activation,

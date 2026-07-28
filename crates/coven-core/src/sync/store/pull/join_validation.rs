@@ -646,27 +646,11 @@ fn predecessor_contains_join_attempt(
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) async fn predecessor_commit_matching(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     order: &super::store_commit::StoreCommitOrder,
     matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
-    let mut commit_verifier = StoreCommitVerifier::new(storage, root)
-        .await
-        .map_err(RegistrationLoadError::Object)?;
-    Box::pin(predecessor_commit_matching_with_verifier(
-        &mut commit_verifier,
-        order,
-        matches,
-    ))
-    .await
-}
-
-async fn predecessor_commit_matching_with_verifier(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
-    order: &super::store_commit::StoreCommitOrder,
-    mut matches: PredecessorCommitPredicate<'_>,
-) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
+    let mut matches = matches;
     let mut pending = order
         .predecessor
         .iter()

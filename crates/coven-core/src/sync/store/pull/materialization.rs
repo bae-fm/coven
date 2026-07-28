@@ -326,6 +326,7 @@ pub(super) async fn apply_candidate(
     } else {
         load_circle_payload_activations(
             database,
+            history_verifier.commit_verifier(),
             storage,
             root,
             &candidate.verified,

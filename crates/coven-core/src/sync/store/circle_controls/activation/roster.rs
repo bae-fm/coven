@@ -20,6 +20,7 @@ use crate::sync::store_commit::{
 
 pub(super) async fn load_circle_roster_state(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -33,6 +34,7 @@ pub(super) async fn load_circle_roster_state(
 ) -> Result<ResolvedCircleRoster, CircleOperationError> {
     load_circle_roster_chain(
         database,
+        commit_verifier,
         verified_prefix,
         storage,
         root,
@@ -52,6 +54,7 @@ pub(super) async fn load_circle_roster_state(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn load_circle_roster_chain(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -86,6 +89,7 @@ pub(super) async fn load_circle_roster_chain(
     }
     let loaded_heads = load_exact_circle_roster_heads(
         database,
+        commit_verifier,
         verified_prefix,
         storage,
         root,
@@ -136,6 +140,7 @@ pub(super) async fn load_circle_roster_chain(
     } else {
         replay_circle_roster_resolutions(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -279,6 +284,7 @@ async fn load_circle_roster_resolutions(
 
 async fn load_exact_circle_roster_heads(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -315,6 +321,7 @@ async fn load_exact_circle_roster_heads(
         let declared_ref = CircleRosterHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -386,6 +393,7 @@ async fn load_exact_circle_roster_heads(
 
 async fn replay_circle_roster_resolutions(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -445,6 +453,7 @@ async fn replay_circle_roster_resolutions(
         }
         let heads = load_exact_circle_roster_heads(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -687,6 +696,7 @@ async fn replay_circle_roster_resolutions(
 
 pub(super) async fn load_circle_authority_roster(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -709,6 +719,7 @@ pub(super) async fn load_circle_authority_roster(
     };
     load_circle_roster_state(
         database,
+        commit_verifier,
         verified_prefix,
         storage,
         root,

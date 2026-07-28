@@ -20,6 +20,7 @@ use crate::sync::store_commit::{
 
 async fn load_metadata_author_roster(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -33,6 +34,7 @@ async fn load_metadata_author_roster(
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
     load_circle_roster_state(
         database,
+        commit_verifier,
         verified_prefix,
         storage,
         root,
@@ -49,6 +51,7 @@ async fn load_metadata_author_roster(
 
 pub(super) async fn load_circle_metadata_state(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
@@ -126,6 +129,7 @@ pub(super) async fn load_circle_metadata_state(
         let declared_ref = CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -251,6 +255,7 @@ pub(super) async fn load_circle_metadata_state(
         }
         let author_roster = load_metadata_author_roster(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             commit,

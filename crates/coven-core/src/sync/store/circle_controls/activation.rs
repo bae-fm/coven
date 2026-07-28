@@ -58,6 +58,7 @@ struct VerifiedAccessPair {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_circle_control_roster_chain(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     verified: &VerifiedStoreBatchCommit,
@@ -65,6 +66,11 @@ pub(crate) async fn load_circle_control_roster_chain(
     control: &PreparedCircleControl,
     keyring: &str,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
+    if commit_verifier.root() != root {
+        return Err(CircleOperationError::InvalidState(
+            "Circle roster verifier belongs to another Store root".to_string(),
+        ));
+    }
     verify_control_context_for_verified_commit(reference, control, verified)?;
     let commit_ref = verified.reference();
     let commit = verified.value();
@@ -77,6 +83,7 @@ pub(crate) async fn load_circle_control_roster_chain(
     let mut consumed_stream_activations = BTreeSet::new();
     load_circle_roster_chain(
         database,
+        commit_verifier,
         &VerifiedStreamActivationPrefix::empty(),
         storage,
         root,
@@ -976,6 +983,7 @@ async fn verify_circle_head_chain(
 
 async fn verify_covered_control_heads(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1008,6 +1016,7 @@ async fn verify_covered_control_heads(
         } = &head.control;
         let authority = resolve_circle_stream_authority(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -1046,6 +1055,7 @@ async fn verify_covered_control_heads(
 
 async fn resolve_circle_stream_authority(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1113,8 +1123,7 @@ async fn resolve_circle_stream_authority(
         }
     } else {
         let reached = crate::sync::store::pull::predecessor_commit_matching(
-            storage,
-            root,
+            commit_verifier,
             &commit.order,
             Box::new(|predecessor| {
                 predecessor.reference() == &activating_commit
@@ -1468,6 +1477,7 @@ pub(crate) async fn load_circle_activations(
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     Box::pin(load_circle_activations_with_prefix(
         database,
+        history_verifier.commit_verifier(),
         storage,
         root,
         verified,
@@ -1482,6 +1492,7 @@ pub(crate) async fn load_circle_activations(
 
 pub(crate) async fn load_circle_activations_with_prefix(
     database: &StoreDatabase,
+    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     verified: &VerifiedStoreBatchCommit,
@@ -1491,6 +1502,11 @@ pub(crate) async fn load_circle_activations_with_prefix(
     verified_root: &crate::sync::store_commit::StoreProtocolRoot,
     verified_membership_prefix: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
+    if commit_verifier.root() != root {
+        return Err(CircleOperationError::InvalidState(
+            "Circle activation verifier belongs to another Store root".to_string(),
+        ));
+    }
     let commit_ref = verified.reference();
     let commit = verified.value();
     let author = verified.author();
@@ -1597,6 +1613,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
         } = &head.control;
         let authority = resolve_circle_stream_authority(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -1655,6 +1672,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
         }
         verify_covered_control_heads(
             database,
+            commit_verifier,
             verified_prefix,
             storage,
             root,
@@ -1737,6 +1755,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                 );
                 let authority_roster = load_circle_authority_roster(
                     database,
+                    commit_verifier,
                     verified_prefix,
                     storage,
                     commit,
@@ -1760,6 +1779,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                 }
                 let roster_chain = load_circle_roster_chain(
                     database,
+                    commit_verifier,
                     verified_prefix,
                     storage,
                     root,
@@ -1823,6 +1843,7 @@ pub(crate) async fn load_circle_activations_with_prefix(
                 let metadata_state = control.value.metadata_state_ref();
                 let metadata = load_circle_metadata_state(
                     database,
+                    commit_verifier,
                     verified_prefix,
                     storage,
                     commit,

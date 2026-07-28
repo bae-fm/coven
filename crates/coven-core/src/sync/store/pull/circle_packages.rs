@@ -7,6 +7,7 @@ pub(crate) enum PullCircleActivationError {
 
 pub(crate) async fn load_circle_payload_activations(
     database: &StoreDatabase,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     verified: &VerifiedStoreBatchCommit,
@@ -25,6 +26,7 @@ pub(crate) async fn load_circle_payload_activations(
     Box::pin(
         crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
             database,
+            commit_verifier,
             storage,
             root,
             verified,
@@ -167,6 +169,7 @@ pub(crate) async fn load_applicable_circle_packages(
             let roster_chain =
                 crate::sync::store::circle_controls::activation::load_circle_control_roster_chain(
                     database,
+                    commit_verifier,
                     storage,
                     root,
                     &historical_commit,
