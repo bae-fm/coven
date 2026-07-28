@@ -1986,8 +1986,6 @@ pub(crate) struct SelectedStableStoreSnapshot {
 
 pub(crate) async fn select_maximal_stable_store_snapshot_with_history(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
 ) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::pull::StorePullError> {
     let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
@@ -1999,8 +1997,6 @@ pub(crate) async fn select_maximal_stable_store_snapshot_with_history(
     for snapshot in candidates {
         match crate::sync::store::pull::verify_snapshot_stability_with_history(
             history_verifier,
-            storage,
-            root,
             &snapshot,
         )
         .await
@@ -2116,8 +2112,6 @@ pub(crate) async fn select_store_snapshot(
     }
     let selected = Box::pin(select_maximal_stable_store_snapshot_with_history(
         &mut history_verifier,
-        storage,
-        root,
         authorized,
     ))
     .await

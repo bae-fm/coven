@@ -27,17 +27,16 @@ pub(crate) async fn load_merge_predecessor_membership_with_history(
 }
 
 pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
+    commit_verifier: &StoreCommitVerifier<'_>,
     state: &StoreMembershipStateRef,
     verified_activations: &VerifiedMergeMembershipPrefix,
     pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
 ) -> Result<MembershipChain, RegistrationLoadError> {
+    let root_value = commit_verifier.verified_root();
     Box::pin(
         super::membership_ops::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-            storage,
-            root,
+            commit_verifier.storage(),
+            commit_verifier.root(),
             root_value,
             &root_value.descriptor.founder_pubkey,
             &state.heads,

@@ -1154,6 +1154,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self.commit_verifier
     }
 
+    pub(crate) fn commit_verifier_ref(&self) -> &StoreCommitVerifier<'a> {
+        &self.commit_verifier
+    }
+
     pub(crate) fn verification_parts(
         &mut self,
     ) -> (&mut StoreCommitVerifier<'a>, &VerifiedMergeHistory) {
@@ -1260,9 +1264,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 ))
                 .await?;
             let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
-                storage,
-                root,
-                &verified_root,
+                &self.commit_verifier,
                 &commit.membership_state,
                 &verified_membership_prefix,
                 pending_resolution.as_ref(),

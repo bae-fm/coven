@@ -208,9 +208,7 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
         commit_predecessor_references(verified_commit),
     )?;
     let membership = load_merge_predecessor_membership_with_verified_activations(
-        storage,
-        root,
-        &verified_root,
+        commit_verifier,
         &request.predecessor_membership,
         &verified_membership_activations,
         None,

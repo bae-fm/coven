@@ -195,8 +195,6 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         let frontier = predecessor_cut.0;
         let accepted_history = super::snapshot_authority::verify_merge_history_authority(
             &mut history_verifier,
-            storage,
-            root,
             &frontier,
             &commit.membership_state,
         )

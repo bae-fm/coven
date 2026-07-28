@@ -42,13 +42,9 @@ pub(in crate::sync::store) async fn verify_device_join_attempt_evidence_with_his
     history_verifier: &mut MergeHistoryVerifier<'_>,
     evidence: LoadedDeviceJoinAttemptEvidence,
 ) -> Result<VerifiedObject<DeviceJoinAttempt>, StorePullError> {
-    let storage = history_verifier.storage();
-    let root = history_verifier.root();
     let frontier = &evidence.attempt.value.bootstrap_cut.0;
     verify_merge_history_authority(
         history_verifier,
-        storage,
-        root,
         frontier,
         &evidence.attempt.value.membership,
     )

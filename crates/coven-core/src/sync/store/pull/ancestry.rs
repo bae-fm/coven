@@ -103,6 +103,10 @@ impl<'a> StoreCommitVerifier<'a> {
         &self.verified_root
     }
 
+    pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
+        self.storage
+    }
+
     pub(crate) fn root(&self) -> &StoreRootRef {
         &self.root
     }

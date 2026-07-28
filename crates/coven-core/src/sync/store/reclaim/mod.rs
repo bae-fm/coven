@@ -3317,8 +3317,6 @@ async fn choose_snapshot(
     }
     let selected = match super::snapshot::select_maximal_stable_store_snapshot_with_history(
         history_verifier,
-        storage,
-        root,
         authorized,
     )
     .await
