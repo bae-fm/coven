@@ -534,12 +534,12 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
         )
         .expect("valid reclaim activation"),
     };
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(&store.storage, &store.root)
             .await
-            .expect("create Store commit verifier");
+            .expect("create Store history verifier");
     let deletion =
-        execute_reclaim_delete(&StoreDatabase::new(&db), &mut commit_verifier, operation).await;
+        execute_reclaim_delete(&StoreDatabase::new(&db), &mut history_verifier, operation).await;
     assert!(
         deletion.is_err(),
         "nonexistent snapshot and acknowledgement refs must not authorize deletion"
@@ -715,7 +715,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
 
     let deletion = execute_reclaim_delete(
         &StoreDatabase::new(&db),
-        history_verifier.commit_verifier(),
+        &mut history_verifier,
         authorized.clone(),
     )
     .await;
@@ -780,13 +780,9 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     .expect("retract reclaim activation materialization");
 
     assert!(
-        execute_reclaim_delete(
-            &StoreDatabase::new(&db),
-            history_verifier.commit_verifier(),
-            authorized,
-        )
-        .await
-        .is_err(),
+        execute_reclaim_delete(&StoreDatabase::new(&db), &mut history_verifier, authorized,)
+            .await
+            .is_err(),
         "a retracted Merge reclaim activation must not delete"
     );
     store

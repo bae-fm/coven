@@ -723,14 +723,6 @@ pub(crate) async fn prepare_store_acknowledgement_activation_for_test(
     owner::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
 }
 
-pub(crate) async fn verify_store_snapshot_stability(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    snapshot: &crate::database::PublishedStoreSnapshot,
-) -> Result<pull::VerifiedStoreSnapshotStability, pull::StorePullError> {
-    pull::verify_snapshot_stability(storage, root, snapshot).await
-}
-
 #[cfg(test)]
 pub(crate) async fn verify_store_snapshots_for_acknowledgement_for_test(
     storage: &dyn SyncStorage,

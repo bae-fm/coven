@@ -1872,7 +1872,7 @@ async fn prepare_reclaim_authorization(
     })?;
     let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, identity_signer)
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    verify_reclaim_evidence(database, history_verifier.commit_verifier(), &evidence).await?;
+    verify_reclaim_evidence(database, history_verifier, &evidence).await?;
     let storage = history_verifier.storage();
     let evidence_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
@@ -1982,7 +1982,7 @@ async fn resume_store_reclaim_operations(
                 journal::DurableStoreReclaimOperation::Authorized { .. } => {
                     Box::pin(execute_reclaim_delete(
                         database,
-                        history_verifier.commit_verifier(),
+                        history_verifier,
                         operation,
                     ))
                     .await?;
@@ -2016,7 +2016,7 @@ async fn resume_store_reclaim_operations(
 
 async fn execute_reclaim_delete(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
     let journal::DurableStoreReclaimOperation::Authorized {
@@ -2028,14 +2028,14 @@ async fn execute_reclaim_delete(
             "only an authorized reclaim can delete its target".to_string(),
         ));
     };
-    let storage = commit_verifier.storage();
     let target =
-        verify_authorized_reclaim(database, commit_verifier, authorization, activation).await?;
+        verify_authorized_reclaim(database, history_verifier, authorization, activation).await?;
     if target_is_retained_for_replay(database, &target).await? {
         return Err(StoreReclaimError::Authorization(
             "reclaim target remains retained for accepted replay".to_string(),
         ));
     }
+    let storage = history_verifier.storage();
     // A row blob has no protocol domain: it is addressed by its locator, so its
     // exact delete goes through the blob primitive rather than the protocol one.
     match &target {
@@ -2046,7 +2046,7 @@ async fn execute_reclaim_delete(
         activation: target.activation().object().stored_hash(),
         source,
     })?;
-    verify_reclaim_target_absent(database, commit_verifier, &target).await?;
+    verify_reclaim_target_absent(database, history_verifier.commit_verifier_ref(), &target).await?;
     database
         .mark_store_reclaim_target_absent(operation, target)
         .await?;
@@ -2083,12 +2083,12 @@ async fn target_is_retained_for_replay(
 
 async fn verify_authorized_reclaim(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     authorization_ref: &ReclaimAuthorizationRef,
     activation: &journal::ReclaimCommitActivation,
 ) -> Result<ReclaimTarget, StoreReclaimError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root().clone();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let opened = crate::sync::store_objects::load_reclaim_authorization_ref(
         storage,
         &root,
@@ -2097,12 +2097,12 @@ async fn verify_authorized_reclaim(
     .await?;
     verify_reclaim_authorization_activation(
         database,
-        commit_verifier,
+        history_verifier.commit_verifier(),
         authorization_ref,
         activation,
     )
     .await?;
-    verify_reclaim_evidence(database, commit_verifier, &opened.evidence.value).await
+    verify_reclaim_evidence(database, history_verifier, &opened.evidence.value).await
 }
 
 async fn verify_reclaim_authorization_activation(
@@ -2168,10 +2168,10 @@ async fn verify_reclaim_authorization_activation(
 /// or replay retention since authoring fails the delete loud.
 async fn verify_reclaim_evidence(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     evidence: &ReclaimEvidence,
 ) -> Result<ReclaimTarget, StoreReclaimError> {
-    let root = commit_verifier.root().clone();
+    let root = history_verifier.root().clone();
     evidence
         .verify()
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
@@ -2182,12 +2182,16 @@ async fn verify_reclaim_evidence(
     }
     match &evidence.claim {
         ReclaimClaim::StorePackage(claim) => {
-            let activation = commit_verifier.load_ref(&claim.target.activation).await?;
+            let activation = history_verifier
+                .commit_verifier()
+                .load_ref(&claim.target.activation)
+                .await?;
             Ok(ReclaimTarget::StorePackage(
-                verify_store_package_reclaim_claim(commit_verifier, &activation, claim).await?,
+                verify_store_package_reclaim_claim(history_verifier, &activation, claim).await?,
             ))
         }
         ReclaimClaim::CirclePackage(claim) => {
+            let commit_verifier = history_verifier.commit_verifier();
             let activation = commit_verifier.load_ref(&claim.target().activation).await?;
             Ok(ReclaimTarget::CirclePackage(
                 verify_circle_package_reclaim_claim(database, commit_verifier, &activation, claim)
@@ -2195,6 +2199,7 @@ async fn verify_reclaim_evidence(
             ))
         }
         ReclaimClaim::CircleBootstrapImage(claim) => {
+            let commit_verifier = history_verifier.commit_verifier();
             let activation = commit_verifier
                 .load_ref(&claim.target.coverage.activation_commit)
                 .await?;
@@ -2209,9 +2214,15 @@ async fn verify_reclaim_evidence(
             ))
         }
         ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
-            verify_circle_snapshot_image_reclaim_claim(database, commit_verifier, claim).await?,
+            verify_circle_snapshot_image_reclaim_claim(
+                database,
+                history_verifier.commit_verifier_ref(),
+                claim,
+            )
+            .await?,
         )),
         ReclaimClaim::AudienceBlob(claim) => {
+            let commit_verifier = history_verifier.commit_verifier();
             let activation = commit_verifier.load_ref(&claim.target.activation).await?;
             Ok(ReclaimTarget::AudienceBlob(
                 verify_audience_blob_reclaim_claim(database, commit_verifier, &activation, claim)
@@ -2419,12 +2430,12 @@ async fn verify_circle_snapshot_image_reclaim_claim(
 }
 
 async fn verify_store_package_reclaim_claim(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &StorePackageReclaimClaim,
 ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root().clone();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let author = crate::sync::store_objects::load_registration_ref(
         storage,
         &root,
@@ -2445,7 +2456,12 @@ async fn verify_store_package_reclaim_claim(
         successor_slot: metadata.successor.next_slot.clone(),
         meta: metadata,
     };
-    let authority = match super::verify_store_snapshot_stability(storage, &root, &snapshot).await {
+    let authority = match super::pull::verify_snapshot_stability_with_history(
+        history_verifier,
+        &snapshot,
+    )
+    .await
+    {
         Ok(stability) => stability.into_authority(),
         Err(super::pull::StorePullError::SnapshotNotStable { member, device_id }) => {
             return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
@@ -2479,7 +2495,7 @@ async fn verify_store_package_reclaim_claim(
     }
     if activation.value().store_package() != Some(&claim.target.package)
         || !snapshot_covers_target(
-            commit_verifier,
+            history_verifier.commit_verifier(),
             &snapshot.meta.coverage,
             &claim.target.activation,
         )

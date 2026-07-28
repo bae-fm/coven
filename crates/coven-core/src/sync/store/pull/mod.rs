@@ -153,8 +153,7 @@ pub(crate) use retained_authority::*;
 #[cfg(test)]
 pub(in crate::sync::store) use snapshot_authority::verify_snapshots_for_acknowledgement;
 pub(in crate::sync::store) use snapshot_authority::{
-    verify_snapshot_stability, verify_snapshot_stability_with_history,
-    verify_snapshots_for_acknowledgement_with_history,
+    verify_snapshot_stability_with_history, verify_snapshots_for_acknowledgement_with_history,
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate_with_history;

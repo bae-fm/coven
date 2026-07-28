@@ -239,15 +239,6 @@ pub(in crate::sync::store) async fn verify_snapshots_for_acknowledgement_with_hi
     Ok(())
 }
 
-pub(in crate::sync::store) async fn verify_snapshot_stability(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    snapshot: &crate::database::PublishedStoreSnapshot,
-) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-    verify_snapshot_stability_with_history(&mut history_verifier, snapshot).await
-}
-
 pub(in crate::sync::store) async fn verify_snapshot_stability_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
     snapshot: &crate::database::PublishedStoreSnapshot,
