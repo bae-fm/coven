@@ -330,8 +330,14 @@ pub(crate) async fn accept_device_registration_request(
     request
         .approval
         .verify(&root_value, &owner, &administrator)?;
+    let commit_verifier = crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
+        storage,
+        &offer.store_root,
+        root_value,
+    )?;
     let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
+        crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
+            .await?;
     crate::sync::store::pull::verify_accepted_provider_access_activation(
         &mut history_verifier,
         &request.approval.access_grant,

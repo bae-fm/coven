@@ -115,8 +115,7 @@ async fn prepare_device_join_bootstrap_with_history(
 }
 
 pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
+    history_verifier: &'a mut MergeHistoryVerifier<'_>,
     attempt: &'a super::store_commit::DeviceJoinAttemptRef,
     attempt_owner: &'a StoreDeviceRegistration,
     attempt_activation: &'a StoreBatchCommitRef,
@@ -128,10 +127,11 @@ pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'
     ),
 > {
     Box::pin(async move {
-        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         let evidence = load_device_join_attempt_evidence_ref_with_root(
             storage,
-            root,
+            &root,
             history_verifier.verified_root_object(),
             attempt,
             attempt_owner,
@@ -139,12 +139,12 @@ pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'
         .await?;
         let verified_attempt =
             super::device_join_attempt::verify_device_join_attempt_evidence_with_history(
-                &mut history_verifier,
+                history_verifier,
                 evidence,
             )
             .await?;
         let plan = prepare_device_join_bootstrap_with_history(
-            &mut history_verifier,
+            history_verifier,
             &verified_attempt.value.bootstrap_cut,
             attempt_activation,
             &verified_attempt.value.membership,

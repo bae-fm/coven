@@ -548,23 +548,6 @@ pub(crate) fn verify_device_join_cleanup_activation<'a>(
     })
 }
 
-pub(crate) async fn verify_accepted_provider_access_activation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
-    provider_admin: &super::provider::ProviderAdminGrantRecord,
-    administrator: &super::store_commit::StoreDeviceRegistration,
-) -> Result<(), pull::StorePullError> {
-    let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
-    pull::verify_accepted_provider_access_activation(
-        &mut history_verifier,
-        access,
-        provider_admin,
-        administrator,
-    )
-    .await
-}
-
 #[cfg(test)]
 pub(crate) fn prepare_device_join_bootstrap<'a>(
     storage: &'a dyn SyncStorage,

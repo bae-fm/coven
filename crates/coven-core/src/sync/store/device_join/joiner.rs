@@ -123,29 +123,42 @@ pub fn prepare_device_registration_request<'a>(
                 return Err(DeviceJoinError::JournalConflict);
             }
         }
-        let owner = crate::sync::store_objects::load_registration_ref(
-            storage,
-            &approval.request.offer.store_root,
-            &approval.request.offer.owner_registration,
-        )
-        .await?
-        .value;
-        let administrator = crate::sync::store_objects::load_registration_ref(
-            storage,
-            &approval.request.offer.store_root,
-            &approval.request.offer.provider_admin.administrator,
-        )
-        .await?
-        .value;
-        let root_value = crate::sync::store_objects::load_store_protocol_root(
+        let verified_root = crate::sync::store_objects::load_store_protocol_root(
             storage,
             &approval.request.offer.store_root,
         )
         .await?;
-        approval.verify(&root_value, &owner, &administrator)?;
-        crate::sync::store::verify_accepted_provider_access_activation(
+        let commit_verifier = crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
             storage,
             &approval.request.offer.store_root,
+            verified_root,
+        )?;
+        let owner = crate::sync::store_objects::load_registration_ref_with_root(
+            commit_verifier.storage(),
+            commit_verifier.root(),
+            commit_verifier.verified_root(),
+            &approval.request.offer.owner_registration,
+        )
+        .await?
+        .value;
+        let administrator = crate::sync::store_objects::load_registration_ref_with_root(
+            commit_verifier.storage(),
+            commit_verifier.root(),
+            commit_verifier.verified_root(),
+            &approval.request.offer.provider_admin.administrator,
+        )
+        .await?
+        .value;
+        approval.verify(
+            commit_verifier.verified_root_object(),
+            &owner,
+            &administrator,
+        )?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
+                .await?;
+        crate::sync::store::pull::verify_accepted_provider_access_activation(
+            &mut history_verifier,
             &approval.access_grant,
             &approval.request.offer.provider_admin,
             &administrator,
@@ -315,24 +328,27 @@ pub fn bootstrap_joining_device<'a>(
 > {
     Box::pin(async move {
         let offer = &bootstrap.bootstrap.request.approval.request.offer;
-        let attempt_owner = Box::pin(crate::sync::store_objects::load_registration_ref(
-            storage,
-            &offer.store_root,
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
+        let attempt_owner = Box::pin(crate::sync::store_objects::load_registration_ref_with_root(
+            history_verifier.storage(),
+            history_verifier.root(),
+            history_verifier.verified_root(),
             &offer.owner_registration,
         ))
         .await?
         .value;
-        let administrator = Box::pin(crate::sync::store_objects::load_registration_ref(
-            storage,
-            &offer.store_root,
+        let administrator = Box::pin(crate::sync::store_objects::load_registration_ref_with_root(
+            history_verifier.storage(),
+            history_verifier.root(),
+            history_verifier.verified_root(),
             &offer.provider_admin.administrator,
         ))
         .await?
         .value;
         let (verified_attempt, bootstrap_plan) = Box::pin(
             crate::sync::store::pull::verify_attempt_and_prepare_device_join_bootstrap(
-                storage,
-                &offer.store_root,
+                &mut history_verifier,
                 &bootstrap.bootstrap.publication_authorization.attempt,
                 &attempt_owner,
                 &bootstrap
