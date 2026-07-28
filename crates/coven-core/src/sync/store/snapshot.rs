@@ -1599,8 +1599,6 @@ impl StagedCircleImageCandidate {
 pub(crate) async fn select_staged_circle_decisions(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     query_db: &crate::sync::store::StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     store_frontier: &CommitFrontier,
     restorer_identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
@@ -1699,8 +1697,8 @@ pub(crate) async fn select_staged_circle_decisions(
         // identity's active leaf carries, not the Store routing key.
         if let Some(candidate) = select_standalone_snapshot_candidate(
             query_db,
-            storage,
-            root,
+            history_verifier.storage(),
+            history_verifier.root(),
             circle_id,
             &head_control,
             &epoch_encryption,
