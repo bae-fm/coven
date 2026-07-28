@@ -1,6 +1,6 @@
 use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
 use super::{
-    prepare_circle_operation_request, publish_circle_operation, CircleOperationError,
+    prepare_circle_operation_request, publish_circle_operation_with_history, CircleOperationError,
     CircleOperationIntent,
 };
 use crate::keys::UserKeypair;
@@ -23,7 +23,20 @@ impl AuthorizedStore<'_> {
         routing_encryption: &crate::encryption::EncryptionService,
         identity: &UserKeypair,
     ) -> Result<(), CircleOperationError> {
-        for mut journal in self.database().waiting_circle_operations().await? {
+        let journals = self.database().waiting_circle_operations().await?;
+        if journals.is_empty() {
+            return Ok(());
+        }
+        let root = self
+            .database()
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(self.storage(), &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        for mut journal in journals {
             let member_pubkey = match &journal.intent {
                 CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
                 _ => {
@@ -73,14 +86,10 @@ impl AuthorizedStore<'_> {
                     cutoff,
                 )
                 .await?;
-            let root = self
-                .database()
-                .local_store_root_ref()
-                .await?
-                .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-            let mut commit_verifier =
-                crate::sync::store::pull::StoreCommitVerifier::new(self.storage(), &root).await?;
-            let activation = commit_verifier.load_ref(&activation_commit_ref).await?;
+            let activation = history_verifier
+                .commit_verifier()
+                .load_ref(&activation_commit_ref)
+                .await?;
             let activation_commit = activation.value();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(
@@ -111,7 +120,7 @@ impl AuthorizedStore<'_> {
             };
             let roster_chain = super::activation::load_circle_control_roster_chain(
                 self.database(),
-                &mut commit_verifier,
+                history_verifier.commit_verifier(),
                 self.storage(),
                 &root,
                 &activation,
@@ -173,9 +182,11 @@ impl AuthorizedStore<'_> {
                 self.store_root().store_root_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            Box::pin(publish_circle_operation(
+            Box::pin(publish_circle_operation_with_history(
                 self.database(),
                 self.storage(),
+                &root,
+                &mut history_verifier,
                 &journal.operation_id,
                 identity,
                 Some(&routing_key),
