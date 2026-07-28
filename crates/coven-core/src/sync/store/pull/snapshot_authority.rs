@@ -72,10 +72,11 @@ async fn verify_history_state(
 ) -> Result<VerifiedMergeSnapshotState, StorePullError> {
     let authority =
         verify_merge_history_authority(history_verifier, frontier, membership_ref).await?;
-    let storage = history_verifier.storage();
-    let root = history_verifier.root().clone();
-    let active_registrations =
-        load_active_history_registrations(storage, &root, &authority.device_state).await?;
+    let active_registrations = load_active_history_registrations(
+        history_verifier.commit_verifier_ref(),
+        &authority.device_state,
+    )
+    .await?;
     let checkpoints = frontier
         .values()
         .map(|reference| {
@@ -248,11 +249,8 @@ pub(in crate::sync::store) async fn verify_snapshot_stability_with_history(
     let accepted_cut = accepted_cut(history_verifier, snapshot_frontier, &state).await?;
     let accepted_frontier = &accepted_cut.0;
     let acknowledgements = activated_acknowledgements(history_verifier, accepted_frontier).await?;
-    let storage = history_verifier.storage();
-    let root = history_verifier.root();
     assemble_snapshot_stability(
-        storage,
-        root,
+        history_verifier.commit_verifier_ref(),
         snapshot,
         snapshot_cut,
         accepted_cut,

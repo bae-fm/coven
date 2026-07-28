@@ -48,12 +48,11 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::{
     load_circle_package, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
-    load_device_join_outcome_ref, load_founder_registration, load_founder_registration_with_root,
+    load_device_join_outcome_ref, load_founder_registration_with_root,
     load_owner_recovery_node_ref, load_owner_signed_device_join_attempt_ref,
-    load_reclaim_authorization_ref, load_reclaim_receipt_ref, load_registration_ref,
-    load_registration_ref_with_root, load_store_ack_predecessor, load_store_ack_ref,
-    load_store_package, load_store_protocol_root, run_blocking_object_verification,
-    StoreObjectError, VerifiedObject,
+    load_reclaim_authorization_ref, load_reclaim_receipt_ref, load_registration_ref_with_root,
+    load_store_ack_predecessor, load_store_ack_ref, load_store_package, load_store_protocol_root,
+    run_blocking_object_verification, StoreObjectError, VerifiedObject,
 };
 use crate::sync::{
     causal_grants, circle, gate, hlc, membership, provider, remote_object, session, store_commit,

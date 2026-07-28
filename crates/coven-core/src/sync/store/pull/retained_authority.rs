@@ -174,8 +174,7 @@ pub(crate) async fn load_merge_conflict_resolution_authorization_with_verifier(
         ));
     }
     verify_canonical_owner_registration(
-        storage,
-        root,
+        commit_verifier,
         &device_state,
         resolver_pubkey,
         author_registration,

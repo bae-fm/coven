@@ -34,8 +34,7 @@ pub(crate) struct VerifiedSnapshotState {
 }
 
 pub(crate) async fn load_active_history_registrations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     state: &ResolvedStoreDeviceState,
 ) -> Result<
     BTreeMap<
@@ -44,12 +43,20 @@ pub(crate) async fn load_active_history_registrations(
     >,
     StorePullError,
 > {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let mut active = BTreeMap::new();
     for (device_id, record) in &state.devices {
         if !matches!(record.status, StoreDeviceStatus::Active) {
             continue;
         }
-        let registration = load_registration_ref(storage, root, &record.registration).await?;
+        let registration = load_registration_ref_with_root(
+            storage,
+            root,
+            commit_verifier.verified_root(),
+            &record.registration,
+        )
+        .await?;
         if registration.value.device_id != *device_id {
             return Err(StorePullError::Database(
                 "resolved Store device state names another exact registration".to_string(),
@@ -64,14 +71,15 @@ pub(crate) async fn load_active_history_registrations(
 }
 
 pub(crate) async fn assemble_snapshot_stability(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     snapshot: &crate::database::PublishedStoreSnapshot,
     snapshot_cut: StoreHistoryCut,
     accepted_cut: StoreHistoryCut,
     snapshot_state: VerifiedSnapshotState,
     accepted_acknowledgements: Vec<VerifiedActivatedStoreAck>,
 ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let mut acknowledgements = BTreeMap::new();
     for (device_id, (registration_ref, registration)) in &snapshot_state.active_registrations {
         let matching = accepted_acknowledgements
@@ -103,7 +111,8 @@ pub(crate) async fn assemble_snapshot_stability(
             },
         );
     }
-    let founder = load_founder_registration(storage, root).await?;
+    let founder =
+        load_founder_registration_with_root(storage, root, commit_verifier.verified_root()).await?;
     let authority = super::retained_replay::RetainedReplaySnapshotAuthority {
         store_root: root.clone(),
         founder_registration: StoreDeviceRegistrationRef::from_registration(

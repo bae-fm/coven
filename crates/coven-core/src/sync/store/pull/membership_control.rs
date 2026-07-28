@@ -21,7 +21,6 @@ pub(crate) async fn verify_merge_membership_control(
     history_verifier: &mut MergeHistoryVerifier<'_>,
     verified_commit: &VerifiedStoreBatchCommit,
 ) -> Result<VerifiedCircleActivations, String> {
-    let storage = history_verifier.storage();
     let root = history_verifier.root().clone();
     if verified_commit.store_root_hash() != root.store_root_hash {
         return Err("authenticated Merge membership control belongs to another Store root".into());
@@ -44,8 +43,7 @@ pub(crate) async fn verify_merge_membership_control(
         verified_merge_membership_prefix(&history.commits, commit_predecessor_references(commit))
             .map_err(|error| error.to_string())?;
     let pending_resolution = verify_merge_resolution_activation_acceptance_with_history(
-        storage,
-        &root,
+        history_verifier.commit_verifier_ref(),
         commit,
         &history.genesis,
         &history.commits,

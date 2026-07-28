@@ -309,15 +309,22 @@ fn merge_device_state_from_verified_history(
 }
 
 async fn verify_merge_owner_conflict_acceptance_with_history(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     acceptance: &super::store_commit::OwnerConflictResolutionAcceptance,
     resolver_pubkey: &str,
     genesis: &ResolvedStoreDeviceState,
     commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
     allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
 ) -> Result<(), StorePullError> {
-    let registration = load_registration_ref(storage, root, &acceptance.owner_registration).await?;
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
+    let registration = load_registration_ref_with_root(
+        storage,
+        root,
+        commit_verifier.verified_root(),
+        &acceptance.owner_registration,
+    )
+    .await?;
     acceptance
         .verify(&registration.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -334,8 +341,7 @@ async fn verify_merge_owner_conflict_acceptance_with_history(
         ));
     }
     verify_canonical_owner_registration(
-        storage,
-        root,
+        commit_verifier,
         &state,
         resolver_pubkey,
         &acceptance.owner_registration,
@@ -345,12 +351,13 @@ async fn verify_merge_owner_conflict_acceptance_with_history(
 }
 
 pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     genesis: &ResolvedStoreDeviceState,
     commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Ok(None);
     };
@@ -376,7 +383,13 @@ pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
         resolution,
     )
     .await?;
-    let registration = load_registration_ref(storage, root, &commit.author_registration).await?;
+    let registration = load_registration_ref_with_root(
+        storage,
+        root,
+        commit_verifier.verified_root(),
+        &commit.author_registration,
+    )
+    .await?;
     let acceptance = &value.value.replacement_acceptance;
     let mut expected_activations = vec![
         super::store_commit::StreamActivation::grant_authorized(
@@ -404,8 +417,7 @@ pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
         ));
     }
     verify_merge_owner_conflict_acceptance_with_history(
-        storage,
-        root,
+        commit_verifier,
         acceptance,
         &value.value.resolver_pubkey,
         genesis,
@@ -1159,11 +1171,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         let frontier = acceptance.device_state.frontier();
         let tips = frontier.commits().values().cloned().collect::<Vec<_>>();
         self.verify_refs(tips.clone()).await?;
-        let storage = self.storage();
-        let root = self.root().clone();
         verify_merge_owner_conflict_acceptance_with_history(
-            storage,
-            &root,
+            &self.commit_verifier,
             acceptance,
             resolver_pubkey,
             &self.history.genesis,
@@ -1240,8 +1249,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             )?;
             let pending_resolution =
                 Box::pin(verify_merge_resolution_activation_acceptance_with_history(
-                    storage,
-                    &root,
+                    &self.commit_verifier,
                     &commit,
                     &self.history.genesis,
                     &self.history.commits,
