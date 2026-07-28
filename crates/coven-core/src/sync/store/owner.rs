@@ -16,6 +16,7 @@ pub struct Store {
     database: StoreDatabase,
     storage: Arc<CloudSyncStorage>,
     store_root: StoreRootRef,
+    protocol_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
 }
 
 #[doc(hidden)]
@@ -43,6 +44,7 @@ struct StoreAccess<'a> {
     database: StoreDatabase,
     storage: &'a dyn SyncStorage,
     store_root: StoreRootRef,
+    protocol_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
 }
 
 pub(crate) struct AuthorizedStore<'a> {
@@ -147,9 +149,9 @@ impl Store {
                 "initialized Store has no local device registration id".to_string(),
             )
         })?;
-        let protocol_root = history_verifier.verified_root().clone();
+        let protocol_root = history_verifier.verified_root_object().clone();
         drop(history_verifier);
-        let store = Self::new(database, storage, store_root, &protocol_root)
+        let store = Self::new(database, storage, store_root, protocol_root)
             .map_err(StoreInitializationError::ProtocolRoot)?;
         Ok(InitializedStore { store, device_id })
     }
@@ -166,21 +168,18 @@ impl Store {
                 .ok_or(StoreError::MissingState {
                     key: operations::STORE_ROOT_AUTHORITY,
                 })?;
-        let verified_root =
-            crate::sync::store_objects::load_store_protocol_root(&*storage, &store_root)
-                .await?
-                .value;
-        Self::new(database, storage, store_root, &verified_root)
-            .map_err(StoreError::InvalidOutbound)
+        let protocol_root =
+            crate::sync::store_objects::load_store_protocol_root(&*storage, &store_root).await?;
+        Self::new(database, storage, store_root, protocol_root).map_err(StoreError::InvalidOutbound)
     }
 
     fn new(
         database: StoreDatabase,
         storage: Arc<CloudSyncStorage>,
         store_root: StoreRootRef,
-        verified_root: &StoreProtocolRoot,
+        protocol_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
     ) -> Result<Self, String> {
-        if store_root.store_root_hash != verified_root.object_hash() {
+        if store_root.store_root_hash != protocol_root.value.object_hash() {
             return Err(
                 "local Store root reference differs from the verified Store root".to_string(),
             );
@@ -189,6 +188,7 @@ impl Store {
             database,
             storage,
             store_root,
+            protocol_root,
         })
     }
     pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
@@ -220,6 +220,7 @@ impl Store {
             database: self.database().clone(),
             storage: &**self.storage(),
             store_root: self.store_root().clone(),
+            protocol_root: self.protocol_root.clone(),
         }
     }
 
@@ -405,10 +406,15 @@ impl Store {
             .await
             .map_err(|error| format!("read Store root reference: {error}"))?
             .ok_or_else(|| "Store root reference is absent".to_string())?;
+        let protocol_root =
+            crate::sync::store_objects::load_store_protocol_root(storage, &store_root)
+                .await
+                .map_err(|error| SyncCycleFailure::operation("open Store root authority", error))?;
         authorize(StoreAccess {
             database,
             storage,
             store_root,
+            protocol_root,
         })
         .await
     }
@@ -684,8 +690,14 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
         .validated_store_owner(&access.store_root)
         .await
         .map_err(|error| SyncCycleFailure::operation("validate Store owner authority", error))?;
+    let commit_verifier = crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
+        access.storage,
+        &access.store_root,
+        access.protocol_root,
+    )
+    .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
     let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(access.storage, &access.store_root)
+        crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
             .await
             .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
     let membership =
@@ -705,4 +717,28 @@ async fn load_authorized_membership(
     membership::load_current_exact_chain_with_history(history_verifier, Some(owner), Some(database))
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::test_helpers::{open_test_db, TestStore};
+
+    #[tokio::test]
+    async fn loaded_store_authorization_retains_its_verified_root() {
+        let db = open_test_db();
+        let fixture = TestStore::create(&db, "retained-root-authority", UserKeypair::generate())
+            .await
+            .expect("create Store");
+        let store = Store::load(StoreDatabase::new(&db), fixture.storage.clone())
+            .await
+            .expect("load Store");
+
+        fixture.home.remove_exact_object(fixture.root.object.slot());
+
+        store
+            .authorize()
+            .await
+            .expect("authorize from the root verified while loading");
+    }
 }
