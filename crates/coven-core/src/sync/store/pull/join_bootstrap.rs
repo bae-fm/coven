@@ -156,13 +156,14 @@ pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'
 
 pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
+    history_verifier: &'a mut MergeHistoryVerifier<'_>,
     reference: &'a StoreBatchCommitRef,
     expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
     membership_state: &'a StoreMembershipStateRef,
 ) -> StorePullFuture<'a, ()> {
     Box::pin(async move {
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         let db = database.sqlite();
         let StoreCommitCoord {
             stream_id,
@@ -180,7 +181,6 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
                 "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
             )));
         }
-        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
         let verified_commit = history_verifier.load_ref(reference).await?;
         let commit = verified_commit.value().clone();
         let author = verified_commit.author().clone();
@@ -197,7 +197,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         let frontier = predecessor_cut.0;
         let accepted_history = super::snapshot_authority::verify_merge_history_authority(
-            &mut history_verifier,
+            history_verifier,
             &frontier,
             &commit.membership_state,
         )
@@ -205,7 +205,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         let membership = accepted_history.membership.clone();
         let accepted_frontier = commit_predecessor_references(&commit);
         let registrations = Box::pin(load_merge_commit_registrations(
-            &history_verifier,
+            history_verifier,
             &commit,
             &author,
             &membership,
@@ -227,7 +227,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         }
         let (_, head_ref) = crate::sync::store::operations::exact_next_announcement_slot(
             storage,
-            root,
+            &root,
             &commit.author_registration,
             &author,
             history_verifier.commit_verifier(),
@@ -268,7 +268,7 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         let history = prepare_merge_history_successor(
             database,
-            root,
+            &root,
             &verified_commit,
             &membership,
             recovery_author.as_ref(),
@@ -292,7 +292,6 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
             .summary
             .open(&commit, reference, &head.value, &head_ref, &state_after)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let root = root.clone();
         let commit_ref = reference.clone();
         let expected_ref = reference.clone();
         db.call(move |connection| {

@@ -584,16 +584,18 @@ pub async fn close_joining_device(
         .read_protocol_object(&attempt_context, &attempt_ref.object, &attempt_prefix)
         .await?;
     let unverified_attempt: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)?;
-    let owner = crate::sync::store_objects::load_registration_ref(
-        storage,
-        root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, root).await?;
+    let owner = crate::sync::store_objects::load_registration_ref_with_root(
+        history_verifier.storage(),
+        history_verifier.root(),
+        history_verifier.verified_root(),
         &unverified_attempt.owner_registration,
     )
     .await?
     .value;
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        root,
+    let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     )
@@ -785,9 +787,18 @@ pub async fn accept_joiner_device_join_cleanup(
         ) => None,
         _ => return Err(DeviceJoinError::JournalConflict),
     };
-    let receipt_terminal =
-        crate::sync::store::verify_device_join_cleanup_activation(storage, root, &activation)
-            .await?;
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, root).await?;
+    let evidence = crate::sync::store::pull::load_device_join_cleanup_activation(
+        &mut history_verifier,
+        &activation,
+    )
+    .await?;
+    let receipt_terminal = crate::sync::store::pull::verify_device_join_cleanup_activation(
+        &mut history_verifier,
+        evidence,
+    )
+    .await?;
     match &local_terminal {
         Some(terminal) if terminal != &receipt_terminal => {
             return Err(DeviceJoinError::JournalConflict);

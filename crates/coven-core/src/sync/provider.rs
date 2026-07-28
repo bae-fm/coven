@@ -11,7 +11,7 @@ use crate::sync::membership::{
     MembershipCoord, MembershipEntry, MembershipGrantId, OwnerStreamBarrier,
 };
 use crate::sync::storage::{
-    ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding, SyncStorage,
+    ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding,
 };
 use crate::sync::store_commit::{
     DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash,
@@ -1786,8 +1786,8 @@ pub async fn prepare_cross_principal_challenge(
     Ok(challenge)
 }
 
-pub async fn publish_cross_principal_challenge(
-    protocol_storage: &dyn SyncStorage,
+pub(crate) async fn publish_cross_principal_challenge(
+    history_verifier: &mut crate::sync::store::MergeHistoryVerifier<'_>,
     administrator: &dyn ExactSlotStorage,
     publication_journal: &dyn DeviceJoinChallengePublicationJournal,
     authorization: &DeviceJoinChallengePublicationAuthorization,
@@ -1795,16 +1795,14 @@ pub async fn publish_cross_principal_challenge(
     context: &CrossPrincipalChallengeContext,
     store: &StoreProviderBinding,
     attempt_owner: &StoreDeviceRegistration,
-    activation_author: &StoreDeviceRegistration,
     administrator_signing_pubkey: &str,
 ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
     challenge.verify(context, store, administrator_signing_pubkey)?;
     if authorization.attempt.attempt_id != context.attempt_id {
         return invalid("challenge publication authorization names another join attempt");
     }
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        protocol_storage,
-        &context.root,
+    let attempt = crate::sync::store::load_verified_device_join_attempt(
+        history_verifier,
         &authorization.attempt,
         attempt_owner,
     )
@@ -1816,18 +1814,13 @@ pub async fn publish_cross_principal_challenge(
     {
         return invalid("activated join attempt differs from the challenge publication context");
     }
-    let mut commit_verifier =
-        crate::sync::store::StoreCommitVerifier::new(protocol_storage, &context.root)
-            .await
-            .map_err(|error| {
-                ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
-            })?;
-    let activation = commit_verifier
+    let activation = history_verifier
+        .commit_verifier()
         .load_ref(&authorization.attempt_activation)
         .await
         .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    if activation.author() != activation_author {
-        return invalid("activation commit has another authenticated author");
+    if activation.author() != attempt_owner {
+        return invalid("join attempt activation author differs from the attempt owner");
     }
     if !activation
         .device_join_attempt_decisions()

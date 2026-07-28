@@ -38,6 +38,24 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     }
 }
 
+pub(crate) async fn load_verified_device_join_attempt(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    reference: &super::store_commit::DeviceJoinAttemptRef,
+    owner: &StoreDeviceRegistration,
+) -> Result<VerifiedObject<DeviceJoinAttempt>, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
+    let evidence = load_device_join_attempt_evidence_ref_with_root(
+        storage,
+        &root,
+        history_verifier.verified_root_object(),
+        reference,
+        owner,
+    )
+    .await?;
+    verify_device_join_attempt_evidence_with_history(history_verifier, evidence).await
+}
+
 pub(in crate::sync::store) async fn verify_device_join_attempt_evidence_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
     evidence: LoadedDeviceJoinAttemptEvidence,

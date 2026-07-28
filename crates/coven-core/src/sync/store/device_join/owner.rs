@@ -523,9 +523,10 @@ pub(crate) async fn cancel_device_join(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = Box::pin(crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        &root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    let attempt = Box::pin(crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     ))
@@ -711,16 +712,17 @@ pub async fn observe_device_join_abandonment(
         .read_protocol_object(&context, &abandonment.abandonment.object, &prefix)
         .await?;
     let object: DeviceJoinAbandonmentObject = serde_json::from_slice(&bytes)?;
-    let owner = crate::sync::store_objects::load_registration_ref(
-        storage,
-        root,
+    let mut commit_verifier =
+        crate::sync::store::pull::StoreCommitVerifier::new(storage, root).await?;
+    let owner = crate::sync::store_objects::load_registration_ref_with_root(
+        commit_verifier.storage(),
+        commit_verifier.root(),
+        commit_verifier.verified_root(),
         &object.owner_registration,
     )
     .await?
     .value;
     abandonment.abandonment.verify(&object, &owner)?;
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(storage, root).await?;
     let activation = commit_verifier
         .load_ref(&abandonment.abandonment_activation)
         .await?;
@@ -797,17 +799,19 @@ pub(crate) async fn finalize_device_join(
         .await
         .map_err(database_error)?;
     let owner_signer = owner.device_signer(identity_signer)?;
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        &offer.store_root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
+    let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     )
     .await?
     .value;
-    let registration = crate::sync::store_objects::load_registration_ref(
-        storage,
-        &offer.store_root,
+    let registration = crate::sync::store_objects::load_registration_ref_with_root(
+        history_verifier.storage(),
+        history_verifier.root(),
+        history_verifier.verified_root(),
         &completion.readiness.proof.registration,
     )
     .await?
@@ -1031,22 +1035,24 @@ pub fn materialize_joined_store_activation<'a>(
             .activated_store_device_registration(unverified_attempt.owner_registration.clone())
             .await
             .map_err(database_error)?;
-        let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-            storage,
-            &root,
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+        let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+            &mut history_verifier,
             &attempt_ref,
             &owner,
         )
         .await?
         .value;
-        Box::pin(crate::sync::store::materialize_device_join_activation(
-            database,
-            storage,
-            &root,
-            &activation.outcome_activation,
-            &activation.outcome,
-            &attempt.membership,
-        ))
+        Box::pin(
+            crate::sync::store::pull::materialize_device_join_activation(
+                database,
+                &mut history_verifier,
+                &activation.outcome_activation,
+                &activation.outcome,
+                &attempt.membership,
+            ),
+        )
         .await?;
         let outcome = crate::sync::store_objects::load_device_join_outcome_ref(
             storage,

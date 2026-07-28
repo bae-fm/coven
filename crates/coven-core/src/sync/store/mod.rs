@@ -153,6 +153,7 @@ pub(crate) use pull::{
 };
 #[doc(hidden)]
 pub use pull::{load_cycle_membership, pull_store_commits, StorePullExecution};
+pub(crate) use pull::{load_verified_device_join_attempt, MergeHistoryVerifier};
 pub use pull::{
     BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures, HeldStoreCoordinate,
     HeldStorePosition, HeldStorePositionReason, PullError, StorePullError,
@@ -511,43 +512,6 @@ pub(crate) async fn verify_store_snapshots_for_acknowledgement_for_test(
     pull::verify_snapshots_for_acknowledgement(storage, root, snapshots).await
 }
 
-pub(crate) fn load_verified_device_join_attempt_ref<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    reference: &'a super::store_commit::DeviceJoinAttemptRef,
-    owner: &'a super::store_commit::StoreDeviceRegistration,
-) -> pull::StorePullFuture<
-    'a,
-    super::store_objects::VerifiedObject<super::store_commit::DeviceJoinAttempt>,
-> {
-    Box::pin(async move {
-        let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
-        let evidence = pull::load_device_join_attempt_evidence_ref_with_root(
-            storage,
-            root,
-            history_verifier.verified_root_object(),
-            reference,
-            owner,
-        )
-        .await?;
-        pull::verify_device_join_attempt_evidence_with_history(&mut history_verifier, evidence)
-            .await
-    })
-}
-
-pub(crate) fn verify_device_join_cleanup_activation<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    activation: &'a device_join::DeviceJoinCleanupActivation,
-) -> pull::StorePullFuture<'a, device_join::JoinerJoinTerminal> {
-    Box::pin(async move {
-        let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
-        let evidence =
-            pull::load_device_join_cleanup_activation(&mut history_verifier, activation).await?;
-        pull::verify_device_join_cleanup_activation(&mut history_verifier, evidence).await
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn prepare_device_join_bootstrap<'a>(
     storage: &'a dyn SyncStorage,
@@ -561,24 +525,6 @@ pub(crate) fn prepare_device_join_bootstrap<'a>(
         root,
         coverage,
         attempt_activation,
-        membership_state,
-    )
-}
-
-pub(crate) fn materialize_device_join_activation<'a>(
-    database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    reference: &'a super::store_commit::StoreBatchCommitRef,
-    expected_outcome: &'a super::store_commit::DeviceJoinOutcomeRef,
-    membership_state: &'a super::circle_control::StoreMembershipStateRef,
-) -> pull::StorePullFuture<'a, ()> {
-    pull::materialize_device_join_activation(
-        database,
-        storage,
-        root,
-        reference,
-        expected_outcome,
         membership_state,
     )
 }

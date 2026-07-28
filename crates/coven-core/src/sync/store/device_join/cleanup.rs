@@ -137,9 +137,10 @@ async fn prepare_device_join_cleanup_inner(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        &root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     )
@@ -354,9 +355,10 @@ pub(super) async fn sign_device_join_producer_write_revocation(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        &root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     )

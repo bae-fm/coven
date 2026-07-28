@@ -6228,9 +6228,12 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         attempt_hash: attempt.attempt_hash(),
         object: prepared.reference().clone(),
     };
-    crate::sync::store::load_verified_device_join_attempt_ref(
-        &storage.storage,
-        &offer.store_root,
+    let mut history_verifier =
+        crate::sync::store::MergeHistoryVerifier::new(&storage.storage, &offer.store_root)
+            .await
+            .expect("open Store history verifier");
+    crate::sync::store::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner_registration,
     )

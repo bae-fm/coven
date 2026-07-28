@@ -136,14 +136,16 @@ pub(crate) async fn publish_device_provider_challenge(
         DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
             let exact = administrator_exact.ok_or(DeviceJoinError::ExactSlotStorageRequired)?;
             let context = cross_challenge_context(&bootstrap.request.approval.request);
-            let mut commit_verifier =
+            let commit_verifier =
                 crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
                     storage,
                     &offer.store_root,
                     root_value.clone(),
                 )?;
-            let activation = commit_verifier
-                .load_ref(&bootstrap.publication_authorization.attempt_activation)
+            let mut history_verifier =
+                crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(
+                    commit_verifier,
+                )
                 .await?;
             let authorization = DeviceJoinChallengePublicationAuthorization {
                 attempt: bootstrap.publication_authorization.attempt.clone(),
@@ -153,7 +155,7 @@ pub(crate) async fn publish_device_provider_challenge(
                     .clone(),
             };
             let published = Box::pin(crate::sync::provider::publish_cross_principal_challenge(
-                storage,
+                &mut history_verifier,
                 exact,
                 database,
                 &authorization,
@@ -161,7 +163,6 @@ pub(crate) async fn publish_device_provider_challenge(
                 &context,
                 &offer.provider,
                 &owner,
-                activation.author(),
                 &administrator.device_signing_pubkey,
             ))
             .await
@@ -372,9 +373,10 @@ pub(crate) async fn close_device_provider_admission(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let attempt = crate::sync::store::load_verified_device_join_attempt_ref(
-        storage,
-        &root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
+        &mut history_verifier,
         &attempt_ref,
         &owner,
     )

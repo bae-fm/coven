@@ -120,7 +120,7 @@ pub use support::{
     PullError,
 };
 
-pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence_with_history;
+pub(crate) use device_join_attempt::load_verified_device_join_attempt;
 pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
 pub(crate) use discovery::*;
 pub(crate) use history::*;
