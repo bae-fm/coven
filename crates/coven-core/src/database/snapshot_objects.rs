@@ -4,6 +4,7 @@ use crate::database::blob_records::validate_live_blob_locator;
 use crate::database::blob_records::validate_stored_locator_on;
 use crate::database::blob_records::validate_stored_row_binding_on;
 use crate::database::remote_object_records::load_remote_object_on;
+use crate::database::PreparedSnapshotBlob;
 
 use super::*;
 
@@ -26,6 +27,84 @@ pub(super) fn validate_snapshot_object_owners_on(
         ));
     }
     validate_snapshot_object_owner_records_on(conn, &expected)
+}
+
+pub(crate) async fn verify_snapshot_blob_spools(
+    blobs: &[PreparedSnapshotBlob],
+    label: &str,
+) -> Result<(), DbError> {
+    for blob in blobs {
+        if let Some(spool_path) = &blob.spool_path {
+            crate::local_blob::verify_exact_file(blob.remote.object(), spool_path)
+                .await
+                .map_err(|error| {
+                    DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                })?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_snapshot_author(
+    author: &StoreDeviceRegistrationRef,
+    local: &StoreDeviceRegistrationRef,
+    label: &str,
+) -> Result<(), DbError> {
+    if author == local {
+        Ok(())
+    } else {
+        Err(DbError::Message(format!(
+            "staged {label} snapshot author differs from local activation"
+        )))
+    }
+}
+
+pub(crate) fn validate_snapshot_image(
+    image: &SnapshotImageRef,
+    prepared: &PreparedExactObject,
+    image_bytes: &[u8],
+    expected_slot: String,
+    label: &str,
+) -> Result<(), DbError> {
+    if image.object == *prepared.reference()
+        && ObjectHash::digest(image_bytes) == image.image_hash
+        && image.object.slot().logical_key() == expected_slot
+    {
+        Ok(())
+    } else {
+        Err(DbError::Message(format!(
+            "staged {label} snapshot image differs from its exact reference"
+        )))
+    }
+}
+
+pub(crate) fn validate_snapshot_blob_plans_on(
+    conn: &Connection,
+    gates: &Gates,
+    synced_tables: &[SyncedTable],
+    owner: &crate::sync::remote_object::SnapshotObjectOwner,
+    blobs: &[PreparedSnapshotBlob],
+) -> Result<(), DbError> {
+    for blob in blobs {
+        validate_snapshot_blob_plan_on(conn, gates, synced_tables, owner, blob)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn persist_snapshot_image_on(
+    conn: &Connection,
+    image: &SnapshotImageRef,
+    owner: crate::sync::remote_object::SnapshotObjectOwner,
+    label: &str,
+) -> Result<(), DbError> {
+    let image = RemoteObjectRecord::snapshot_activated_image(image, owner)
+        .map_err(|error| DbError::Message(format!("{label} ownership: {error}")))?;
+    persist_exact_remote_object_on(conn, &image, label)
+}
+
+pub(crate) fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result<i64, DbError> {
+    i64::try_from(generation)
+        .map_err(|_| DbError::Message(format!("{label} generation exceeds SQLite INTEGER")))
 }
 
 pub(super) fn validate_snapshot_object_owner_records_on(
@@ -189,6 +268,24 @@ pub(crate) fn install_snapshot_blob_plan_on(
         )
         .map_err(DbError::from)?;
         validate_stored_row_binding_on(conn, binding, &blob.authority, object_id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn install_snapshot_blob_plans_on(
+    conn: &Connection,
+    blobs: &[PreparedSnapshotBlob],
+) -> Result<(), DbError> {
+    for blob in blobs {
+        install_snapshot_blob_plan_on(conn, blob)?;
+        if let Some(path) = &blob.spool_path {
+            conn.execute(
+                "INSERT INTO snapshot_blob_spool_cleanup (path) VALUES (?1)
+                 ON CONFLICT(path) DO NOTHING",
+                [path.to_string_lossy().as_ref()],
+            )
+            .map_err(DbError::from)?;
+        }
     }
     Ok(())
 }

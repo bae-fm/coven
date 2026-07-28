@@ -1,9 +1,8 @@
 use crate::database::*;
 use crate::sync::circle::CircleId;
-use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
-    CircleSnapshotRef, ObjectHash,
+    CircleSnapshotRef,
 };
 use rusqlite::OptionalExtension;
 
@@ -19,17 +18,7 @@ impl StoreDatabase {
             .call(move |conn| load_outbound_circle_snapshot_on(conn, circle_id))
             .await?;
         if let Some(pending) = &pending {
-            for blob in &pending.blobs {
-                if let Some(spool_path) = &blob.spool_path {
-                    crate::local_blob::verify_exact_file(blob.remote.object(), spool_path)
-                        .await
-                        .map_err(|error| {
-                            DbError::Message(format!(
-                                "prepared Circle snapshot blob spool: {error}"
-                            ))
-                        })?;
-                }
-            }
+            verify_snapshot_blob_spools(&pending.blobs, "prepared Circle").await?;
         }
         Ok(pending)
     }
@@ -57,28 +46,22 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-                if meta.author_registration != registration_ref {
-                    return Err(DbError::Message(
-                        "staged Circle snapshot author differs from local activation".to_string(),
-                    ));
-                }
+                validate_snapshot_author(&meta.author_registration, &registration_ref, "Circle")?;
                 let device_id = registration.device_id.to_string();
-                if meta.bootstrap.image.object != *image_prepared.reference()
-                    || ObjectHash::digest(&image_bytes) != meta.bootstrap.image.image_hash
-                    || meta.bootstrap.image.object.slot().logical_key()
-                        != format!(
-                            "{}.db",
-                            circle_snapshot_image_semantic_prefix(
-                                meta.circle_id,
-                                &device_id,
-                                meta.bootstrap.image.image_hash,
-                            )
+                validate_snapshot_image(
+                    &meta.bootstrap.image,
+                    &image_prepared,
+                    &image_bytes,
+                    format!(
+                        "{}.db",
+                        circle_snapshot_image_semantic_prefix(
+                            meta.circle_id,
+                            &device_id,
+                            meta.bootstrap.image.image_hash,
                         )
-                {
-                    return Err(DbError::Message(
-                        "staged Circle snapshot image differs from its exact reference".to_string(),
-                    ));
-                }
+                    ),
+                    "Circle",
+                )?;
                 let reference = CircleSnapshotRef {
                     generation: meta.generation,
                     snapshot_hash: meta.snapshot_hash(),
@@ -158,15 +141,13 @@ impl StoreDatabase {
                     activation: meta.successor.activation,
                     generation: meta.generation,
                 };
-                for blob in &blobs {
-                    validate_snapshot_blob_plan_on(
-                        conn,
-                        &gates,
-                        &synced_tables,
-                        &snapshot_owner,
-                        blob,
-                    )?;
-                }
+                validate_snapshot_blob_plans_on(
+                    conn,
+                    &gates,
+                    &synced_tables,
+                    &snapshot_owner,
+                    &blobs,
+                )?;
                 tx.execute(
                     "INSERT INTO outbound_circle_snapshot \
                  (circle_id, snapshot_ref, meta_prepared, image_ref, image_prepared, \
@@ -244,29 +225,17 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                for blob in &outbound.blobs {
-                    install_snapshot_blob_plan_on(&tx, blob)?;
-                    if let Some(path) = &blob.spool_path {
-                        tx.execute(
-                            "INSERT INTO snapshot_blob_spool_cleanup (path) VALUES (?1)
-                         ON CONFLICT(path) DO NOTHING",
-                            [path.to_string_lossy().as_ref()],
-                        )
-                        .map_err(DbError::from)?;
-                    }
-                }
+                install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
                 let snapshot_owner = crate::sync::remote_object::SnapshotObjectOwner {
                     activation: outbound.meta.value.successor.activation,
                     generation: outbound.meta.value.generation,
                 };
-                let image = RemoteObjectRecord::snapshot_activated_image(
+                persist_snapshot_image_on(
+                    &tx,
                     &outbound.meta.value.bootstrap.image,
                     snapshot_owner,
-                )
-                .map_err(|error| {
-                    DbError::Message(format!("Circle snapshot image ownership: {error}"))
-                })?;
-                persist_exact_remote_object_on(&tx, &image, "Circle snapshot image")?;
+                    "Circle snapshot image",
+                )?;
                 let deleted = tx
                     .execute(
                         "DELETE FROM outbound_circle_snapshot WHERE circle_id = ?1",
@@ -278,11 +247,8 @@ impl StoreDatabase {
                         "outbound Circle snapshot ownership row is absent or changed".to_string(),
                     ));
                 }
-                let accepted_generation = i64::try_from(accepted.generation).map_err(|_| {
-                    DbError::Message(
-                        "Circle snapshot generation exceeds SQLite INTEGER".to_string(),
-                    )
-                })?;
+                let accepted_generation =
+                    snapshot_generation_as_i64(accepted.generation, "Circle snapshot")?;
                 tx.execute(
                     "INSERT INTO published_circle_snapshot \
                  (circle_id, generation, snapshot_ref, successor_slot, cut, meta_bytes) \

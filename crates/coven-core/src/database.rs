@@ -45,7 +45,9 @@ pub(crate) use crate::database::remote_object_records::{
 };
 use crate::database::snapshot_objects::validate_snapshot_object_owners_on;
 pub(crate) use crate::database::snapshot_objects::{
-    install_snapshot_blob_plan_on, validate_snapshot_blob_plan_on,
+    install_snapshot_blob_plan_on, install_snapshot_blob_plans_on, persist_snapshot_image_on,
+    snapshot_generation_as_i64, validate_snapshot_author, validate_snapshot_blob_plans_on,
+    validate_snapshot_image, verify_snapshot_blob_spools,
 };
 pub(crate) use crate::database::snapshot_records::{
     load_outbound_store_snapshot_on, load_published_store_snapshot_on,

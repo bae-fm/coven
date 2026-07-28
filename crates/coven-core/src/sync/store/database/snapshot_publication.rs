@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::database::*;
-use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
-    snapshot_image_semantic_prefix, snapshot_slot_prefix, ObjectHash, SnapshotMeta,
-    StoreSnapshotRef,
+    snapshot_image_semantic_prefix, snapshot_slot_prefix, SnapshotMeta, StoreSnapshotRef,
 };
 
 use super::*;
@@ -15,15 +13,7 @@ impl StoreDatabase {
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
         let pending = self.sqlite().call(load_outbound_store_snapshot_on).await?;
         if let Some(pending) = &pending {
-            for blob in &pending.blobs {
-                if let Some(spool_path) = &blob.spool_path {
-                    crate::local_blob::verify_exact_file(blob.remote.object(), spool_path)
-                        .await
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared snapshot blob spool: {error}"))
-                        })?;
-                }
-            }
+            verify_snapshot_blob_spools(&pending.blobs, "prepared").await?;
         }
         Ok(pending)
     }
@@ -42,26 +32,20 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-                if meta.author_registration != registration_ref {
-                    return Err(DbError::Message(
-                        "staged Store snapshot author differs from local activation".to_string(),
-                    ));
-                }
-                if meta.image.object != *image_prepared.reference()
-                    || ObjectHash::digest(&image_bytes) != meta.image.image_hash
-                    || meta.image.object.slot().logical_key()
-                        != format!(
-                            "{}.db",
-                            snapshot_image_semantic_prefix(
-                                &registration.device_id.to_string(),
-                                meta.image.image_hash,
-                            )
+                validate_snapshot_author(&meta.author_registration, &registration_ref, "Store")?;
+                validate_snapshot_image(
+                    &meta.image,
+                    &image_prepared,
+                    &image_bytes,
+                    format!(
+                        "{}.db",
+                        snapshot_image_semantic_prefix(
+                            &registration.device_id.to_string(),
+                            meta.image.image_hash,
                         )
-                {
-                    return Err(DbError::Message(
-                        "staged Store snapshot image differs from its exact reference".to_string(),
-                    ));
-                }
+                    ),
+                    "Store",
+                )?;
                 let reference = StoreSnapshotRef {
                     generation: meta.generation,
                     snapshot_hash: meta.snapshot_hash(),
@@ -132,15 +116,13 @@ impl StoreDatabase {
                     activation: meta.successor.activation,
                     generation: meta.generation,
                 };
-                for blob in &blobs {
-                    validate_snapshot_blob_plan_on(
-                        conn,
-                        &gates,
-                        &synced_tables,
-                        &snapshot_owner,
-                        blob,
-                    )?;
-                }
+                validate_snapshot_blob_plans_on(
+                    conn,
+                    &gates,
+                    &synced_tables,
+                    &snapshot_owner,
+                    &blobs,
+                )?;
                 tx.execute(
                     "INSERT INTO outbound_store_snapshot \
                  (singleton, snapshot_ref, meta_prepared, image_ref, image_prepared, \
@@ -197,29 +179,17 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                for blob in &outbound.blobs {
-                    install_snapshot_blob_plan_on(&tx, blob)?;
-                    if let Some(path) = &blob.spool_path {
-                        tx.execute(
-                            "INSERT INTO snapshot_blob_spool_cleanup (path) VALUES (?1)
-                         ON CONFLICT(path) DO NOTHING",
-                            [path.to_string_lossy().as_ref()],
-                        )
-                        .map_err(DbError::from)?;
-                    }
-                }
+                install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
                 let snapshot_owner = crate::sync::remote_object::SnapshotObjectOwner {
                     activation: outbound.meta.value.successor.activation,
                     generation: outbound.meta.value.generation,
                 };
-                let image = RemoteObjectRecord::snapshot_activated_image(
+                persist_snapshot_image_on(
+                    &tx,
                     &outbound.meta.value.image,
                     snapshot_owner,
-                )
-                .map_err(|error| {
-                    DbError::Message(format!("Store snapshot image ownership: {error}"))
-                })?;
-                persist_exact_remote_object_on(&tx, &image, "Store snapshot image")?;
+                    "Store snapshot image",
+                )?;
                 let deleted = tx
                     .execute(
                         "DELETE FROM outbound_store_snapshot \
@@ -236,9 +206,8 @@ impl StoreDatabase {
                         "outbound snapshot ownership row is absent or changed".to_string(),
                     ));
                 }
-                let accepted_generation = i64::try_from(accepted.generation).map_err(|_| {
-                    DbError::Message("Store snapshot generation exceeds SQLite INTEGER".to_string())
-                })?;
+                let accepted_generation =
+                    snapshot_generation_as_i64(accepted.generation, "Store snapshot")?;
                 tx.execute(
                     "INSERT INTO published_store_snapshot \
                  (generation, snapshot_ref, successor_slot, meta_bytes) VALUES (?1, ?2, ?3, ?4)",
