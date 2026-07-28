@@ -417,8 +417,6 @@ pub(crate) fn publish<'a>(
         let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
             database,
             &mut commit_verifier,
-            storage,
-            &root,
             &verified_commit,
             &authorization.membership,
             &authorization.device_state_ref,

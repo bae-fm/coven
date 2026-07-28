@@ -98,13 +98,13 @@ async fn predecessor_acknowledgement_activation(
 async fn verify_merge_device_exclusion_proof(
     resolver: &DeviceStateResolver<'_>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit: &StoreBatchCommit,
     proposal: &super::store_objects::VerifiedDeviceExclusionProposal,
     remaining_device_acks: &[super::store_commit::StoreAckRef],
     cutoff: &StoreHistoryCut,
 ) -> Result<(), RegistrationLoadError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let frozen = resolve_device_state(resolver, &proposal.object.value.frozen_device_state).await?;
     if !device_state_has_active_registration(&frozen, &proposal.object.value.target) {
         return Err(RegistrationLoadError::Invalid(
@@ -139,11 +139,11 @@ async fn verify_merge_device_exclusion_proof(
                 "device exclusion proof repeats a remaining registration".to_string(),
             ));
         }
-        let registration = load_registration_ref(storage, root, &required_record.registration)
+        let registration = load_registration_ref(storage, &root, &required_record.registration)
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
-        let ack = load_store_ack_ref(storage, root, reference, &registration)
+        let ack = load_store_ack_ref(storage, &root, reference, &registration)
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
@@ -235,12 +235,12 @@ async fn verify_merge_device_exclusion_proof(
 pub(crate) async fn load_commit_device_operations(
     resolver: Option<&DeviceStateResolver<'_>>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit: &StoreBatchCommit,
     predecessor_state: &ResolvedStoreDeviceState,
     predecessor_membership: Option<&MembershipChain>,
 ) -> Result<VerifiedStoreDeviceOperations, RegistrationLoadError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     if commit.device_exclusion_proposals().is_empty()
         && commit.device_exclusion_outcomes().is_empty()
     {
@@ -254,7 +254,7 @@ pub(crate) async fn load_commit_device_operations(
     })?;
     let mut proposals = Vec::with_capacity(commit.device_exclusion_proposals().len());
     for reference in commit.device_exclusion_proposals() {
-        let opened = load_device_exclusion_proposal_ref(storage, root, reference)
+        let opened = load_device_exclusion_proposal_ref(storage, &root, reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
         let proposal = &opened.object.value;
@@ -285,10 +285,10 @@ pub(crate) async fn load_commit_device_operations(
                 "device exclusion outcome does not resolve an exact pending proposal".to_string(),
             ));
         }
-        let proposal = load_device_exclusion_proposal_ref(storage, root, reference.proposal())
+        let proposal = load_device_exclusion_proposal_ref(storage, &root, reference.proposal())
             .await
             .map_err(RegistrationLoadError::Object)?;
-        let outcome = load_device_exclusion_outcome_ref(storage, root, reference, &proposal)
+        let outcome = load_device_exclusion_outcome_ref(storage, &root, reference, &proposal)
             .await
             .map_err(RegistrationLoadError::Object)?;
         let (owner_registration, owner_grant) = match &outcome.object.value {
@@ -340,8 +340,6 @@ pub(crate) async fn load_commit_device_operations(
                 verify_merge_device_exclusion_proof(
                     resolver,
                     commit_verifier,
-                    storage,
-                    root,
                     commit,
                     &proposal,
                     remaining_device_acks,
@@ -365,6 +363,6 @@ pub(crate) async fn load_commit_device_operations(
         );
     }
     RetainedStoreDeviceOperations::from_sources(proposals, outcomes)
-        .verify_for(root, commit)
+        .verify_for(&root, commit)
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
 }

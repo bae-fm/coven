@@ -3,18 +3,12 @@ use super::*;
 pub(crate) async fn load_local_commit_device_operations(
     database: &StoreDatabase,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     verified_commit: &VerifiedStoreBatchCommit,
     membership: &MembershipChain,
     state_ref: &StoreDeviceStateRef,
     state: ResolvedStoreDeviceState,
 ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
-    if commit_verifier.root() != root {
-        return Err(StorePullError::Database(
-            "local device-operation verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let root = commit_verifier.root();
     if verified_commit.store_root_hash() != root.store_root_hash {
         return Err(StorePullError::Database(
             "local device-operation commit belongs to another Store root".to_string(),
@@ -38,8 +32,6 @@ pub(crate) async fn load_local_commit_device_operations(
     Box::pin(load_commit_device_operations(
         Some(&resolver),
         commit_verifier,
-        storage,
-        root,
         commit,
         &state,
         Some(membership),
