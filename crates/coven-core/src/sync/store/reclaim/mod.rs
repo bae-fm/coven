@@ -1158,17 +1158,6 @@ async fn reclaim_store_packages(
         history_verifier.commit_verifier(),
     ))
     .await?;
-    Box::pin(prepare_circle_bootstrap_reclaim_authorizations(
-        database,
-        storage,
-        device_id,
-        identity_signer,
-        membership,
-        &root,
-        &registrations,
-        history_verifier.commit_verifier(),
-    ))
-    .await?;
     Box::pin(prepare_audience_blob_reclaim_authorizations(
         database,
         storage,
@@ -1480,6 +1469,20 @@ async fn prepare_circle_reclaim_authorizations(
             database, storage, root, circle_id, &control, &streams,
         ))
         .await?;
+        let selected = maximal_stable_circle_snapshot(&stable);
+        Box::pin(prepare_circle_bootstrap_reclaim_authorizations(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            circle_id,
+            &control,
+            selected,
+            commit_verifier,
+        ))
+        .await?;
         // A superseded snapshot generation's image is reclaimable on its own
         // stream's evidence, independent of which snapshot covers the packages.
         Box::pin(prepare_circle_snapshot_image_reclaim_authorizations(
@@ -1495,7 +1498,7 @@ async fn prepare_circle_reclaim_authorizations(
             commit_verifier,
         ))
         .await?;
-        let Some(selected) = maximal_stable_circle_snapshot(stable) else {
+        let Some(selected) = selected else {
             continue;
         };
         let targets = exact_circle_package_targets(
@@ -1541,6 +1544,7 @@ async fn prepare_circle_reclaim_authorizations(
     Ok(())
 }
 
+#[derive(Clone)]
 struct SelectedCircleSnapshot {
     author_registration: StoreDeviceRegistrationRef,
     reference: CircleSnapshotRef,
@@ -1654,19 +1658,20 @@ async fn stable_circle_snapshots(
 /// The maximal stable Circle snapshot: the one whose cut no other stable
 /// snapshot strictly dominates.
 fn maximal_stable_circle_snapshot(
-    mut stable: Vec<SelectedCircleSnapshot>,
-) -> Option<SelectedCircleSnapshot> {
-    let coverages: Vec<CommitFrontier> = stable
+    stable: &[SelectedCircleSnapshot],
+) -> Option<&SelectedCircleSnapshot> {
+    let coverages: Vec<&CommitFrontier> = stable
         .iter()
-        .map(|candidate| candidate.meta.bootstrap.coverage.clone())
+        .map(|candidate| &candidate.meta.bootstrap.coverage)
         .collect();
-    stable.retain(|candidate| {
-        !coverages.iter().any(|other| {
-            super::snapshot::coverage_dominates(other, &candidate.meta.bootstrap.coverage)
+    stable
+        .iter()
+        .filter(|candidate| {
+            !coverages.iter().any(|other| {
+                super::snapshot::coverage_dominates(other, &candidate.meta.bootstrap.coverage)
+            })
         })
-    });
-    stable.sort_by_key(|candidate| candidate.reference.snapshot_hash);
-    stable.pop()
+        .max_by_key(|candidate| candidate.reference.snapshot_hash)
 }
 
 /// The maximal acknowledgement-stable Circle snapshot across every active device's
@@ -1698,7 +1703,7 @@ async fn choose_circle_snapshot(
         &streams,
     ))
     .await?;
-    Ok(maximal_stable_circle_snapshot(stable))
+    Ok(maximal_stable_circle_snapshot(&stable).cloned())
 }
 
 /// Every Circle package addressed to `circle_id` whose activating commit lies at
@@ -1759,105 +1764,91 @@ async fn prepare_circle_bootstrap_reclaim_authorizations(
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
     root: &StoreRootRef,
-    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+    circle_id: CircleId,
+    current_control: &CircleControlCoord,
+    selected: Option<&SelectedCircleSnapshot>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
 ) -> Result<(), StoreReclaimError> {
-    for input in database.circle_acknowledgement_publication_inputs().await? {
-        let circle_id = input.circle_id;
-        let current_control = input.control;
-        let roster = database.circle_current_roster_members(circle_id).await?;
-        let retained_controls = database.retained_circle_control_coords(circle_id).await?;
-        // The maximal acknowledgement-stable Circle snapshot cut, if any. A seed a
-        // still-active recipient holds is superseded only when this cut strictly
-        // dominates it — a later sufficient snapshot every active device acknowledged.
-        let stable_cut = Box::pin(choose_circle_snapshot(
-            database,
-            storage,
-            root,
-            circle_id,
-            &current_control,
-            registrations,
-        ))
-        .await?
-        .map(|selected| selected.meta.bootstrap.coverage);
-        for acknowledgement in database.activated_circle_acks(circle_id).await? {
-            let ack =
-                match super::acknowledgements::load_circle_acknowledgement_under_retained_controls(
-                    database,
-                    storage,
-                    root,
-                    &acknowledgement,
-                    &current_control,
-                    &retained_controls,
-                )
-                .await
-                {
-                    Ok(ack) => ack,
-                    Err(error) => {
-                        // A device stream sealed under an epoch this reader cannot resolve
-                        // is not current coverage evidence; reclaim is best-effort and a
-                        // later cycle retries once the key is resolvable.
-                        tracing::debug!(
-                            circle_id = %circle_id,
-                            "skip Circle acknowledgement for bootstrap reclaim: {error}"
-                        );
-                        continue;
-                    }
-                };
-            let Some(coverage) = ack.seeded_from.clone() else {
-                // A founder/source device never seeded from an image — nothing to reclaim.
-                continue;
-            };
-            let recipient = database
-                .activated_store_device_registration(acknowledgement.registration.clone())
-                .await?;
-            let recipient_active = roster.contains(&recipient.author_pubkey);
-            let seed = &coverage.bootstrap.coverage;
-            let superseded_by_snapshot = stable_cut
-                .as_ref()
-                .is_some_and(|cut| snapshot_supersedes_seed(cut, seed));
-            let proof = if recipient_active {
-                if superseded_by_snapshot {
-                    CircleBootstrapReclaimProof::RecipientCoverage {
-                        acknowledgement: acknowledgement.clone(),
-                    }
-                } else {
-                    // No later sufficient snapshot supersedes the recipient's live seed.
-                    continue;
-                }
-            } else if database
-                .circle_control_covers_strictly(circle_id, &current_control, &coverage.control)
-                .await?
-            {
-                CircleBootstrapReclaimProof::LostAuthority {
-                    acknowledgement: acknowledgement.clone(),
-                    successor_control: current_control.clone(),
-                }
-            } else {
-                continue;
-            };
-            let target = CircleBootstrapImageReclaimTarget { coverage };
-            if database
-                .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
-                .await?
-            {
-                continue;
-            }
-            Box::pin(prepare_reclaim_authorization(
+    let roster = database.circle_current_roster_members(circle_id).await?;
+    let retained_controls = database.retained_circle_control_coords(circle_id).await?;
+    // The maximal acknowledgement-stable Circle snapshot cut, if any. A seed a
+    // still-active recipient holds is superseded only when this cut strictly
+    // dominates it — a later sufficient snapshot every active device acknowledged.
+    let stable_cut = selected.map(|selected| &selected.meta.bootstrap.coverage);
+    for acknowledgement in database.activated_circle_acks(circle_id).await? {
+        let ack =
+            match super::acknowledgements::load_circle_acknowledgement_under_retained_controls(
                 database,
                 storage,
-                device_id,
-                identity_signer,
-                membership,
                 root,
-                commit_verifier,
-                ReclaimClaim::CircleBootstrapImage(CircleBootstrapImageReclaimClaim {
-                    target,
-                    proof,
-                }),
-            ))
+                &acknowledgement,
+                current_control,
+                &retained_controls,
+            )
+            .await
+            {
+                Ok(ack) => ack,
+                Err(error) => {
+                    // A device stream sealed under an epoch this reader cannot resolve
+                    // is not current coverage evidence; reclaim is best-effort and a
+                    // later cycle retries once the key is resolvable.
+                    tracing::debug!(
+                        circle_id = %circle_id,
+                        "skip Circle acknowledgement for bootstrap reclaim: {error}"
+                    );
+                    continue;
+                }
+            };
+        let Some(coverage) = ack.seeded_from.clone() else {
+            // A founder/source device never seeded from an image — nothing to reclaim.
+            continue;
+        };
+        let recipient = database
+            .activated_store_device_registration(acknowledgement.registration.clone())
             .await?;
+        let recipient_active = roster.contains(&recipient.author_pubkey);
+        let seed = &coverage.bootstrap.coverage;
+        let superseded_by_snapshot = stable_cut
+            .as_ref()
+            .is_some_and(|cut| snapshot_supersedes_seed(cut, seed));
+        let proof = if recipient_active {
+            if superseded_by_snapshot {
+                CircleBootstrapReclaimProof::RecipientCoverage {
+                    acknowledgement: acknowledgement.clone(),
+                }
+            } else {
+                // No later sufficient snapshot supersedes the recipient's live seed.
+                continue;
+            }
+        } else if database
+            .circle_control_covers_strictly(circle_id, current_control, &coverage.control)
+            .await?
+        {
+            CircleBootstrapReclaimProof::LostAuthority {
+                acknowledgement: acknowledgement.clone(),
+                successor_control: current_control.clone(),
+            }
+        } else {
+            continue;
+        };
+        let target = CircleBootstrapImageReclaimTarget { coverage };
+        if database
+            .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
+            .await?
+        {
+            continue;
         }
+        Box::pin(prepare_reclaim_authorization(
+            database,
+            storage,
+            device_id,
+            identity_signer,
+            membership,
+            root,
+            commit_verifier,
+            ReclaimClaim::CircleBootstrapImage(CircleBootstrapImageReclaimClaim { target, proof }),
+        ))
+        .await?;
     }
     Ok(())
 }
