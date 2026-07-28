@@ -438,11 +438,18 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
     let member = UserKeypair::generate();
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let current = load_fixture(&fixture).await;
+    let root_value = crate::sync::store_objects::load_store_protocol_root(
+        &fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("load Store root")
+    .value;
 
     let projected = project_anchored_chain_to_verified_store_prefix(
         &fixture.store.storage,
         &fixture.store.root,
-        &fixture.owner_pubkey,
+        &root_value,
         current.head_refs(),
         &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
     )
@@ -485,11 +492,18 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     invite_fixture_member(&fixture, &later_member, MemberRole::Member).await;
     let candidate = load_fixture(&fixture).await;
     assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
+    let root_value = crate::sync::store_objects::load_store_protocol_root(
+        &fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("load Store root")
+    .value;
 
     let projected = project_anchored_chain_to_verified_store_prefix(
         &fixture.store.storage,
         &fixture.store.root,
-        &fixture.owner_pubkey,
+        &root_value,
         candidate.head_refs(),
         &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
     )

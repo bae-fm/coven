@@ -416,22 +416,18 @@ fn project_membership_cut_to_store_prefix(
 pub(crate) async fn project_anchored_chain_to_verified_store_prefix(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    owner_pubkey: &str,
+    root_value: &crate::sync::store_commit::StoreProtocolRoot,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .map_err(map_membership_object_error)?
-        .value;
     let candidate =
-        load_exact_membership_graph_objects(storage, root, &root_value, candidate_heads).await?;
+        load_exact_membership_graph_objects(storage, root, root_value, candidate_heads).await?;
     let (heads, resolutions) = project_membership_cut_to_store_prefix(&candidate, prefix)?;
     let projected = load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
         storage,
         root,
-        &root_value,
-        owner_pubkey,
+        root_value,
+        &root_value.descriptor.founder_pubkey,
         &heads,
         &resolutions,
         prefix,

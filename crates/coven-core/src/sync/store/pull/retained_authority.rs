@@ -126,7 +126,7 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
     let membership = super::membership_ops::project_anchored_chain_to_verified_store_prefix(
         storage,
         root,
-        &root_value.descriptor.founder_pubkey,
+        &root_value,
         candidate_membership_heads,
         &prefix,
     )
@@ -188,7 +188,7 @@ pub(crate) async fn load_retained_merge_outbound_authorization(
     let membership = super::membership_ops::project_anchored_chain_to_verified_store_prefix(
         storage,
         root,
-        &root_value.descriptor.founder_pubkey,
+        &root_value,
         candidate_membership_heads,
         &prefix,
     )
