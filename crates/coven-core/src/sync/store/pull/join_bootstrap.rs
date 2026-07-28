@@ -123,14 +123,18 @@ pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'
     ),
 > {
     Box::pin(async move {
-        let evidence =
-            load_device_join_attempt_evidence_ref(storage, root, attempt, attempt_owner).await?;
         let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+        let evidence = load_device_join_attempt_evidence_ref_with_root(
+            storage,
+            root,
+            history_verifier.verified_root_object(),
+            attempt,
+            attempt_owner,
+        )
+        .await?;
         let verified_attempt =
             super::device_join_attempt::verify_device_join_attempt_evidence_with_history(
                 &mut history_verifier,
-                storage,
-                root,
                 evidence,
             )
             .await?;
@@ -198,12 +202,9 @@ pub(in crate::sync::store) fn materialize_device_join_activation<'a>(
         )
         .await?;
         let membership = accepted_history.membership.clone();
-        let verified_root = history_verifier.verified_root().clone();
         let accepted_frontier = commit_predecessor_references(&commit);
         let registrations = Box::pin(load_merge_commit_registrations(
-            storage,
-            root,
-            &verified_root,
+            &history_verifier,
             &commit,
             &author,
             &membership,

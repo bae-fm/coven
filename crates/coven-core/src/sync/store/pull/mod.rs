@@ -91,7 +91,7 @@ mod terminal_cleanup;
 
 pub use ancestry::StoreCommitVerifier;
 pub(crate) use ancestry::{
-    commit_position_covers, history_cut_covers, load_device_join_attempt_evidence_ref,
+    commit_position_covers, history_cut_covers, load_device_join_attempt_evidence_ref_with_root,
     load_provider_access_activation, CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
 };
 pub(crate) use circle_packages::*;
@@ -120,7 +120,7 @@ pub use support::{
     PullError,
 };
 
-pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence;
+pub(in crate::sync::store) use device_join_attempt::verify_device_join_attempt_evidence_with_history;
 pub(in crate::sync::store) use device_join_cleanup::verify_device_join_cleanup_activation;
 pub(crate) use discovery::*;
 pub(crate) use history::*;

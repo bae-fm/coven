@@ -1287,9 +1287,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             let accepted_frontier = commit_predecessor_references(&commit);
             let registrations = Box::pin(load_merge_commit_registrations(
-                storage,
-                root,
-                &verified_root,
+                self,
                 &commit,
                 &author,
                 &membership,
@@ -1336,8 +1334,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
             })?;
-            let acknowledgement = Box::pin(validate_commit_acknowledgement(
-                storage, root, &commit, &author,
+            let acknowledgement = Box::pin(validate_commit_acknowledgement_with_root(
+                storage,
+                root,
+                &verified_root,
+                &commit,
+                &author,
             ))
             .await
             .map_err(|error| match error {

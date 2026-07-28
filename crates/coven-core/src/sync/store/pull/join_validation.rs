@@ -56,10 +56,11 @@ pub(super) async fn validate_commit_join_abandonments(
 }
 
 async fn load_commit_device_join_attempt_evidence(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    history_verifier: &MergeHistoryVerifier<'_>,
     reference: &super::store_commit::DeviceJoinAttemptRef,
 ) -> Result<LoadedDeviceJoinAttemptEvidence, RegistrationLoadError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
@@ -74,13 +75,24 @@ async fn load_commit_device_join_attempt_evidence(
         .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
     let unverified: DeviceJoinAttempt = serde_json::from_slice(&bytes)
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    let owner = load_registration_ref(storage, root, &unverified.owner_registration)
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
-    load_device_join_attempt_evidence_ref(storage, root, reference, &owner)
-        .await
-        .map_err(registration_attempt_error)
+    let owner = load_registration_ref_with_root(
+        storage,
+        root,
+        history_verifier.verified_root(),
+        &unverified.owner_registration,
+    )
+    .await
+    .map_err(RegistrationLoadError::Object)?
+    .value;
+    load_device_join_attempt_evidence_ref_with_root(
+        storage,
+        root,
+        history_verifier.verified_root_object(),
+        reference,
+        &owner,
+    )
+    .await
+    .map_err(registration_attempt_error)
 }
 
 pub(crate) struct LoadedCommitJoinCleanupReceipt {
@@ -106,13 +118,14 @@ pub(crate) struct VerifiedCommitJoinEvidence {
 }
 
 pub(crate) fn load_commit_join_cleanup_receipts<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    root_value: &'a super::store_commit::StoreProtocolRoot,
+    history_verifier: &'a MergeHistoryVerifier<'_>,
     commit: &'a StoreBatchCommit,
     activating_author: &'a StoreDeviceRegistration,
 ) -> RegistrationLoadFuture<'a, Vec<LoadedCommitJoinCleanupReceipt>> {
     Box::pin(async move {
+        let storage = history_verifier.storage();
+        let root = history_verifier.root();
+        let root_value = history_verifier.verified_root();
         let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
         for reference in commit.device_join_cleanup_receipts() {
             let context = ProtocolObjectContext::signed_plaintext(
@@ -157,13 +170,24 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                 .map_err(|error| RegistrationLoadError::Object(StoreObjectError::Storage(error)))?;
             let unverified: DeviceJoinAttempt = serde_json::from_slice(&attempt_bytes)
                 .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-            let owner = load_registration_ref(storage, root, &unverified.owner_registration)
-                .await
-                .map_err(RegistrationLoadError::Object)?
-                .value;
-            let attempt = load_device_join_attempt_evidence_ref(storage, root, attempt_ref, &owner)
-                .await
-                .map_err(registration_attempt_error)?;
+            let owner = load_registration_ref_with_root(
+                storage,
+                root,
+                root_value,
+                &unverified.owner_registration,
+            )
+            .await
+            .map_err(RegistrationLoadError::Object)?
+            .value;
+            let attempt = load_device_join_attempt_evidence_ref_with_root(
+                storage,
+                root,
+                history_verifier.verified_root_object(),
+                attempt_ref,
+                &owner,
+            )
+            .await
+            .map_err(registration_attempt_error)?;
             let expected_administrator = &attempt
                 .attempt
                 .value
@@ -193,20 +217,29 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
             match &receipt.administrator_terminal {
                 super::device_join::ProviderAdminJoinTerminal::Completed(_) => {}
                 super::device_join::ProviderAdminJoinTerminal::Cancelled(closure) => {
-                    let administrator =
-                        load_registration_ref(storage, root, &closure.administrator_registration)
-                            .await
-                            .map_err(RegistrationLoadError::Object)?
-                            .value;
+                    let administrator = load_registration_ref_with_root(
+                        storage,
+                        root,
+                        root_value,
+                        &closure.administrator_registration,
+                    )
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
                     closure
                         .verify(&administrator)
                         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
                 }
                 super::device_join::ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = load_registration_ref(storage, root, &revocation.executor)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                        .value;
+                    let executor = load_registration_ref_with_root(
+                        storage,
+                        root,
+                        root_value,
+                        &revocation.executor,
+                    )
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
                     revocation
                         .verify(&executor)
                         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
@@ -218,10 +251,15 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                     .verify()
                     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?,
                 super::device_join::JoinerJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = load_registration_ref(storage, root, &revocation.executor)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                        .value;
+                    let executor = load_registration_ref_with_root(
+                        storage,
+                        root,
+                        root_value,
+                        &revocation.executor,
+                    )
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
                     revocation
                         .verify(&executor)
                         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
@@ -234,15 +272,12 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
 }
 
 pub(crate) async fn load_commit_join_evidence(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
 ) -> Result<LoadedCommitJoinEvidence, RegistrationLoadError> {
     let loaded_cleanup =
-        load_commit_join_cleanup_receipts(storage, root, root_value, commit, activating_author)
-            .await?;
+        load_commit_join_cleanup_receipts(history_verifier, commit, activating_author).await?;
     let mut attempts = BTreeMap::new();
     let mut cleanup_receipts = Vec::with_capacity(loaded_cleanup.len());
     for loaded in loaded_cleanup {
@@ -272,7 +307,8 @@ pub(crate) async fn load_commit_join_evidence(
         if attempts.contains_key(&reference) {
             continue;
         }
-        let evidence = load_commit_device_join_attempt_evidence(storage, root, &reference).await?;
+        let evidence =
+            load_commit_device_join_attempt_evidence(history_verifier, &reference).await?;
         attempts.insert(reference, evidence);
     }
     Ok(LoadedCommitJoinEvidence {

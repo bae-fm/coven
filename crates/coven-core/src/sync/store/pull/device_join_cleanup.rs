@@ -4,8 +4,6 @@ use crate::sync::store::pull::LoadedDeviceJoinCleanupActivation;
 
 pub(in crate::sync::store) async fn verify_device_join_cleanup_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     activation: LoadedDeviceJoinCleanupActivation,
 ) -> Result<crate::sync::store::JoinerJoinTerminal, StorePullError> {
     let membership = load_merge_predecessor_membership_with_history(
@@ -29,8 +27,6 @@ pub(in crate::sync::store) async fn verify_device_join_cleanup_activation(
     })?;
     let attempt = super::device_join_attempt::verify_device_join_attempt_evidence_with_history(
         history_verifier,
-        storage,
-        root,
         loaded.attempt,
     )
     .await?;

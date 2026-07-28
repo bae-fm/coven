@@ -84,16 +84,8 @@ pub(crate) struct LoadedDeviceJoinCleanupActivation {
 
 pub(crate) async fn load_device_join_cleanup_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     activation: &super::device_join::DeviceJoinCleanupActivation,
 ) -> Result<LoadedDeviceJoinCleanupActivation, StorePullError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StorePullError::Database(
-            "device join cleanup verifier belongs to another Store root".to_string(),
-        ));
-    }
-    let root_value = history_verifier.verified_root().clone();
     let verified_commit = history_verifier.load_ref(&activation.activation).await?;
     if verified_commit.value().device_join_cleanup_receipts()
         != std::slice::from_ref(&activation.receipt)
@@ -103,9 +95,7 @@ pub(crate) async fn load_device_join_cleanup_activation(
         ));
     }
     let receipts = load_commit_join_cleanup_receipts(
-        storage,
-        root,
-        &root_value,
+        history_verifier,
         verified_commit.value(),
         verified_commit.author(),
     )
@@ -123,6 +113,32 @@ pub(crate) async fn load_device_join_cleanup_activation(
 pub(crate) async fn validate_commit_acknowledgement(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+) -> Result<
+    Option<(
+        super::store_commit::StoreAckRef,
+        super::store_commit::StoreAck,
+    )>,
+    RegistrationLoadError,
+> {
+    let root_value = load_store_protocol_root(storage, root)
+        .await
+        .map_err(RegistrationLoadError::Object)?;
+    validate_commit_acknowledgement_with_root(
+        storage,
+        root,
+        &root_value.value,
+        commit,
+        activating_author,
+    )
+    .await
+}
+
+pub(crate) async fn validate_commit_acknowledgement_with_root(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    root_value: &super::store_commit::StoreProtocolRoot,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
 ) -> Result<
@@ -157,9 +173,14 @@ pub(crate) async fn validate_commit_acknowledgement(
         ));
     }
     if let Some(snapshot) = &ack.snapshot {
-        let snapshot_author = load_registration_ref(storage, root, &snapshot.author_registration)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
+        let snapshot_author = load_registration_ref_with_root(
+            storage,
+            root,
+            root_value,
+            &snapshot.author_registration,
+        )
+        .await
+        .map_err(RegistrationLoadError::Object)?;
         let (_, metadata) = Box::pin(crate::sync::store::snapshot::load_store_snapshot_ref(
             storage,
             root,
@@ -504,10 +525,8 @@ async fn validate_commit_reclaim_receipt(
     Ok(())
 }
 
-pub(super) async fn load_commit_registrations_with_root(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
+pub(super) async fn load_commit_registrations(
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
@@ -515,15 +534,19 @@ pub(super) async fn load_commit_registrations_with_root(
     accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
+    let root_value = history_verifier.verified_root();
     if join_evidence.commit != *commit {
         return Err(RegistrationLoadError::Invalid(
             "verified device-join evidence belongs to another Store commit".to_string(),
         ));
     }
     if commit.acknowledgement().is_some() {
-        Box::pin(validate_commit_acknowledgement(
+        Box::pin(validate_commit_acknowledgement_with_root(
             storage,
             root,
+            root_value,
             commit,
             activating_author,
         ))

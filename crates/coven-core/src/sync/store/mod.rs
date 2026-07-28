@@ -521,9 +521,17 @@ pub(crate) fn load_verified_device_join_attempt_ref<'a>(
     super::store_objects::VerifiedObject<super::store_commit::DeviceJoinAttempt>,
 > {
     Box::pin(async move {
-        let evidence =
-            pull::load_device_join_attempt_evidence_ref(storage, root, reference, owner).await?;
-        pull::verify_device_join_attempt_evidence(storage, root, evidence).await
+        let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
+        let evidence = pull::load_device_join_attempt_evidence_ref_with_root(
+            storage,
+            root,
+            history_verifier.verified_root_object(),
+            reference,
+            owner,
+        )
+        .await?;
+        pull::verify_device_join_attempt_evidence_with_history(&mut history_verifier, evidence)
+            .await
     })
 }
 
@@ -534,15 +542,9 @@ pub(crate) fn verify_device_join_cleanup_activation<'a>(
 ) -> pull::StorePullFuture<'a, device_join::JoinerJoinTerminal> {
     Box::pin(async move {
         let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
-        let evidence = pull::load_device_join_cleanup_activation(
-            &mut history_verifier,
-            storage,
-            root,
-            activation,
-        )
-        .await?;
-        pull::verify_device_join_cleanup_activation(&mut history_verifier, storage, root, evidence)
-            .await
+        let evidence =
+            pull::load_device_join_cleanup_activation(&mut history_verifier, activation).await?;
+        pull::verify_device_join_cleanup_activation(&mut history_verifier, evidence).await
     })
 }
 

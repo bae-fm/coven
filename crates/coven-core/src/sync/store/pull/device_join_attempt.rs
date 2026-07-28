@@ -38,29 +38,12 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     }
 }
 
-pub(in crate::sync::store) fn verify_device_join_attempt_evidence<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    evidence: LoadedDeviceJoinAttemptEvidence,
-) -> StorePullFuture<'a, VerifiedObject<DeviceJoinAttempt>> {
-    Box::pin(async move {
-        let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-        verify_device_join_attempt_evidence_with_history(
-            &mut history_verifier,
-            storage,
-            root,
-            evidence,
-        )
-        .await
-    })
-}
-
-pub(super) async fn verify_device_join_attempt_evidence_with_history(
+pub(in crate::sync::store) async fn verify_device_join_attempt_evidence_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     evidence: LoadedDeviceJoinAttemptEvidence,
 ) -> Result<VerifiedObject<DeviceJoinAttempt>, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let frontier = &evidence.attempt.value.bootstrap_cut.0;
     verify_merge_history_authority(
         history_verifier,

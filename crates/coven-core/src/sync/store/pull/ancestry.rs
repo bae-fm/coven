@@ -212,30 +212,34 @@ pub(crate) struct LoadedDeviceJoinAttemptEvidence {
     pub(crate) attempt: VerifiedObject<DeviceJoinAttempt>,
 }
 
-pub(crate) fn load_device_join_attempt_evidence_ref<'a>(
+pub(crate) fn load_device_join_attempt_evidence_ref_with_root<'a>(
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
+    verified_root: &'a VerifiedObject<super::store_commit::StoreProtocolRoot>,
     reference: &'a super::store_commit::DeviceJoinAttemptRef,
     owner: &'a StoreDeviceRegistration,
 ) -> StorePullFuture<'a, LoadedDeviceJoinAttemptEvidence> {
     Box::pin(async move {
         let attempt =
             load_owner_signed_device_join_attempt_ref(storage, root, reference, owner).await?;
-        let verified_root = load_store_protocol_root(storage, root).await?;
         if attempt.value.store_root != *root {
             return Err(StorePullError::Database(
                 "device join attempt names another Store root".to_string(),
             ));
         }
         let offer = &attempt.value.provider_approval.request.offer;
-        let administrator =
-            load_registration_ref(storage, root, &offer.provider_admin.administrator)
-                .await?
-                .value;
+        let administrator = load_registration_ref_with_root(
+            storage,
+            root,
+            &verified_root.value,
+            &offer.provider_admin.administrator,
+        )
+        .await?
+        .value;
         attempt
             .value
             .provider_approval
-            .verify(&verified_root, owner, &administrator)
+            .verify(verified_root, owner, &administrator)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         Ok(LoadedDeviceJoinAttemptEvidence { attempt })
     })
