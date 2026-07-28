@@ -27,6 +27,34 @@ pub(super) async fn publish_circle_operation(
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<(), CircleOperationError> {
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    publish_circle_operation_with_history(
+        database,
+        storage,
+        &root,
+        &mut history_verifier,
+        operation_id,
+        identity,
+        routing_key,
+    )
+    .await
+}
+
+pub(super) async fn publish_circle_operation_with_history(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    operation_id: &CircleOperationId,
+    identity: &UserKeypair,
+    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
+) -> Result<(), CircleOperationError> {
     let mut journal = database
         .circle_operation(operation_id)
         .await?
@@ -39,18 +67,16 @@ pub(super) async fn publish_circle_operation(
     }
     let creation = journal.operation().creation.clone();
     let store_root_hash = creation.control.value.store_root_hash;
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
     if root.store_root_hash != store_root_hash {
         return Err(CircleOperationError::InvalidState(
             "Circle commit names a different Store root".to_string(),
         ));
     }
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err(CircleOperationError::InvalidState(
+            "Circle publication verifier belongs to another Store root".to_string(),
+        ));
+    }
     let circle_encryption = EncryptionService::from(
         MasterKeyring::from_serialized(&creation.keyring)
             .map_err(|error| CircleOperationError::Journal(format!("circle keyring: {error}")))?,
@@ -117,7 +143,7 @@ pub(super) async fn publish_circle_operation(
         let (_, state_after) = crate::sync::store::pull::retained_merge_device_state_for_order(
             database,
             storage,
-            &root,
+            root,
             &commit.order,
         )
         .await
@@ -493,8 +519,8 @@ pub(super) async fn publish_circle_operation(
     let verified = load_circle_activations(
         database,
         storage,
-        &root,
-        &mut history_verifier,
+        root,
+        history_verifier,
         &verified_commit,
         identity,
         routing_key,

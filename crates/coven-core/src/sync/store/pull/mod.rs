@@ -154,7 +154,7 @@ pub(in crate::sync::store) use snapshot_authority::{
     verify_snapshot_stability, verify_snapshots_for_acknowledgement,
 };
 pub(super) use terminal_authority::*;
-pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate;
+pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate_with_history;
 #[cfg(test)]
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
 pub(crate) use terminal_cleanup::cleanup_merge_candidate_with_history;

@@ -416,16 +416,17 @@ async fn authenticate_blocked_candidate(
 pub(crate) async fn discard_candidate_nonactivation(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     candidate: &crate::database::BlockedMergeCandidate,
     revoked_grant: Option<&crate::sync::membership::MembershipGrantId>,
 ) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
-    let root = database.local_store_root_ref().await?.ok_or_else(|| {
-        StoreError::InvalidOutbound("discard candidate has no Store root".to_string())
-    })?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
-    let verified_candidate =
-        authenticate_blocked_candidate(&mut history_verifier, candidate).await?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err(StoreError::InvalidOutbound(
+            "discard candidate verifier belongs to another Store root".to_string(),
+        ));
+    }
+    let verified_candidate = authenticate_blocked_candidate(history_verifier, candidate).await?;
     if let ExcludedCandidateHeadObservation::MergeWinner(observation) =
         observe_excluded_candidate_head(
             database,
@@ -451,8 +452,8 @@ pub(crate) async fn discard_candidate_nonactivation(
     if let Some(nonactivation) = excluded_candidate_nonactivation(
         database,
         storage,
-        &root,
-        &mut history_verifier,
+        root,
+        history_verifier,
         &verified_candidate,
         &candidate.head.value,
         &candidate.head.object,
@@ -467,8 +468,8 @@ pub(crate) async fn discard_candidate_nonactivation(
     membership_revocation_candidate_nonactivation(
         database,
         storage,
-        &root,
-        &mut history_verifier,
+        root,
+        history_verifier,
         revoked_grant,
         &verified_candidate,
         &candidate.head.value,

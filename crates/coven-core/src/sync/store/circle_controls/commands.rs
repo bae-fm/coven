@@ -1,6 +1,7 @@
 use super::{
     prepare_circle_operation, prepare_circle_operation_request, publish_circle_operation,
-    CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
+    publish_circle_operation_with_history, CircleAuthoringState, CircleOperationError,
+    CircleOperationIntent, CircleTransitionHistory,
 };
 use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
@@ -194,9 +195,14 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut commit_verifier =
-            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
-        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let activation_commit = history_verifier
+            .commit_verifier()
+            .load_ref(&activation_commit_ref)
+            .await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -235,9 +241,11 @@ impl Store {
         }
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             None,
@@ -272,9 +280,14 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut commit_verifier =
-            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
-        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let activation_commit = history_verifier
+            .commit_verifier()
+            .load_ref(&activation_commit_ref)
+            .await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -333,9 +346,11 @@ impl Store {
         }
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             Some(routing_key),
@@ -365,9 +380,14 @@ impl Store {
             .local_store_root_ref()
             .await?
             .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut commit_verifier =
-            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
-        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let activation_commit = history_verifier
+            .commit_verifier()
+            .load_ref(&activation_commit_ref)
+            .await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -424,9 +444,11 @@ impl Store {
         }
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             None,
@@ -811,6 +833,14 @@ impl Store {
         }
         let database = self.database();
         let storage = &**self.storage();
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         crate::sync::store::ensure_active_registration(database, storage).await?;
         let journal = database
             .circle_operation(operation_id)
@@ -826,6 +856,8 @@ impl Store {
                 crate::sync::store::abandonment::discard_candidate_nonactivation(
                     database,
                     storage,
+                    &root,
+                    &mut history_verifier,
                     &discard_candidate.candidate,
                     discard_candidate.revoked_grant.as_ref(),
                 ),
@@ -840,9 +872,11 @@ impl Store {
                 .begin_circle_operation_discard(operation_id, nonactivation)
                 .await?;
         }
-        crate::sync::store::pull::cleanup_circle_operation_candidate(
+        crate::sync::store::pull::cleanup_circle_operation_candidate_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             operation_id,
         )
         .await
@@ -874,6 +908,14 @@ impl Store {
         }
         let database = self.database();
         let storage = &**self.storage();
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         crate::sync::store::ensure_active_registration(database, storage).await?;
         if database
             .circle_control_conflict_branches(circle_id)
@@ -889,13 +931,10 @@ impl Store {
         let (current, activation_commit_ref) = database
             .circle_delete_context(circle_id, &identity_pubkey)
             .await?;
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut commit_verifier =
-            crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
-        let activation_commit = commit_verifier.load_ref(&activation_commit_ref).await?;
+        let activation_commit = history_verifier
+            .commit_verifier()
+            .load_ref(&activation_commit_ref)
+            .await?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -949,9 +988,11 @@ impl Store {
             }
             None => database.insert_circle_operation(journal).await?,
         }
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             None,
@@ -966,10 +1007,24 @@ impl Store {
     ) -> Result<(), CircleOperationError> {
         let database = self.database();
         let storage = &**self.storage();
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         // Interrupted discards resume first: a durable `Discarding` row plus the
         // per-object cleanup states carry an unfinished discard to completion
         // before any pending operation republishes.
-        Box::pin(resume_discarding_circle_operations(database, storage)).await?;
+        Box::pin(resume_discarding_circle_operations(
+            database,
+            storage,
+            &root,
+            &mut history_verifier,
+        ))
+        .await?;
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
             if !journal.is_publishable() {
                 return Err(CircleOperationError::Journal(format!(
@@ -977,9 +1032,11 @@ impl Store {
                     journal.circle_id()
                 )));
             }
-            match Box::pin(publish_circle_operation(
+            match Box::pin(publish_circle_operation_with_history(
                 database,
                 storage,
+                &root,
+                &mut history_verifier,
                 &journal.operation_id,
                 identity,
                 routing_key,
@@ -999,11 +1056,15 @@ impl Store {
 async fn resume_discarding_circle_operations(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
 ) -> Result<(), CircleOperationError> {
     for operation_id in database.discarding_circle_operations().await? {
-        crate::sync::store::pull::cleanup_circle_operation_candidate(
+        crate::sync::store::pull::cleanup_circle_operation_candidate_with_history(
             database,
             storage,
+            root,
+            history_verifier,
             &operation_id,
         )
         .await

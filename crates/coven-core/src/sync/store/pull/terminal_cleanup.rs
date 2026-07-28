@@ -57,15 +57,18 @@ pub(crate) async fn cleanup_merge_candidate_with_history(
 /// candidate and its durable home from the `circle_operations` journal. Idempotent
 /// and restart-safe: the durable `Discarding` row plus the per-object cleanup
 /// states drive an interrupted run to completion on resume.
-pub(crate) async fn cleanup_circle_operation_candidate(
+pub(crate) async fn cleanup_circle_operation_candidate_with_history(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     operation_id: &crate::sync::circle::CircleOperationId,
 ) -> Result<(), StorePullError> {
-    let root = database.local_store_root_ref().await?.ok_or_else(|| {
-        StorePullError::Database("Circle operation discard has no Store root".to_string())
-    })?;
-    let mut history_verifier = MergeHistoryVerifier::new(storage, &root).await?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err(StorePullError::Database(
+            "Circle operation cleanup verifier belongs to another Store root".to_string(),
+        ));
+    }
     for verification in database
         .circle_operation_discard_terminal_verifications(operation_id)
         .await?
@@ -73,8 +76,8 @@ pub(crate) async fn cleanup_circle_operation_candidate(
         let nonactivation = verify_terminal_cleanup_candidate(
             database,
             storage,
-            &root,
-            &mut history_verifier,
+            root,
+            history_verifier,
             &verification,
         )
         .await?;
