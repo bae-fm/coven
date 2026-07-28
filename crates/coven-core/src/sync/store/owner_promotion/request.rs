@@ -140,10 +140,14 @@ impl Store {
             (None, None)
         };
         let root = history_verifier.root().clone();
-        let member =
-            crate::sync::store_objects::load_registration_ref(storage, &root, &member_registration)
-                .await
-                .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+        let member = crate::sync::store_objects::load_registration_ref_with_root(
+            storage,
+            &root,
+            history_verifier.verified_root(),
+            &member_registration,
+        )
+        .await
+        .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
         let plan = crate::sync::store::operations::prepare_plan(
             database,
             history_verifier,

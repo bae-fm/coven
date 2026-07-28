@@ -2436,9 +2436,10 @@ async fn verify_store_package_reclaim_claim(
 ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
     let storage = history_verifier.storage();
     let root = history_verifier.root().clone();
-    let author = crate::sync::store_objects::load_registration_ref(
+    let author = crate::sync::store_objects::load_registration_ref_with_root(
         storage,
         &root,
+        history_verifier.verified_root(),
         &claim.covering_snapshot.author_registration,
     )
     .await?;
@@ -2640,9 +2641,10 @@ async fn verify_circle_package_snapshot_coverage_claim(
                 "Circle {circle_id} snapshot key is not resolvable from retained controls"
             ))
         })?;
-    let author = crate::sync::store_objects::load_registration_ref(
+    let author = crate::sync::store_objects::load_registration_ref_with_root(
         storage,
         &root,
+        commit_verifier.verified_root(),
         &claim.covering_snapshot.author_registration,
     )
     .await?;

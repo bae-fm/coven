@@ -1139,10 +1139,14 @@ async fn resolve_circle_stream_authority(
             ));
         }
     }
-    let registration =
-        crate::sync::store_objects::load_registration_ref(storage, &root, author_registration)
-            .await?
-            .value;
+    let registration = crate::sync::store_objects::load_registration_ref_with_root(
+        storage,
+        &root,
+        commit_verifier.verified_root(),
+        author_registration,
+    )
+    .await?
+    .value;
     Ok(CircleStreamAuthority {
         activation_id: activation.activation_id(),
         first_slot: anchor.first_slot().clone(),
