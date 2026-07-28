@@ -402,6 +402,32 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
     candidate: Box<operations::PreparedStoreOperationCommit>,
     completion: operations::StoreMembershipJournalCompletion,
 ) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+    publish_prepared_merge_membership_activation_with_history(
+        database,
+        &mut history_verifier,
+        author,
+        transition,
+        publication,
+        candidate,
+        completion,
+    )
+    .await
+}
+
+pub(crate) async fn publish_prepared_merge_membership_activation_with_history(
+    database: &crate::sync::store::StoreDatabase,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    author: &store_commit::StoreDeviceRegistration,
+    transition: &PreparedMembershipTransition,
+    publication: &PreparedMembershipPublication,
+    candidate: Box<operations::PreparedStoreOperationCommit>,
+    completion: operations::StoreMembershipJournalCompletion,
+) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     validate_prepared_transition(transition)?;
     validate_prepared_publication(publication)?;
     candidate
@@ -456,12 +482,12 @@ pub(crate) async fn publish_prepared_merge_membership_activation(
         publication.head_ref.clone(),
     )?;
     let _authorship = database.author_own_stream().await;
-    operations::publish_prepared_store_membership_operation(
+    operations::publish_prepared_with_history(
         database,
-        storage,
+        history_verifier,
         candidate,
-        membership_objects,
-        completion,
+        Some(membership_objects),
+        Some(completion),
     )
     .await
     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))

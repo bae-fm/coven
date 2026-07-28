@@ -1,5 +1,4 @@
 use crate::keys::UserKeypair;
-use crate::sync::storage::SyncStorage;
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store::operations::{StoreOperationBatch, StoreOperationPublicationOutcome};
 use crate::sync::store::Store;
@@ -8,7 +7,7 @@ use crate::sync::store_commit::{
     OwnerPromotionRequestActivation, StoreDeviceRegistrationRef,
 };
 
-use super::authority::{exact_merge_member_grant, load_current_merge_membership, target_key};
+use super::authority::{exact_merge_member_grant, target_key};
 use super::journal::{
     advance_owner_promotion_journal, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
     OwnerPromotionJournalState,
@@ -17,16 +16,16 @@ use super::OwnerPromotionError;
 
 async fn resume_request_publication(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     journal: OwnerPromotionJournal,
 ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
     let (previous, state) = journal.into_predecessor()?;
-    resume_request_publication_state(database, storage, previous, state).await
+    resume_request_publication_state(database, history_verifier, previous, state).await
 }
 
 async fn resume_request_publication_state(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     mut previous: OwnerPromotionJournalPredecessor,
     mut state: OwnerPromotionJournalState,
 ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
@@ -43,8 +42,12 @@ async fn resume_request_publication_state(
                 // plan, which takes this same turn.
                 let outcome = {
                     let _authorship = database.author_own_stream().await;
-                    crate::sync::store::operations::publish_prepared_store_operation(
-                        database, storage, candidate,
+                    crate::sync::store::operations::publish_prepared_with_history(
+                        database,
+                        history_verifier,
+                        candidate,
+                        None,
+                        None,
                     )
                     .await?
                 };
@@ -108,8 +111,15 @@ impl Store {
         identity: &UserKeypair,
         member_registration: StoreDeviceRegistrationRef,
     ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
-        let database = self.database();
-        let storage = &**self.storage();
+        let mut authorization = self
+            .authorize()
+            .await
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let authority = authorization.operation_authority();
+        let database = authority.database;
+        let history_verifier = authority.history_verifier;
+        let membership = &*authority.membership;
+        let storage = history_verifier.storage();
         let db = database.sqlite();
         let (allocated, failed_attempt) = if let Some(existing) = database
             .load_owner_promotion_target(target_key(&member_registration)?)
@@ -124,29 +134,25 @@ impl Store {
             ) {
                 (None, Some(existing))
             } else {
-                return resume_request_publication(database, storage, existing).await;
+                return resume_request_publication(database, history_verifier, existing).await;
             }
         } else {
             (None, None)
         };
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or_else(|| OwnerPromotionError::Protocol("Store root is absent".to_string()))?;
+        let root = history_verifier.root().clone();
         let member =
             crate::sync::store_objects::load_registration_ref(storage, &root, &member_registration)
                 .await
                 .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-        let membership = load_current_merge_membership(database, storage, &root).await?;
-        let plan = crate::sync::store::operations::prepare_plan(
+        let plan = crate::sync::store::operations::prepare_plan_with_history(
             database,
-            storage,
-            &membership,
+            history_verifier,
+            membership,
             device_id,
             identity,
         )
         .await?;
-        let member_grant = exact_merge_member_grant(&membership, &member.value.author_pubkey)?;
+        let member_grant = exact_merge_member_grant(membership, &member.value.author_pubkey)?;
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
             OwnerPromotionError::Protocol("promotion author is not an Owner".to_string())
         })?;
@@ -234,6 +240,6 @@ impl Store {
         let (previous, _) = allocation.into_predecessor()?;
         let (previous, state) =
             advance_owner_promotion_journal(database, previous, prepared).await?;
-        resume_request_publication_state(database, storage, previous, state).await
+        resume_request_publication_state(database, history_verifier, previous, state).await
     }
 }

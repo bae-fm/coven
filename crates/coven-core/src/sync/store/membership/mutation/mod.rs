@@ -20,8 +20,10 @@ pub(crate) use keyring::{
 };
 pub(crate) use publication::{
     finish_membership_transition, prepare_membership_transition,
-    publish_prepared_merge_membership_activation, publish_prepared_merge_membership_authority,
-    validate_prepared_publication, validate_prepared_transition,
+    publish_prepared_merge_membership_activation,
+    publish_prepared_merge_membership_activation_with_history,
+    publish_prepared_merge_membership_authority, validate_prepared_publication,
+    validate_prepared_transition,
 };
 pub(crate) use removal::{complete_revoke_rotation_adoption, revoke_member_durable};
 pub(crate) use resolution::resolve_membership_conflict;

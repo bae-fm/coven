@@ -1,7 +1,10 @@
 use crate::sync::membership::{MembershipChain, MembershipGrantId, StoreMembershipRoleGrant};
+#[cfg(test)]
 use crate::sync::storage::SyncStorage;
 use crate::sync::store::database::StoreDatabase;
-use crate::sync::store_commit::{ObjectHash, StoreDeviceRegistrationRef, StoreRootRef};
+#[cfg(test)]
+use crate::sync::store_commit::StoreRootRef;
+use crate::sync::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
 
 use super::OwnerPromotionError;
 
@@ -16,6 +19,7 @@ pub(super) fn target_key(
     Ok(format!("{TARGET_PREFIX}{}", ObjectHash::digest(&bytes)))
 }
 
+#[cfg(test)]
 pub(super) async fn load_current_merge_membership(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,

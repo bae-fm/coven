@@ -5,44 +5,7 @@ pub(crate) async fn publish_prepared_store_operation(
     storage: &dyn SyncStorage,
     prepared: Box<PreparedStoreOperationCommit>,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
-    Box::pin(publish_prepared_store_operation_with_membership_completion(
-        database, storage, prepared, None, None,
-    ))
-    .await
-}
-
-pub(crate) fn publish_prepared_store_membership_operation<'a>(
-    database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    prepared: Box<PreparedStoreOperationCommit>,
-    membership_objects: crate::database::VerifiedMergeMembershipObjects,
-    completion: StoreMembershipJournalCompletion,
-) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
-{
-    Box::pin(publish_prepared_store_operation_with_membership_completion(
-        database,
-        storage,
-        prepared,
-        Some(membership_objects),
-        Some(completion),
-    ))
-}
-
-async fn publish_prepared_store_operation_with_membership_completion(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    prepared: Box<PreparedStoreOperationCommit>,
-    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-    membership_completion: Option<StoreMembershipJournalCompletion>,
-) -> Result<StoreOperationPublicationOutcome, StoreError> {
-    publish_prepared(
-        database,
-        storage,
-        prepared,
-        membership_objects,
-        membership_completion,
-    )
-    .await
+    publish_prepared(database, storage, prepared, None, None).await
 }
 
 pub(crate) struct PreparedStoreOperationActivation {

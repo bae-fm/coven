@@ -139,7 +139,7 @@ pub(crate) use mutation::signed_wrapped_keyring_for_test;
 pub(crate) use mutation::{
     complete_revoke_rotation_adoption, create_invitation_with_encryption_durable,
     ed25519_hex_to_x25519, finish_membership_transition, load_authorized_owner_keyring,
-    prepare_membership_transition, publish_prepared_merge_membership_activation,
+    prepare_membership_transition, publish_prepared_merge_membership_activation_with_history,
     publish_prepared_merge_membership_authority, resolve_membership_conflict,
     revoke_member_durable, signed_wrapped_key, unwrap_store_keyring_for_refs,
     validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,

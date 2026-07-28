@@ -366,9 +366,9 @@ fn prepare_merge_store_candidate<'a>(
             database,
         ))
         .await?;
-        let plan = Box::pin(crate::sync::store::operations::prepare_plan(
+        let plan = Box::pin(crate::sync::store::operations::prepare_plan_with_history(
             database,
-            storage,
+            history_verifier,
             &membership,
             device_id,
             identity,
@@ -559,10 +559,9 @@ fn activate_owner_promotion_merge_head<'a>(
                 })?;
         }
         let outcome = Box::pin(
-            crate::sync::store::membership::publish_prepared_merge_membership_activation(
+            crate::sync::store::membership::publish_prepared_merge_membership_activation_with_history(
                 database,
-                storage,
-                &root,
+                history_verifier,
                 promoter,
                 &transition,
                 &publication,
