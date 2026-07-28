@@ -1,78 +1,5 @@
 use super::*;
 
-pub(crate) async fn verify_merge_device_state_ref(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    reference: &StoreDeviceStateRef,
-) -> Result<ResolvedStoreDeviceState, StorePullError> {
-    let frontier = reference.frontier();
-    let history = verify_merge_history_refs(
-        storage,
-        root,
-        frontier.commits().values().cloned().collect::<Vec<_>>(),
-    )
-    .await?;
-    let state = if frontier.commits().is_empty() {
-        history.genesis
-    } else {
-        ResolvedStoreDeviceState::merge(
-            frontier
-                .commits()
-                .values()
-                .map(|commit| {
-                    history
-                        .commits
-                        .get(commit)
-                        .map(|verified| verified.state_after.clone())
-                        .ok_or_else(|| {
-                            StorePullError::Database(
-                                "Merge device-state frontier is absent from its verified history"
-                                    .to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(|error| StorePullError::Database(error.to_string()))?
-    };
-    let expected = StoreDeviceStateRef::from_resolved(frontier.clone(), &state)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    if &expected != reference {
-        return Err(StorePullError::Database(
-            "Merge device-state reference differs from its verified history".to_string(),
-        ));
-    }
-    Ok(state)
-}
-
-pub(crate) async fn verify_merge_owner_conflict_acceptance(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    acceptance: &super::store_commit::OwnerConflictResolutionAcceptance,
-    resolver_pubkey: &str,
-) -> Result<(), StorePullError> {
-    let registration = load_registration_ref(storage, root, &acceptance.owner_registration).await?;
-    acceptance
-        .verify(&registration.value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let state = verify_merge_device_state_ref(storage, root, &acceptance.device_state).await?;
-    if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
-        return Err(StorePullError::Database(
-            "conflict-resolution Owner registration is not active at its exact device state"
-                .to_string(),
-        ));
-    }
-    verify_canonical_owner_registration(
-        storage,
-        root,
-        &state,
-        resolver_pubkey,
-        &acceptance.owner_registration,
-    )
-    .await?;
-    Ok(())
-}
-
 pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) verified: VerifiedStoreBatchCommit,
     pub(crate) predecessor_membership: MembershipChain,
@@ -1107,19 +1034,6 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
     Ok(summary)
 }
 
-pub(crate) fn verify_merge_history_refs<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    tips: impl IntoIterator<Item = StoreBatchCommitRef>,
-) -> StorePullFuture<'a, VerifiedMergeHistory> {
-    let pending = tips.into_iter().collect::<Vec<_>>();
-    Box::pin(async move {
-        let mut verifier = MergeHistoryVerifier::new(storage, root).await?;
-        verifier.verify_refs(pending).await?;
-        Ok(verifier.into_history())
-    })
-}
-
 impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn new(
         storage: &'a dyn SyncStorage,
@@ -1195,12 +1109,28 @@ impl<'a> MergeHistoryVerifier<'a> {
         (&mut self.commit_verifier, &self.history)
     }
 
-    pub(crate) fn into_commit_verifier(self) -> StoreCommitVerifier<'a> {
-        self.commit_verifier
+    pub(crate) async fn verify_owner_conflict_acceptance(
+        &mut self,
+        acceptance: &super::store_commit::OwnerConflictResolutionAcceptance,
+        resolver_pubkey: &str,
+    ) -> Result<(), StorePullError> {
+        let frontier = acceptance.device_state.frontier();
+        let tips = frontier.commits().values().cloned().collect::<Vec<_>>();
+        self.verify_refs(tips.clone()).await?;
+        verify_merge_owner_conflict_acceptance_with_history(
+            self.storage,
+            self.root,
+            acceptance,
+            resolver_pubkey,
+            &self.history.genesis,
+            &self.history.commits,
+            tips,
+        )
+        .await
     }
 
-    pub(super) fn into_history(self) -> VerifiedMergeHistory {
-        self.history
+    pub(crate) fn into_commit_verifier(self) -> StoreCommitVerifier<'a> {
+        self.commit_verifier
     }
 
     pub(crate) async fn verify_refs(

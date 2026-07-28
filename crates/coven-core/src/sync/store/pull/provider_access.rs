@@ -12,13 +12,17 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
     let activation =
         load_provider_access_activation(history_verifier, storage, root, access, administrator)
             .await?;
-    let membership =
-        load_merge_predecessor_membership(storage, root, &activation.value().membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+    let membership = load_merge_predecessor_membership_with_history(
+        history_verifier,
+        storage,
+        root,
+        &activation.value().membership_state,
+    )
+    .await
+    .map_err(|error| match error {
+        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+    })?;
     if !verify_merge_provider_administrator(
         &membership,
         &access.grant.administrator_grant,

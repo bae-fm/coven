@@ -152,6 +152,7 @@ use exact_chain::map_membership_object_error;
 pub(crate) use exact_chain::{
     authorize_loaded_membership_author, load_anchored_chain_at_exact_heads,
     load_anchored_chain_at_exact_heads_with_root,
+    load_anchored_chain_at_exact_heads_with_root_and_history,
     load_anchored_chain_at_exact_heads_with_root_and_verified_activations,
     load_current_exact_chain, load_exact_anchored_chain, load_exact_membership_head,
     project_anchored_chain_to_verified_store_prefix, MembershipAuthorRequirement,

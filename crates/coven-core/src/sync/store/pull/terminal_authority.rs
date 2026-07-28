@@ -334,13 +334,17 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
             "membership revocation witness commit names another membership state".to_string(),
         ));
     }
-    let current_membership =
-        load_merge_predecessor_membership(storage, root, &witness_commit.value().membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+    let current_membership = load_merge_predecessor_membership_with_history(
+        history_verifier,
+        storage,
+        root,
+        &witness_commit.value().membership_state,
+    )
+    .await
+    .map_err(|error| match error {
+        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+    })?;
     let MembershipStatus::Resolved(current) = current_membership.status() else {
         return Err(StorePullError::Database(
             "membership revocation witness state is conflicted".to_string(),
@@ -358,13 +362,17 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     let candidate_ref = candidate.reference();
     let candidate_commit = candidate.value();
     let candidate_author = candidate.author();
-    let predecessor_membership =
-        load_merge_predecessor_membership(storage, root, &candidate_commit.membership_state)
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+    let predecessor_membership = load_merge_predecessor_membership_with_history(
+        history_verifier,
+        storage,
+        root,
+        &candidate_commit.membership_state,
+    )
+    .await
+    .map_err(|error| match error {
+        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+    })?;
     let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
         return Err(StorePullError::Database(
             "membership revocation candidate predecessor is conflicted".to_string(),

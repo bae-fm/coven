@@ -369,15 +369,16 @@ pub(crate) async fn verify_merge_membership_control_with_history(
 }
 
 pub(crate) async fn verify_merge_membership_head_activation(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     reference: &super::membership::MembershipHeadRef,
     head: &super::membership::AuthorHead,
     activation: &StoreBatchCommitRef,
 ) -> Result<bool, String> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root)
-        .await
-        .map_err(|error| error.to_string())?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err("membership activation verifier belongs to another Store root".to_string());
+    }
     let verified = history_verifier
         .load_ref(activation)
         .await

@@ -449,23 +449,23 @@ type LoadedMembershipGraphFuture<'a> = Pin<
 >;
 
 fn load_exact_membership_graph<'a>(
+    activation_authority: &'a mut MembershipActivationAuthority<'_, '_>,
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     root_value: &'a crate::sync::store_commit::StoreProtocolRoot,
     exact_heads: &'a [MembershipHeadRef],
-    verified_activations: Option<&'a crate::sync::store::pull::VerifiedMergeMembershipPrefix>,
 ) -> LoadedMembershipGraphFuture<'a> {
     Box::pin(async move {
         let graph =
             load_exact_membership_graph_objects(storage, root, root_value, exact_heads).await?;
         for node in graph.path_heads.values() {
             if !Box::pin(validate_membership_head_activation(
+                activation_authority,
                 storage,
                 root,
                 &node.reference,
                 &node.head,
                 &node.entry,
-                verified_activations,
             ))
             .await?
             {
@@ -625,13 +625,13 @@ type LayeredMembershipFuture<'a> =
 
 #[allow(clippy::too_many_arguments)]
 fn load_layered_membership_chain<'a>(
+    activation_authority: &'a mut MembershipActivationAuthority<'_, '_>,
     storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     root_value: &'a crate::sync::store_commit::StoreProtocolRoot,
     graph: LoadedExactMembershipGraph,
     exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
     provider_admin: &'a crate::sync::provider::ProviderAdminState,
-    verified_activations: Option<&'a crate::sync::store::pull::VerifiedMergeMembershipPrefix>,
     pending_resolution: Option<
         &'a crate::sync::store::pull::VerifiedMergeConflictResolutionActivation,
     >,
@@ -657,27 +657,26 @@ fn load_layered_membership_chain<'a>(
             .await
             .map_err(map_membership_object_error)?
             .value;
-            let verified_by_prefix = verified_activations
-                .is_some_and(|prefix| prefix.verifies_conflict_resolution(reference));
-            let verified_by_pending =
-                pending_resolution.is_some_and(|pending| pending.verifies(reference));
-            if verified_activations.is_some() && !verified_by_prefix && !verified_by_pending {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership conflict resolution is absent from its verified Store authority"
-                        .to_string(),
-                ));
-            }
-            if verified_activations.is_none() {
-                Box::pin(
-                    crate::sync::store::pull::verify_merge_owner_conflict_acceptance(
-                        storage,
-                        root,
+            match &mut *activation_authority {
+                MembershipActivationAuthority::VerifiedPrefix(prefix) => {
+                    let verified_by_prefix = prefix.verifies_conflict_resolution(reference);
+                    let verified_by_pending =
+                        pending_resolution.is_some_and(|pending| pending.verifies(reference));
+                    if !verified_by_prefix && !verified_by_pending {
+                        return Err(AnchoredChainError::LoadFailed(
+                            "membership conflict resolution is absent from its verified Store authority"
+                                .to_string(),
+                        ));
+                    }
+                }
+                MembershipActivationAuthority::History(history) => {
+                    Box::pin(history.verify_owner_conflict_acceptance(
                         &value.replacement_acceptance,
                         &value.resolver_pubkey,
-                    ),
-                )
-                .await
-                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                    ))
+                    .await
+                    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                }
             }
             resolutions.insert(reference.clone(), value);
         }
@@ -727,11 +726,11 @@ fn load_layered_membership_chain<'a>(
             ));
         }
         let conflict_graph = load_exact_membership_graph(
+            activation_authority,
             storage,
             root,
             root_value,
             conflict_heads,
-            verified_activations,
         )
         .await?;
         let prior_cut = conflict_graph.resolution_cut();
@@ -746,13 +745,13 @@ fn load_layered_membership_chain<'a>(
             ));
         }
         let mut chain = load_layered_membership_chain(
+            activation_authority,
             storage,
             root,
             root_value,
             conflict_graph,
             &prior_cut,
             provider_admin,
-            verified_activations,
             None,
         )
         .await?;
@@ -786,13 +785,13 @@ fn load_layered_membership_chain<'a>(
 }
 
 pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
+    activation_authority: &mut MembershipActivationAuthority<'_, '_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &crate::sync::store_commit::StoreProtocolRoot,
     owner_pubkey: &str,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: Option<&crate::sync::store::pull::VerifiedMergeMembershipPrefix>,
     pending_resolution: Option<
         &crate::sync::store::pull::VerifiedMergeConflictResolutionActivation,
     >,
@@ -819,21 +818,21 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
         &root_value.descriptor.founder_provider_admin,
     );
     let graph = Box::pin(load_exact_membership_graph(
+        activation_authority,
         storage,
         root,
         root_value,
         exact_heads,
-        verified_activations,
     ))
     .await?;
     let chain = load_layered_membership_chain(
+        activation_authority,
         storage,
         root,
         root_value,
         graph,
         exact_resolutions,
         &provider_admin,
-        verified_activations,
         pending_resolution,
     )
     .await?;

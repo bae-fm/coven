@@ -1,8 +1,7 @@
 use super::*;
 use crate::sync::store::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, readiness,
-    verified_merge_membership_prefix, verify_merge_history_refs, Readiness,
-    VerifiedMergePrefixHeadStatus,
+    verified_merge_membership_prefix, Readiness, VerifiedMergePrefixHeadStatus,
 };
 use crate::sync::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
 use rusqlite::OptionalExtension;
@@ -1662,15 +1661,16 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .iter()
         .any(|head| head.coord == transition.body.entry.coord));
 
-    let verified = verify_merge_history_refs(
-        &store.storage,
-        &store.root,
-        [later_commit.clone(), earlier_control.clone()],
-    )
-    .await
-    .expect("verify both concurrent commits");
-    let later_prefix = verified_merge_membership_prefix(&verified.commits, later_predecessors)
-        .expect("derive the later commit's exact membership prefix");
+    let mut verifier = MergeHistoryVerifier::new(&store.storage, &store.root)
+        .await
+        .expect("open history verification operation");
+    verifier
+        .verify_refs([later_commit.clone(), earlier_control.clone()])
+        .await
+        .expect("verify both concurrent commits");
+    let later_prefix =
+        verified_merge_membership_prefix(&verifier.history().commits, later_predecessors)
+            .expect("derive the later commit's exact membership prefix");
     assert_eq!(
         later_prefix
             .classify_head(&earlier_head_ref, &earlier_head, &earlier_control,)

@@ -143,8 +143,8 @@ pub(in crate::sync::store) use provider_access::verify_accepted_provider_access_
 pub(in crate::sync::store) use registration::RegistrationLoadError;
 pub(in crate::sync::store) use registration_authority::load_device_join_authorization;
 pub(crate) use registration_authority::{
-    load_merge_predecessor_membership, load_merge_predecessor_membership_with_verified_activations,
-    verify_merge_membership_state_ref,
+    load_merge_predecessor_membership_with_history,
+    load_merge_predecessor_membership_with_verified_activations, verify_merge_membership_state_ref,
 };
 use registration_validation::load_merge_commit_registrations;
 use replay::verified_terminal_merge_retractions;
@@ -459,7 +459,8 @@ pub fn pull_store_commits<'a>(
             if materialization.commit().membership_authority.is_none() {
                 continue;
             }
-            let membership = Box::pin(load_merge_predecessor_membership(
+            let membership = Box::pin(load_merge_predecessor_membership_with_history(
+                &mut history_verifier,
                 storage,
                 &root,
                 &materialization.commit().membership_state,
