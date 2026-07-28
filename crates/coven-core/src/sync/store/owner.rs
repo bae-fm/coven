@@ -491,6 +491,10 @@ impl<'storage> AuthorizedStore<'storage> {
         self.history_verifier.root()
     }
 
+    pub(crate) fn protocol_root(&self) -> &StoreProtocolRoot {
+        self.history_verifier.verified_root()
+    }
+
     pub(super) fn operation_authority<'operation>(
         &'operation mut self,
     ) -> AuthorizedStoreAuthority<'operation, 'storage> {

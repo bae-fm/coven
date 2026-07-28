@@ -349,24 +349,26 @@ impl Store {
         identity_signer: &UserKeypair,
         member_pubkey: &str,
     ) -> Result<DeviceJoinOfferBundle, DeviceJoinTransportError> {
-        let root = crate::sync::store_objects::load_store_protocol_root(
-            &**self.storage(),
-            self.store_root(),
+        let authorized = self
+            .authorize()
+            .await
+            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+        let provider_admin_grant = authorized
+            .protocol_root()
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone();
+        let offer = super::device_join::begin_device_join(
+            authorized.database(),
+            authorized.storage(),
+            authorized.membership(),
+            identity_signer,
+            member_pubkey,
+            provider_admin_grant,
         )
-        .await
-        .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        let offer = self
-            .begin_device_join(
-                identity_signer,
-                member_pubkey,
-                root.value
-                    .descriptor
-                    .founder_provider_admin
-                    .grant_id
-                    .clone(),
-            )
-            .await?;
-        DeviceJoinOfferBundle::allocate(&**self.storage(), offer).await
+        .await?;
+        DeviceJoinOfferBundle::allocate(authorized.storage(), offer).await
     }
 }
 
