@@ -1084,20 +1084,32 @@ async fn reclaim_store_packages(
             physical_copies_deleted: packages_deleted,
         });
     }
+    let mut history_verifier =
+        super::pull::MergeHistoryVerifier::from_commit_verifier(storage, &root, commit_verifier)
+            .await
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let registrations = database
         .activated_store_device_registration_records()
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     // A missing or unstable Store snapshot leaves Store packages uncovered but must
     // not block Circle package reclamation, which carries its own Circle coverage.
-    let store_targets = match Box::pin(choose_snapshot(storage, &root, &registrations)).await {
-        Ok(snapshot) => {
-            exact_package_targets(&mut commit_verifier, &snapshot.snapshot.meta.coverage)
-                .await?
-                .into_iter()
-                .map(|(commit, package)| (commit, package, snapshot.clone()))
-                .collect::<Vec<_>>()
-        }
+    let store_targets = match Box::pin(choose_snapshot(
+        &mut history_verifier,
+        storage,
+        &root,
+        &registrations,
+    ))
+    .await
+    {
+        Ok(snapshot) => exact_package_targets(
+            history_verifier.commit_verifier(),
+            &snapshot.snapshot.meta.coverage,
+        )
+        .await?
+        .into_iter()
+        .map(|(commit, package)| (commit, package, snapshot.clone()))
+        .collect::<Vec<_>>(),
         Err(
             StoreReclaimError::NoSnapshot
             | StoreReclaimError::MissingAcknowledgement { .. }
@@ -1127,7 +1139,7 @@ async fn reclaim_store_packages(
             identity_signer,
             membership,
             &root,
-            &mut commit_verifier,
+            history_verifier.commit_verifier(),
             ReclaimClaim::StorePackage(StorePackageReclaimClaim {
                 target: StorePackageReclaimTarget {
                     package,
@@ -1150,7 +1162,7 @@ async fn reclaim_store_packages(
         membership,
         &root,
         &registrations,
-        &mut commit_verifier,
+        history_verifier.commit_verifier(),
     ))
     .await?;
     Box::pin(prepare_circle_bootstrap_reclaim_authorizations(
@@ -1161,7 +1173,7 @@ async fn reclaim_store_packages(
         membership,
         &root,
         &registrations,
-        &mut commit_verifier,
+        history_verifier.commit_verifier(),
     ))
     .await?;
     Box::pin(prepare_audience_blob_reclaim_authorizations(
@@ -1171,7 +1183,7 @@ async fn reclaim_store_packages(
         identity_signer,
         membership,
         &root,
-        &mut commit_verifier,
+        history_verifier.commit_verifier(),
     ))
     .await?;
     packages_deleted = packages_deleted
@@ -1182,7 +1194,7 @@ async fn reclaim_store_packages(
                 device_id,
                 identity_signer,
                 membership,
-                &mut commit_verifier,
+                history_verifier.commit_verifier(),
             ))
             .await?,
         )
@@ -3284,6 +3296,7 @@ struct VerifiedReclaimSnapshot {
 }
 
 async fn choose_snapshot(
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
@@ -3302,8 +3315,11 @@ async fn choose_snapshot(
             authorized.push(snapshot);
         }
     }
-    let selected = match super::snapshot::select_maximal_stable_store_snapshot(
-        storage, root, authorized,
+    let selected = match super::snapshot::select_maximal_stable_store_snapshot_with_history(
+        history_verifier,
+        storage,
+        root,
+        authorized,
     )
     .await
     {

@@ -270,9 +270,18 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .await
         .expect("load active registrations");
 
-    let selected = choose_snapshot(&store.storage, &store.root, &registrations)
-        .await
-        .expect("select the stable reclaim snapshot");
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(&store.storage, &store.root)
+            .await
+            .expect("open reclaim snapshot history");
+    let selected = choose_snapshot(
+        &mut history_verifier,
+        &store.storage,
+        &store.root,
+        &registrations,
+    )
+    .await
+    .expect("select the stable reclaim snapshot");
 
     assert_eq!(selected.snapshot.reference, stable.reference);
 }

@@ -1099,6 +1099,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.verified_root()
     }
 
+    pub(crate) fn verified_root_object(
+        &self,
+    ) -> &VerifiedObject<super::store_commit::StoreProtocolRoot> {
+        self.commit_verifier.verified_root_object()
+    }
+
     pub(crate) fn commit_verifier(&mut self) -> &mut StoreCommitVerifier<'a> {
         &mut self.commit_verifier
     }

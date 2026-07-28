@@ -25,7 +25,7 @@ use super::store_commit::{
     StoreProtocolError, StoreProtocolRoot, StoreRootRef, VerifiedStoreBatchCommit,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct VerifiedObject<T> {
     pub value: T,
     pub bytes: Vec<u8>,

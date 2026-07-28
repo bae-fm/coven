@@ -1987,7 +1987,8 @@ pub(crate) struct SelectedStableStoreSnapshot {
     pub(crate) stability: crate::sync::store::pull::VerifiedStoreSnapshotStability,
 }
 
-pub(crate) async fn select_maximal_stable_store_snapshot(
+pub(crate) async fn select_maximal_stable_store_snapshot_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
@@ -1999,7 +2000,14 @@ pub(crate) async fn select_maximal_stable_store_snapshot(
     let mut stable = Vec::new();
     let mut maximal_rejection = None;
     for snapshot in candidates {
-        match super::verify_store_snapshot_stability(storage, root, &snapshot).await {
+        match crate::sync::store::pull::verify_snapshot_stability_with_history(
+            history_verifier,
+            storage,
+            root,
+            &snapshot,
+        )
+        .await
+        {
             Ok(stability) => stable.push(SelectedStableStoreSnapshot {
                 snapshot,
                 stability,
@@ -2058,9 +2066,10 @@ pub(crate) async fn select_store_snapshot(
     ),
     SnapshotError,
 > {
-    let verified_root = crate::sync::store_objects::load_store_protocol_root(storage, root)
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+    let verified_root = history_verifier.verified_root_object().clone();
     let root_value = &verified_root.value;
     if root_value.descriptor.store_root_id() != root.store_root_id {
         return Err(SnapshotError::UnauthorizedAuthor(
@@ -2087,15 +2096,18 @@ pub(crate) async fn select_store_snapshot(
         registrations.insert(head.body.author_registration.clone(), registration);
     }
     let resolutions = resolutions.into_iter().collect::<Vec<_>>();
-    let membership = crate::sync::store::membership::load_anchored_chain_at_exact_heads(
-        storage,
-        root,
-        &root_value.descriptor.founder_pubkey,
-        heads,
-        &resolutions,
-    )
-    .await
-    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+    let membership =
+        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_history(
+            &mut history_verifier,
+            storage,
+            root,
+            root_value,
+            &root_value.descriptor.founder_pubkey,
+            heads,
+            &resolutions,
+        )
+        .await
+        .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
     let registrations = registrations
         .into_iter()
         .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
@@ -2106,8 +2118,11 @@ pub(crate) async fn select_store_snapshot(
             load_store_snapshot_stream(storage, root, &registration_ref, &registration).await?,
         );
     }
-    let selected = Box::pin(select_maximal_stable_store_snapshot(
-        storage, root, authorized,
+    let selected = Box::pin(select_maximal_stable_store_snapshot_with_history(
+        &mut history_verifier,
+        storage,
+        root,
+        authorized,
     ))
     .await
     .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?

@@ -256,20 +256,21 @@ pub(in crate::sync::store) async fn verify_snapshot_stability(
     snapshot: &crate::database::PublishedStoreSnapshot,
 ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
     let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-    let (snapshot_cut, state) =
-        verify_authority(&mut history_verifier, storage, root, snapshot).await?;
+    verify_snapshot_stability_with_history(&mut history_verifier, storage, root, snapshot).await
+}
+
+pub(in crate::sync::store) async fn verify_snapshot_stability_with_history(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    snapshot: &crate::database::PublishedStoreSnapshot,
+) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
+    let (snapshot_cut, state) = verify_authority(history_verifier, storage, root, snapshot).await?;
     let snapshot_frontier = &snapshot_cut.0;
-    let accepted_cut = accepted_cut(
-        &mut history_verifier,
-        storage,
-        root,
-        snapshot_frontier,
-        &state,
-    )
-    .await?;
+    let accepted_cut =
+        accepted_cut(history_verifier, storage, root, snapshot_frontier, &state).await?;
     let accepted_frontier = &accepted_cut.0;
-    let acknowledgements =
-        activated_acknowledgements(&mut history_verifier, accepted_frontier).await?;
+    let acknowledgements = activated_acknowledgements(history_verifier, accepted_frontier).await?;
     assemble_snapshot_stability(
         storage,
         root,
