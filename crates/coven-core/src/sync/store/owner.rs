@@ -1,5 +1,9 @@
 use super::*;
 
+mod circles;
+
+pub(in crate::sync::store) use circles::verified_circle_bootstrap_blobs;
+
 #[cfg(test)]
 pub(in crate::sync::store) async fn prepare_acknowledgement_activation_for_test(
     db: &Database,

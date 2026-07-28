@@ -1117,11 +1117,10 @@ pub(crate) async fn push_circle_snapshot(
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
     // The image references only already-published Circle blobs, verified exact —
     // the same closure a member-addition bootstrap image carries.
-    let blobs = crate::sync::store::circle_controls::verified_circle_bootstrap_blobs(
-        storage, circle_id, &snapshot,
-    )
-    .await
-    .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
+    let blobs =
+        crate::sync::store::owner::verified_circle_bootstrap_blobs(storage, circle_id, &snapshot)
+            .await
+            .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
     let image_bytes = snapshot.db_image;
     let image_hash = ObjectHash::digest(&image_bytes);
     let image_context = ProtocolObjectContext::circle(
