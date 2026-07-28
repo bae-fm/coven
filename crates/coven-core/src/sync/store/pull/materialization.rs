@@ -1579,6 +1579,6 @@ async fn commit_candidate(
     for (write_id, status) in applied.write_status_notifications {
         db.notify_write_status(write_id, status);
     }
-    resume_merge_retraction_cleanups(database, storage, root).await?;
+    resume_merge_retraction_cleanups(database, storage, root, history_verifier).await?;
     Ok(applied.outcome)
 }

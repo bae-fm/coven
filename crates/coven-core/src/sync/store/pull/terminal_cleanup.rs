@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) async fn cleanup_merge_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -9,6 +10,22 @@ pub(crate) async fn cleanup_merge_candidate(
         StorePullError::Database("Merge candidate cleanup has no Store root".to_string())
     })?;
     let mut history_verifier = MergeHistoryVerifier::new(storage, &root).await?;
+    cleanup_merge_candidate_with_history(database, storage, &root, &mut history_verifier, write_id)
+        .await
+}
+
+pub(crate) async fn cleanup_merge_candidate_with_history(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    write_id: crate::WriteId,
+) -> Result<(), StorePullError> {
+    if history_verifier.commit_verifier().root() != root {
+        return Err(StorePullError::Database(
+            "Merge candidate cleanup verifier belongs to another Store root".to_string(),
+        ));
+    }
     for verification in database
         .merge_candidate_terminal_verifications(write_id.clone())
         .await?
@@ -16,8 +33,8 @@ pub(crate) async fn cleanup_merge_candidate(
         let nonactivation = verify_terminal_cleanup_candidate(
             database,
             storage,
-            &root,
-            &mut history_verifier,
+            root,
+            history_verifier,
             &verification,
         )
         .await?;
@@ -149,8 +166,13 @@ pub(crate) async fn resume_merge_retraction_cleanups(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
 ) -> Result<(), StorePullError> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err(StorePullError::Database(
+            "Merge retraction cleanup verifier belongs to another Store root".to_string(),
+        ));
+    }
     for candidate in database.pending_merge_retraction_cleanups().await? {
         let verification = database
             .merge_retraction_cleanup_verification(candidate.clone())
@@ -159,7 +181,7 @@ pub(crate) async fn resume_merge_retraction_cleanups(
             database,
             storage,
             root,
-            &mut history_verifier,
+            history_verifier,
             &verification,
         )
         .await?;

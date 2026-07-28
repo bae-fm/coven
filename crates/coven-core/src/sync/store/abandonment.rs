@@ -156,7 +156,14 @@ pub(crate) async fn abandon_merge_candidate(
     match database.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
-                super::pull::cleanup_merge_candidate(database, storage, write_id.clone()).await?;
+                super::pull::cleanup_merge_candidate_with_history(
+                    database,
+                    storage,
+                    &root,
+                    &mut history_verifier,
+                    write_id.clone(),
+                )
+                .await?;
                 database
                     .finish_retracted_merge_candidate_cleanup(write_id.clone())
                     .await?;
@@ -188,8 +195,14 @@ pub(crate) async fn abandon_merge_candidate(
                             nonactivation,
                         )
                         .await?;
-                    super::pull::cleanup_merge_candidate(database, storage, write_id.clone())
-                        .await?;
+                    super::pull::cleanup_merge_candidate_with_history(
+                        database,
+                        storage,
+                        &root,
+                        &mut history_verifier,
+                        write_id.clone(),
+                    )
+                    .await?;
                     return Ok(MergeCandidateAbandonment::Abandoned);
                 }
             }
@@ -249,8 +262,14 @@ pub(crate) async fn abandon_merge_candidate(
                             authority,
                         )
                         .await?;
-                    super::pull::cleanup_merge_candidate(database, storage, write_id.clone())
-                        .await?;
+                    super::pull::cleanup_merge_candidate_with_history(
+                        database,
+                        storage,
+                        &root,
+                        &mut history_verifier,
+                        write_id.clone(),
+                    )
+                    .await?;
                     database
                         .finish_author_excluded_merge_abandonment(write_id)
                         .await?;
@@ -269,13 +288,34 @@ pub(crate) async fn abandon_merge_candidate(
         | crate::database::MergeAbandonmentState::CandidateWon
         | crate::database::MergeAbandonmentState::OtherWon => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
-                super::pull::cleanup_merge_candidate(database, storage, write_id.clone()).await?;
+                super::pull::cleanup_merge_candidate_with_history(
+                    database,
+                    storage,
+                    &root,
+                    &mut history_verifier,
+                    write_id.clone(),
+                )
+                .await?;
             }
-            return finish_merge_abandonment(database, storage, write_id).await;
+            return finish_merge_abandonment(
+                database,
+                storage,
+                &root,
+                &mut history_verifier,
+                write_id,
+            )
+            .await;
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
-                super::pull::cleanup_merge_candidate(database, storage, write_id.clone()).await?;
+                super::pull::cleanup_merge_candidate_with_history(
+                    database,
+                    storage,
+                    &root,
+                    &mut history_verifier,
+                    write_id.clone(),
+                )
+                .await?;
             }
             database
                 .finish_author_excluded_merge_abandonment(write_id)
@@ -289,13 +329,22 @@ pub(crate) async fn abandon_merge_candidate(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
         ));
     }
-    super::pull::cleanup_merge_candidate(database, storage, write_id.clone()).await?;
-    finish_merge_abandonment(database, storage, write_id).await
+    super::pull::cleanup_merge_candidate_with_history(
+        database,
+        storage,
+        &root,
+        &mut history_verifier,
+        write_id.clone(),
+    )
+    .await?;
+    finish_merge_abandonment(database, storage, &root, &mut history_verifier, write_id).await
 }
 
 async fn finish_merge_abandonment(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     write_id: crate::WriteId,
 ) -> Result<MergeCandidateAbandonment, StoreError> {
     match database.merge_abandonment_state(&write_id).await? {
@@ -317,7 +366,14 @@ async fn finish_merge_abandonment(
         )),
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
-                super::pull::cleanup_merge_candidate(database, storage, write_id.clone()).await?;
+                super::pull::cleanup_merge_candidate_with_history(
+                    database,
+                    storage,
+                    root,
+                    history_verifier,
+                    write_id.clone(),
+                )
+                .await?;
             }
             database
                 .finish_author_excluded_merge_abandonment(write_id)

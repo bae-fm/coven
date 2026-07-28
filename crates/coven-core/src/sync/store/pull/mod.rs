@@ -155,7 +155,9 @@ pub(in crate::sync::store) use snapshot_authority::{
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate;
+#[cfg(test)]
 pub(crate) use terminal_cleanup::cleanup_merge_candidate;
+pub(crate) use terminal_cleanup::cleanup_merge_candidate_with_history;
 pub(super) use terminal_cleanup::resume_merge_retraction_cleanups;
 
 #[cfg(test)]
@@ -271,7 +273,7 @@ pub fn pull_store_commits<'a>(
             database.retained_merge_replay_inputs_with_verified_commits(retained_commit_proofs),
         )
         .await?;
-        resume_merge_retraction_cleanups(database, storage, &root).await?;
+        resume_merge_retraction_cleanups(database, storage, &root, &mut history_verifier).await?;
 
         let local_frontier = database.materialized_frontier().await.map_err(|error| {
             StorePullError::Database(format!("load discovery device-state frontier: {error}"))
