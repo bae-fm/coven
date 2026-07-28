@@ -103,9 +103,7 @@ impl Store {
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let promoter = load_owner_promotion_remote_promoter(
-            storage,
-            &root,
-            history_verifier.verified_root(),
+            history_verifier.commit_verifier_ref(),
             &acceptance.request.promoter_registration,
         )
         .await?;
@@ -113,11 +111,9 @@ impl Store {
             let resumed = resume_owner_promotion_finalization(
                 &mut history_verifier,
                 database,
-                storage,
                 device_id,
                 identity,
                 encryption,
-                root.clone(),
                 acceptance.clone(),
             )
             .await?;
@@ -127,8 +123,6 @@ impl Store {
                     match activate_owner_promotion_merge_head(
                         &mut history_verifier,
                         database,
-                        storage,
-                        &root,
                         &promoter,
                         &previous,
                         pending,
@@ -197,11 +191,9 @@ enum OwnerPromotionPreparation {
 fn prepare_owner_promotion_finalization<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
     encryption: &'a EncryptionService,
-    root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
 ) -> std::pin::Pin<
@@ -216,11 +208,9 @@ fn prepare_owner_promotion_finalization<'a>(
     prepare_merge_owner_promotion_finalization(
         history_verifier,
         database,
-        storage,
         device_id,
         identity,
         encryption,
-        root,
         journal,
         acceptance,
         author_stream,
@@ -231,11 +221,9 @@ fn prepare_owner_promotion_finalization<'a>(
 fn prepare_merge_owner_promotion_finalization<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
     encryption: &'a EncryptionService,
-    root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
     author_stream: crate::sync::causal_grants::AuthorStreamId,
@@ -248,9 +236,12 @@ fn prepare_merge_owner_promotion_finalization<'a>(
     >,
 > {
     Box::pin(async move {
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         let db = database.sqlite();
         let promoter =
-            load_owner_promotion_promoter(database, device_id, identity, root, &acceptance).await?;
+            load_owner_promotion_promoter(database, device_id, identity, &root, &acceptance)
+                .await?;
         let membership = Box::pin(load_current_merge_membership_with_history(
             history_verifier,
             database,
@@ -281,7 +272,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         }
         let wrapped_key = prepare_promotion_wrap(
             storage,
-            root,
+            &root,
             membership.store_id().ok_or_else(|| {
                 OwnerPromotionError::Protocol("membership Store id is absent".to_string())
             })?,
@@ -293,7 +284,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         .await?;
         let candidate = crate::sync::store_objects::load_registration_ref_with_root(
             storage,
-            root,
+            &root,
             history_verifier.verified_root(),
             &acceptance.request.member_registration,
         )
@@ -301,7 +292,7 @@ fn prepare_merge_owner_promotion_finalization<'a>(
         .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
         let entry = membership
             .signed_finalize_owner_promotion_in_stream(
-                root,
+                &root,
                 &promoter,
                 &candidate.value,
                 acceptance.clone(),
@@ -346,10 +337,8 @@ fn prepare_merge_owner_promotion_finalization<'a>(
 fn prepare_merge_store_candidate<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
-    root: &'a StoreRootRef,
     journal: &'a OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
     wrapped_key: PreparedWrappedStoreKey,
@@ -362,6 +351,8 @@ fn prepare_merge_store_candidate<'a>(
     >,
 > {
     Box::pin(async move {
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         crate::sync::store::membership::publish_prepared_merge_membership_authority(
             storage,
             root.store_root_hash,
@@ -464,15 +455,13 @@ struct PublishedOwnerPromotionMergeHead {
 }
 
 async fn load_owner_promotion_remote_promoter(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    verified_root: &crate::sync::store_commit::StoreProtocolRoot,
+    commit_verifier: &crate::sync::store::pull::StoreCommitVerifier<'_>,
     registration: &StoreDeviceRegistrationRef,
 ) -> Result<crate::sync::store_commit::StoreDeviceRegistration, OwnerPromotionError> {
     Box::pin(crate::sync::store_objects::load_registration_ref_with_root(
-        storage,
-        root,
-        verified_root,
+        commit_verifier.storage(),
+        commit_verifier.root(),
+        commit_verifier.verified_root(),
         registration,
     ))
     .await
@@ -483,8 +472,6 @@ async fn load_owner_promotion_remote_promoter(
 fn activate_owner_promotion_merge_head<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
     promoter: &'a crate::sync::store_commit::StoreDeviceRegistration,
     previous: &'a OwnerPromotionJournalPredecessor,
     published: Box<PublishedOwnerPromotionMergeHead>,
@@ -496,6 +483,8 @@ fn activate_owner_promotion_merge_head<'a>(
     >,
 > {
     Box::pin(async move {
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         let PublishedOwnerPromotionMergeHead {
             acceptance,
             wrapped_key,
@@ -573,7 +562,7 @@ fn activate_owner_promotion_merge_head<'a>(
             crate::sync::store::membership::publish_prepared_merge_membership_activation(
                 database,
                 storage,
-                root,
+                &root,
                 promoter,
                 &transition,
                 &publication,
@@ -708,11 +697,9 @@ enum OwnerPromotionResumeOutcome {
 fn resume_owner_promotion_finalization<'a>(
     history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
     device_id: &'a str,
     identity: &'a UserKeypair,
     encryption: &'a EncryptionService,
-    root: StoreRootRef,
     acceptance: OwnerPromotionAcceptance,
 ) -> std::pin::Pin<
     Box<
@@ -722,6 +709,7 @@ fn resume_owner_promotion_finalization<'a>(
     >,
 > {
     Box::pin(async move {
+        let storage = history_verifier.storage();
         let existing = database
             .load_owner_promotion_journal(acceptance.request.promotion_id)
             .await?;
@@ -794,11 +782,9 @@ fn resume_owner_promotion_finalization<'a>(
                     let preparation = prepare_owner_promotion_finalization(
                         history_verifier,
                         database,
-                        storage,
                         device_id,
                         identity,
                         encryption,
-                        &root,
                         &previous,
                         acceptance,
                     )
@@ -825,10 +811,8 @@ fn resume_owner_promotion_finalization<'a>(
                     let next = prepare_merge_store_candidate(
                         history_verifier,
                         database,
-                        storage,
                         device_id,
                         identity,
-                        &root,
                         &previous,
                         acceptance,
                         wrapped_key,
