@@ -3056,7 +3056,7 @@ async fn stage_uploaded_proposal(
     .expect("retain prepared exclusion proposal");
     let candidate = crate::sync::store::operations::prepare_candidate(
         &store_database(db),
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         StoreOperationBatch::DeviceExclusionProposal(retained),
     )

@@ -637,17 +637,20 @@ impl AuthorizedStore<'_> {
                     };
                     plan.common()
                         .validate_acknowledgement(&outbound.ack.value)?;
-                    let candidate = Box::pin(operations::prepare_candidate(
-                        self.database(),
-                        self.storage(),
-                        plan,
-                        crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
-                            reference: outbound.reference.clone(),
-                            value: outbound.ack.value.clone(),
-                            circle_acknowledgements: outbound.circle_acknowledgements.clone(),
-                        },
-                    ))
-                    .await?;
+                    let candidate = {
+                        let authority = self.operation_authority();
+                        Box::pin(operations::prepare_candidate(
+                            authority.database,
+                            authority.history_verifier.commit_verifier_ref(),
+                            plan,
+                            crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
+                                reference: outbound.reference.clone(),
+                                value: outbound.ack.value.clone(),
+                                circle_acknowledgements: outbound.circle_acknowledgements.clone(),
+                            },
+                        ))
+                        .await?
+                    };
                     self.database()
                         .prepare_acknowledgement_activation(outbound.reference.clone(), candidate)
                         .await?;

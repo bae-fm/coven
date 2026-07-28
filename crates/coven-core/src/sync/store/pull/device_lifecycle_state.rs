@@ -119,8 +119,7 @@ pub(crate) fn predecessor_with_recovery_author(
 }
 
 pub(crate) async fn verify_commit_owner_recovery_activation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
 ) -> Result<
     Option<(
@@ -149,9 +148,15 @@ pub(crate) async fn verify_commit_owner_recovery_activation(
             "Store commit activates more than one Owner recovery stream".to_string(),
         ));
     }
-    let registration = load_registration_ref(storage, root, registration_ref).await?;
+    let registration = load_registration_ref_with_root(
+        commit_verifier.storage(),
+        commit_verifier.root(),
+        commit_verifier.verified_root(),
+        registration_ref,
+    )
+    .await?;
     super::store_commit::OwnerRecoveryActivationId::derive(
-        root,
+        commit_verifier.root(),
         &registration.value.author_pubkey,
         grant_id,
         anchor,

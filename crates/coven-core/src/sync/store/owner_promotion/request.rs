@@ -224,7 +224,7 @@ impl Store {
         )?;
         let candidate = crate::sync::store::operations::prepare_candidate(
             database,
-            storage,
+            history_verifier.commit_verifier_ref(),
             plan,
             StoreOperationBatch::OwnerPromotionRequest(request.clone()),
         )

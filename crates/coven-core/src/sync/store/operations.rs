@@ -152,21 +152,22 @@ pub(crate) async fn prepare_plan(
 /// [`prepare_candidate_borrowed`] and holds the plan across the publication.
 pub(crate) async fn prepare_candidate(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    commit_verifier: &super::pull::StoreCommitVerifier<'_>,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<PreparedStoreOperationCommit, StoreError> {
-    prepare_candidate_borrowed(database, storage, &plan, batch).await
+    prepare_candidate_borrowed(database, commit_verifier, &plan, batch).await
 }
 
 /// Compose a candidate without consuming the plan, leaving the turn it holds in
 /// the caller's hands. Only for a caller that publishes under that same turn.
 pub(crate) async fn prepare_candidate_borrowed(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    commit_verifier: &super::pull::StoreCommitVerifier<'_>,
     plan: &StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<PreparedStoreOperationCommit, StoreError> {
+    let storage = commit_verifier.storage();
     let db = database.sqlite();
     let acknowledgement_evidence = match &batch {
         StoreOperationBatch::Acknowledgement {
@@ -242,8 +243,7 @@ pub(crate) async fn prepare_candidate_borrowed(
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
     };
     let state_after = Box::pin(super::pull::derive_local_post_device_state(
-        storage,
-        plan.root(),
+        commit_verifier,
         &common.commit,
         plan.predecessor_state().clone(),
         &registrations,

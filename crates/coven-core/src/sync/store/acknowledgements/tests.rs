@@ -130,7 +130,7 @@ async fn persist_candidate(
         .expect("acknowledgement matches activation predecessor");
     let candidate = crate::sync::store::operations::prepare_candidate(
         &database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
             reference: outbound.reference.clone(),
@@ -209,7 +209,7 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
     };
     let competing = Box::pin(crate::sync::store::operations::prepare_candidate(
         &database,
-        &storage,
+        history_verifier.commit_verifier_ref(),
         competing_plan,
         crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
     ))

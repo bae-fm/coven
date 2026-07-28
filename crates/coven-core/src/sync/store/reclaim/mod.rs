@@ -1921,7 +1921,7 @@ async fn prepare_reclaim_authorization(
     );
     let candidate = Box::pin(super::operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         super::operations::StoreOperationBatch::ReclaimAuthorization(Box::new(
             authorization_ref.clone(),
@@ -2935,7 +2935,10 @@ async fn drive_reclaim_candidate(
                     }
                 };
                 let replacement = Box::pin(super::operations::prepare_candidate(
-                    database, storage, plan, batch,
+                    database,
+                    history_verifier.commit_verifier_ref(),
+                    plan,
+                    batch,
                 ))
                 .await?;
                 operation = Box::pin(database.begin_store_reclaim_candidate_replacement(
@@ -3057,7 +3060,7 @@ async fn prepare_reclaim_receipt(
     let receipt_ref = ReclaimReceiptRef::from_receipt(&receipt, prepared.reference().clone());
     let candidate = Box::pin(super::operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         super::operations::StoreOperationBatch::ReclaimReceipt(Box::new(receipt_ref.clone())),
     ))

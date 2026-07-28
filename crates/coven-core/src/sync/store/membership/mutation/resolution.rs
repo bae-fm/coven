@@ -234,7 +234,7 @@ async fn build_resolution_mutation(
     stream_activations.sort();
     let mut candidate = operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         operation,
         operations::StoreOperationBatch::MergeMembershipActivation {
             transition: transition.transition.clone(),

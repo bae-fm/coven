@@ -395,7 +395,7 @@ fn prepare_merge_store_candidate<'a>(
         stream_activations.sort();
         let mut candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
             database,
-            storage,
+            history_verifier.commit_verifier_ref(),
             plan,
             StoreOperationBatch::MergeMembershipActivation {
                 transition: transition.transition.clone(),

@@ -759,7 +759,7 @@ async fn prepare_proposal(
     )?;
     let candidate = Box::pin(super::operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         *plan,
         StoreOperationBatch::DeviceExclusionProposal(retained),
     ))
@@ -1008,7 +1008,7 @@ async fn prepare_outcome(
     )?;
     let candidate = Box::pin(super::operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         StoreOperationBatch::DeviceExclusionOutcome(retained),
     ))
@@ -1328,7 +1328,7 @@ async fn prepare_replacement_candidate(
     )?;
     Box::pin(super::operations::prepare_candidate(
         database,
-        storage,
+        history_verifier.commit_verifier_ref(),
         plan,
         StoreOperationBatch::DeviceExclusionOutcome(retained),
     ))

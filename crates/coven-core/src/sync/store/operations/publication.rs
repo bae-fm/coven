@@ -196,8 +196,13 @@ pub(crate) async fn activate_store_operation_commit(
     // stream, and it must still be held when the head below takes the position
     // the plan was composed against. Dropping it here would let another local
     // writer take that position mid-activation.
-    let prepared =
-        prepare_candidate_borrowed(database, history_verifier.storage(), &plan, batch).await?;
+    let prepared = prepare_candidate_borrowed(
+        database,
+        history_verifier.commit_verifier_ref(),
+        &plan,
+        batch,
+    )
+    .await?;
     match publish_prepared(database, history_verifier, Box::new(prepared), None, None).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {

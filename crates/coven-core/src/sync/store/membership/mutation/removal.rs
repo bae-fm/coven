@@ -152,7 +152,7 @@ async fn build_revoke_mutation(
         .await?;
         let mut candidate = Box::pin(crate::sync::store::operations::prepare_candidate(
             database,
-            storage,
+            history_verifier.commit_verifier_ref(),
             operation,
             crate::sync::store::operations::StoreOperationBatch::MergeMembershipActivation {
                 transition: transition.transition.clone(),

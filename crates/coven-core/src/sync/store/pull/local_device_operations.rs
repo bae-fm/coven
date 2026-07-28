@@ -44,8 +44,7 @@ pub(crate) async fn load_local_commit_device_operations(
 }
 
 pub(crate) async fn derive_local_post_device_state(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     predecessor_state: ResolvedStoreDeviceState,
     registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
@@ -55,7 +54,8 @@ pub(crate) async fn derive_local_post_device_state(
         predecessor_with_recovery_author(predecessor_state, commit, registrations)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
     let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-        storage, root, commit,
+        commit_verifier,
+        commit,
     ))
     .await?;
     device_operations

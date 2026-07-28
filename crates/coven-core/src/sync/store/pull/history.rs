@@ -1354,7 +1354,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                     None
                 };
             let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-                storage, &root, &commit,
+                &self.commit_verifier,
+                &commit,
             ))
             .await?;
             let state = operations

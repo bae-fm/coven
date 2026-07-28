@@ -1286,7 +1286,9 @@ async fn commit_candidate(
     let (authorized_predecessor, recovery_author) =
         predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let owner_recovery = verify_commit_owner_recovery_activation(storage, &root, commit).await?;
+    let owner_recovery =
+        verify_commit_owner_recovery_activation(history_verifier.commit_verifier_ref(), commit)
+            .await?;
     let state_after = device_operations
         .apply_to(authorized_predecessor.clone(), &commit.device_state)
         .and_then(|state| {
