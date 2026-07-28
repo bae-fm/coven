@@ -102,17 +102,14 @@ pub(crate) async fn invite_member_with_history(
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     validate_invitation(user_keypair, public_key_hex, &role)?;
     require_resolved_membership(chain)?;
-    let storage = history_verifier.storage();
     let root_ref = history_verifier.root().clone();
-    let store_root_hash = root_ref.store_root_hash;
     let protocol_store_id = root_ref.store_root_id.to_string();
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
     let (join_info, wrapped_key) = Box::pin(super::create_invitation_with_encryption_durable(
-        storage,
+        history_verifier,
         cloud_home,
-        store_root_hash,
         chain,
         user_keypair,
         public_key_hex,

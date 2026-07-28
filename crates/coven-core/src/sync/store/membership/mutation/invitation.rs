@@ -134,7 +134,7 @@ fn invite_plan_matches_request(
 }
 
 async fn execute_invite_mutation(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     cloud_home: &dyn CloudHome,
     store_root_hash: ObjectHash,
     chain: &mut MembershipChain,
@@ -142,18 +142,14 @@ async fn execute_invite_mutation(
     mut progress: MembershipMutationProgress,
     persistence: MutationPersistence<'_>,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
+    let storage = history_verifier.storage();
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
-    let root = persistence
-        .database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| {
-            InviteError::InvalidDurableMutation("local Store root reference is absent".to_string())
-        })?;
-    let author = store_objects::load_registration_ref(
+    let root = history_verifier.root();
+    let author = store_objects::load_registration_ref_with_root(
         storage,
-        &root,
+        root,
+        history_verifier.verified_root(),
         &plan.publication.head.body.author_registration,
     )
     .await
@@ -246,9 +242,8 @@ async fn execute_invite_mutation(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_invitation_with_encryption_durable(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     cloud_home: &dyn CloudHome,
-    store_root_hash: ObjectHash,
     chain: &mut MembershipChain,
     owner_keypair: &UserKeypair,
     invitee_ed25519_pubkey: &str,
@@ -259,6 +254,8 @@ pub(crate) async fn create_invitation_with_encryption_durable(
     timestamp: &str,
     database: &StoreDatabase,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
+    let storage = history_verifier.storage();
+    let store_root_hash = history_verifier.root().store_root_hash;
     let _mutation = database.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
@@ -310,7 +307,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         }
     };
     Box::pin(execute_invite_mutation(
-        storage,
+        history_verifier,
         cloud_home,
         store_root_hash,
         chain,

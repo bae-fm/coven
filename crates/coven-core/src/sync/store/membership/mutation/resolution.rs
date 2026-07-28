@@ -364,14 +364,11 @@ async fn execute_resolution_mutation(
         &[(plan.reference.clone(), plan.resolution.clone())],
     )?;
     successor.add_entry(plan.publication.entry.clone())?;
-    let root = persistence
-        .database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| InviteError::InvalidDurableMutation("Store root is absent".to_string()))?;
-    let author = store_objects::load_registration_ref(
+    let root = history_verifier.root();
+    let author = store_objects::load_registration_ref_with_root(
         storage,
-        &root,
+        root,
+        history_verifier.verified_root(),
         &plan.publication.head.body.author_registration,
     )
     .await
