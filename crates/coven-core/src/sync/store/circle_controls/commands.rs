@@ -260,108 +260,6 @@ impl Store {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn add_circle_member(
-        &self,
-        device_id: &str,
-        circle_id: CircleId,
-        member_pubkey: String,
-        role: CircleRole,
-        bootstrap: crate::sync::store::snapshot::SnapshotCut,
-        routing_key: &crate::sync::circle::RowRoutingKey,
-        signer: &UserKeypair,
-    ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let database = self.database();
-        let storage = &**self.storage();
-        crate::sync::store::ensure_active_registration(database, storage).await?;
-        ensure_not_deleted(database, circle_id).await?;
-        let identity_pubkey = keys::public_key_hex(signer);
-        let (current, activation_commit_ref) = database
-            .circle_authoring_context(circle_id, &identity_pubkey)
-            .await?;
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut history_verifier =
-            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
-                .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        ensure_not_rotation_required(database, &mut history_verifier, circle_id).await?;
-        let activation_commit = history_verifier
-            .commit_verifier()
-            .load_ref(&activation_commit_ref)
-            .await?;
-        if activation_commit.value().candidate_family() != current.candidate_family {
-            return Err(CircleOperationError::InvalidState(format!(
-                "Circle {circle_id} current state differs from its activating Store commit"
-            )));
-        }
-        let reference = activation_commit
-            .value()
-            .circle_controls()
-            .iter()
-            .find(|reference| {
-                reference.circle_id() == circle_id && reference.control() == &current.control.coord
-            })
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle {circle_id} current control is absent from its activating Store commit"
-                ))
-            })?;
-        let keyring = match &current.access.disposition {
-            crate::sync::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
-            crate::sync::circle::CircleAccessDisposition::Inactive => {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle member addition requires active local access".to_string(),
-                ));
-            }
-        };
-        let roster_chain = super::activation::load_circle_control_roster_chain(
-            database,
-            history_verifier.commit_verifier(),
-            &activation_commit,
-            reference,
-            &current.control,
-            keyring,
-        )
-        .await?;
-        let journal = Box::pin(prepare_circle_operation_request(
-            &mut history_verifier,
-            database,
-            device_id,
-            CircleOperationRequest::AddMember(Box::new(CircleAddMemberRequest {
-                circle_id,
-                member_pubkey,
-                role,
-                bootstrap,
-                current,
-                previous_control: reference.clone(),
-                roster_chain,
-            })),
-            signer,
-        ))
-        .await?;
-        if journal.circle_id() != circle_id {
-            return Err(CircleOperationError::InvalidState(
-                "prepared Circle member addition changed Circle identity".to_string(),
-            ));
-        }
-        let operation_id = journal.operation_id.clone();
-        database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation_with_history(
-            database,
-            &mut history_verifier,
-            &operation_id,
-            signer,
-            Some(routing_key),
-        ))
-        .await
-    }
-
     pub(crate) async fn remove_circle_member(
         &self,
         device_id: &str,
@@ -1013,6 +911,99 @@ impl Store {
 }
 
 impl AuthorizedStore<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn add_circle_member(
+        &mut self,
+        device_id: &str,
+        circle_id: CircleId,
+        member_pubkey: String,
+        role: CircleRole,
+        bootstrap: crate::sync::store::snapshot::SnapshotCut,
+        routing_key: &crate::sync::circle::RowRoutingKey,
+        signer: &UserKeypair,
+    ) -> Result<(), CircleOperationError> {
+        let authority = self.operation_authority();
+        let database = authority.database;
+        let history_verifier = authority.history_verifier;
+        crate::sync::store::ensure_active_registration(database, history_verifier.storage())
+            .await?;
+        ensure_not_deleted(database, circle_id).await?;
+        let identity_pubkey = keys::public_key_hex(signer);
+        let (current, activation_commit_ref) = database
+            .circle_authoring_context(circle_id, &identity_pubkey)
+            .await?;
+        ensure_not_rotation_required(database, history_verifier, circle_id).await?;
+        let activation_commit = history_verifier
+            .commit_verifier()
+            .load_ref(&activation_commit_ref)
+            .await?;
+        if activation_commit.value().candidate_family() != current.candidate_family {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} current state differs from its activating Store commit"
+            )));
+        }
+        let reference = activation_commit
+            .value()
+            .circle_controls()
+            .iter()
+            .find(|reference| {
+                reference.circle_id() == circle_id && reference.control() == &current.control.coord
+            })
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle {circle_id} current control is absent from its activating Store commit"
+                ))
+            })?;
+        let keyring = match &current.access.disposition {
+            crate::sync::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+            crate::sync::circle::CircleAccessDisposition::Inactive => {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle member addition requires active local access".to_string(),
+                ));
+            }
+        };
+        let roster_chain = super::activation::load_circle_control_roster_chain(
+            database,
+            history_verifier.commit_verifier(),
+            &activation_commit,
+            reference,
+            &current.control,
+            keyring,
+        )
+        .await?;
+        let journal = Box::pin(prepare_circle_operation_request(
+            history_verifier,
+            database,
+            device_id,
+            CircleOperationRequest::AddMember(Box::new(CircleAddMemberRequest {
+                circle_id,
+                member_pubkey,
+                role,
+                bootstrap,
+                current,
+                previous_control: reference.clone(),
+                roster_chain,
+            })),
+            signer,
+        ))
+        .await?;
+        if journal.circle_id() != circle_id {
+            return Err(CircleOperationError::InvalidState(
+                "prepared Circle member addition changed Circle identity".to_string(),
+            ));
+        }
+        let operation_id = journal.operation_id.clone();
+        database.insert_circle_operation(journal).await?;
+        Box::pin(publish_circle_operation_with_history(
+            database,
+            history_verifier,
+            &operation_id,
+            signer,
+            Some(routing_key),
+        ))
+        .await
+    }
+
     pub(crate) async fn resume_circle_operations(
         &mut self,
         identity: &UserKeypair,

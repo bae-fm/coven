@@ -1082,7 +1082,7 @@ impl SyncComponents {
             self.store.store_root().store_root_hash,
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        self.store
+        authorization
             .add_circle_member(
                 &self.device_id,
                 circle_id,
