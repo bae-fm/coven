@@ -70,10 +70,11 @@ async fn retained_merge_device_state(
 
 pub(crate) async fn retained_merge_device_state_for_order(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     order: &super::store_commit::StoreCommitOrder,
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let frontier = order
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
@@ -91,8 +92,14 @@ pub(crate) async fn retained_merge_device_state_for_order(
             "Merge device-state authority is missing a retained predecessor checkpoint".to_string(),
         ));
     }
-    let root_value = load_store_protocol_root(storage, root).await?.value;
-    retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await
+    retained_merge_device_state(
+        storage,
+        root,
+        commit_verifier.verified_root(),
+        &frontier,
+        &checkpoints,
+    )
+    .await
 }
 
 #[cfg(test)]

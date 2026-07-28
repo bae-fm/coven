@@ -111,8 +111,7 @@ pub(super) async fn publish_circle_operation_with_history(
             })?;
         let (_, state_after) = crate::sync::store::pull::retained_merge_device_state_for_order(
             database,
-            storage,
-            &root,
+            history_verifier.commit_verifier_ref(),
             &commit.order,
         )
         .await
