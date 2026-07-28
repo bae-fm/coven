@@ -222,9 +222,14 @@ impl Store {
             return Ok(discarded);
         }
 
-        match abandonment::abandon_merge_candidate(
-            self.database(),
-            &**self.storage(),
+        let mut authorization = self
+            .authorize()
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let authority = authorization.operation_authority();
+        match abandonment::abandon_merge_candidate_with_history(
+            authority.database,
+            authority.history_verifier,
             device_id,
             identity,
             write_id.clone(),

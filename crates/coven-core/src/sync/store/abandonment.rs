@@ -140,6 +140,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
     Ok(true)
 }
 
+#[cfg(test)]
 pub(crate) async fn abandon_merge_candidate(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -147,18 +148,35 @@ pub(crate) async fn abandon_merge_candidate(
     identity_signer: &UserKeypair,
     write_id: crate::WriteId,
 ) -> Result<MergeCandidateAbandonment, StoreError> {
-    let db = database.sqlite();
     let root = database.local_store_root_ref().await?.ok_or_else(|| {
         StoreError::InvalidOutbound("Merge abandonment has no Store root".to_string())
     })?;
     let mut history_verifier =
         crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    abandon_merge_candidate_with_history(
+        database,
+        &mut history_verifier,
+        device_id,
+        identity_signer,
+        write_id,
+    )
+    .await
+}
+
+pub(crate) async fn abandon_merge_candidate_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    write_id: crate::WriteId,
+) -> Result<MergeCandidateAbandonment, StoreError> {
+    let db = database.sqlite();
     match database.merge_abandonment_state(&write_id).await? {
         crate::database::MergeAbandonmentState::None => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    &mut history_verifier,
+                    history_verifier,
                     write_id.clone(),
                 )
                 .await?;
@@ -174,11 +192,10 @@ pub(crate) async fn abandon_merge_candidate(
                 return Ok(MergeCandidateAbandonment::NotRequired);
             }
             if let Some(candidate) = database.blocked_merge_candidate(write_id.clone()).await? {
-                let verified =
-                    authenticate_blocked_candidate(&mut history_verifier, &candidate).await?;
+                let verified = authenticate_blocked_candidate(history_verifier, &candidate).await?;
                 if let Some(nonactivation) = Box::pin(excluded_candidate_nonactivation(
                     database,
-                    &mut history_verifier,
+                    history_verifier,
                     &verified,
                     &candidate.head.value,
                     &candidate.head.object,
@@ -193,7 +210,7 @@ pub(crate) async fn abandon_merge_candidate(
                         .await?;
                     super::pull::cleanup_merge_candidate_with_history(
                         database,
-                        &mut history_verifier,
+                        history_verifier,
                         write_id.clone(),
                     )
                     .await?;
@@ -202,7 +219,7 @@ pub(crate) async fn abandon_merge_candidate(
             }
             if !prepare_merge_candidate_abandonment(
                 database,
-                storage,
+                history_verifier.storage(),
                 device_id,
                 identity_signer,
                 write_id.clone(),
@@ -222,22 +239,20 @@ pub(crate) async fn abandon_merge_candidate(
                     )
                 })?;
             let verified_candidate =
-                authenticate_blocked_candidate(&mut history_verifier, &candidates.candidate)
-                    .await?;
+                authenticate_blocked_candidate(history_verifier, &candidates.candidate).await?;
             let candidate = Box::pin(excluded_candidate_nonactivation(
                 database,
-                &mut history_verifier,
+                history_verifier,
                 &verified_candidate,
                 &candidates.candidate.head.value,
                 &candidates.candidate.head.object,
             ))
             .await?;
             let verified_authority =
-                authenticate_blocked_candidate(&mut history_verifier, &candidates.authority)
-                    .await?;
+                authenticate_blocked_candidate(history_verifier, &candidates.authority).await?;
             let authority = Box::pin(excluded_candidate_nonactivation(
                 database,
-                &mut history_verifier,
+                history_verifier,
                 &verified_authority,
                 &candidates.authority.head.value,
                 &candidates.authority.head.object,
@@ -254,7 +269,7 @@ pub(crate) async fn abandon_merge_candidate(
                         .await?;
                     super::pull::cleanup_merge_candidate_with_history(
                         database,
-                        &mut history_verifier,
+                        history_verifier,
                         write_id.clone(),
                     )
                     .await?;
@@ -278,18 +293,18 @@ pub(crate) async fn abandon_merge_candidate(
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    &mut history_verifier,
+                    history_verifier,
                     write_id.clone(),
                 )
                 .await?;
             }
-            return finish_merge_abandonment(database, &mut history_verifier, write_id).await;
+            return finish_merge_abandonment(database, history_verifier, write_id).await;
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    &mut history_verifier,
+                    history_verifier,
                     write_id.clone(),
                 )
                 .await?;
@@ -310,13 +325,9 @@ pub(crate) async fn abandon_merge_candidate(
             "accepted Merge abandonment has no exact cleanup transition".to_string(),
         ));
     }
-    super::pull::cleanup_merge_candidate_with_history(
-        database,
-        &mut history_verifier,
-        write_id.clone(),
-    )
-    .await?;
-    finish_merge_abandonment(database, &mut history_verifier, write_id).await
+    super::pull::cleanup_merge_candidate_with_history(database, history_verifier, write_id.clone())
+        .await?;
+    finish_merge_abandonment(database, history_verifier, write_id).await
 }
 
 async fn finish_merge_abandonment(
