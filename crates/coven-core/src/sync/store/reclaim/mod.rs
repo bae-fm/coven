@@ -20,7 +20,7 @@ use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, CircleAckRef, CirclePackageRef, CircleSnapshotRef,
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreAckRef, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError,
-    StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit, STORE_PROTOCOL_VERSION,
+    StoreSnapshotLocator, VerifiedStoreBatchCommit, STORE_PROTOCOL_VERSION,
 };
 use crate::sync::store_objects::StoreObjectError;
 
@@ -1071,7 +1071,6 @@ async fn reclaim_store_packages(
         .map_err(StoreReclaimError::Object)?;
     let mut packages_deleted = Box::pin(resume_store_reclaim_operations(
         database,
-        storage,
         device_id,
         identity_signer,
         membership,
@@ -1094,13 +1093,7 @@ async fn reclaim_store_packages(
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     // A missing or unstable Store snapshot leaves Store packages uncovered but must
     // not block Circle package reclamation, which carries its own Circle coverage.
-    let store_targets = match Box::pin(choose_snapshot(
-        &mut history_verifier,
-        storage,
-        &root,
-        &registrations,
-    ))
-    .await
+    let store_targets = match Box::pin(choose_snapshot(&mut history_verifier, &registrations)).await
     {
         Ok(snapshot) => exact_package_targets(
             history_verifier.commit_verifier(),
@@ -1127,11 +1120,9 @@ async fn reclaim_store_packages(
         }
         Box::pin(prepare_reclaim_authorization(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            &root,
             history_verifier.commit_verifier(),
             ReclaimClaim::StorePackage(StorePackageReclaimClaim {
                 target: StorePackageReclaimTarget {
@@ -1149,22 +1140,18 @@ async fn reclaim_store_packages(
     }
     Box::pin(prepare_circle_reclaim_authorizations(
         database,
-        storage,
         device_id,
         identity_signer,
         membership,
-        &root,
         &registrations,
         history_verifier.commit_verifier(),
     ))
     .await?;
     Box::pin(prepare_audience_blob_reclaim_authorizations(
         database,
-        storage,
         device_id,
         identity_signer,
         membership,
-        &root,
         history_verifier.commit_verifier(),
     ))
     .await?;
@@ -1172,7 +1159,6 @@ async fn reclaim_store_packages(
         .checked_add(
             Box::pin(resume_store_reclaim_operations(
                 database,
-                storage,
                 device_id,
                 identity_signer,
                 membership,
@@ -1199,11 +1185,9 @@ async fn reclaim_store_packages(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     commit_verifier: &mut StoreCommitVerifier<'_>,
@@ -1248,11 +1232,9 @@ async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
         }
         Box::pin(prepare_reclaim_authorization(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             commit_verifier,
             ReclaimClaim::CirclePackage(CirclePackageReclaimClaim::BeyondEpochCutoff(
                 CirclePackageBeyondCutoffClaim {
@@ -1297,11 +1279,9 @@ fn audience_blob_binding_package(
 /// decides eligibility, and an image that still pins the blob holds it back.
 async fn prepare_audience_blob_reclaim_authorizations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
 ) -> Result<(), StoreReclaimError> {
     for (blob, owners) in database.stored_blob_reclaim_candidates().await? {
@@ -1344,11 +1324,9 @@ async fn prepare_audience_blob_reclaim_authorizations(
         };
         Box::pin(prepare_reclaim_authorization(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             commit_verifier,
             ReclaimClaim::AudienceBlob(AudienceBlobReclaimClaim { target }),
         ))
@@ -1366,11 +1344,9 @@ async fn prepare_audience_blob_reclaim_authorizations(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_circle_snapshot_image_reclaim_authorizations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     circle_id: CircleId,
     streams: &[CircleSnapshotStream],
     stable: &[SelectedCircleSnapshot],
@@ -1403,11 +1379,9 @@ async fn prepare_circle_snapshot_image_reclaim_authorizations(
             }
             Box::pin(prepare_reclaim_authorization(
                 database,
-                storage,
                 device_id,
                 identity_signer,
                 membership,
-                root,
                 commit_verifier,
                 ReclaimClaim::CircleSnapshotImage(CircleSnapshotImageReclaimClaim {
                     target,
@@ -1427,11 +1401,9 @@ async fn prepare_circle_snapshot_image_reclaim_authorizations(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_circle_reclaim_authorizations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
     commit_verifier: &mut StoreCommitVerifier<'_>,
 ) -> Result<(), StoreReclaimError> {
@@ -1443,11 +1415,9 @@ async fn prepare_circle_reclaim_authorizations(
         // Circle has a stable snapshot.
         Box::pin(prepare_beyond_cutoff_circle_reclaim_authorizations(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             circle_id,
             &control,
             commit_verifier,
@@ -1458,25 +1428,26 @@ async fn prepare_circle_reclaim_authorizations(
         // acknowledged. Read it once.
         let streams = Box::pin(load_circle_snapshot_streams(
             database,
-            storage,
-            root,
+            commit_verifier,
             circle_id,
             &control,
             registrations,
         ))
         .await?;
         let stable = Box::pin(stable_circle_snapshots(
-            database, storage, root, circle_id, &control, &streams,
+            database,
+            commit_verifier,
+            circle_id,
+            &control,
+            &streams,
         ))
         .await?;
         let selected = maximal_stable_circle_snapshot(&stable);
         Box::pin(prepare_circle_bootstrap_reclaim_authorizations(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             circle_id,
             &control,
             selected,
@@ -1487,11 +1458,9 @@ async fn prepare_circle_reclaim_authorizations(
         // stream's evidence, independent of which snapshot covers the packages.
         Box::pin(prepare_circle_snapshot_image_reclaim_authorizations(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             circle_id,
             &streams,
             &stable,
@@ -1516,11 +1485,9 @@ async fn prepare_circle_reclaim_authorizations(
             }
             Box::pin(prepare_reclaim_authorization(
                 database,
-                storage,
                 device_id,
                 identity_signer,
                 membership,
-                root,
                 commit_verifier,
                 ReclaimClaim::CirclePackage(CirclePackageReclaimClaim::SnapshotCovered(
                     CirclePackageSnapshotCoverageClaim {
@@ -1567,12 +1534,13 @@ struct CircleSnapshotStream {
 /// cannot decrypt the older ones.
 async fn load_circle_snapshot_streams(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Vec<CircleSnapshotStream>, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let encryption = database
         .circle_package_access(circle_id, current_control.clone())
         .await?
@@ -1622,12 +1590,13 @@ async fn load_circle_snapshot_streams(
 /// cut every device holding active Circle access has acknowledged.
 async fn stable_circle_snapshots(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     streams: &[CircleSnapshotStream],
 ) -> Result<Vec<SelectedCircleSnapshot>, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let mut stable = Vec::new();
     for stream in streams {
         for (reference, meta) in &stream.generations {
@@ -1679,16 +1648,14 @@ fn maximal_stable_circle_snapshot(
 /// holding active Circle access has acknowledged coverage dominating that cut.
 async fn choose_circle_snapshot(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Option<SelectedCircleSnapshot>, StoreReclaimError> {
     let streams = Box::pin(load_circle_snapshot_streams(
         database,
-        storage,
-        root,
+        commit_verifier,
         circle_id,
         current_control,
         registrations,
@@ -1696,8 +1663,7 @@ async fn choose_circle_snapshot(
     .await?;
     let stable = Box::pin(stable_circle_snapshots(
         database,
-        storage,
-        root,
+        commit_verifier,
         circle_id,
         current_control,
         &streams,
@@ -1759,16 +1725,16 @@ fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFrontier) -> bool
 #[allow(clippy::too_many_arguments)]
 async fn prepare_circle_bootstrap_reclaim_authorizations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     selected: Option<&SelectedCircleSnapshot>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
 ) -> Result<(), StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let roster = database.circle_current_roster_members(circle_id).await?;
     let retained_controls = database.retained_circle_control_coords(circle_id).await?;
     // The maximal acknowledgement-stable Circle snapshot cut, if any. A seed a
@@ -1780,7 +1746,7 @@ async fn prepare_circle_bootstrap_reclaim_authorizations(
             match super::acknowledgements::load_circle_acknowledgement_under_retained_controls(
                 database,
                 storage,
-                root,
+                &root,
                 &acknowledgement,
                 current_control,
                 &retained_controls,
@@ -1840,11 +1806,9 @@ async fn prepare_circle_bootstrap_reclaim_authorizations(
         }
         Box::pin(prepare_reclaim_authorization(
             database,
-            storage,
             device_id,
             identity_signer,
             membership,
-            root,
             commit_verifier,
             ReclaimClaim::CircleBootstrapImage(CircleBootstrapImageReclaimClaim { target, proof }),
         ))
@@ -1867,14 +1831,14 @@ async fn reclaim_target_is_recorded(
 
 async fn prepare_reclaim_authorization(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     claim: ReclaimClaim,
 ) -> Result<(), StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     if reclaim_target_is_recorded(database, &claim.target()).await? {
         return Ok(());
     }
@@ -1893,7 +1857,7 @@ async fn prepare_reclaim_authorization(
     })?;
     let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, identity_signer)
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-    verify_reclaim_evidence(database, storage, root, commit_verifier, &evidence).await?;
+    verify_reclaim_evidence(database, commit_verifier, &evidence).await?;
     let evidence_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreReclaimEvidence,
@@ -1965,12 +1929,12 @@ async fn prepare_reclaim_authorization(
 
 async fn resume_store_reclaim_operations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
     commit_verifier: &mut StoreCommitVerifier<'_>,
 ) -> Result<u64, StoreReclaimError> {
+    let storage = commit_verifier.storage();
     let mut completed = 0_u64;
     loop {
         let operations = database.store_reclaim_operations().await?;
@@ -1999,13 +1963,7 @@ async fn resume_store_reclaim_operations(
                     progressed = true;
                 }
                 journal::DurableStoreReclaimOperation::Authorized { .. } => {
-                    Box::pin(execute_reclaim_delete(
-                        database,
-                        storage,
-                        commit_verifier,
-                        operation,
-                    ))
-                    .await?;
+                    Box::pin(execute_reclaim_delete(database, commit_verifier, operation)).await?;
                     completed = completed.checked_add(1).ok_or_else(|| {
                         StoreReclaimError::Authorization(
                             "reclaimed package count exceeded u64".to_string(),
@@ -2016,7 +1974,7 @@ async fn resume_store_reclaim_operations(
                 journal::DurableStoreReclaimOperation::AbsentVerified { .. } => {
                     Box::pin(prepare_reclaim_receipt(
                         database,
-                        storage,
+                        commit_verifier,
                         device_id,
                         identity_signer,
                         membership,
@@ -2036,7 +1994,6 @@ async fn resume_store_reclaim_operations(
 
 async fn execute_reclaim_delete(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
@@ -2049,19 +2006,9 @@ async fn execute_reclaim_delete(
             "only an authorized reclaim can delete its target".to_string(),
         ));
     };
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
-    let target = verify_authorized_reclaim(
-        database,
-        storage,
-        &root,
-        commit_verifier,
-        authorization,
-        activation,
-    )
-    .await?;
+    let storage = commit_verifier.storage();
+    let target =
+        verify_authorized_reclaim(database, commit_verifier, authorization, activation).await?;
     if target_is_retained_for_replay(database, &target).await? {
         return Err(StoreReclaimError::Authorization(
             "reclaim target remains retained for accepted replay".to_string(),
@@ -2077,7 +2024,7 @@ async fn execute_reclaim_delete(
         activation: target.activation().object().stored_hash(),
         source,
     })?;
-    verify_reclaim_target_absent(database, storage, &root, &target).await?;
+    verify_reclaim_target_absent(database, commit_verifier, &target).await?;
     database
         .mark_store_reclaim_target_absent(operation, target)
         .await?;
@@ -2114,45 +2061,36 @@ async fn target_is_retained_for_replay(
 
 async fn verify_authorized_reclaim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     authorization_ref: &ReclaimAuthorizationRef,
     activation: &journal::ReclaimCommitActivation,
 ) -> Result<ReclaimTarget, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let opened = crate::sync::store_objects::load_reclaim_authorization_ref(
         storage,
-        root,
+        &root,
         authorization_ref,
     )
     .await?;
     verify_reclaim_authorization_activation(
         database,
-        storage,
-        root,
         commit_verifier,
         authorization_ref,
         activation,
     )
     .await?;
-    verify_reclaim_evidence(
-        database,
-        storage,
-        root,
-        commit_verifier,
-        &opened.evidence.value,
-    )
-    .await
+    verify_reclaim_evidence(database, commit_verifier, &opened.evidence.value).await
 }
 
 async fn verify_reclaim_authorization_activation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     authorization: &ReclaimAuthorizationRef,
     activation: &journal::ReclaimCommitActivation,
 ) -> Result<(), StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     activation
         .validate()
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
@@ -2185,7 +2123,7 @@ async fn verify_reclaim_authorization_activation(
     }
     let (_, accepted_head) = super::operations::exact_next_announcement_slot(
         storage,
-        root,
+        &root,
         &commit_value.author_registration,
         author,
         commit_verifier,
@@ -2208,11 +2146,10 @@ async fn verify_reclaim_authorization_activation(
 /// or replay retention since authoring fails the delete loud.
 async fn verify_reclaim_evidence(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     evidence: &ReclaimEvidence,
 ) -> Result<ReclaimTarget, StoreReclaimError> {
+    let root = commit_verifier.root().clone();
     evidence
         .verify()
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
@@ -2225,28 +2162,14 @@ async fn verify_reclaim_evidence(
         ReclaimClaim::StorePackage(claim) => {
             let activation = commit_verifier.load_ref(&claim.target.activation).await?;
             Ok(ReclaimTarget::StorePackage(
-                verify_store_package_reclaim_claim(
-                    storage,
-                    root,
-                    commit_verifier,
-                    &activation,
-                    claim,
-                )
-                .await?,
+                verify_store_package_reclaim_claim(commit_verifier, &activation, claim).await?,
             ))
         }
         ReclaimClaim::CirclePackage(claim) => {
             let activation = commit_verifier.load_ref(&claim.target().activation).await?;
             Ok(ReclaimTarget::CirclePackage(
-                verify_circle_package_reclaim_claim(
-                    database,
-                    storage,
-                    root,
-                    commit_verifier,
-                    &activation,
-                    claim,
-                )
-                .await?,
+                verify_circle_package_reclaim_claim(database, commit_verifier, &activation, claim)
+                    .await?,
             ))
         }
         ReclaimClaim::CircleBootstrapImage(claim) => {
@@ -2256,8 +2179,7 @@ async fn verify_reclaim_evidence(
             Ok(ReclaimTarget::CircleBootstrapImage(
                 verify_circle_bootstrap_image_reclaim_claim(
                     database,
-                    storage,
-                    root,
+                    commit_verifier,
                     &activation,
                     claim,
                 )
@@ -2265,12 +2187,12 @@ async fn verify_reclaim_evidence(
             ))
         }
         ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
-            verify_circle_snapshot_image_reclaim_claim(database, storage, root, claim).await?,
+            verify_circle_snapshot_image_reclaim_claim(database, commit_verifier, claim).await?,
         )),
         ReclaimClaim::AudienceBlob(claim) => {
             let activation = commit_verifier.load_ref(&claim.target.activation).await?;
             Ok(ReclaimTarget::AudienceBlob(
-                verify_audience_blob_reclaim_claim(database, storage, root, &activation, claim)
+                verify_audience_blob_reclaim_claim(database, commit_verifier, &activation, claim)
                     .await?,
             ))
         }
@@ -2283,8 +2205,7 @@ async fn verify_reclaim_evidence(
 /// materialized rows rather than taken from the claim.
 async fn verify_audience_blob_reclaim_claim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &AudienceBlobReclaimClaim,
 ) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
@@ -2298,8 +2219,7 @@ async fn verify_audience_blob_reclaim_claim(
     }
     let package = read_audience_blob_binding_package(
         database,
-        storage,
-        root,
+        commit_verifier,
         &claim.target.package,
         &claim.target.activation,
     )
@@ -2329,11 +2249,12 @@ async fn verify_audience_blob_reclaim_claim(
 /// both the read context and the semantic prefix.
 async fn read_audience_blob_binding_package(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     package: &AudienceBlobBindingPackage,
     activation: &StoreBatchCommitRef,
 ) -> Result<crate::sync::audience_package::AudiencePackage, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let (context, prefix, object) = match package {
         AudienceBlobBindingPackage::Store(package) => (
             ProtocolObjectContext::store_encrypted(
@@ -2390,8 +2311,7 @@ async fn read_audience_blob_binding_package(
 /// stability, or the image itself is taken on trust.
 async fn verify_circle_snapshot_image_reclaim_claim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     claim: &CircleSnapshotImageReclaimClaim,
 ) -> Result<CircleSnapshotImageReclaimTarget, StoreReclaimError> {
     let circle_id = claim.target.circle_id;
@@ -2409,8 +2329,7 @@ async fn verify_circle_snapshot_image_reclaim_claim(
     let author_stream = [(claim.target.snapshot_author.clone(), author)];
     let streams = Box::pin(load_circle_snapshot_streams(
         database,
-        storage,
-        root,
+        commit_verifier,
         circle_id,
         &current_control,
         &author_stream,
@@ -2459,8 +2378,8 @@ async fn verify_circle_snapshot_image_reclaim_claim(
     }
     if super::acknowledgements::stable_circle_acks_dominating_on(
         database,
-        storage,
-        root,
+        commit_verifier.storage(),
+        commit_verifier.root(),
         circle_id,
         &current_control,
         &superseding.1.bootstrap.coverage,
@@ -2478,21 +2397,21 @@ async fn verify_circle_snapshot_image_reclaim_claim(
 }
 
 async fn verify_store_package_reclaim_claim(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &StorePackageReclaimClaim,
 ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let author = crate::sync::store_objects::load_registration_ref(
         storage,
-        root,
+        &root,
         &claim.covering_snapshot.author_registration,
     )
     .await?;
     let (reference, metadata) = super::snapshot::load_store_snapshot_ref(
         storage,
-        root,
+        &root,
         &claim.covering_snapshot.author_registration,
         &author.value,
         &claim.covering_snapshot.snapshot,
@@ -2504,7 +2423,7 @@ async fn verify_store_package_reclaim_claim(
         successor_slot: metadata.successor.next_slot.clone(),
         meta: metadata,
     };
-    let authority = match super::verify_store_snapshot_stability(storage, root, &snapshot).await {
+    let authority = match super::verify_store_snapshot_stability(storage, &root, &snapshot).await {
         Ok(stability) => stability.into_authority(),
         Err(super::pull::StorePullError::SnapshotNotStable { member, device_id }) => {
             return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
@@ -2553,8 +2472,6 @@ async fn verify_store_package_reclaim_claim(
 
 async fn verify_circle_package_reclaim_claim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &CirclePackageReclaimClaim,
@@ -2563,8 +2480,6 @@ async fn verify_circle_package_reclaim_claim(
         CirclePackageReclaimClaim::SnapshotCovered(claim) => {
             Box::pin(verify_circle_package_snapshot_coverage_claim(
                 database,
-                storage,
-                root,
                 commit_verifier,
                 activation,
                 claim,
@@ -2661,12 +2576,12 @@ async fn verify_circle_package_beyond_cutoff_claim(
 /// retained keyring resolves epochs sealed before a rotation.
 async fn verify_circle_package_snapshot_coverage_claim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &CirclePackageSnapshotCoverageClaim,
 ) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let circle_id = claim.target.package.circle_id;
     let snapshot_control = &claim.covering_snapshot.control;
     // Read snapshot metadata under the current control's retained keyring so a
@@ -2689,13 +2604,13 @@ async fn verify_circle_package_snapshot_coverage_claim(
         })?;
     let author = crate::sync::store_objects::load_registration_ref(
         storage,
-        root,
+        &root,
         &claim.covering_snapshot.author_registration,
     )
     .await?;
     let stream = super::snapshot::load_circle_snapshot_stream_refs(
         storage,
-        root,
+        &root,
         circle_id,
         access.encryption,
         &claim.covering_snapshot.author_registration,
@@ -2719,7 +2634,7 @@ async fn verify_circle_package_snapshot_coverage_claim(
     let expected = super::acknowledgements::stable_circle_acks_dominating_on(
         database,
         storage,
-        root,
+        &root,
         circle_id,
         &current_control,
         cut,
@@ -2759,11 +2674,12 @@ async fn verify_circle_package_snapshot_coverage_claim(
 /// keyring resolves the epoch it was sealed under even after a rotation.
 async fn verify_circle_bootstrap_image_reclaim_claim(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &CircleBootstrapImageReclaimClaim,
 ) -> Result<CircleBootstrapImageReclaimTarget, StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     if !activation
         .value()
         .circle_controls()
@@ -2828,8 +2744,7 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
             let seed = &claim.target.coverage.bootstrap.coverage;
             let superseded = Box::pin(choose_circle_snapshot(
                 database,
-                storage,
-                root,
+                commit_verifier,
                 circle_id,
                 &current_control,
                 &registrations,
@@ -3024,12 +2939,14 @@ async fn finish_reclaim_candidate_replacement(
 
 async fn prepare_reclaim_receipt(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    commit_verifier: &StoreCommitVerifier<'_>,
     device_id: &str,
     identity_signer: &UserKeypair,
     membership: &MembershipChain,
     operation: journal::DurableStoreReclaimOperation,
 ) -> Result<(), StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let journal::DurableStoreReclaimOperation::AbsentVerified {
         authorization,
         target,
@@ -3040,12 +2957,8 @@ async fn prepare_reclaim_receipt(
             "only an authorized reclaim can be executed".to_string(),
         ));
     };
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| StoreReclaimError::Authorization("Store root is absent".to_string()))?;
     let opened =
-        crate::sync::store_objects::load_reclaim_authorization_ref(storage, &root, authorization)
+        crate::sync::store_objects::load_reclaim_authorization_ref(storage, root, authorization)
             .await?;
     if &opened.authorization.value.target != target {
         return Err(StoreReclaimError::Authorization(
@@ -3118,10 +3031,11 @@ async fn prepare_reclaim_receipt(
 
 async fn verify_reclaim_target_absent(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     target: &ReclaimTarget,
 ) -> Result<(), StoreReclaimError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     // A row blob is addressed by its locator, not by a protocol domain prefix, so
     // its absence is confirmed through the same exact-object verification the blob
     // primitives use.
@@ -3253,10 +3167,10 @@ struct VerifiedReclaimSnapshot {
 
 async fn choose_snapshot(
     history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
         for snapshot in super::snapshot::load_store_snapshot_stream(
