@@ -111,8 +111,7 @@ pub(crate) async fn load_device_join_cleanup_activation(
 }
 
 pub(crate) async fn validate_commit_acknowledgement(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
 ) -> Result<
@@ -122,32 +121,8 @@ pub(crate) async fn validate_commit_acknowledgement(
     )>,
     RegistrationLoadError,
 > {
-    let root_value = load_store_protocol_root(storage, root)
-        .await
-        .map_err(RegistrationLoadError::Object)?;
-    validate_commit_acknowledgement_with_root(
-        storage,
-        root,
-        &root_value.value,
-        commit,
-        activating_author,
-    )
-    .await
-}
-
-pub(crate) async fn validate_commit_acknowledgement_with_root(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    root_value: &super::store_commit::StoreProtocolRoot,
-    commit: &StoreBatchCommit,
-    activating_author: &StoreDeviceRegistration,
-) -> Result<
-    Option<(
-        super::store_commit::StoreAckRef,
-        super::store_commit::StoreAck,
-    )>,
-    RegistrationLoadError,
-> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let Some(reference) = commit.acknowledgement() else {
         return Ok(None);
     };
@@ -176,7 +151,7 @@ pub(crate) async fn validate_commit_acknowledgement_with_root(
         let snapshot_author = load_registration_ref_with_root(
             storage,
             root,
-            root_value,
+            commit_verifier.verified_root(),
             &snapshot.author_registration,
         )
         .await
@@ -543,10 +518,8 @@ pub(super) async fn load_commit_registrations(
         ));
     }
     if commit.acknowledgement().is_some() {
-        Box::pin(validate_commit_acknowledgement_with_root(
-            storage,
-            root,
-            root_value,
+        Box::pin(validate_commit_acknowledgement(
+            history_verifier.commit_verifier_ref(),
             commit,
             activating_author,
         ))

@@ -1179,7 +1179,6 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<(), StorePullError> {
         let storage = self.storage();
         let root = self.root().clone();
-        let verified_root = self.commit_verifier.verified_root().clone();
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
         while let Some(reference) = pending.pop() {
@@ -1319,10 +1318,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
             })?;
-            let acknowledgement = Box::pin(validate_commit_acknowledgement_with_root(
-                storage,
-                &root,
-                &verified_root,
+            let acknowledgement = Box::pin(validate_commit_acknowledgement(
+                &self.commit_verifier,
                 &commit,
                 &author,
             ))

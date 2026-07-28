@@ -1299,12 +1299,13 @@ async fn commit_candidate(
             )
         })
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let acknowledgement = validate_commit_acknowledgement(storage, &root, commit, author)
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+    let acknowledgement =
+        validate_commit_acknowledgement(history_verifier.commit_verifier_ref(), commit, author)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
     let retained_acknowledgement = match acknowledgement {
         Some((acknowledgement_ref, acknowledgement_value)) => Some(
             retain_activated_acknowledgement(
