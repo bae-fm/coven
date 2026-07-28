@@ -1269,17 +1269,8 @@ pub(super) async fn prepare_circle_operation_request(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let heads = current.head_refs().to_vec();
         let resolutions = current.resolution_refs().to_vec();
-        let exact = crate::sync::store::membership::load_anchored_chain_at_exact_heads(
-            storage,
-            &root,
-            &founder,
-            &heads,
-            &resolutions,
-        )
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        let members = exact.current_members();
-        let state_hash = match exact.status() {
+        let members = current.current_members();
+        let state_hash = match current.status() {
             crate::sync::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
             crate::sync::membership::MembershipStatus::Conflict(_) => {
                 return Err(CircleOperationError::InvalidState(
@@ -1288,11 +1279,13 @@ pub(super) async fn prepare_circle_operation_request(
             }
         };
         let membership_authority =
-            exact.write_grant_authority(&author_pubkey).ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "circle creator is not a current Store writer".to_string(),
-                )
-            })?;
+            current
+                .write_grant_authority(&author_pubkey)
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(
+                        "circle creator is not a current Store writer".to_string(),
+                    )
+                })?;
         let commit_base = database.local_commit_base().await?;
         // Held until this request's candidate is durably staged, so the position
         // its order extends is still this device's next one when it lands.
@@ -1970,7 +1963,7 @@ pub(super) async fn prepare_circle_operation_request(
             database,
             &root,
             &verified_commit,
-            &exact,
+            &current,
             None,
             resolved_devices,
             crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),
