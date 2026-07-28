@@ -625,7 +625,7 @@ impl StoreDatabase {
         self.sqlite().call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut unique = BTreeSet::new();
-            for object in candidate_objects.iter().chain(&retained_authorities) {
+            for object in &candidate_objects {
                 let object_id = remote_object_id(object);
                 if !unique.insert(object_id) {
                     return Err(DbError::Message(
