@@ -4,17 +4,20 @@ use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store_commit::{CircleControlRef, StoreRootRef, VerifiedStoreBatchCommit};
 
 pub(super) async fn verify_control_membership(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     control: &PreparedCircleControl,
-    founder_pubkey: &str,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.access_epoch().store_membership;
+    let verified_root = history_verifier.verified_root().clone();
     let chain = Box::pin(
-        crate::sync::store::membership::load_anchored_chain_at_exact_heads(
+        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_history(
+            history_verifier,
             storage,
             root,
-            founder_pubkey,
+            &verified_root,
+            &verified_root.descriptor.founder_pubkey,
             &state.heads,
             &state.resolutions,
         ),

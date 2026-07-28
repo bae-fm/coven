@@ -229,12 +229,13 @@ impl BootstrapResult {
             }
             // Capture the selection inputs before the authority is consumed into
             // the install.
-            let founder_pubkey = self.store_root.value.descriptor.founder_pubkey.clone();
             let root = crate::sync::store_commit::StoreRootRef {
                 store_root_id: self.store_root.value.descriptor.store_root_id(),
                 store_root_hash: self.store_root.semantic_hash,
                 object: self.store_root.object.clone(),
             };
+            let history_root = self.store_root.clone();
+            let history_founder = self.founder_registration.clone();
             let store_frontier = self.coverage.clone();
             let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
                 self.snapshot,
@@ -250,6 +251,14 @@ impl BootstrapResult {
                 // Circles exist only in a scoped (Circle-routing) Store; without
                 // routing encryption there are no Circle images to stage.
                 Some(encryption) => {
+                    let mut history_verifier =
+                        crate::sync::store::pull::MergeHistoryVerifier::from_verified_root_and_founder(
+                            storage,
+                            &root,
+                            history_root,
+                            &history_founder,
+                        )
+                        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
                     let routing_key = crate::sync::circle::derive_row_routing_key(
                         encryption,
                         root.store_root_hash,
@@ -265,7 +274,7 @@ impl BootstrapResult {
                         migrations,
                         storage,
                         &root,
-                        &founder_pubkey,
+                        &mut history_verifier,
                         &store_frontier,
                         restorer_identity,
                         Some(&routing_key),
@@ -323,7 +332,7 @@ async fn stage_restore_circle_decisions(
     migrations: &[Migration],
     storage: &dyn SyncStorage,
     root: &crate::sync::store_commit::StoreRootRef,
-    founder_pubkey: &str,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     store_frontier: &crate::sync::store_commit::CommitFrontier,
     restorer_identity: &crate::keys::UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
@@ -344,10 +353,10 @@ async fn stage_restore_circle_decisions(
         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
         let store_database = crate::sync::store::StoreDatabase::from_database(query_db);
         super::select_staged_circle_decisions(
+            history_verifier,
             &store_database,
             storage,
             root,
-            founder_pubkey,
             store_frontier,
             restorer_identity,
             routing_key,

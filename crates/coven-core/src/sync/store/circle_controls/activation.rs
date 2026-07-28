@@ -1384,6 +1384,7 @@ pub(crate) enum LocalCircleAccess {
 /// identity can decrypt it and what baseline image it can stage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_local_circle_access(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1391,7 +1392,6 @@ pub(crate) async fn resolve_local_circle_access(
     reference: &crate::sync::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
     identity: &UserKeypair,
-    founder_pubkey: &str,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<LocalCircleAccess, CircleOperationError> {
     let verified_access = load_verified_access_pairs(
@@ -1403,10 +1403,10 @@ pub(crate) async fn resolve_local_circle_access(
     )
     .await?;
     let checkpoint_members = Box::pin(verify_control_membership(
+        history_verifier,
         storage,
         root,
         control,
-        founder_pubkey,
     ))
     .await?;
     let Some(resolved) = resolve_identity_access_leaf(

@@ -1048,11 +1048,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         root: &'a StoreRootRef,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
-        if commit_verifier.root() != root {
-            return Err(StorePullError::Database(
-                "commit verifier belongs to another Store root".to_string(),
-            ));
-        }
         let verified_root = commit_verifier.verified_root();
         let founder = Box::pin(load_founder_registration_with_root(
             storage,
@@ -1060,8 +1055,50 @@ impl<'a> MergeHistoryVerifier<'a> {
             verified_root,
         ))
         .await?;
+        Self::from_commit_verifier_and_founder(storage, root, commit_verifier, &founder)
+    }
+
+    pub(crate) fn from_verified_root_and_founder(
+        storage: &'a dyn SyncStorage,
+        root: &'a StoreRootRef,
+        verified_root: VerifiedObject<super::store_commit::StoreProtocolRoot>,
+        founder: &VerifiedObject<StoreDeviceRegistration>,
+    ) -> Result<Self, StorePullError> {
+        let commit_verifier = StoreCommitVerifier::from_verified_root(storage, root, verified_root)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        Self::from_commit_verifier_and_founder(storage, root, commit_verifier, founder)
+    }
+
+    fn from_commit_verifier_and_founder(
+        storage: &'a dyn SyncStorage,
+        root: &'a StoreRootRef,
+        commit_verifier: StoreCommitVerifier<'a>,
+        founder: &VerifiedObject<StoreDeviceRegistration>,
+    ) -> Result<Self, StorePullError> {
+        if commit_verifier.root() != root {
+            return Err(StorePullError::Database(
+                "commit verifier belongs to another Store root".to_string(),
+            ));
+        }
+        let verified_root = commit_verifier.verified_root();
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        let founder_origin_matches = matches!(
+            founder.value.origin,
+            super::store_commit::StoreDeviceRegistrationOrigin::Founder { creation_id }
+                if creation_id == verified_root.descriptor.creation_id
+        );
+        if founder.value.store_root != *root
+            || founder.value.author_pubkey != verified_root.descriptor.founder_pubkey
+            || founder.value.provider != verified_root.descriptor.founder_provider_admin.provider
+            || founder.object.slot() != &verified_root.descriptor.founder_registration
+            || founder.semantic_hash != founder_ref.registration_hash
+            || !founder_origin_matches
+        {
+            return Err(StorePullError::Database(
+                "verified founder registration belongs to another Store root".to_string(),
+            ));
+        }
         let genesis = ResolvedStoreDeviceState::founder(
             root,
             founder_ref,

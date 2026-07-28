@@ -22,6 +22,29 @@ impl<'a> StoreCommitVerifier<'a> {
         })
     }
 
+    pub(crate) fn from_verified_root(
+        storage: &'a dyn SyncStorage,
+        root: &StoreRootRef,
+        verified_root: VerifiedObject<super::store_commit::StoreProtocolRoot>,
+    ) -> Result<Self, StoreProtocolError> {
+        let verified_reference = StoreRootRef {
+            store_root_id: verified_root.value.descriptor.store_root_id(),
+            store_root_hash: verified_root.semantic_hash,
+            object: verified_root.object.clone(),
+        };
+        if &verified_reference != root {
+            return Err(StoreProtocolError::Malformed(
+                "verified Store root belongs to another exact reference".to_string(),
+            ));
+        }
+        Ok(Self {
+            storage,
+            root: root.clone(),
+            verified_root,
+            commits: BTreeMap::new(),
+        })
+    }
+
     pub async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
