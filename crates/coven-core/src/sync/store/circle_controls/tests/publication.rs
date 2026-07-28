@@ -2941,7 +2941,6 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let journal = prepare_circle_operation_request(
         &mut history_verifier,
         &StoreDatabase::new(&fixture.db),
-        &fixture.store.storage,
         &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {
@@ -3049,7 +3048,6 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
     let prepared = prepare_circle_operation_request(
         &mut history_verifier,
         &StoreDatabase::new(&fixture.db),
-        &fixture.store.storage,
         &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {

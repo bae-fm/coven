@@ -1216,7 +1216,6 @@ pub(super) async fn prepare_circle_activation_objects(
 pub(super) async fn prepare_circle_operation(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     metadata_stamp: &str,
     name: &str,
@@ -1225,7 +1224,6 @@ pub(super) async fn prepare_circle_operation(
     Box::pin(prepare_circle_operation_request(
         history_verifier,
         database,
-        storage,
         device_id,
         CircleOperationRequest::Create {
             name: name.to_string(),
@@ -1239,11 +1237,11 @@ pub(super) async fn prepare_circle_operation(
 pub(super) async fn prepare_circle_operation_request(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     device_id: &str,
     request: CircleOperationRequest,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let (root, author_registration, author, device_signer) =
         crate::sync::store::operations::load_local_store_authority(database, device_id, signer)

@@ -141,7 +141,6 @@ impl AuthorizedStore<'_> {
             let prepared = Box::pin(prepare_circle_operation_request(
                 &mut history_verifier,
                 self.database(),
-                self.storage(),
                 device_id,
                 CircleOperationRequest::FinalizeEpochClose(Box::new(
                     CircleFinalizeEpochCloseRequest {

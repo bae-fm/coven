@@ -69,7 +69,6 @@ async fn prepare_circle_operation(
     super::prepare_circle_operation(
         &mut history_verifier,
         &database,
-        storage,
         device_id,
         metadata_stamp,
         name,

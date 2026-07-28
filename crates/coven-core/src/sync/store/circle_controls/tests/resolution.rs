@@ -457,7 +457,6 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
     let stale = prepare_circle_operation_request(
         &mut history_verifier,
         &StoreDatabase::new(&fixture.db1),
-        &*fixture.store.storage,
         &fixture.device1,
         resolve_request(&fixture, &chosen, vec![chosen.clone()]).await,
         &fixture.founder,
@@ -862,7 +861,6 @@ async fn journal_resolution(
     let journal = prepare_circle_operation_request(
         &mut history_verifier,
         &StoreDatabase::new(&fixture.db1),
-        &*fixture.store.storage,
         &fixture.device1,
         request,
         &fixture.founder,

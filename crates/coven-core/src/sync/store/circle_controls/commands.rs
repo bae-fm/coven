@@ -160,7 +160,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             metadata_stamp,
             name,
@@ -235,7 +234,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::Rename(Box::new(CircleRenameRequest {
                 circle_id,
@@ -338,7 +336,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::AddMember(Box::new(CircleAddMemberRequest {
                 circle_id,
@@ -438,7 +435,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::RemoveMember(Box::new(CircleRemoveMemberRequest {
                 circle_id,
@@ -553,7 +549,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::ResolveControl(Box::new(CircleResolveControlRequest {
                 circle_id,
@@ -650,7 +645,6 @@ impl Store {
         let prepared = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::CancelEpochClose(Box::new(CircleCancelEpochCloseRequest {
                 operation_id: journal.operation_id.clone(),
@@ -990,7 +984,6 @@ impl Store {
         let journal = Box::pin(prepare_circle_operation_request(
             &mut history_verifier,
             database,
-            storage,
             device_id,
             CircleOperationRequest::Delete(Box::new(CircleDeleteRequest {
                 circle_id,
