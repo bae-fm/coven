@@ -11,6 +11,7 @@ pub(super) use graph::{
     LoadedExactMembershipGraph, MembershipProjectionStatus,
 };
 
+#[cfg(test)]
 pub(crate) async fn load_current_exact_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -372,6 +373,7 @@ async fn traverse_exact_membership_stream(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn load_exact_anchored_chain(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

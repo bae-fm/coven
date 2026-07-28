@@ -88,6 +88,7 @@ pub(crate) fn require_resolved_membership(
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 async fn required_store_root_ref(
     database: &StoreDatabase,
 ) -> Result<StoreRootRef, MembershipOpsError> {
@@ -128,7 +129,9 @@ mod refresh;
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
 pub(crate) use key_rotation::apply_key_rotation;
-pub(crate) use listing::{current_membership_floor, get_members, get_membership_conflict};
+#[cfg(test)]
+pub(crate) use listing::{current_membership_floor, get_members};
+pub(crate) use listing::{members_from_chain, membership_conflict_from_chain};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use merge::{invite_member, remove_member};
 pub(crate) use merge::{invite_member_with_history, remove_member_with_history};
@@ -159,10 +162,12 @@ use exact_chain::map_membership_object_error;
 pub(crate) use exact_chain::{
     authorize_loaded_membership_author, load_anchored_chain_at_exact_heads_with_history,
     load_anchored_chain_at_exact_heads_with_root_and_verified_activations,
-    load_current_exact_chain, load_current_exact_chain_with_history, load_exact_anchored_chain,
-    load_exact_anchored_chain_with_history, load_exact_membership_head_with_history,
-    project_anchored_chain_to_verified_store_prefix, MembershipAuthorRequirement,
+    load_current_exact_chain_with_history, load_exact_anchored_chain_with_history,
+    load_exact_membership_head_with_history, project_anchored_chain_to_verified_store_prefix,
+    MembershipAuthorRequirement,
 };
+#[cfg(test)]
+pub(crate) use exact_chain::{load_current_exact_chain, load_exact_anchored_chain};
 
 #[cfg(test)]
 use cursors::head_cursor_key;

@@ -263,7 +263,12 @@ impl Store {
         &self,
         user_pubkey: Option<&[u8]>,
     ) -> Result<Vec<crate::sync::membership::MemberInfo>, membership::MembershipOpsError> {
-        membership::get_members(self.storage().as_ref(), user_pubkey, self.database()).await
+        let authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        membership::members_from_chain(authorization.membership(), user_pubkey)
     }
 
     #[doc(hidden)]
@@ -274,8 +279,15 @@ impl Store {
         Option<crate::sync::membership::MembershipConflictInfo>,
         membership::MembershipOpsError,
     > {
-        membership::get_membership_conflict(self.storage().as_ref(), user_pubkey, self.database())
-            .await
+        let authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        Ok(membership::membership_conflict_from_chain(
+            authorization.membership(),
+            user_pubkey,
+        ))
     }
 
     pub(crate) async fn resolve_membership_conflict(
@@ -346,19 +358,17 @@ impl Store {
     pub async fn restore_membership(
         &self,
     ) -> Result<StoreRestoreMembership, membership::MembershipOpsError> {
-        let founder_pubkey = self
-            .database()
-            .local_store_founder_pubkey()
-            .await
-            .map_err(|error| membership::MembershipOpsError::Database(error.to_string()))?
+        let authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        let founder_pubkey = authorization
+            .membership()
+            .founder_pubkey()
+            .map(str::to_string)
             .ok_or(membership::MembershipOpsError::NoFounderChain)?;
-        let membership_floor = membership::current_membership_floor(
-            self.storage().as_ref(),
-            self.store_root(),
-            Some(&founder_pubkey),
-            Some(self.database()),
-        )
-        .await?;
+        let membership_floor = authorization.membership().head_refs().to_vec();
         Ok(StoreRestoreMembership {
             store_root: self.store_root().clone(),
             founder_pubkey,
@@ -639,11 +649,17 @@ pub(crate) async fn anchor_owner_membership(
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
+    let owner = access
+        .database
+        .validated_store_owner(&access.store_root)
+        .await
+        .map_err(|error| SyncCycleFailure::operation("validate Store owner authority", error))?;
     let mut history_verifier =
         crate::sync::store::pull::MergeHistoryVerifier::new(access.storage, &access.store_root)
             .await
             .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
-    let membership = load_authorized_membership(&mut history_verifier, &access.database).await?;
+    let membership =
+        load_authorized_membership(&mut history_verifier, &access.database, &owner).await?;
     Ok(AuthorizedStore {
         database: access.database,
         history_verifier,
@@ -654,8 +670,9 @@ async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncC
 async fn load_authorized_membership(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
+    owner: &str,
 ) -> Result<crate::sync::membership::MembershipChain, SyncCycleFailure> {
-    crate::sync::store::pull::load_cycle_membership_with_history(history_verifier, database)
+    membership::load_current_exact_chain_with_history(history_verifier, Some(owner), Some(database))
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))
 }

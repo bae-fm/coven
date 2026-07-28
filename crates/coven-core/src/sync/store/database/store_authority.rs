@@ -21,9 +21,66 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn local_store_founder_pubkey(&self) -> Result<Option<String>, DbError> {
+    pub(crate) async fn validated_store_owner(
+        &self,
+        expected_root: &crate::sync::store_commit::StoreRootRef,
+    ) -> Result<String, DbError> {
+        let expected_root = expected_root.clone();
         self.sqlite()
-            .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
+            .call(move |conn| {
+                let (root, protocol_root) =
+                    load_store_root_authority_on(conn)?.ok_or(DbError::StoreRootHashMissing)?;
+                if root != expected_root {
+                    return Err(DbError::Message(
+                        "local Store root differs from the operation authority".to_string(),
+                    ));
+                }
+                let owner =
+                    get_protocol_state_on(conn, crate::sync::store::OWNER_PUBKEY_STATE_KEY)?
+                        .ok_or_else(|| {
+                            DbError::Message("Store owner anchor is absent".to_string())
+                        })?;
+                if owner != protocol_root.descriptor.founder_pubkey {
+                    return Err(DbError::Message(
+                        "Store owner anchor differs from its signed root".to_string(),
+                    ));
+                }
+                let baseline = StoreDatabase::generation_zero_replay_baseline_on(conn)?;
+                let (baseline_root, founder_reference) = match &baseline.authority {
+                    RetainedReplayAuthority::Genesis(authority) => {
+                        (&authority.store_root, &authority.founder_registration)
+                    }
+                    RetainedReplayAuthority::StableSnapshot(authority) => {
+                        (&authority.store_root, &authority.founder_registration)
+                    }
+                };
+                if baseline_root != &root {
+                    return Err(DbError::Message(
+                        "retained replay baseline belongs to another Store root".to_string(),
+                    ));
+                }
+                let founder = load_activated_registration_on(conn, &root, founder_reference)?;
+                let expected_genesis = ResolvedStoreDeviceState::founder(
+                    &root,
+                    founder_reference.clone(),
+                    &protocol_root.descriptor.founder_pubkey,
+                    protocol_root.descriptor.founder_grant.clone(),
+                    &protocol_root.descriptor.founder_recovery,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
+                    &required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
+                )
+                .map_err(|error| {
+                    DbError::Message(format!("Store device genesis state: {error}"))
+                })?;
+                if founder.author_pubkey != owner || stored_genesis != expected_genesis {
+                    return Err(DbError::Message(
+                        "Store device genesis differs from installed founder authority".to_string(),
+                    ));
+                }
+                Ok(owner)
+            })
             .await
     }
 

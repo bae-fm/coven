@@ -433,6 +433,78 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
 }
 
 #[tokio::test]
+async fn store_membership_reads_require_the_installed_owner_anchor() {
+    let fixture = merge_fixture("store-membership-owner-anchor").await;
+    let storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            fixture.store.home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            fixture.store.storage.store_id(),
+            fixture.owner.clone(),
+        )
+        .expect("open a Store-owned storage session"),
+    );
+    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
+        .await
+        .expect("load Store owner");
+    fixture
+        .db
+        .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
+        .await
+        .expect("remove the installed owner anchor");
+
+    let error = store
+        .members(Some(&fixture.owner.public_key()))
+        .await
+        .expect_err("membership reads must not recreate a missing owner anchor");
+    assert!(
+        matches!(
+            &error,
+            MembershipOpsError::Chain(AnchoredChainError::LoadFailed(message))
+                if message.contains("owner anchor is absent")
+        ),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn store_membership_reads_reject_tampered_founder_state() {
+    let fixture = merge_fixture("store-membership-founder-state").await;
+    let storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            fixture.store.home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            fixture.store.storage.store_id(),
+            fixture.owner.clone(),
+        )
+        .expect("open a Store-owned storage session"),
+    );
+    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
+        .await
+        .expect("load Store owner");
+    fixture
+        .db
+        .set_protocol_state(crate::database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
+        .await
+        .expect("tamper with the installed founder state");
+
+    let error = store
+        .members(Some(&fixture.owner.public_key()))
+        .await
+        .expect_err("membership reads must validate installed founder state");
+    assert!(
+        matches!(
+            &error,
+            MembershipOpsError::Chain(AnchoredChainError::LoadFailed(message))
+                if message.contains("Store device genesis")
+        ),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn store_prefix_projection_retains_direct_membership_heads() {
     let fixture = merge_fixture("project-direct-membership").await;
     let member = UserKeypair::generate();

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) async fn current_membership_floor(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -11,22 +12,32 @@ pub(crate) async fn current_membership_floor(
 }
 
 /// Read the membership chain from the sync storage and return the current members.
+#[cfg(test)]
 pub(crate) async fn get_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
     database: &StoreDatabase,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
-    let chain = load_current_membership_chain(storage, database).await?;
-    require_resolved_membership(&chain)?;
+    let root = required_store_root_ref(database).await?;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(super::exact_chain::map_membership_history_error)?;
+    let chain = load_current_membership_chain_with_history(&mut history_verifier, database).await?;
+    members_from_chain(&chain, user_pubkey)
+}
+
+pub(crate) fn members_from_chain(
+    chain: &MembershipChain,
+    user_pubkey: Option<&[u8]>,
+) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+    require_resolved_membership(chain)?;
     Ok(member_info(chain.current_members(), user_pubkey))
 }
 
-pub(crate) async fn get_membership_conflict(
-    storage: &dyn SyncStorage,
+pub(crate) fn membership_conflict_from_chain(
+    chain: &MembershipChain,
     user_pubkey: Option<&[u8]>,
-    database: &StoreDatabase,
-) -> Result<Option<crate::sync::membership::MembershipConflictInfo>, MembershipOpsError> {
-    let chain = load_current_membership_chain(storage, database).await?;
+) -> Option<crate::sync::membership::MembershipConflictInfo> {
     let conflict = match chain.status() {
         crate::sync::membership::MembershipStatus::Resolved(_) => None,
         crate::sync::membership::MembershipStatus::Conflict(
@@ -113,22 +124,26 @@ pub(crate) async fn get_membership_conflict(
             },
         ),
     };
-    Ok(conflict)
+    conflict
 }
 
-pub(crate) async fn load_current_membership_chain(
-    storage: &dyn SyncStorage,
+#[cfg(test)]
+async fn load_current_membership_chain_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
 ) -> Result<MembershipChain, MembershipOpsError> {
     let db = database.sqlite();
-    let root_ref = required_store_root_ref(database).await?;
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let chain =
-        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(database)).await?;
+    let chain = load_current_exact_chain_with_history(
+        history_verifier,
+        Some(&pinned_owner),
+        Some(database),
+    )
+    .await?;
     Ok(chain)
 }
 

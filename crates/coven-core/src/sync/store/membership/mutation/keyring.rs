@@ -2,7 +2,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::{self, UserKeypair};
 use crate::sync::membership::{validate_membership_floor, MembershipHeadRef};
 use crate::sync::storage::{StorageError, SyncStorage};
-use crate::sync::store::membership::load_exact_anchored_chain;
+use crate::sync::store::membership::load_exact_anchored_chain_with_history;
 use crate::sync::store_commit::{ObjectHash, StoreRootRef};
 use crate::sync::wrapped_store_key::{load_wrapped_store_key, WrappedStoreKey, WrappedStoreKeyRef};
 
@@ -93,9 +93,13 @@ pub async fn unwrap_store_keyring(
     // the authority that selects its current recipient-sealed keys before it has
     // those keys. The joiner reads only, so `watermark_db` is None.
     validate_membership_floor(membership_floor).map_err(InviteError::Crypto)?;
-    let chain = load_exact_anchored_chain(
-        bootstrap_storage,
-        store_root,
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(bootstrap_storage, store_root)
+            .await
+            .map_err(super::super::exact_chain::map_membership_history_error)
+            .map_err(|error| InviteError::Crypto(format!("membership chain: {error}")))?;
+    let chain = load_exact_anchored_chain_with_history(
+        &mut history_verifier,
         membership_floor,
         Some(founder),
     )
