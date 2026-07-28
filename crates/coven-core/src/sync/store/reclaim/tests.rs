@@ -592,11 +592,12 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .publish_changeset("founder", 1, &changeset, db.schema_version())
         .await
         .expect("publish target package activation");
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(&store.storage, &store.root)
             .await
-            .expect("create Store commit verifier");
-    let target_commit = commit_verifier
+            .expect("create Store history verifier");
+    let target_commit = history_verifier
+        .commit_verifier()
         .load_ref(&target_activation)
         .await
         .expect("load target activation");
@@ -659,7 +660,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         &device_id,
         &signer,
         reclaim_membership,
-        &mut commit_verifier,
+        &mut history_verifier,
         ReclaimClaim::StorePackage(StorePackageReclaimClaim {
             target: StorePackageReclaimTarget {
                 package: target_package.clone(),
@@ -691,7 +692,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     let activation_head_prepared = prepared_candidate.prepared_head.clone();
     drive_reclaim_candidate(
         &StoreDatabase::new(&db),
-        &store.storage,
+        &mut history_verifier,
         &device_id,
         &signer,
         reclaim_membership,
@@ -714,7 +715,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
 
     let deletion = execute_reclaim_delete(
         &StoreDatabase::new(&db),
-        &mut commit_verifier,
+        history_verifier.commit_verifier(),
         authorized.clone(),
     )
     .await;
@@ -779,9 +780,13 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     .expect("retract reclaim activation materialization");
 
     assert!(
-        execute_reclaim_delete(&StoreDatabase::new(&db), &mut commit_verifier, authorized,)
-            .await
-            .is_err(),
+        execute_reclaim_delete(
+            &StoreDatabase::new(&db),
+            history_verifier.commit_verifier(),
+            authorized,
+        )
+        .await
+        .is_err(),
         "a retracted Merge reclaim activation must not delete"
     );
     store
