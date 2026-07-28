@@ -2,13 +2,25 @@ use super::*;
 
 pub(crate) async fn load_local_commit_device_operations(
     database: &StoreDatabase,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit: &StoreBatchCommit,
+    verified_commit: &VerifiedStoreBatchCommit,
     membership: &MembershipChain,
     state_ref: &StoreDeviceStateRef,
     state: ResolvedStoreDeviceState,
 ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
+    if commit_verifier.root() != root {
+        return Err(StorePullError::Database(
+            "local device-operation verifier belongs to another Store root".to_string(),
+        ));
+    }
+    if verified_commit.store_root_hash() != root.store_root_hash {
+        return Err(StorePullError::Database(
+            "local device-operation commit belongs to another Store root".to_string(),
+        ));
+    }
+    let commit = verified_commit.value();
     if commit.device_exclusion_proposals().is_empty()
         && commit.device_exclusion_outcomes().is_empty()
     {
@@ -23,10 +35,9 @@ pub(crate) async fn load_local_commit_device_operations(
     }
     verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
     let resolver = DeviceStateResolver::Database(database);
-    let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
     Box::pin(load_commit_device_operations(
         Some(&resolver),
-        &mut commit_verifier,
+        commit_verifier,
         storage,
         root,
         commit,

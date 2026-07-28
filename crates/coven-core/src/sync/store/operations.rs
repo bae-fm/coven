@@ -418,9 +418,10 @@ pub(crate) fn publish<'a>(
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
             database,
+            &mut commit_verifier,
             storage,
             &root,
-            &commit,
+            &verified_commit,
             &authorization.membership,
             &authorization.device_state_ref,
             authorization.device_state,
