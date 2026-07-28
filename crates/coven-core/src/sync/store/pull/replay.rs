@@ -2,8 +2,6 @@ use super::*;
 
 pub(super) async fn verified_terminal_merge_retractions(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     activation_head: &StoreDeviceHead,
     activation_head_object: &ExactObjectRef,
@@ -13,6 +11,7 @@ pub(super) async fn verified_terminal_merge_retractions(
     device_operations: &VerifiedStoreDeviceOperations,
     loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
 ) -> Result<Vec<super::remote_object::VerifiedCandidateNonactivation>, StorePullError> {
+    let root = history_verifier.root().clone();
     let retained = Box::pin(database.retained_merge_replay_inputs()).await?;
     let mut verified_retained = BTreeMap::new();
     for materialization in &retained {
@@ -112,8 +111,6 @@ pub(super) async fn verified_terminal_merge_retractions(
                 continue;
             }
             let nonactivation = Box::pin(verify_membership_grant_revocation_nonactivation(
-                storage,
-                root,
                 history_verifier,
                 grant_id,
                 current_membership_ref,
@@ -129,8 +126,6 @@ pub(super) async fn verified_terminal_merge_retractions(
         };
         let nonactivation = Box::pin(
             verify_author_exclusion_nonactivation_with_verified_operation(
-                storage,
-                root,
                 history_verifier.commit_verifier(),
                 &locator,
                 activation_head,

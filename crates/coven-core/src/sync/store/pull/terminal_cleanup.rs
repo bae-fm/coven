@@ -10,34 +10,21 @@ pub(crate) async fn cleanup_merge_candidate(
         StorePullError::Database("Merge candidate cleanup has no Store root".to_string())
     })?;
     let mut history_verifier = MergeHistoryVerifier::new(storage, &root).await?;
-    cleanup_merge_candidate_with_history(database, storage, &root, &mut history_verifier, write_id)
-        .await
+    cleanup_merge_candidate_with_history(database, &mut history_verifier, write_id).await
 }
 
 pub(crate) async fn cleanup_merge_candidate_with_history(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     write_id: crate::WriteId,
 ) -> Result<(), StorePullError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StorePullError::Database(
-            "Merge candidate cleanup verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
     for verification in database
         .merge_candidate_terminal_verifications(write_id.clone())
         .await?
     {
-        let nonactivation = verify_terminal_cleanup_candidate(
-            database,
-            storage,
-            root,
-            history_verifier,
-            &verification,
-        )
-        .await?;
+        let nonactivation =
+            verify_terminal_cleanup_candidate(database, history_verifier, &verification).await?;
         database
             .reconcile_merge_candidate_terminal_head(write_id.clone(), nonactivation)
             .await?;
@@ -59,28 +46,16 @@ pub(crate) async fn cleanup_merge_candidate_with_history(
 /// states drive an interrupted run to completion on resume.
 pub(crate) async fn cleanup_circle_operation_candidate_with_history(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     operation_id: &crate::sync::circle::CircleOperationId,
 ) -> Result<(), StorePullError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StorePullError::Database(
-            "Circle operation cleanup verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
     for verification in database
         .circle_operation_discard_terminal_verifications(operation_id)
         .await?
     {
-        let nonactivation = verify_terminal_cleanup_candidate(
-            database,
-            storage,
-            root,
-            history_verifier,
-            &verification,
-        )
-        .await?;
+        let nonactivation =
+            verify_terminal_cleanup_candidate(database, history_verifier, &verification).await?;
         database
             .reconcile_circle_operation_terminal_head(operation_id, nonactivation)
             .await?;
@@ -99,8 +74,6 @@ pub(crate) async fn cleanup_circle_operation_candidate_with_history(
 
 async fn verify_terminal_cleanup_candidate(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     verification: &crate::database::TerminalCandidateCleanupVerification,
 ) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
@@ -123,8 +96,6 @@ async fn verify_terminal_cleanup_candidate(
         crate::database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
             Box::pin(verify_author_exclusion_nonactivation(
                 database,
-                storage,
-                root,
                 history_verifier.commit_verifier(),
                 locator,
                 &candidate,
@@ -140,8 +111,6 @@ async fn verify_terminal_cleanup_candidate(
             activation_head,
         } => {
             Box::pin(verify_membership_grant_revocation_nonactivation(
-                storage,
-                root,
                 history_verifier,
                 grant_id,
                 membership,
@@ -167,27 +136,15 @@ async fn verify_terminal_cleanup_candidate(
 
 pub(crate) async fn resume_merge_retraction_cleanups(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
 ) -> Result<(), StorePullError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StorePullError::Database(
-            "Merge retraction cleanup verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
     for candidate in database.pending_merge_retraction_cleanups().await? {
         let verification = database
             .merge_retraction_cleanup_verification(candidate.clone())
             .await?;
-        let verified = verify_terminal_cleanup_candidate(
-            database,
-            storage,
-            root,
-            history_verifier,
-            &verification,
-        )
-        .await?;
+        let verified =
+            verify_terminal_cleanup_candidate(database, history_verifier, &verification).await?;
         database
             .confirm_merge_retraction_cleanup_nonactivation(candidate.clone(), verified)
             .await?;

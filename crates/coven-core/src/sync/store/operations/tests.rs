@@ -118,7 +118,6 @@ async fn observe_excluded_candidate_head(
         .await?;
     store_observe_excluded_candidate_head(
         &database,
-        storage,
         &mut commit_verifier,
         candidate,
         &verified_commit,

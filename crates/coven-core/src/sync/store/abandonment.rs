@@ -158,8 +158,6 @@ pub(crate) async fn abandon_merge_candidate(
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    storage,
-                    &root,
                     &mut history_verifier,
                     write_id.clone(),
                 )
@@ -180,8 +178,6 @@ pub(crate) async fn abandon_merge_candidate(
                     authenticate_blocked_candidate(&mut history_verifier, &candidate).await?;
                 if let Some(nonactivation) = Box::pin(excluded_candidate_nonactivation(
                     database,
-                    storage,
-                    &root,
                     &mut history_verifier,
                     &verified,
                     &candidate.head.value,
@@ -197,8 +193,6 @@ pub(crate) async fn abandon_merge_candidate(
                         .await?;
                     super::pull::cleanup_merge_candidate_with_history(
                         database,
-                        storage,
-                        &root,
                         &mut history_verifier,
                         write_id.clone(),
                     )
@@ -232,8 +226,6 @@ pub(crate) async fn abandon_merge_candidate(
                     .await?;
             let candidate = Box::pin(excluded_candidate_nonactivation(
                 database,
-                storage,
-                &root,
                 &mut history_verifier,
                 &verified_candidate,
                 &candidates.candidate.head.value,
@@ -245,8 +237,6 @@ pub(crate) async fn abandon_merge_candidate(
                     .await?;
             let authority = Box::pin(excluded_candidate_nonactivation(
                 database,
-                storage,
-                &root,
                 &mut history_verifier,
                 &verified_authority,
                 &candidates.authority.head.value,
@@ -264,8 +254,6 @@ pub(crate) async fn abandon_merge_candidate(
                         .await?;
                     super::pull::cleanup_merge_candidate_with_history(
                         database,
-                        storage,
-                        &root,
                         &mut history_verifier,
                         write_id.clone(),
                     )
@@ -290,28 +278,17 @@ pub(crate) async fn abandon_merge_candidate(
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    storage,
-                    &root,
                     &mut history_verifier,
                     write_id.clone(),
                 )
                 .await?;
             }
-            return finish_merge_abandonment(
-                database,
-                storage,
-                &root,
-                &mut history_verifier,
-                write_id,
-            )
-            .await;
+            return finish_merge_abandonment(database, &mut history_verifier, write_id).await;
         }
         crate::database::MergeAbandonmentState::AuthorExcluded => {
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    storage,
-                    &root,
                     &mut history_verifier,
                     write_id.clone(),
                 )
@@ -325,7 +302,6 @@ pub(crate) async fn abandon_merge_candidate(
     }
     crate::sync::store::publication::drain_store_writes_with_verifier(
         database,
-        storage,
         history_verifier.commit_verifier(),
     )
     .await?;
@@ -336,19 +312,15 @@ pub(crate) async fn abandon_merge_candidate(
     }
     super::pull::cleanup_merge_candidate_with_history(
         database,
-        storage,
-        &root,
         &mut history_verifier,
         write_id.clone(),
     )
     .await?;
-    finish_merge_abandonment(database, storage, &root, &mut history_verifier, write_id).await
+    finish_merge_abandonment(database, &mut history_verifier, write_id).await
 }
 
 async fn finish_merge_abandonment(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     write_id: crate::WriteId,
 ) -> Result<MergeCandidateAbandonment, StoreError> {
@@ -365,7 +337,6 @@ async fn finish_merge_abandonment(
             database.resume_winning_merge_candidate(write_id).await?;
             crate::sync::store::publication::drain_store_writes_with_verifier(
                 database,
-                storage,
                 history_verifier.commit_verifier(),
             )
             .await?;
@@ -378,8 +349,6 @@ async fn finish_merge_abandonment(
             if database.merge_candidate_cleanup_pending(&write_id).await? {
                 super::pull::cleanup_merge_candidate_with_history(
                     database,
-                    storage,
-                    root,
                     history_verifier,
                     write_id.clone(),
                 )
@@ -425,22 +394,14 @@ async fn authenticate_blocked_candidate(
 
 pub(crate) async fn discard_candidate_nonactivation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     candidate: &crate::database::BlockedMergeCandidate,
     revoked_grant: Option<&crate::sync::membership::MembershipGrantId>,
 ) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StoreError::InvalidOutbound(
-            "discard candidate verifier belongs to another Store root".to_string(),
-        ));
-    }
     let verified_candidate = authenticate_blocked_candidate(history_verifier, candidate).await?;
     if let ExcludedCandidateHeadObservation::MergeWinner(observation) =
         observe_excluded_candidate_head(
             database,
-            storage,
             history_verifier.commit_verifier(),
             &candidate.head.value,
             &verified_candidate,
@@ -461,8 +422,6 @@ pub(crate) async fn discard_candidate_nonactivation(
     }
     if let Some(nonactivation) = excluded_candidate_nonactivation(
         database,
-        storage,
-        root,
         history_verifier,
         &verified_candidate,
         &candidate.head.value,
@@ -477,8 +436,6 @@ pub(crate) async fn discard_candidate_nonactivation(
     };
     membership_revocation_candidate_nonactivation(
         database,
-        storage,
-        root,
         history_verifier,
         revoked_grant,
         &verified_candidate,
@@ -490,14 +447,13 @@ pub(crate) async fn discard_candidate_nonactivation(
 
 async fn membership_revocation_candidate_nonactivation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     revoked_grant: &crate::sync::membership::MembershipGrantId,
     candidate: &crate::sync::store_commit::VerifiedStoreBatchCommit,
     candidate_head: &crate::sync::store_commit::StoreDeviceHead,
     candidate_head_object: &crate::sync::storage::ExactObjectRef,
 ) -> Result<Option<crate::sync::remote_object::VerifiedCandidateNonactivation>, StoreError> {
+    let root = history_verifier.root().clone();
     let expected_stream = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
         root.store_root_hash,
         &candidate.value().author_registration,
@@ -546,8 +502,6 @@ async fn membership_revocation_candidate_nonactivation(
         };
         return Box::pin(
             crate::sync::store::pull::verify_membership_grant_revocation_nonactivation(
-                storage,
-                root,
                 history_verifier,
                 revoked_grant,
                 &witness.commit().membership_state,
@@ -567,8 +521,6 @@ async fn membership_revocation_candidate_nonactivation(
 
 pub(crate) async fn excluded_candidate_nonactivation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     candidate: &crate::sync::store_commit::VerifiedStoreBatchCommit,
     candidate_head: &crate::sync::store_commit::StoreDeviceHead,
@@ -591,7 +543,6 @@ pub(crate) async fn excluded_candidate_nonactivation(
     };
     let nonactivation = match observe_excluded_candidate_head(
         database,
-        storage,
         history_verifier.commit_verifier(),
         candidate_head,
         candidate,
@@ -602,8 +553,6 @@ pub(crate) async fn excluded_candidate_nonactivation(
         ExcludedCandidateHeadObservation::AuthorExclusion => {
             Box::pin(super::pull::verify_author_exclusion_nonactivation(
                 database,
-                storage,
-                root,
                 history_verifier.commit_verifier(),
                 &locator,
                 candidate,
@@ -716,12 +665,12 @@ pub(crate) enum ExcludedCandidateHeadObservation {
 
 pub(crate) async fn observe_excluded_candidate_head(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     candidate: &StoreDeviceHead,
     candidate_commit: &VerifiedStoreBatchCommit,
     candidate_object: &ExactObjectRef,
 ) -> Result<ExcludedCandidateHeadObservation, StoreError> {
+    let storage = commit_verifier.storage();
     let store_root_hash = commit_verifier.root().store_root_hash;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
@@ -739,7 +688,6 @@ pub(crate) async fn observe_excluded_candidate_head(
         }
         Ok(_) => read_occupied_merge_head(
             database,
-            storage,
             commit_verifier,
             candidate,
             candidate_commit,
@@ -776,13 +724,13 @@ pub(crate) fn verify_merge_candidate_nonactivations(
 
 pub(crate) async fn read_occupied_merge_head(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     expected: &StoreDeviceHead,
     expected_commit: &VerifiedStoreBatchCommit,
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
 ) -> Result<VerifiedMergeWinner, StoreError> {
+    let storage = commit_verifier.storage();
     let store_root_hash = commit_verifier.root().store_root_hash;
     let context =
         ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);

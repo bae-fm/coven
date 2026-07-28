@@ -30,12 +30,11 @@ pub(crate) async fn drain_store_writes(
     };
     let root = required_store_root(database).await?;
     let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, &root).await?;
-    drain_prepared_store_writes(database, storage, &mut commit_verifier, first).await
+    drain_prepared_store_writes(database, &mut commit_verifier, first).await
 }
 
 pub(crate) async fn drain_store_writes_with_verifier(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
 ) -> Result<u64, StoreError> {
     let _authorship = database.author_own_stream().await;
@@ -43,21 +42,15 @@ pub(crate) async fn drain_store_writes_with_verifier(
     let Some(first) = database.oldest_prepared_store_write().await? else {
         return Ok(0);
     };
-    let root = required_store_root(database).await?;
-    if commit_verifier.root() != &root {
-        return Err(StoreError::InvalidOutbound(
-            "Store write verifier belongs to another Store root".to_string(),
-        ));
-    }
-    drain_prepared_store_writes(database, storage, commit_verifier, first).await
+    drain_prepared_store_writes(database, commit_verifier, first).await
 }
 
 async fn drain_prepared_store_writes(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
     first: crate::database::PreparedStoreWriteCommit,
 ) -> Result<u64, StoreError> {
+    let storage = commit_verifier.storage();
     #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
@@ -135,7 +128,6 @@ async fn drain_prepared_store_writes(
                 }
                 let observation = read_occupied_merge_head(
                     database,
-                    storage,
                     commit_verifier,
                     head,
                     commit,
@@ -202,7 +194,6 @@ async fn drain_prepared_store_writes(
             }
             let observation = read_occupied_merge_head(
                 database,
-                storage,
                 commit_verifier,
                 head,
                 commit,

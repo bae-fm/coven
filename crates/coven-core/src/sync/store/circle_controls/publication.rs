@@ -36,8 +36,6 @@ pub(super) async fn publish_circle_operation(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     publish_circle_operation_with_history(
         database,
-        storage,
-        &root,
         &mut history_verifier,
         operation_id,
         identity,
@@ -48,13 +46,13 @@ pub(super) async fn publish_circle_operation(
 
 pub(super) async fn publish_circle_operation_with_history(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     operation_id: &CircleOperationId,
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<(), CircleOperationError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let mut journal = database
         .circle_operation(operation_id)
         .await?
@@ -70,11 +68,6 @@ pub(super) async fn publish_circle_operation_with_history(
     if root.store_root_hash != store_root_hash {
         return Err(CircleOperationError::InvalidState(
             "Circle commit names a different Store root".to_string(),
-        ));
-    }
-    if history_verifier.commit_verifier().root() != root {
-        return Err(CircleOperationError::InvalidState(
-            "Circle publication verifier belongs to another Store root".to_string(),
         ));
     }
     let circle_encryption = EncryptionService::from(
@@ -143,7 +136,7 @@ pub(super) async fn publish_circle_operation_with_history(
         let (_, state_after) = crate::sync::store::pull::retained_merge_device_state_for_order(
             database,
             storage,
-            root,
+            &root,
             &commit.order,
         )
         .await
@@ -582,7 +575,6 @@ pub(super) async fn publish_circle_operation_with_history(
         ) {
             block_lost_position(
                 database,
-                storage,
                 history_verifier.commit_verifier(),
                 &journal,
                 &head,
@@ -723,7 +715,6 @@ async fn current_merge_authority(
 #[allow(clippy::too_many_arguments)]
 async fn block_lost_position(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     journal: &CircleOperationJournal,
     head: &crate::sync::store_commit::StoreDeviceHead,
@@ -743,7 +734,6 @@ async fn block_lost_position(
     let crate::sync::store::abandonment::ExcludedCandidateHeadObservation::MergeWinner(winner) =
         crate::sync::store::abandonment::observe_excluded_candidate_head(
             database,
-            storage,
             commit_verifier,
             head,
             commit,

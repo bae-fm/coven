@@ -273,7 +273,7 @@ pub fn pull_store_commits<'a>(
             database.retained_merge_replay_inputs_with_verified_commits(retained_commit_proofs),
         )
         .await?;
-        resume_merge_retraction_cleanups(database, storage, &root, &mut history_verifier).await?;
+        resume_merge_retraction_cleanups(database, &mut history_verifier).await?;
 
         let local_frontier = database.materialized_frontier().await.map_err(|error| {
             StorePullError::Database(format!("load discovery device-state frontier: {error}"))

@@ -171,8 +171,6 @@ impl Store {
         database.insert_circle_operation(journal).await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -254,8 +252,6 @@ impl Store {
         database.insert_circle_operation(journal).await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -358,8 +354,6 @@ impl Store {
         database.insert_circle_operation(journal).await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -455,8 +449,6 @@ impl Store {
         database.insert_circle_operation(journal).await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -569,8 +561,6 @@ impl Store {
         database.insert_circle_operation(journal).await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -671,8 +661,6 @@ impl Store {
             .await?;
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &journal.operation_id,
             signer,
@@ -884,8 +872,6 @@ impl Store {
             let Some(nonactivation) = Box::pin(
                 crate::sync::store::abandonment::discard_candidate_nonactivation(
                     database,
-                    storage,
-                    &root,
                     &mut history_verifier,
                     &discard_candidate.candidate,
                     discard_candidate.revoked_grant.as_ref(),
@@ -903,8 +889,6 @@ impl Store {
         }
         crate::sync::store::pull::cleanup_circle_operation_candidate_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             operation_id,
         )
@@ -1019,8 +1003,6 @@ impl Store {
         }
         Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
-            &root,
             &mut history_verifier,
             &operation_id,
             signer,
@@ -1049,8 +1031,6 @@ impl Store {
         // before any pending operation republishes.
         Box::pin(resume_discarding_circle_operations(
             database,
-            storage,
-            &root,
             &mut history_verifier,
         ))
         .await?;
@@ -1063,8 +1043,6 @@ impl Store {
             }
             match Box::pin(publish_circle_operation_with_history(
                 database,
-                storage,
-                &root,
                 &mut history_verifier,
                 &journal.operation_id,
                 identity,
@@ -1084,15 +1062,11 @@ impl Store {
 /// idempotent candidate-exclusive cleanup and clearing its journal row.
 async fn resume_discarding_circle_operations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
 ) -> Result<(), CircleOperationError> {
     for operation_id in database.discarding_circle_operations().await? {
         crate::sync::store::pull::cleanup_circle_operation_candidate_with_history(
             database,
-            storage,
-            root,
             history_verifier,
             &operation_id,
         )

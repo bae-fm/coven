@@ -447,7 +447,6 @@ pub(crate) fn publish<'a>(
             Err(StorageError::SlotCollision(_)) => {
                 return Box::pin(resolve_head_collision(
                     database,
-                    storage,
                     activation.candidate,
                     &mut commit_verifier,
                     verified_commit,
@@ -581,7 +580,6 @@ pub(crate) fn publish<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn resolve_head_collision(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
     mut candidate: Box<PreparedStoreOperationCommit>,
     commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
     commit: crate::sync::store_commit::VerifiedStoreBatchCommit,
@@ -590,9 +588,9 @@ async fn resolve_head_collision(
     prepared_head: PreparedExactObject,
     head_prefix: String,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
+    let storage = commit_verifier.storage();
     let observation = read_occupied_merge_head(
         database,
-        storage,
         commit_verifier,
         &head,
         &commit,

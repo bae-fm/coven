@@ -182,8 +182,6 @@ impl AuthorizedStore<'_> {
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             Box::pin(publish_circle_operation_with_history(
                 self.database(),
-                self.storage(),
-                &root,
                 &mut history_verifier,
                 &journal.operation_id,
                 identity,

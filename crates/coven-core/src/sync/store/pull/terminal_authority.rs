@@ -2,13 +2,13 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 async fn verify_terminal_candidate_head(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     candidate: &VerifiedStoreBatchCommit,
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
 ) -> Result<super::remote_object::VerifiedCandidateHead, StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let candidate_ref = candidate.reference();
     let candidate_commit = candidate.value();
     let candidate_author = candidate.author();
@@ -34,7 +34,7 @@ async fn verify_terminal_candidate_head(
     let (candidate_slot, predecessor_head) =
         crate::sync::store::operations::exact_next_announcement_slot(
             storage,
-            root,
+            &root,
             &candidate_commit.author_registration,
             candidate_author,
             commit_verifier,
@@ -128,8 +128,6 @@ async fn verify_terminal_candidate_head(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_author_exclusion_nonactivation_with_verified_operation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     locator: &crate::database::AuthorExclusionActivationLocator,
     activation_head: &StoreDeviceHead,
@@ -185,8 +183,6 @@ pub(crate) async fn verify_author_exclusion_nonactivation_with_verified_operatio
         ));
     }
     let verified_candidate_head = Box::pin(verify_terminal_candidate_head(
-        storage,
-        root,
         commit_verifier,
         candidate,
         candidate_head,
@@ -213,8 +209,6 @@ pub(crate) async fn verify_author_exclusion_nonactivation_with_verified_operatio
 
 pub(crate) async fn verify_author_exclusion_nonactivation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     locator: &crate::database::AuthorExclusionActivationLocator,
     candidate: &VerifiedStoreBatchCommit,
@@ -234,8 +228,6 @@ pub(crate) async fn verify_author_exclusion_nonactivation(
     }
     Box::pin(
         verify_author_exclusion_nonactivation_with_verified_operation(
-            storage,
-            root,
             commit_verifier,
             locator,
             retained.activation_head(),
@@ -253,8 +245,6 @@ pub(crate) async fn verify_author_exclusion_nonactivation(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_membership_grant_revocation_nonactivation(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     grant_id: &super::membership::MembershipGrantId,
     membership: &crate::sync::circle_control::StoreMembershipStateRef,
@@ -264,6 +254,8 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     candidate_head: &StoreDeviceHead,
     candidate_head_object: &ExactObjectRef,
 ) -> Result<super::remote_object::VerifiedCandidateNonactivation, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let head_prefix =
         super::store_commit::semantic_prefix_from_exact_object(&activation_head.object, ".json")
             .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -286,7 +278,7 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
         ));
     }
     let witness_author =
-        load_registration_ref(storage, root, &witness_head.author_registration).await?;
+        load_registration_ref(storage, &root, &witness_head.author_registration).await?;
     let opened = super::store_objects::load_head_ref(
         storage,
         root.store_root_hash,
@@ -316,7 +308,7 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
     }
     let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
         storage,
-        root,
+        &root,
         &witness_head.author_registration,
         &witness_author.value,
         history_verifier.commit_verifier(),
@@ -413,8 +405,6 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
         ));
     }
     let verified_candidate_head = verify_terminal_candidate_head(
-        storage,
-        root,
         history_verifier.commit_verifier(),
         candidate,
         candidate_head,

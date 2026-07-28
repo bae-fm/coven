@@ -1365,8 +1365,6 @@ async fn commit_candidate(
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     let retractions = Box::pin(verified_terminal_merge_retractions(
         database,
-        storage,
-        &root,
         history_verifier,
         &merge_candidate.activation_head,
         &merge_candidate.activation_head_object,
@@ -1572,6 +1570,6 @@ async fn commit_candidate(
     for (write_id, status) in applied.write_status_notifications {
         db.notify_write_status(write_id, status);
     }
-    resume_merge_retraction_cleanups(database, storage, &root, history_verifier).await?;
+    resume_merge_retraction_cleanups(database, history_verifier).await?;
     Ok(applied.outcome)
 }
