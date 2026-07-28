@@ -137,8 +137,11 @@ pub(crate) async fn publish_device_provider_challenge(
             let exact = administrator_exact.ok_or(DeviceJoinError::ExactSlotStorageRequired)?;
             let context = cross_challenge_context(&bootstrap.request.approval.request);
             let mut commit_verifier =
-                crate::sync::store::pull::StoreCommitVerifier::new(storage, &offer.store_root)
-                    .await?;
+                crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
+                    storage,
+                    &offer.store_root,
+                    root_value.clone(),
+                )?;
             let activation = commit_verifier
                 .load_ref(&bootstrap.publication_authorization.attempt_activation)
                 .await?;
