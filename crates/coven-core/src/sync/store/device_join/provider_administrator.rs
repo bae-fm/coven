@@ -38,9 +38,14 @@ impl Store {
         bootstrap: ProvisionalDeviceBootstrap,
     ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
         let exact = self.storage().exact_slot_storage();
-        publish_device_provider_challenge(
-            self.database(),
+        let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
             &**self.storage(),
+            self.store_root(),
+        )
+        .await?;
+        publish_device_provider_challenge_with_history(
+            self.database(),
+            &mut history_verifier,
             Some(exact),
             bootstrap,
         )
@@ -65,9 +70,14 @@ impl Store {
         cancellation: DeviceJoinCancellation,
     ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
         let exact = self.storage().exact_slot_storage();
-        close_device_provider_admission(
-            self.database(),
+        let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
             &**self.storage(),
+            self.store_root(),
+        )
+        .await?;
+        close_device_provider_admission_with_history(
+            self.database(),
+            &mut history_verifier,
             Some(exact),
             identity_signer,
             cancellation,
@@ -108,9 +118,32 @@ pub trait DeviceProviderAccessAdministrator: Send + Sync {
     ) -> Result<crate::sync::provider::ProviderAccessLocator, DeviceJoinError>;
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) async fn publish_device_provider_challenge(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    administrator_exact: Option<&dyn ExactSlotStorage>,
+    bootstrap: ProvisionalDeviceBootstrap,
+) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
+    let root = database
+        .local_store_root_ref()
+        .await
+        .map_err(database_error)?
+        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    publish_device_provider_challenge_with_history(
+        database,
+        &mut history_verifier,
+        administrator_exact,
+        bootstrap,
+    )
+    .await
+}
+
+pub(crate) async fn publish_device_provider_challenge_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     bootstrap: ProvisionalDeviceBootstrap,
 ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
@@ -125,8 +158,7 @@ pub(crate) async fn publish_device_provider_challenge(
     )
     .await
     .map_err(database_error)?;
-    let root_value =
-        crate::sync::store_objects::load_store_protocol_root(storage, &offer.store_root).await?;
+    let root_value = history_verifier.verified_root_object().clone();
     bootstrap
         .request
         .approval
@@ -138,17 +170,6 @@ pub(crate) async fn publish_device_provider_challenge(
         DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
             let exact = administrator_exact.ok_or(DeviceJoinError::ExactSlotStorageRequired)?;
             let context = cross_challenge_context(&bootstrap.request.approval.request);
-            let commit_verifier =
-                crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
-                    storage,
-                    &offer.store_root,
-                    root_value.clone(),
-                )?;
-            let mut history_verifier =
-                crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(
-                    commit_verifier,
-                )
-                .await?;
             let authorization = DeviceJoinChallengePublicationAuthorization {
                 attempt: bootstrap.publication_authorization.attempt.clone(),
                 attempt_activation: bootstrap
@@ -157,7 +178,7 @@ pub(crate) async fn publish_device_provider_challenge(
                     .clone(),
             };
             let published = Box::pin(crate::sync::provider::publish_cross_principal_challenge(
-                &mut history_verifier,
+                history_verifier,
                 exact,
                 database,
                 &authorization,
@@ -327,6 +348,7 @@ pub(crate) async fn complete_device_provider_admission(
     Ok(completion)
 }
 
+#[cfg(test)]
 pub(crate) async fn close_device_provider_admission(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -334,6 +356,31 @@ pub(crate) async fn close_device_provider_admission(
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
 ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+    let root = database
+        .local_store_root_ref()
+        .await
+        .map_err(database_error)?
+        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    close_device_provider_admission_with_history(
+        database,
+        &mut history_verifier,
+        administrator_exact,
+        identity_signer,
+        cancellation,
+    )
+    .await
+}
+
+pub(crate) async fn close_device_provider_admission_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    administrator_exact: Option<&dyn ExactSlotStorage>,
+    identity_signer: &UserKeypair,
+    cancellation: DeviceJoinCancellation,
+) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
@@ -356,11 +403,7 @@ pub(crate) async fn close_device_provider_admission(
         )) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
         _ => {}
     }
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let root = history_verifier.root().clone();
     let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
@@ -375,10 +418,8 @@ pub(crate) async fn close_device_provider_admission(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
     let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
-        &mut history_verifier,
+        history_verifier,
         &attempt_ref,
         &owner,
     )
