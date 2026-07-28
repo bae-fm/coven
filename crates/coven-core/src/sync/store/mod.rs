@@ -69,19 +69,6 @@ pub use device_exclusion::{
     StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo,
     StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
 };
-#[cfg(test)]
-pub(crate) use device_join::{
-    abandon_device_join, activate_device_join_cleanup, cancel_device_join,
-    close_device_provider_admission, complete_owner_device_join_cleanup,
-    load_store_device_join_actions, load_store_device_join_status, prepare_device_join_cleanup,
-    revoke_device_provider_admission_writes, revoke_joining_device_writes,
-};
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use device_join::{
-    accept_device_registration_request, authorize_device_provider_access, begin_device_join,
-    complete_device_provider_admission, finalize_device_join,
-    load_current_device_join_authorization, publish_device_provider_challenge,
-};
 #[doc(hidden)]
 pub use device_join::{
     accept_joiner_device_join_cleanup, close_joining_device, complete_device_join,
@@ -92,8 +79,18 @@ pub use device_join::{
     DeviceJoinRoleProgress, JoinerJoinProgress, OwnerJoinProgress, PreparedDeviceJoinObject,
     ProviderAdminJoinProgress,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use device_join::{
+    begin_device_join, complete_device_provider_admission, load_current_device_join_authorization,
+    publish_device_provider_challenge,
+};
 #[doc(hidden)]
 pub use device_join::{bootstrap_joining_device, materialize_joined_store_activation};
+#[cfg(test)]
+pub(crate) use device_join::{
+    close_device_provider_admission, complete_owner_device_join_cleanup,
+    load_store_device_join_actions, load_store_device_join_status,
+};
 pub use device_join::{
     DeviceJoinAbandonment, DeviceJoinAbandonmentRef, DeviceJoinAction, DeviceJoinActivation,
     DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
@@ -131,8 +128,6 @@ pub use membership::{seed_head_watermark, unwrap_store_keyring};
 pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use operations::load_local_store_authority as load_local_store_authority_for_test;
-#[cfg(test)]
-pub(crate) use operations::prepare_plan as prepare_store_operation_plan_for_test;
 pub(crate) use operations::CircleAckActivation;
 pub(crate) use operations::PreparedStoreOperationCommit;
 #[cfg(any(test, feature = "test-utils"))]
@@ -189,6 +184,216 @@ pub use snapshot::{
     bootstrap_from_snapshot, create_snapshot, load_store_snapshot_ref, reconcile_snapshot_blobs,
     BootstrapResult, SnapshotBlobReconcile, SnapshotError,
 };
+
+#[cfg(any(test, feature = "test-utils"))]
+async fn device_join_history_verifier<'a>(
+    database: &StoreDatabase,
+    storage: &'a dyn SyncStorage,
+) -> Result<pull::MergeHistoryVerifier<'a>, DeviceJoinError> {
+    let root = database
+        .local_store_root_ref()
+        .await
+        .map_err(|error| DeviceJoinError::Store(error.to_string()))?
+        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(DeviceJoinError::from)
+}
+
+#[cfg(test)]
+pub(crate) async fn abandon_device_join(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    offer: DeviceJoinOffer,
+) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::abandon_device_join(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        offer,
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn accept_device_registration_request(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    request: DeviceRegistrationRequest,
+) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::accept_device_registration_request(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        request,
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn authorize_device_provider_access(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    administrator_exact: Option<&dyn crate::storage::cloud::ExactSlotStorage>,
+    access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    request: DeviceProviderAccessRequest,
+) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::authorize_device_provider_access(
+        database,
+        &mut history_verifier,
+        administrator_exact,
+        access_administrator,
+        authorization,
+        identity,
+        request,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn cancel_device_join(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    attempt: super::store_commit::DeviceJoinAttemptRef,
+) -> Result<DeviceJoinCancellation, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::cancel_device_join(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        attempt,
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn finalize_device_join(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    completion: DeviceProviderAdmissionCompletion,
+) -> Result<DeviceJoinActivation, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::finalize_device_join(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        completion,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_device_join_cleanup(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    executor_exact: &dyn crate::storage::cloud::ExactSlotStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    cancellation: DeviceJoinCancellation,
+    administrator_terminal: ProviderAdminJoinTerminal,
+    joiner_terminal: JoinerJoinTerminal,
+) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::prepare_device_join_cleanup(
+        database,
+        &mut history_verifier,
+        executor_exact,
+        authorization,
+        identity,
+        cancellation,
+        administrator_terminal,
+        joiner_terminal,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn activate_device_join_cleanup(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    attempt_id: super::store_commit::DeviceJoinAttemptId,
+    receipt: DeviceJoinCleanupReceipt,
+) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::activate_device_join_cleanup(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        attempt_id,
+        receipt,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revoke_device_provider_admission_writes(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    cancellation: DeviceJoinCancellation,
+    executor: &dyn DeviceJoinWriteRevocationExecutor,
+    executor_grant: super::provider::ProviderAdminGrantId,
+) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::revoke_device_provider_admission_writes(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        cancellation,
+        executor,
+        executor_grant,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revoke_joining_device_writes(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    authorization: &crate::sync::membership::MembershipChain,
+    identity: &UserKeypair,
+    cancellation: DeviceJoinCancellation,
+    executor: &dyn DeviceJoinWriteRevocationExecutor,
+    executor_grant: super::provider::ProviderAdminGrantId,
+) -> Result<JoinerJoinTerminal, DeviceJoinError> {
+    let mut history_verifier = device_join_history_verifier(database, storage).await?;
+    device_join::revoke_joining_device_writes(
+        database,
+        &mut history_verifier,
+        authorization,
+        identity,
+        cancellation,
+        executor,
+        executor_grant,
+    )
+    .await
+}
 
 #[cfg(feature = "test-utils")]
 #[doc(hidden)]
@@ -247,6 +452,29 @@ pub(crate) async fn exact_next_announcement_slot_for_test(
         registration,
         &mut verifier,
         previous.as_ref(),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn prepare_store_operation_plan_for_test(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    membership: &crate::sync::membership::MembershipChain,
+    device_id: &str,
+    identity: &UserKeypair,
+) -> Result<operations::StoreOperationCommitPlan, StoreError> {
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| StoreError::InvalidOutbound("test Store root is absent".to_string()))?;
+    let mut history_verifier = pull::MergeHistoryVerifier::new(storage, &root).await?;
+    operations::prepare_plan(
+        database,
+        &mut history_verifier,
+        membership,
+        device_id,
+        identity,
     )
     .await
 }

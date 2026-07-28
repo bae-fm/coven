@@ -366,7 +366,7 @@ fn prepare_merge_store_candidate<'a>(
             database,
         ))
         .await?;
-        let plan = Box::pin(crate::sync::store::operations::prepare_plan_with_history(
+        let plan = Box::pin(crate::sync::store::operations::prepare_plan(
             database,
             history_verifier,
             &membership,

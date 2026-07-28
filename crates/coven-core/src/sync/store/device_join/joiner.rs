@@ -18,11 +18,12 @@ impl Store {
         revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
         executor_grant: ProviderAdminGrantId,
     ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         revoke_joining_device_writes(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             cancellation,
             revocation_executor,
@@ -699,7 +700,7 @@ pub async fn close_joining_device(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn revoke_joining_device_writes(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
@@ -718,7 +719,7 @@ pub(crate) async fn revoke_joining_device_writes(
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
         database,
-        storage,
+        history_verifier,
         authorization,
         identity_signer,
         cancellation,

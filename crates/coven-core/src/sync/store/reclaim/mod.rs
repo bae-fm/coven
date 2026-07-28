@@ -1857,7 +1857,7 @@ async fn prepare_reclaim_authorization(
     if reclaim_target_is_recorded(database, &claim.target()).await? {
         return Ok(());
     }
-    let plan = Box::pin(super::operations::prepare_plan_with_history(
+    let plan = Box::pin(super::operations::prepare_plan(
         database,
         history_verifier,
         membership,
@@ -2874,7 +2874,7 @@ async fn drive_reclaim_candidate(
         // which takes this same turn.
         let outcome = {
             let _authorship = database.author_own_stream().await;
-            Box::pin(super::operations::publish_prepared_with_history(
+            Box::pin(super::operations::publish_prepared(
                 database,
                 history_verifier,
                 candidate,
@@ -2898,7 +2898,7 @@ async fn drive_reclaim_candidate(
                 nonactivation,
                 ..
             } => {
-                let plan = Box::pin(super::operations::prepare_plan_with_history(
+                let plan = Box::pin(super::operations::prepare_plan(
                     database,
                     history_verifier,
                     membership,
@@ -2995,7 +2995,7 @@ async fn prepare_reclaim_receipt(
         ));
     }
 
-    let plan = Box::pin(super::operations::prepare_plan_with_history(
+    let plan = Box::pin(super::operations::prepare_plan(
         database,
         history_verifier,
         membership,

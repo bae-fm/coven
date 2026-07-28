@@ -683,7 +683,7 @@ async fn prepare_proposal(
     let db = database.sqlite();
     let device_id = local_device_id(db).await?;
     let plan = Box::new(
-        Box::pin(super::operations::prepare_plan_with_history(
+        Box::pin(super::operations::prepare_plan(
             database,
             history_verifier,
             authorization,
@@ -924,7 +924,7 @@ async fn prepare_outcome(
     let storage = history_verifier.storage();
     let db = database.sqlite();
     let device_id = local_device_id(db).await?;
-    let plan = Box::pin(super::operations::prepare_plan_with_history(
+    let plan = Box::pin(super::operations::prepare_plan(
         database,
         history_verifier,
         authorization,
@@ -1098,7 +1098,7 @@ async fn publish_device_exclusion_candidate(
     // takes this same turn.
     let publication = Box::new({
         let _authorship = database.author_own_stream().await;
-        let publish = super::operations::publish_prepared_with_history(
+        let publish = super::operations::publish_prepared(
             database,
             history_verifier,
             Box::new(candidate),
@@ -1302,7 +1302,7 @@ async fn prepare_replacement_candidate(
         ));
     };
     let device_id = local_device_id(db).await?;
-    let plan = super::operations::prepare_plan_with_history(
+    let plan = super::operations::prepare_plan(
         database,
         history_verifier,
         authorization,

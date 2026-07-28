@@ -34,6 +34,20 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> CloudSyncStorage {
     .expect("construct acknowledgement test storage")
 }
 
+async fn history_verifier<'a>(
+    database: &StoreDatabase,
+    storage: &'a CloudSyncStorage,
+) -> crate::sync::store::pull::MergeHistoryVerifier<'a> {
+    let root = database
+        .local_store_root_ref()
+        .await
+        .expect("read acknowledgement test root")
+        .expect("acknowledgement test Store root");
+    crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .expect("verify acknowledgement test history")
+}
+
 async fn initialize(db: &Database, storage: &CloudSyncStorage, signer: &UserKeypair) {
     crate::sync::store::protocol_root::create_store(
         &store_database(db),
@@ -101,9 +115,10 @@ async fn persist_candidate(
         .await
         .unwrap()
         .expect("local Store device id");
+    let mut history_verifier = history_verifier(&database, storage).await;
     let plan = crate::sync::store::operations::prepare_plan(
         &database,
-        storage,
+        &mut history_verifier,
         &membership,
         &device_id,
         signer,
@@ -169,9 +184,10 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
         .await
         .unwrap()
         .expect("local Store device id");
+    let mut history_verifier = history_verifier(&database, &storage).await;
     let competing_plan = Box::pin(crate::sync::store::operations::prepare_plan(
         &database,
-        &storage,
+        &mut history_verifier,
         &membership,
         &device_id,
         &signer,
@@ -491,9 +507,11 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .mark_remote_object_uploaded(acknowledgement_remote)
         .await
         .expect("record acknowledgement upload");
+    let database = StoreDatabase::new(&db);
+    let mut history_verifier = history_verifier(&database, &storage).await;
     crate::sync::store::operations::publish_prepared(
-        &StoreDatabase::new(&db),
-        &storage,
+        &database,
+        &mut history_verifier,
         Box::new(candidate),
         None,
         None,

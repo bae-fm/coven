@@ -626,7 +626,7 @@ impl AuthorizedStore<'_> {
                 crate::database::OutboundStoreAckActivation::AwaitingCandidate => {
                     let plan = {
                         let authority = self.operation_authority();
-                        operations::prepare_plan_with_history(
+                        operations::prepare_plan(
                             authority.database,
                             authority.history_verifier,
                             &*authority.membership,
@@ -688,7 +688,7 @@ impl AuthorizedStore<'_> {
             let _authorship = self.database().author_own_stream().await;
             let publication = {
                 let authority = self.operation_authority();
-                Box::pin(operations::publish_prepared_with_history(
+                Box::pin(operations::publish_prepared(
                     authority.database,
                     authority.history_verifier,
                     Box::new(candidate),

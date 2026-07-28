@@ -215,6 +215,7 @@ pub(crate) async fn publish_prepared_remote_objects(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn required_store_root(
     database: &StoreDatabase,
 ) -> Result<StoreRootRef, StoreError> {

@@ -124,7 +124,7 @@ async fn build_revoke_mutation(
                     "local Store device registration is absent".to_string(),
                 )
             })?;
-        let operation = Box::pin(crate::sync::store::operations::prepare_plan_with_history(
+        let operation = Box::pin(crate::sync::store::operations::prepare_plan(
             database,
             history_verifier,
             chain,

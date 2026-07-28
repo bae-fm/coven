@@ -42,7 +42,7 @@ async fn resume_request_publication_state(
                 // plan, which takes this same turn.
                 let outcome = {
                     let _authorship = database.author_own_stream().await;
-                    crate::sync::store::operations::publish_prepared_with_history(
+                    crate::sync::store::operations::publish_prepared(
                         database,
                         history_verifier,
                         candidate,
@@ -144,7 +144,7 @@ impl Store {
             crate::sync::store_objects::load_registration_ref(storage, &root, &member_registration)
                 .await
                 .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-        let plan = crate::sync::store::operations::prepare_plan_with_history(
+        let plan = crate::sync::store::operations::prepare_plan(
             database,
             history_verifier,
             membership,

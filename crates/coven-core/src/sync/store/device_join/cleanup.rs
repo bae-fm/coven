@@ -13,13 +13,14 @@ impl Store {
         administrator_terminal: ProviderAdminJoinTerminal,
         joiner_terminal: JoinerJoinTerminal,
     ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         let exact = exact_slot_storage(self);
         prepare_device_join_cleanup(
-            authorized.database(),
-            authorized.storage(),
+            authority.database,
+            authority.history_verifier,
             exact,
-            authorized.membership(),
+            authority.membership,
             identity_signer,
             cancellation,
             administrator_terminal,
@@ -34,11 +35,12 @@ impl Store {
         identity_signer: &UserKeypair,
         receipt: DeviceJoinCleanupReceipt,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         activate_device_join_cleanup(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             receipt.receipt.attempt_id,
             receipt,
@@ -63,7 +65,7 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
 
 pub(crate) fn prepare_device_join_cleanup<'a>(
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
+    history_verifier: &'a mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     executor_exact: &'a dyn ExactSlotStorage,
     authorization: &'a MembershipChain,
     identity_signer: &'a UserKeypair,
@@ -75,7 +77,7 @@ pub(crate) fn prepare_device_join_cleanup<'a>(
 > {
     Box::pin(prepare_device_join_cleanup_inner(
         database,
-        storage,
+        history_verifier,
         executor_exact,
         authorization,
         identity_signer,
@@ -88,7 +90,7 @@ pub(crate) fn prepare_device_join_cleanup<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_device_join_cleanup_inner(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     executor_exact: &dyn ExactSlotStorage,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
@@ -96,6 +98,7 @@ async fn prepare_device_join_cleanup_inner(
     administrator_terminal: Box<ProviderAdminJoinTerminal>,
     joiner_terminal: Box<JoinerJoinTerminal>,
 ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
@@ -118,11 +121,7 @@ async fn prepare_device_join_cleanup_inner(
     if durable_cancellation != cancellation.as_ref() {
         return Err(DeviceJoinError::JournalConflict);
     }
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let root = history_verifier.root().clone();
     let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
@@ -137,10 +136,8 @@ async fn prepare_device_join_cleanup_inner(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
     let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
-        &mut history_verifier,
+        history_verifier,
         &attempt_ref,
         &owner,
     )
@@ -212,7 +209,7 @@ async fn prepare_device_join_cleanup_inner(
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(_)) => {
             let plan = crate::sync::store::operations::prepare_plan(
                 database,
-                storage,
+                history_verifier,
                 authorization,
                 &local_device_id,
                 identity_signer,
@@ -325,7 +322,7 @@ async fn prepare_device_join_cleanup_inner(
 
 pub(super) async fn sign_device_join_producer_write_revocation(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
@@ -333,14 +330,11 @@ pub(super) async fn sign_device_join_producer_write_revocation(
     revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
     executor_grant: ProviderAdminGrantId,
 ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     require_cancelled_outcome(&cancellation.outcome)?;
     let attempt_ref = cancellation.outcome.attempt().clone();
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let root = history_verifier.root().clone();
     let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
@@ -355,10 +349,8 @@ pub(super) async fn sign_device_join_producer_write_revocation(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
     let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
-        &mut history_verifier,
+        history_verifier,
         &attempt_ref,
         &owner,
     )
@@ -463,12 +455,13 @@ pub(super) async fn sign_device_join_producer_write_revocation(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn activate_device_join_cleanup(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     attempt_id: DeviceJoinAttemptId,
     receipt: DeviceJoinCleanupReceipt,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::Owner)
         .await?
@@ -496,17 +489,13 @@ pub(crate) async fn activate_device_join_cleanup(
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
     )
     .await?;
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let root = history_verifier.root();
     let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinCleanupReceipt,
@@ -530,7 +519,7 @@ pub(crate) async fn activate_device_join_cleanup(
     }
     let activation_ref = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::CleanupReceipt(
             receipt.receipt.clone(),

@@ -457,7 +457,7 @@ pub(crate) async fn publish_prepared_merge_membership_activation_with_history(
         publication.head_ref.clone(),
     )?;
     let _authorship = database.author_own_stream().await;
-    operations::publish_prepared_with_history(
+    operations::publish_prepared(
         database,
         history_verifier,
         candidate,

@@ -1,4 +1,3 @@
-use super::journal::database_error;
 use super::*;
 
 pub(super) async fn authorize_store(store: &Store) -> Result<AuthorizedStore<'_>, DeviceJoinError> {
@@ -37,18 +36,4 @@ pub(crate) async fn load_current_device_join_authorization(
         .await
         .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
     Ok(membership)
-}
-
-pub(super) async fn load_local_store_root(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, DeviceJoinError> {
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    crate::sync::store_objects::load_store_protocol_root(storage, &root)
-        .await
-        .map_err(DeviceJoinError::from)
 }

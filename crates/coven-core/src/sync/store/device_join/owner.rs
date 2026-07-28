@@ -1,4 +1,4 @@
-use super::authority::{authorize_store, load_local_store_root, resolved_provider_admin};
+use super::authority::{authorize_store, resolved_provider_admin};
 use super::joiner::cross_challenge_context;
 use super::journal::{
     advance_store_journal, begin_store_journal, database_error, load_store_journal, provider_error,
@@ -31,11 +31,12 @@ impl Store {
         identity_signer: &UserKeypair,
         offer: DeviceJoinOffer,
     ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         abandon_device_join(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             offer,
         )
@@ -48,11 +49,12 @@ impl Store {
         identity_signer: &UserKeypair,
         request: DeviceRegistrationRequest,
     ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         accept_device_registration_request(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             request,
         )
@@ -65,11 +67,12 @@ impl Store {
         identity_signer: &UserKeypair,
         attempt: DeviceJoinAttemptRef,
     ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         cancel_device_join(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             attempt,
         )
@@ -82,11 +85,12 @@ impl Store {
         identity_signer: &UserKeypair,
         completion: DeviceProviderAdmissionCompletion,
     ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         finalize_device_join(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             completion,
         )
@@ -189,11 +193,12 @@ pub(crate) async fn begin_device_join(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn abandon_device_join(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     offer: DeviceJoinOffer,
 ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let current = load_store_journal(db, offer.attempt_id, DeviceJoinRole::Owner)
         .await?
@@ -275,7 +280,7 @@ pub(crate) async fn abandon_device_join(
     abandonment_ref.verify(&abandonment_object, &owner)?;
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
@@ -283,7 +288,7 @@ pub(crate) async fn abandon_device_join(
     .await?;
     let activation = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::Abandonment(abandonment_ref.clone()),
     )
@@ -309,13 +314,14 @@ pub(crate) async fn abandon_device_join(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept_device_registration_request(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     request: DeviceRegistrationRequest,
 ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
-    let root_value = load_local_store_root(database, storage).await?;
+    let root_value = history_verifier.verified_root_object();
     request.verify()?;
     let offer = &request.approval.request.offer;
     let owner =
@@ -329,17 +335,12 @@ pub(crate) async fn accept_device_registration_request(
     .map_err(database_error)?;
     request
         .approval
-        .verify(&root_value, &owner, &administrator)?;
-    let commit_verifier = crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
-        storage,
-        &offer.store_root,
-        root_value,
-    )?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
-            .await?;
+        .verify(root_value, &owner, &administrator)?;
+    if history_verifier.root() != &offer.store_root {
+        return Err(DeviceJoinError::OfferMismatch);
+    }
     crate::sync::store::pull::verify_accepted_provider_access_activation(
-        &mut history_verifier,
+        history_verifier,
         &request.approval.access_grant,
         &offer.provider_admin,
         &administrator,
@@ -376,7 +377,7 @@ pub(crate) async fn accept_device_registration_request(
     }
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
@@ -444,7 +445,7 @@ pub(crate) async fn accept_device_registration_request(
     };
     let activation = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::Attempt(attempt_ref.clone()),
     )
@@ -474,11 +475,12 @@ pub(crate) async fn accept_device_registration_request(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cancel_device_join(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     attempt_ref: DeviceJoinAttemptRef,
 ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let current = load_store_journal(db, attempt_ref.attempt_id, DeviceJoinRole::Owner)
         .await?
@@ -504,11 +506,7 @@ pub(crate) async fn cancel_device_join(
     if expected_attempt != &attempt_ref {
         return Err(DeviceJoinError::AttemptMismatch);
     }
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(database_error)?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+    let root = history_verifier.root().clone();
     let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
@@ -523,10 +521,8 @@ pub(crate) async fn cancel_device_join(
         .activated_store_device_registration(unverified_attempt.owner_registration.clone())
         .await
         .map_err(database_error)?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root).await?;
     let attempt = Box::pin(crate::sync::store::pull::load_verified_device_join_attempt(
-        &mut history_verifier,
+        history_verifier,
         &attempt_ref,
         &owner,
     ))
@@ -610,7 +606,7 @@ pub(crate) async fn cancel_device_join(
     }
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
@@ -618,7 +614,7 @@ pub(crate) async fn cancel_device_join(
     .await?;
     let outcome_activation = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
@@ -761,11 +757,12 @@ pub async fn observe_device_join_abandonment(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_device_join(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     completion: DeviceProviderAdmissionCompletion,
 ) -> Result<DeviceJoinActivation, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let attempt_ref = completion.readiness.proof.attempt.clone();
     let attempt_id = attempt_ref.attempt_id;
@@ -799,10 +796,11 @@ pub(crate) async fn finalize_device_join(
         .await
         .map_err(database_error)?;
     let owner_signer = owner.device_signer(identity_signer)?;
-    let mut history_verifier =
-        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
+    if history_verifier.root() != &offer.store_root {
+        return Err(DeviceJoinError::OfferMismatch);
+    }
     let attempt = crate::sync::store::pull::load_verified_device_join_attempt(
-        &mut history_verifier,
+        history_verifier,
         &attempt_ref,
         &owner,
     )
@@ -963,7 +961,7 @@ pub(crate) async fn finalize_device_join(
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
@@ -971,7 +969,7 @@ pub(crate) async fn finalize_device_join(
     .await?;
     let activation_ref = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),

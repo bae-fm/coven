@@ -1,13 +1,5 @@
 use super::*;
 
-pub(crate) async fn publish_prepared_store_operation(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    prepared: Box<PreparedStoreOperationCommit>,
-) -> Result<StoreOperationPublicationOutcome, StoreError> {
-    publish_prepared(database, storage, prepared, None, None).await
-}
-
 pub(crate) struct PreparedStoreOperationActivation {
     pub(crate) candidate: Box<PreparedStoreOperationCommit>,
     pub(crate) retained_operation_objects: Vec<ExactObjectRef>,
@@ -196,7 +188,7 @@ pub(crate) fn retained_store_operation_objects(
 
 pub(crate) async fn activate_store_operation_commit(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     plan: StoreOperationCommitPlan,
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreError> {
@@ -204,8 +196,9 @@ pub(crate) async fn activate_store_operation_commit(
     // stream, and it must still be held when the head below takes the position
     // the plan was composed against. Dropping it here would let another local
     // writer take that position mid-activation.
-    let prepared = prepare_candidate_borrowed(database, storage, &plan, batch).await?;
-    match publish_prepared_store_operation(database, storage, Box::new(prepared)).await? {
+    let prepared =
+        prepare_candidate_borrowed(database, history_verifier.storage(), &plan, batch).await?;
+    match publish_prepared(database, history_verifier, Box::new(prepared), None, None).await? {
         StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
         StoreOperationPublicationOutcome::Nonactivated(reference) => {
             Err(StoreError::InvalidOutbound(format!(

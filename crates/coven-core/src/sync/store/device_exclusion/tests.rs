@@ -2984,9 +2984,18 @@ async fn stage_uploaded_proposal(
     .await
     .expect("load exclusion test membership");
     let device_id = local_device_id(db).await.expect("local device id");
+    let database = store_database(db);
+    let root = database
+        .local_store_root_ref()
+        .await
+        .expect("read exclusion test root")
+        .expect("exclusion test Store root");
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .expect("verify exclusion test history");
     let plan = crate::sync::store::operations::prepare_plan(
-        &store_database(db),
-        storage,
+        &database,
+        &mut history_verifier,
         &membership,
         &device_id,
         signer,

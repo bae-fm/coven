@@ -67,25 +67,6 @@ pub(crate) fn next_store_sequence(
 
 pub(crate) async fn prepare_plan(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    candidate_membership: &crate::sync::membership::MembershipChain,
-    device_id: &str,
-    keypair: &UserKeypair,
-) -> Result<StoreOperationCommitPlan, StoreError> {
-    let root = required_store_root(database).await?;
-    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
-    prepare_plan_with_history(
-        database,
-        &mut history_verifier,
-        candidate_membership,
-        device_id,
-        keypair,
-    )
-    .await
-}
-
-pub(crate) async fn prepare_plan_with_history(
-    database: &StoreDatabase,
     history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     candidate_membership: &crate::sync::membership::MembershipChain,
     device_id: &str,
@@ -326,25 +307,6 @@ pub(crate) async fn prepare_candidate_borrowed(
 }
 
 pub(crate) async fn publish_prepared(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    candidate: Box<PreparedStoreOperationCommit>,
-    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-    membership_completion: Option<StoreMembershipJournalCompletion>,
-) -> Result<StoreOperationPublicationOutcome, StoreError> {
-    let root = required_store_root(database).await?;
-    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
-    publish_prepared_with_history(
-        database,
-        &mut history_verifier,
-        candidate,
-        membership_objects,
-        membership_completion,
-    )
-    .await
-}
-
-pub(crate) async fn publish_prepared_with_history(
     database: &StoreDatabase,
     history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
     candidate: Box<PreparedStoreOperationCommit>,

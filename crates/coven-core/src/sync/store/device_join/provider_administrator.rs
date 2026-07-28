@@ -1,4 +1,4 @@
-use super::authority::{authorize_store, load_local_store_root, resolved_provider_admin};
+use super::authority::{authorize_store, resolved_provider_admin};
 use super::cleanup::{
     ensure_exact_slot_absent, require_cancelled_outcome, sign_device_join_producer_write_revocation,
 };
@@ -17,14 +17,15 @@ impl Store {
         request: DeviceProviderAccessRequest,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         let exact = self.storage().exact_slot_storage();
         authorize_device_provider_access(
-            authorized.database(),
-            authorized.storage(),
+            authority.database,
+            authority.history_verifier,
             Some(exact),
             access_administrator,
-            authorized.membership(),
+            authority.membership,
             identity_signer,
             request,
         )
@@ -82,11 +83,12 @@ impl Store {
         revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
         executor_grant: ProviderAdminGrantId,
     ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
-        let authorized = authorize_store(self).await?;
+        let mut authorized = authorize_store(self).await?;
+        let authority = authorized.operation_authority();
         revoke_device_provider_admission_writes(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
+            authority.database,
+            authority.history_verifier,
+            authority.membership,
             identity_signer,
             cancellation,
             revocation_executor,
@@ -506,7 +508,7 @@ pub(crate) async fn close_device_provider_admission(
 
 pub(crate) async fn revoke_device_provider_admission_writes(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     cancellation: DeviceJoinCancellation,
@@ -540,7 +542,7 @@ pub(crate) async fn revoke_device_provider_admission_writes(
     }
     let revocation = Box::pin(sign_device_join_producer_write_revocation(
         database,
-        storage,
+        history_verifier,
         authorization,
         identity_signer,
         cancellation,
@@ -566,15 +568,16 @@ pub(crate) async fn revoke_device_provider_admission_writes(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_device_provider_access(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     administrator_exact: Option<&dyn ExactSlotStorage>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     authorization: &MembershipChain,
     identity_signer: &UserKeypair,
     request: DeviceProviderAccessRequest,
 ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
-    let root_value = load_local_store_root(database, storage).await?;
+    let root_value = history_verifier.verified_root_object().clone();
     let owner = database
         .activated_store_device_registration(request.offer.owner_registration.clone())
         .await
@@ -698,7 +701,7 @@ pub(crate) async fn authorize_device_provider_access(
         StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
     let plan = crate::sync::store::operations::prepare_plan(
         database,
-        storage,
+        history_verifier,
         authorization,
         &local_device_id,
         identity_signer,
@@ -706,7 +709,7 @@ pub(crate) async fn authorize_device_provider_access(
     .await?;
     let activation = crate::sync::store::operations::activate_store_operation_commit(
         database,
-        storage,
+        history_verifier,
         plan,
         crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant_ref.clone()),
     )

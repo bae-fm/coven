@@ -23,9 +23,15 @@ async fn prepare_plan(
     device_id: &str,
     keypair: &UserKeypair,
 ) -> Result<StoreOperationCommitPlan, StoreError> {
+    let database = StoreDatabase::new(db);
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| StoreError::InvalidOutbound("test Store root is absent".to_string()))?;
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
     super::prepare_plan(
-        &StoreDatabase::new(db),
-        storage,
+        &database,
+        &mut history_verifier,
         candidate_membership,
         device_id,
         keypair,
