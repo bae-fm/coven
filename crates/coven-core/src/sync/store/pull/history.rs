@@ -1126,6 +1126,19 @@ impl<'a> MergeHistoryVerifier<'a> {
         root: &'a StoreRootRef,
     ) -> Result<Self, StorePullError> {
         let commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+        Self::from_commit_verifier(storage, root, commit_verifier).await
+    }
+
+    pub(crate) async fn from_commit_verifier(
+        storage: &'a dyn SyncStorage,
+        root: &'a StoreRootRef,
+        commit_verifier: StoreCommitVerifier<'a>,
+    ) -> Result<Self, StorePullError> {
+        if commit_verifier.root() != root {
+            return Err(StorePullError::Database(
+                "commit verifier belongs to another Store root".to_string(),
+            ));
+        }
         let verified_root = commit_verifier.verified_root();
         let founder = Box::pin(load_founder_registration_with_root(
             storage,
@@ -1174,6 +1187,10 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) fn commit_verifier(&mut self) -> &mut StoreCommitVerifier<'a> {
         &mut self.commit_verifier
+    }
+
+    pub(crate) fn into_commit_verifier(self) -> StoreCommitVerifier<'a> {
+        self.commit_verifier
     }
 
     pub(super) fn into_history(self) -> VerifiedMergeHistory {

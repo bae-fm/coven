@@ -18,14 +18,21 @@ pub(crate) fn membership_authorizes(
 }
 
 pub(crate) async fn verify_merge_membership_control(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
+    verified_commit: &VerifiedStoreBatchCommit,
 ) -> Result<VerifiedCircleActivations, String> {
-    let history = verify_merge_history_refs(storage, root, commit_predecessor_references(commit))
+    if verified_commit.store_root_hash() != root.store_root_hash {
+        return Err("authenticated Merge membership control belongs to another Store root".into());
+    }
+    let commit_ref = verified_commit.reference();
+    let commit = verified_commit.value();
+    history_verifier
+        .verify_refs(commit_predecessor_references(commit))
         .await
         .map_err(|error| error.to_string())?;
+    let history = history_verifier.history();
     let states = history
         .commits
         .iter()

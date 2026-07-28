@@ -314,19 +314,6 @@ pub(crate) async fn publish_prepared(
     let head = candidate.head.clone();
     let prepared_head = candidate.prepared_head.clone();
     let history_summary = candidate.history_summary.clone();
-    let circle_activations = if candidate.commit.control().is_some() {
-        super::pull::verify_merge_membership_control(
-            storage,
-            &root,
-            &candidate.reference,
-            &candidate.commit,
-        )
-        .await
-        .map_err(StoreError::InvalidOutbound)?
-    } else {
-        VerifiedCircleActivations::none(&candidate.commit, &candidate.reference)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-    };
     publish(
         database,
         storage,
@@ -340,7 +327,6 @@ pub(crate) async fn publish_prepared(
         history_summary,
         membership_objects,
         membership_completion,
-        circle_activations,
     )
     .await
 }
@@ -387,7 +373,6 @@ pub(crate) fn publish<'a>(
     history_summary: crate::sync::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     membership_completion: Option<StoreMembershipJournalCompletion>,
-    circle_activations: VerifiedCircleActivations,
 ) -> Pin<Box<dyn Future<Output = Result<StoreOperationPublicationOutcome, StoreError>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -398,6 +383,27 @@ pub(crate) fn publish<'a>(
             .authenticate_bytes(&reference, &activation.candidate.commit.to_bytes())
             .await?;
         let commit = verified_commit.value().clone();
+        let circle_activations = if commit.control().is_some() {
+            let mut history_verifier = super::pull::MergeHistoryVerifier::from_commit_verifier(
+                storage,
+                &root,
+                commit_verifier,
+            )
+            .await?;
+            let activations = super::pull::verify_merge_membership_control(
+                &mut history_verifier,
+                storage,
+                &root,
+                &verified_commit,
+            )
+            .await
+            .map_err(StoreError::InvalidOutbound)?;
+            commit_verifier = history_verifier.into_commit_verifier();
+            activations
+        } else {
+            VerifiedCircleActivations::none(&commit, &reference)
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+        };
         upload_commit(storage, &activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
         let authorization = Box::pin(super::pull::load_retained_merge_outbound_authorization(
