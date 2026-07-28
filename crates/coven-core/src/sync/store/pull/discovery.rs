@@ -27,15 +27,22 @@ impl MergeStreamBlock {
 
 pub(crate) async fn load_active_merge_registrations(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    history_verifier: &MergeHistoryVerifier<'_>,
 ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let durable = database
         .activated_store_device_registration_records()
         .await?;
     let mut verified = Vec::with_capacity(durable.len());
     for (reference, expected) in durable {
-        let opened = load_registration_ref(storage, root, &reference).await?;
+        let opened = load_registration_ref_with_root(
+            storage,
+            root,
+            history_verifier.verified_root(),
+            &reference,
+        )
+        .await?;
         if opened.value != expected {
             return Err(StorePullError::Database(format!(
                 "activated Store registration {} differs from its exact remote bytes",
@@ -57,11 +64,12 @@ pub(crate) async fn load_active_merge_registrations(
 }
 
 pub(crate) async fn discover_merge_owner_recoveries(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    protocol: &super::store_commit::StoreProtocolRoot,
+    history_verifier: &MergeHistoryVerifier<'_>,
     membership: &MembershipChain,
 ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
+    let protocol = history_verifier.verified_root();
     if membership
         .active_owner_grant(&protocol.descriptor.founder_pubkey)
         .as_ref()
@@ -121,9 +129,10 @@ pub(crate) async fn discover_merge_owner_recoveries(
                 "Owner recovery stream differs from its root-anchored authority".into(),
             ));
         }
-        let registration = load_registration_ref(storage, root, &node.readiness.registration)
-            .await?
-            .value;
+        let registration =
+            load_registration_ref_with_root(storage, root, protocol, &node.readiness.registration)
+                .await?
+                .value;
         let initial_ack =
             load_store_ack_ref(storage, root, &node.readiness.initial_ack, &registration)
                 .await?
@@ -161,12 +170,12 @@ pub(crate) async fn discover_merge_owner_recoveries(
 
 pub(crate) async fn discover_merge_stream(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     registration_ref: &StoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     inactive_accepted_cut: Option<&StoreHistoryCut>,
 ) -> Result<MergeStreamDiscovery, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits else {
         return Err(StorePullError::Database(format!(
             "Store registration {} has no Merge announcement anchor",

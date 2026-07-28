@@ -176,11 +176,11 @@ pub(crate) async fn history_cut_covers(
 
 pub(crate) async fn load_provider_access_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
     administrator: &StoreDeviceRegistration,
 ) -> Result<VerifiedStoreBatchCommit, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let grant = super::store_objects::load_provider_access_grant_ref_with_root(
         storage,
         root,

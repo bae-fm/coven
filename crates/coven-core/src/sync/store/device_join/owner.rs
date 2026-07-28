@@ -334,8 +334,6 @@ pub(crate) async fn accept_device_registration_request(
         crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
     crate::sync::store::pull::verify_accepted_provider_access_activation(
         &mut history_verifier,
-        storage,
-        &offer.store_root,
         &request.approval.access_grant,
         &offer.provider_admin,
         &administrator,

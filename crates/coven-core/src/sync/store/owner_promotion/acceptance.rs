@@ -75,8 +75,6 @@ impl Store {
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let verified_activation = crate::sync::store::find_owner_promotion_request_activation(
             &mut history_verifier,
-            storage,
-            &root,
             &request,
         )
         .await

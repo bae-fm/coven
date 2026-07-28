@@ -14,15 +14,10 @@ impl VerifiedOwnerPromotionRequestActivation {
 
 pub(in crate::sync::store) async fn find_request_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
 ) -> Result<VerifiedOwnerPromotionRequestActivation, StorePullError> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err(StorePullError::Database(
-            "Owner-promotion request verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let verified_root = history_verifier.verified_root().clone();
     let promoter = load_registration_ref_with_root(
         storage,
@@ -36,8 +31,6 @@ pub(in crate::sync::store) async fn find_request_activation(
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     let discovered = discover_merge_stream(
         history_verifier,
-        storage,
-        root,
         &request.promoter_registration,
         &promoter.value,
         None,

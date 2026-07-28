@@ -556,8 +556,6 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
     pull::verify_accepted_provider_access_activation(
         &mut history_verifier,
-        storage,
-        root,
         access,
         provider_admin,
         administrator,
@@ -604,11 +602,9 @@ pub(crate) struct VerifiedOwnerPromotionAcceptance;
 
 pub(in crate::sync::store) async fn find_owner_promotion_request_activation(
     history_verifier: &mut pull::MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     request: &super::store_commit::OwnerPromotionRequest,
 ) -> Result<pull::VerifiedOwnerPromotionRequestActivation, pull::StorePullError> {
-    pull::find_owner_promotion_request_activation(history_verifier, storage, root, request).await
+    pull::find_owner_promotion_request_activation(history_verifier, request).await
 }
 
 pub(in crate::sync::store) async fn verify_owner_promotion_acceptance_from_request_activation(

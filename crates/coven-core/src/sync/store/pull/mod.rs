@@ -244,7 +244,6 @@ pub fn pull_store_commits<'a>(
         let db = database.sqlite();
         let root = required_pull_root(database, store_root_hash).await?;
         let mut history_verifier = MergeHistoryVerifier::new(storage, &root).await?;
-        let verified_root = history_verifier.verified_root().clone();
         membership
             .ensure_resolved()
             .map_err(StorePullMembershipError::State)
@@ -288,14 +287,12 @@ pub fn pull_store_commits<'a>(
             .store_device_state_for_history_cut(&StoreHistoryCut(local_frontier))
             .await?;
 
-        let mut active = load_active_merge_registrations(database, storage, &root)
+        let mut active = load_active_merge_registrations(database, &history_verifier)
             .await
             .map_err(|error| {
                 StorePullError::Database(format!("load active Merge registrations: {error}"))
             })?;
-        for recovered in
-            discover_merge_owner_recoveries(storage, &root, &verified_root, membership).await?
-        {
+        for recovered in discover_merge_owner_recoveries(&history_verifier, membership).await? {
             if active
                 .iter()
                 .all(|(reference, _)| reference != &recovered.0)
@@ -325,8 +322,6 @@ pub fn pull_store_commits<'a>(
             };
             let discovered = discover_merge_stream(
                 &mut history_verifier,
-                storage,
-                &root,
                 &registration_ref,
                 &registration,
                 inactive_cut,

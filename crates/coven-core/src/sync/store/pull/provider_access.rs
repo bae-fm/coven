@@ -3,15 +3,12 @@ use super::*;
 
 pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     access: &crate::sync::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &crate::sync::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
 ) -> Result<(), StorePullError> {
     let activation =
-        load_provider_access_activation(history_verifier, storage, root, access, administrator)
-            .await?;
+        load_provider_access_activation(history_verifier, access, administrator).await?;
     let membership = load_merge_predecessor_membership_with_history(
         history_verifier,
         &activation.value().membership_state,
@@ -32,15 +29,7 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
                 .to_string(),
         ));
     }
-    if !current_history_contains(
-        history_verifier,
-        storage,
-        root,
-        &membership,
-        &access.activation,
-    )
-    .await?
-    {
+    if !current_history_contains(history_verifier, &membership, &access.activation).await? {
         return Err(StorePullError::Database(
             "device provider approval activation is absent from current accepted Store history"
                 .to_string(),
@@ -51,11 +40,11 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
 
 async fn current_history_contains(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     membership: &MembershipChain,
     expected: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     history_verifier.verify_refs([expected.clone()]).await?;
     let mut state = history_verifier
         .history()
@@ -73,12 +62,10 @@ async fn current_history_contains(
     let founder = load_founder_registration_with_root(storage, root, &verified_root).await?;
     let founder_ref = StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object);
     registrations.insert(founder_ref.device_id, (founder_ref, founder.value));
-    for recovered in
-        discover_merge_owner_recoveries(storage, root, &verified_root, membership).await?
-    {
+    for recovered in discover_merge_owner_recoveries(history_verifier, membership).await? {
         registrations.insert(recovered.0.device_id, recovered);
     }
-    load_state_registrations(storage, root, &state, &mut registrations).await?;
+    load_state_registrations(history_verifier, &state, &mut registrations).await?;
 
     let mut accepted = BTreeMap::new();
     let mut observed_states = BTreeSet::new();
@@ -100,8 +87,6 @@ async fn current_history_contains(
             };
             let discovered = discover_merge_stream(
                 history_verifier,
-                storage,
-                root,
                 registration_ref,
                 registration,
                 inactive_cut,
@@ -141,7 +126,7 @@ async fn current_history_contains(
             .map_err(|error| StorePullError::Database(error.to_string()))?
         };
         let registration_count = registrations.len();
-        load_state_registrations(storage, root, &next_state, &mut registrations).await?;
+        load_state_registrations(history_verifier, &next_state, &mut registrations).await?;
         let stable =
             next == accepted && next_state == state && registrations.len() == registration_count;
         if stable {
@@ -162,14 +147,15 @@ async fn current_history_contains(
 }
 
 async fn load_state_registrations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    history_verifier: &MergeHistoryVerifier<'_>,
     state: &ResolvedStoreDeviceState,
     registrations: &mut BTreeMap<
         super::store_commit::StoreDeviceId,
         (StoreDeviceRegistrationRef, StoreDeviceRegistration),
     >,
 ) -> Result<(), StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     for (device_id, record) in &state.devices {
         if registrations
             .get(device_id)
@@ -177,7 +163,13 @@ async fn load_state_registrations(
         {
             continue;
         }
-        let registration = load_registration_ref(storage, root, &record.registration).await?;
+        let registration = load_registration_ref_with_root(
+            storage,
+            root,
+            history_verifier.verified_root(),
+            &record.registration,
+        )
+        .await?;
         if registration.value.device_id != *device_id {
             return Err(StorePullError::Database(
                 "current Merge device state registration has another device id".to_string(),

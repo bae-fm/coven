@@ -161,7 +161,6 @@ async fn verify_authority(
 
 async fn accepted_cut(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshot_frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
     state: &VerifiedMergeSnapshotState,
@@ -173,15 +172,8 @@ async fn accepted_cut(
             registration_ref,
             super::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
-        let discovery = discover_merge_stream(
-            history_verifier,
-            storage,
-            root,
-            registration_ref,
-            registration,
-            None,
-        )
-        .await?;
+        let discovery =
+            discover_merge_stream(history_verifier, registration_ref, registration, None).await?;
         let Some((_, _, latest, _)) = discovery.commits.last() else {
             if accepted.contains_key(&stream_id) {
                 return Err(StorePullError::Database(
@@ -269,8 +261,7 @@ pub(in crate::sync::store) async fn verify_snapshot_stability_with_history(
 ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
     let (snapshot_cut, state) = verify_authority(history_verifier, storage, root, snapshot).await?;
     let snapshot_frontier = &snapshot_cut.0;
-    let accepted_cut =
-        accepted_cut(history_verifier, storage, root, snapshot_frontier, &state).await?;
+    let accepted_cut = accepted_cut(history_verifier, root, snapshot_frontier, &state).await?;
     let accepted_frontier = &accepted_cut.0;
     let acknowledgements = activated_acknowledgements(history_verifier, accepted_frontier).await?;
     assemble_snapshot_stability(
