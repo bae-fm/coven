@@ -1060,20 +1060,23 @@ pub(crate) fn compose_merge_snapshot_history_summary(
 
 pub(crate) fn prepare_merge_abandonment_history_summary(
     candidate_summary: &RetainedVerifiedMergeHistorySummary,
-    candidate: &StoreBatchCommitRef,
-    candidate_value: &StoreBatchCommit,
-    abandonment: &StoreBatchCommitRef,
-    abandonment_value: &StoreBatchCommit,
+    candidate: &VerifiedStoreBatchCommit,
+    abandonment: &VerifiedStoreBatchCommit,
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
     candidate_summary
         .validate_shape()
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    candidate
-        .verify_commit(candidate_value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    abandonment
-        .verify_commit(abandonment_value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let candidate_value = candidate.value();
+    let candidate = candidate.reference();
+    let abandonment_value = abandonment.value();
+    let abandonment = abandonment.reference();
+    if candidate_summary.store_root_hash != candidate_value.store_root_hash
+        || candidate_summary.store_root_hash != abandonment_value.store_root_hash
+    {
+        return Err(StorePullError::Database(
+            "Merge abandonment history belongs to another Store root".to_string(),
+        ));
+    }
     if candidate.coord != abandonment.coord
         || candidate_value.order != abandonment_value.order
         || candidate_value.membership_state != abandonment_value.membership_state

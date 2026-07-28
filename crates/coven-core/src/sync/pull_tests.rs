@@ -1164,11 +1164,23 @@ async fn replace_exact_commit_bytes(
         .expect("load replacement candidate history summary");
     let reference =
         publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
+    let candidate = crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+        &graph.commit.to_bytes(),
+        graph.commit.store_root_hash,
+        &graph.reference,
+        &graph.registration,
+    )
+    .expect("authenticate replacement candidate");
+    let replacement_commit = crate::sync::store_commit::VerifiedStoreBatchCommit::parse(
+        &replacement_commit.to_bytes(),
+        replacement_commit.store_root_hash,
+        &reference,
+        &graph.registration,
+    )
+    .expect("authenticate replacement commit");
     let history_summary = crate::sync::store::prepare_merge_abandonment_history_summary(
         &candidate_summary,
-        &graph.reference,
-        &graph.commit,
-        &reference,
+        &candidate,
         &replacement_commit,
     )
     .expect("prepare replacement exact Store history summary");

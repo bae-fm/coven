@@ -97,10 +97,8 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
     let commit_ref = commit.reference().clone();
     let history_summary = super::pull::prepare_merge_abandonment_history_summary(
         &candidate_summary,
-        &candidate.head.value.commit,
         &candidate.commit.value,
-        &commit_ref,
-        commit.value(),
+        &commit,
     )
     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let head = StoreDeviceHead::signed(
