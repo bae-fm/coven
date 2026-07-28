@@ -384,12 +384,8 @@ pub(crate) fn publish<'a>(
             .await?;
         let commit = verified_commit.value().clone();
         let circle_activations = if commit.control().is_some() {
-            let mut history_verifier = super::pull::MergeHistoryVerifier::from_commit_verifier(
-                storage,
-                &root,
-                commit_verifier,
-            )
-            .await?;
+            let mut history_verifier =
+                super::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier).await?;
             let activations = super::pull::verify_merge_membership_control(
                 &mut history_verifier,
                 &verified_commit,

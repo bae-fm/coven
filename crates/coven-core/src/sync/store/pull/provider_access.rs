@@ -44,7 +44,7 @@ async fn current_history_contains(
     expected: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     history_verifier.verify_refs([expected.clone()]).await?;
     let mut state = history_verifier
         .history()
@@ -59,7 +59,7 @@ async fn current_history_contains(
         .clone();
     let mut registrations = BTreeMap::new();
     let verified_root = history_verifier.verified_root().clone();
-    let founder = load_founder_registration_with_root(storage, root, &verified_root).await?;
+    let founder = load_founder_registration_with_root(storage, &root, &verified_root).await?;
     let founder_ref = StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object);
     registrations.insert(founder_ref.device_id, (founder_ref, founder.value));
     for recovered in discover_merge_owner_recoveries(history_verifier, membership).await? {

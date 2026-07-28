@@ -1084,7 +1084,7 @@ async fn reclaim_store_packages(
         });
     }
     let mut history_verifier =
-        super::pull::MergeHistoryVerifier::from_commit_verifier(storage, &root, commit_verifier)
+        super::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
             .await
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let registrations = database
@@ -3170,12 +3170,12 @@ async fn choose_snapshot(
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let mut authorized = Vec::new();
     for (registration_ref, registration) in registrations {
         for snapshot in super::snapshot::load_store_snapshot_stream(
             storage,
-            root,
+            &root,
             registration_ref,
             registration,
         )

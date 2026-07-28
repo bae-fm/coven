@@ -66,13 +66,9 @@ impl Store {
         )
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let mut history_verifier =
-            crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(
-                storage,
-                &root,
-                commit_verifier,
-            )
-            .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
+                .await
+                .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let verified_activation = crate::sync::store::find_owner_promotion_request_activation(
             &mut history_verifier,
             &request,

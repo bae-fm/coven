@@ -390,7 +390,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let root_value = history_verifier.verified_root().clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     if let Some(owner) = owner_pubkey {
@@ -414,7 +414,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
     let founder_loaded = Box::pin(traverse_exact_membership_stream(
         &mut activation_authority,
         storage,
-        root,
+        &root,
         &root_value.descriptor.founder_pubkey,
         &root_value.descriptor.founder_grant,
         founder_stream,
@@ -458,7 +458,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
         let chain = Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
             &mut activation_authority,
             storage,
-            root,
+            &root,
             &root_value,
             &root_value.descriptor.founder_pubkey,
             &exact_heads,
@@ -488,7 +488,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
             let loaded = Box::pin(traverse_exact_membership_stream(
                 &mut activation_authority,
                 storage,
-                root,
+                &root,
                 &stream.author_pubkey,
                 &stream.author_owner_grant,
                 stream.stream_id,
@@ -604,14 +604,14 @@ pub(crate) async fn load_anchored_chain_at_exact_heads_with_history(
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let root_value = history_verifier.verified_root().clone();
     let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
         storage,
-        root,
+        &root,
         &root_value,
         &owner_pubkey,
         exact_heads,

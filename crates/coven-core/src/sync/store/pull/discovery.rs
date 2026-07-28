@@ -30,7 +30,7 @@ pub(crate) async fn load_active_merge_registrations(
     history_verifier: &MergeHistoryVerifier<'_>,
 ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let durable = database
         .activated_store_device_registration_records()
         .await?;
@@ -38,7 +38,7 @@ pub(crate) async fn load_active_merge_registrations(
     for (reference, expected) in durable {
         let opened = load_registration_ref_with_root(
             storage,
-            root,
+            &root,
             history_verifier.verified_root(),
             &reference,
         )
@@ -175,7 +175,7 @@ pub(crate) async fn discover_merge_stream(
     inactive_accepted_cut: Option<&StoreHistoryCut>,
 ) -> Result<MergeStreamDiscovery, StorePullError> {
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits else {
         return Err(StorePullError::Database(format!(
             "Store registration {} has no Merge announcement anchor",

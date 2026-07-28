@@ -73,9 +73,9 @@ async fn verify_history_state(
     let authority =
         verify_merge_history_authority(history_verifier, frontier, membership_ref).await?;
     let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let active_registrations =
-        load_active_history_registrations(storage, root, &authority.device_state).await?;
+        load_active_history_registrations(storage, &root, &authority.device_state).await?;
     let checkpoints = frontier
         .values()
         .map(|reference| {
@@ -151,7 +151,7 @@ async fn accepted_cut(
     snapshot_frontier: &BTreeMap<super::membership::AuthorStreamId, StoreBatchCommitRef>,
     state: &VerifiedMergeSnapshotState,
 ) -> Result<StoreHistoryCut, StorePullError> {
-    let root = history_verifier.root();
+    let root = history_verifier.root().clone();
     let mut accepted = snapshot_frontier.clone();
     for (registration_ref, registration) in state.common.active_registrations.values() {
         let stream_id = super::store_commit::StreamActivation::device_authorized_stream_id(

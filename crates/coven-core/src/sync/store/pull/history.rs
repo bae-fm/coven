@@ -424,8 +424,6 @@ pub(crate) struct VerifiedMergeHistory {
 }
 
 pub(crate) struct MergeHistoryVerifier<'a> {
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }
@@ -1040,22 +1038,19 @@ impl<'a> MergeHistoryVerifier<'a> {
         root: &'a StoreRootRef,
     ) -> Result<Self, StorePullError> {
         let commit_verifier = StoreCommitVerifier::new(storage, root).await?;
-        Self::from_commit_verifier(storage, root, commit_verifier).await
+        Self::from_commit_verifier(commit_verifier).await
     }
 
     pub(crate) async fn from_commit_verifier(
-        storage: &'a dyn SyncStorage,
-        root: &'a StoreRootRef,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
-        let verified_root = commit_verifier.verified_root();
         let founder = Box::pin(load_founder_registration_with_root(
-            storage,
-            root,
-            verified_root,
+            commit_verifier.storage(),
+            commit_verifier.root(),
+            commit_verifier.verified_root(),
         ))
         .await?;
-        Self::from_commit_verifier_and_founder(storage, root, commit_verifier, &founder)
+        Self::from_commit_verifier_and_founder(commit_verifier, &founder)
     }
 
     pub(crate) fn from_verified_root_and_founder(
@@ -1066,20 +1061,14 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<Self, StorePullError> {
         let commit_verifier = StoreCommitVerifier::from_verified_root(storage, root, verified_root)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        Self::from_commit_verifier_and_founder(storage, root, commit_verifier, founder)
+        Self::from_commit_verifier_and_founder(commit_verifier, founder)
     }
 
     fn from_commit_verifier_and_founder(
-        storage: &'a dyn SyncStorage,
-        root: &'a StoreRootRef,
         commit_verifier: StoreCommitVerifier<'a>,
         founder: &VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<Self, StorePullError> {
-        if commit_verifier.root() != root {
-            return Err(StorePullError::Database(
-                "commit verifier belongs to another Store root".to_string(),
-            ));
-        }
+        let root = commit_verifier.root();
         let verified_root = commit_verifier.verified_root();
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
@@ -1108,8 +1097,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         )
         .map_err(|error| StorePullError::Database(error.to_string()))?;
         Ok(Self {
-            storage,
-            root,
             commit_verifier,
             history: VerifiedMergeHistory {
                 genesis,
@@ -1133,11 +1120,11 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
-        self.storage
+        self.commit_verifier.storage()
     }
 
-    pub(crate) fn root(&self) -> &'a StoreRootRef {
-        self.root
+    pub(crate) fn root(&self) -> &StoreRootRef {
+        self.commit_verifier.root()
     }
 
     pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
@@ -1172,9 +1159,11 @@ impl<'a> MergeHistoryVerifier<'a> {
         let frontier = acceptance.device_state.frontier();
         let tips = frontier.commits().values().cloned().collect::<Vec<_>>();
         self.verify_refs(tips.clone()).await?;
+        let storage = self.storage();
+        let root = self.root().clone();
         verify_merge_owner_conflict_acceptance_with_history(
-            self.storage,
-            self.root,
+            storage,
+            &root,
             acceptance,
             resolver_pubkey,
             &self.history.genesis,
@@ -1192,8 +1181,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         tips: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<(), StorePullError> {
-        let storage = self.storage;
-        let root = self.root;
+        let storage = self.storage();
+        let root = self.root().clone();
         let verified_root = self.commit_verifier.verified_root().clone();
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
@@ -1234,7 +1223,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let (_, accepted_head) = Box::pin(
                 crate::sync::store::operations::exact_next_announcement_slot(
                     storage,
-                    root,
+                    &root,
                     &commit.author_registration,
                     &author,
                     &mut self.commit_verifier,
@@ -1257,7 +1246,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             let pending_resolution =
                 Box::pin(verify_merge_resolution_activation_acceptance_with_history(
                     storage,
-                    root,
+                    &root,
                     &commit,
                     &self.history.genesis,
                     &self.history.commits,
@@ -1336,7 +1325,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             })?;
             let acknowledgement = Box::pin(validate_commit_acknowledgement_with_root(
                 storage,
-                root,
+                &root,
                 &verified_root,
                 &commit,
                 &author,
@@ -1372,7 +1361,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     None
                 };
             let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-                storage, root, &commit,
+                storage, &root, &commit,
             ))
             .await?;
             let state = operations
@@ -1401,7 +1390,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let membership_closure = Box::pin(verified_merge_membership_objects(
-                storage, root, &reference, &commit,
+                storage, &root, &reference, &commit,
             ))
             .await?;
             let retained_registrations = commit
@@ -1417,7 +1406,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Some((acknowledgement_ref, acknowledgement_value)) => Some(
                     retain_activated_acknowledgement(
                         storage,
-                        root,
+                        &root,
                         &reference,
                         &commit,
                         &author,
@@ -1429,7 +1418,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 None => None,
             };
             let successor = compose_merge_history_successor(
-                root,
+                &root,
                 &commit,
                 &reference,
                 &membership,
