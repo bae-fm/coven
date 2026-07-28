@@ -24,12 +24,45 @@ pub(crate) async fn drain_store_writes(
     // else can, so they must not be the ones to take it out from under an
     // operation that is mid-activation.
     let _authorship = database.author_own_stream().await;
+    database.retire_uploaded_blob_spools().await?;
+    let Some(first) = database.oldest_prepared_store_write().await? else {
+        return Ok(0);
+    };
+    let root = required_store_root(database).await?;
+    let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, &root).await?;
+    drain_prepared_store_writes(database, storage, &mut commit_verifier, first).await
+}
+
+pub(crate) async fn drain_store_writes_with_verifier(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
+) -> Result<u64, StoreError> {
+    let _authorship = database.author_own_stream().await;
+    database.retire_uploaded_blob_spools().await?;
+    let Some(first) = database.oldest_prepared_store_write().await? else {
+        return Ok(0);
+    };
+    let root = required_store_root(database).await?;
+    if commit_verifier.root() != &root {
+        return Err(StoreError::InvalidOutbound(
+            "Store write verifier belongs to another Store root".to_string(),
+        ));
+    }
+    drain_prepared_store_writes(database, storage, commit_verifier, first).await
+}
+
+async fn drain_prepared_store_writes(
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
+    first: crate::database::PreparedStoreWriteCommit,
+) -> Result<u64, StoreError> {
     #[cfg(any(test, feature = "test-utils"))]
     let db = database.sqlite();
     let mut published = 0_u64;
-    let mut commit_verifier = None;
-    database.retire_uploaded_blob_spools().await?;
-    while let Some(batch) = database.oldest_prepared_store_write().await? {
+    let mut next = Some(first);
+    while let Some(batch) = next {
         let write_id = batch.commit.value.write_id.clone();
         database
             .set_write_status(&write_id, crate::WriteStatus::Publishing)
@@ -41,14 +74,6 @@ pub(crate) async fn drain_store_writes(
                 &batch.commit.value.author_registration,
             ))
             .await?;
-            if commit_verifier.is_none() {
-                let root = required_store_root(database).await?;
-                commit_verifier =
-                    Some(super::pull::StoreCommitVerifier::new(storage, &root).await?);
-            }
-            let commit_verifier = commit_verifier
-                .as_mut()
-                .expect("Store commit verifier was initialized above");
             let store_root_hash = commit_verifier.root().store_root_hash;
             let commit = &batch.commit.value;
             if !matches!(
@@ -239,6 +264,7 @@ pub(crate) async fn drain_store_writes(
         published = published
             .checked_add(1)
             .ok_or_else(|| StoreError::Database("publish count exceeded u64".into()))?;
+        next = database.oldest_prepared_store_write().await?;
     }
     Ok(published)
 }
