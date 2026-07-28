@@ -219,14 +219,22 @@ async fn activated_acknowledgements(
     Ok(acknowledgements)
 }
 
+#[cfg(test)]
 pub(in crate::sync::store) async fn verify_snapshots_for_acknowledgement(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     snapshots: &[crate::database::PublishedStoreSnapshot],
 ) -> Result<(), StorePullError> {
     let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
+    verify_snapshots_for_acknowledgement_with_history(&mut history_verifier, snapshots).await
+}
+
+pub(in crate::sync::store) async fn verify_snapshots_for_acknowledgement_with_history(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    snapshots: &[crate::database::PublishedStoreSnapshot],
+) -> Result<(), StorePullError> {
     for snapshot in snapshots {
-        verify_authority(&mut history_verifier, snapshot).await?;
+        verify_authority(history_verifier, snapshot).await?;
     }
     Ok(())
 }

@@ -392,7 +392,7 @@ async fn run_single_sync_cycle_with_authorization(
         store_dir,
         cloud_home,
         observer,
-        &authorization,
+        &mut authorization,
     ))
     .await?
     {
@@ -407,7 +407,7 @@ async fn run_single_sync_cycle_with_authorization(
         hlc,
         user_keypair,
         store_dir,
-        &authorization,
+        &mut authorization,
         routing_encryption,
         prepared,
         store_pull,
@@ -489,9 +489,9 @@ async fn prepare_cycle_before_pull(
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: &AuthorizedStore<'_>,
+    authorization: &mut AuthorizedStore<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
-    let database = authorization.database();
+    let database = authorization.database().clone();
     let db = database.sqlite();
     let protocol_store_id = authorization.store_root().store_root_id.to_string();
 
@@ -628,12 +628,12 @@ async fn complete_cycle_after_pull(
     hlc: &Hlc,
     user_keypair: &UserKeypair,
     store_dir: &StoreDir,
-    authorization: &AuthorizedStore<'_>,
+    authorization: &mut AuthorizedStore<'_>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     prepared: PreparedCycle,
     store_pull: super::store::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
-    let database = authorization.database();
+    let database = authorization.database().clone();
     let db = database.sqlite();
     let PreparedCycle {
         sync_time,
@@ -1052,7 +1052,7 @@ impl SyncComponents {
             .current_encryption()
             .ok_or(CircleOperationError::BrowsableStorage)?;
         let operation_stamp = self.hlc.now().to_string();
-        let authorization = self
+        let mut authorization = self
             .store
             .authorize()
             .await

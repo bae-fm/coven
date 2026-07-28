@@ -213,7 +213,7 @@ pub(crate) async fn stage_store_acknowledgement_for_test(
     sync_time: String,
     identity: &UserKeypair,
 ) -> Result<super::store_commit::StoreAck, acknowledgements::StoreAckError> {
-    let store = Store::authorize_borrowed(storage, db)
+    let mut store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
     store
@@ -257,7 +257,7 @@ pub(crate) async fn drain_store_acknowledgements_for_test(
     storage: &dyn SyncStorage,
     identity: &UserKeypair,
 ) -> Result<u64, acknowledgements::StoreAckError> {
-    let store = Store::authorize_borrowed(storage, db)
+    let mut store = Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
     store.drain_acknowledgements(identity).await

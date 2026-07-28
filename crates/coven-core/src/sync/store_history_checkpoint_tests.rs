@@ -26,7 +26,7 @@ async fn publish_note(
         ),
     )
     .await;
-    let authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
+    let mut authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
         .await
         .expect("authorize Merge Store write");
     assert!(
@@ -159,7 +159,7 @@ async fn prepare_sabotaged_successor(
                  '0000000002000-0000-history', '2026-07-21')",
     )
     .await;
-    let authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
+    let mut authorization = super::store::Store::authorize_borrowed(&*store.storage, db)
         .await
         .expect("authorize sabotaged successor");
     match authorization

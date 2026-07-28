@@ -2177,7 +2177,7 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, &db)
+        let mut authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, &db)
             .await
             .map_err(|error| error.to_string())?;
         let prepared = authorization
@@ -2287,7 +2287,7 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, db)
+        let mut authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, db)
             .await
             .map_err(|error| error.to_string())?;
         let prepared = authorization

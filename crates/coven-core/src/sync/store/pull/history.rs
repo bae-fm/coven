@@ -1173,10 +1173,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         .await
     }
 
-    pub(crate) fn into_commit_verifier(self) -> StoreCommitVerifier<'a> {
-        self.commit_verifier
-    }
-
     pub(crate) async fn verify_refs(
         &mut self,
         tips: impl IntoIterator<Item = StoreBatchCommitRef>,

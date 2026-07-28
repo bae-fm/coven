@@ -72,8 +72,32 @@ pub(crate) async fn prepare_plan(
     device_id: &str,
     keypair: &UserKeypair,
 ) -> Result<StoreOperationCommitPlan, StoreError> {
+    let root = required_store_root(database).await?;
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    prepare_plan_with_history(
+        database,
+        &mut history_verifier,
+        candidate_membership,
+        device_id,
+        keypair,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_plan_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    candidate_membership: &crate::sync::membership::MembershipChain,
+    device_id: &str,
+    keypair: &UserKeypair,
+) -> Result<StoreOperationCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(database, device_id, keypair).await?;
+    if &root != history_verifier.root() {
+        return Err(StoreError::InvalidOutbound(
+            "local Store operation authority differs from its verified root".to_string(),
+        ));
+    }
     let base = database.local_commit_base().await?;
     let previous = base.predecessor;
     let dependencies = crate::sync::store_commit::CommitFrontier::from_refs(base.frontier)
@@ -93,10 +117,9 @@ pub(crate) async fn prepare_plan(
         predecessor: previous,
         dependencies,
     };
-    let authorization = super::pull::load_retained_merge_outbound_authorization(
+    let authorization = super::pull::load_retained_merge_outbound_authorization_with_verifier(
         database,
-        storage,
-        &root,
+        history_verifier.commit_verifier_ref(),
         &order,
         candidate_membership.head_refs(),
         &registration_ref,
@@ -310,14 +333,31 @@ pub(crate) async fn publish_prepared(
     membership_completion: Option<StoreMembershipJournalCompletion>,
 ) -> Result<StoreOperationPublicationOutcome, StoreError> {
     let root = required_store_root(database).await?;
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    publish_prepared_with_history(
+        database,
+        &mut history_verifier,
+        candidate,
+        membership_objects,
+        membership_completion,
+    )
+    .await
+}
+
+pub(crate) async fn publish_prepared_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    candidate: Box<PreparedStoreOperationCommit>,
+    membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+    membership_completion: Option<StoreMembershipJournalCompletion>,
+) -> Result<StoreOperationPublicationOutcome, StoreError> {
     let retained_operation_objects = retained_store_operation_objects(&candidate.commit)?;
     let head = candidate.head.clone();
     let prepared_head = candidate.prepared_head.clone();
     let history_summary = candidate.history_summary.clone();
     publish(
         database,
-        storage,
-        root,
+        history_verifier,
         PreparedStoreOperationActivation {
             candidate,
             retained_operation_objects,
@@ -365,8 +405,7 @@ pub(crate) async fn upload_commit(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish<'a>(
     database: &'a StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    root: StoreRootRef,
+    history_verifier: &'a mut super::pull::MergeHistoryVerifier<'_>,
     mut activation: PreparedStoreOperationActivation,
     head: StoreDeviceHead,
     prepared_head: PreparedExactObject,
@@ -377,22 +416,19 @@ pub(crate) fn publish<'a>(
 {
     Box::pin(async move {
         let db = database.sqlite();
+        let storage = history_verifier.storage();
+        let root = history_verifier.root().clone();
         let reference = activation.candidate.reference.clone();
-        let mut commit_verifier = super::pull::StoreCommitVerifier::new(storage, &root).await?;
-        let verified_commit = commit_verifier
+        let verified_commit = history_verifier
+            .commit_verifier()
             .authenticate_bytes(&reference, &activation.candidate.commit.to_bytes())
             .await?;
         let commit = verified_commit.value().clone();
         let circle_activations = if commit.control().is_some() {
-            let mut history_verifier =
-                super::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier).await?;
-            let activations = super::pull::verify_merge_membership_control(
-                &mut history_verifier,
-                &verified_commit,
-            )
-            .await
-            .map_err(StoreError::InvalidOutbound)?;
-            commit_verifier = history_verifier.into_commit_verifier();
+            let activations =
+                super::pull::verify_merge_membership_control(history_verifier, &verified_commit)
+                    .await
+                    .map_err(StoreError::InvalidOutbound)?;
             activations
         } else {
             VerifiedCircleActivations::none(&commit, &reference)
@@ -400,19 +436,20 @@ pub(crate) fn publish<'a>(
         };
         upload_commit(storage, &activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
-        let authorization = Box::pin(super::pull::load_retained_merge_outbound_authorization(
-            database,
-            storage,
-            &root,
-            &commit.order,
-            membership_heads,
-            &commit.author_registration,
-        ))
+        let authorization = Box::pin(
+            super::pull::load_retained_merge_outbound_authorization_with_verifier(
+                database,
+                history_verifier.commit_verifier_ref(),
+                &commit.order,
+                membership_heads,
+                &commit.author_registration,
+            ),
+        )
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_operations = Box::pin(super::pull::load_local_commit_device_operations(
             database,
-            &mut commit_verifier,
+            history_verifier.commit_verifier(),
             &verified_commit,
             &authorization.membership,
             &authorization.device_state_ref,
@@ -444,7 +481,7 @@ pub(crate) fn publish<'a>(
                 return Box::pin(resolve_head_collision(
                     database,
                     activation.candidate,
-                    &mut commit_verifier,
+                    history_verifier.commit_verifier(),
                     verified_commit,
                     reference,
                     head,

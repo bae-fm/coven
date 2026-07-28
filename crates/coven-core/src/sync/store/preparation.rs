@@ -14,11 +14,14 @@ use crate::sync::store_objects::StoreObjectError;
 
 use super::StoreError;
 
+#[cfg(test)]
+use super::operations::required_store_root;
 use super::operations::{
     blocked_status, load_local_store_authority, next_store_sequence, successor_store_sequence,
 };
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn prepare_store_write(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -28,6 +31,31 @@ pub(crate) async fn prepare_store_write(
     store_dir: &StoreDir,
     membership: &MembershipChain,
 ) -> Result<bool, StoreError> {
+    let root = required_store_root(database).await?;
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    prepare_store_write_with_history(
+        database,
+        &mut history_verifier,
+        device_id,
+        _timestamp,
+        keypair,
+        store_dir,
+        membership,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_store_write_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    device_id: &str,
+    _timestamp: &str,
+    keypair: &UserKeypair,
+    store_dir: &StoreDir,
+    membership: &MembershipChain,
+) -> Result<bool, StoreError> {
+    let storage = history_verifier.storage();
     let db = database.sqlite();
     let Some(PreparedStoreWrite {
         write_id,
@@ -51,6 +79,11 @@ pub(crate) async fn prepare_store_write(
     let preparation = async {
         let (root, registration_ref, registration, device_signer) =
             load_local_store_authority(database, device_id, keypair).await?;
+        if &root != history_verifier.root() {
+            return Err(StoreError::InvalidOutbound(
+                "local Store write authority differs from its verified root".to_string(),
+            ));
+        }
         let blob_write_authority = BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let store_root_hash = root.store_root_hash;
@@ -71,10 +104,9 @@ pub(crate) async fn prepare_store_write(
             dependencies,
         };
         let candidate_membership = membership;
-        let authorization = super::pull::load_retained_merge_outbound_authorization(
+        let authorization = super::pull::load_retained_merge_outbound_authorization_with_verifier(
             database,
-            storage,
-            &root,
+            history_verifier.commit_verifier_ref(),
             &order,
             candidate_membership.head_refs(),
             &registration_ref,

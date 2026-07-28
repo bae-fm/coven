@@ -726,7 +726,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("activate Circle member successor");
-    let concurrent_authorization =
+    let mut concurrent_authorization =
         crate::sync::store::Store::authorize_borrowed(&concurrent_storage, &concurrent_db)
             .await
             .expect("authorize concurrent Circle writer Store");
@@ -2261,7 +2261,7 @@ async fn member_pull(fixture: &ClosingFounderCircle) {
 /// of Store packages published. Errors while old-epoch publication is frozen —
 /// the closing Circle has no active control to resolve.
 async fn member_push(fixture: &ClosingFounderCircle, stamp: &str) -> Result<u64, String> {
-    let authorized =
+    let mut authorized =
         crate::sync::store::Store::authorize_borrowed(&fixture.member_storage, &fixture.member_db)
             .await
             .map_err(|error| error.to_string())?;
@@ -3883,7 +3883,7 @@ async fn silent_pull(
 async fn silent_publish_pending_write(fixture: &SilentParticipantCircle, stamp: &str) {
     let (_temp, store_dir) = temp_store_dir();
     let device_id = local_device_id(&fixture.silent_db).await;
-    let authorized =
+    let mut authorized =
         crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
             .await
             .expect("authorize silent participant Store");

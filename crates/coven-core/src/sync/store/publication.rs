@@ -1,18 +1,21 @@
 use super::abandonment::{read_occupied_merge_head, verify_merge_candidate_nonactivations};
 use super::database::StoreDatabase;
 use super::StoreError;
-use super::*;
+#[cfg(test)]
+use crate::sync::storage::SyncStorage;
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
 use crate::sync::store_objects::StoreObjectError;
 
+#[cfg(test)]
+use super::operations::required_store_root;
 use super::operations::{
     blocked_status, publish_prepared_remote_objects, reject_excluded_merge_candidate,
-    required_store_root,
 };
 
+#[cfg(test)]
 pub(crate) async fn drain_store_writes(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,

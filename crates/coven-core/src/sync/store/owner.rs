@@ -51,6 +51,13 @@ pub(crate) struct AuthorizedStore<'a> {
     membership: crate::sync::membership::MembershipChain,
 }
 
+pub(super) struct AuthorizedStoreAuthority<'operation, 'storage> {
+    pub(super) database: &'operation StoreDatabase,
+    pub(super) history_verifier:
+        &'operation mut crate::sync::store::pull::MergeHistoryVerifier<'storage>,
+    pub(super) membership: &'operation mut crate::sync::membership::MembershipChain,
+}
+
 impl Store {
     pub(crate) async fn create(
         database: StoreDatabase,
@@ -474,18 +481,14 @@ impl<'storage> AuthorizedStore<'storage> {
         self.history_verifier.root()
     }
 
-    pub(super) fn pull_authority<'operation>(
+    pub(super) fn operation_authority<'operation>(
         &'operation mut self,
-    ) -> (
-        &'operation StoreDatabase,
-        &'operation mut crate::sync::store::pull::MergeHistoryVerifier<'storage>,
-        &'operation mut crate::sync::membership::MembershipChain,
-    ) {
-        (
-            &self.database,
-            &mut self.history_verifier,
-            &mut self.membership,
-        )
+    ) -> AuthorizedStoreAuthority<'operation, 'storage> {
+        AuthorizedStoreAuthority {
+            database: &self.database,
+            history_verifier: &mut self.history_verifier,
+            membership: &mut self.membership,
+        }
     }
 
     pub(crate) async fn drain_uploads(
@@ -548,25 +551,33 @@ impl<'storage> AuthorizedStore<'storage> {
         .await
     }
 
-    pub(crate) async fn drain_store_writes(&self) -> Result<u64, crate::sync::store::StoreError> {
-        publication::drain_store_writes(self.database(), self.storage()).await
+    pub(crate) async fn drain_store_writes(
+        &mut self,
+    ) -> Result<u64, crate::sync::store::StoreError> {
+        let authority = self.operation_authority();
+        publication::drain_store_writes_with_verifier(
+            authority.database,
+            authority.history_verifier.commit_verifier(),
+        )
+        .await
     }
 
     pub(crate) async fn prepare_pending_store_write(
-        &self,
+        &mut self,
         device_id: &str,
         timestamp: &str,
         identity: &UserKeypair,
         store_dir: &StoreDir,
     ) -> Result<bool, SyncCycleFailure> {
-        preparation::prepare_store_write(
-            self.database(),
-            self.storage(),
+        let authority = self.operation_authority();
+        preparation::prepare_store_write_with_history(
+            authority.database,
+            authority.history_verifier,
             device_id,
             timestamp,
             identity,
             store_dir,
-            &self.membership,
+            &*authority.membership,
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))

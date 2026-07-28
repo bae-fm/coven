@@ -463,9 +463,10 @@ async fn sync_for_test<S: TestStoreStorage>(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let authorization = crate::sync::store::Store::authorize_borrowed(storage.sync_storage(), db)
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut authorization =
+        crate::sync::store::Store::authorize_borrowed(storage.sync_storage(), db)
+            .await
+            .map_err(|error| error.to_string())?;
     let prepared = authorization
         .prepare_pending_store_write(&device_id, timestamp, keypair, store_dir)
         .await

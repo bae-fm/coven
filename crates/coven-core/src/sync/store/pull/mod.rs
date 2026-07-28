@@ -150,9 +150,11 @@ use registration_validation::load_merge_commit_registrations;
 use replay::verified_terminal_merge_retractions;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
 pub(crate) use retained_authority::*;
+#[cfg(test)]
+pub(in crate::sync::store) use snapshot_authority::verify_snapshots_for_acknowledgement;
 pub(in crate::sync::store) use snapshot_authority::{
     verify_snapshot_stability, verify_snapshot_stability_with_history,
-    verify_snapshots_for_acknowledgement,
+    verify_snapshots_for_acknowledgement_with_history,
 };
 pub(super) use terminal_authority::*;
 pub(crate) use terminal_cleanup::cleanup_circle_operation_candidate_with_history;
@@ -206,19 +208,19 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
-        let (database, history_verifier, membership) = self.pull_authority();
+        let authority = self.operation_authority();
         let execution = pull_store_commits_with_history(
-            database,
-            database.sqlite().synced_tables(),
-            history_verifier,
+            authority.database,
+            authority.database.sqlite().synced_tables(),
+            authority.history_verifier,
             store_dir,
-            membership,
+            &*authority.membership,
             Some(identity),
             routing_encryption,
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
-        *membership = execution.membership;
+        *authority.membership = execution.membership;
         Ok(execution.result)
     }
 

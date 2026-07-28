@@ -373,7 +373,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     )
     .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
-    let authorization =
+    let mut authorization =
         crate::sync::store::Store::authorize_borrowed(&*storage.storage, &member_db)
             .await
             .expect("authorize member while their grant is active");

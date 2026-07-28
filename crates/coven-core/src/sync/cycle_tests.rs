@@ -6051,7 +6051,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         .expect("the owner's store has an activated local device");
     let (_write_dir, store_dir) = temp_store_dir();
     {
-        let writer = crate::sync::store::Store::authorize_borrowed(&storage.storage, &owner_db)
+        let mut writer = crate::sync::store::Store::authorize_borrowed(&storage.storage, &owner_db)
             .await
             .expect("authorize the owner's Store writer");
         assert!(
@@ -6088,7 +6088,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     let drain_db = owner_db.clone();
     let drain_storage = storage.clone();
     let drain = tokio::spawn(async move {
-        let writer =
+        let mut writer =
             crate::sync::store::Store::authorize_borrowed(&drain_storage.storage, &drain_db)
                 .await
                 .expect("authorize the owner's Store writer");

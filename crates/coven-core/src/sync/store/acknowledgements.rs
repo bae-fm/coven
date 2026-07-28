@@ -367,7 +367,7 @@ pub(crate) async fn stable_circle_acks_dominating_on(
 
 impl AuthorizedStore<'_> {
     pub(crate) async fn stage_and_publish_ack(
-        &self,
+        &mut self,
         identity: &UserKeypair,
         sync_time: &str,
     ) -> Result<(), SyncCycleFailure> {
@@ -530,7 +530,7 @@ impl AuthorizedStore<'_> {
     }
 
     pub(crate) async fn stage_acknowledgement(
-        &self,
+        &mut self,
         frontier: CommitFrontier,
         sync_time: String,
         identity: &UserKeypair,
@@ -556,9 +556,16 @@ impl AuthorizedStore<'_> {
             .database()
             .store_device_state_for_history_cut(&history_cut)
             .await?;
-        let snapshot = self
-            .select_acknowledgement_snapshot(&root, &frontier, &device_state)
-            .await?;
+        let snapshot = {
+            let authority = self.operation_authority();
+            select_acknowledgement_snapshot(
+                authority.database,
+                authority.history_verifier,
+                &frontier,
+                &device_state,
+            )
+            .await?
+        };
         let exclusions = crate::sync::store_commit::StoreAckExclusionState {
             proposal_freezes: self.database().store_device_exclusion_freezes().await?,
         };
@@ -581,55 +588,8 @@ impl AuthorizedStore<'_> {
         .await
     }
 
-    async fn select_acknowledgement_snapshot(
-        &self,
-        root: &StoreRootRef,
-        frontier: &CommitFrontier,
-        device_state: &crate::sync::store_commit::StoreDeviceStateRef,
-    ) -> Result<Option<crate::sync::store_commit::StoreSnapshotLocator>, StoreAckError> {
-        let registrations = self
-            .database()
-            .activated_store_device_registration_records()
-            .await?;
-        let mut candidates = Vec::new();
-        for (registration_ref, registration) in registrations {
-            for snapshot in crate::sync::store::snapshot::load_store_snapshot_stream(
-                self.storage(),
-                root,
-                &registration_ref,
-                &registration,
-            )
-            .await?
-            {
-                if !frontier.covers(&snapshot.meta.coverage)
-                    || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
-                    || snapshot.meta.state.devices.recovery() != device_state.recovery()
-                {
-                    continue;
-                }
-                candidates.push(snapshot);
-            }
-        }
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-        pull::verify_snapshots_for_acknowledgement(self.storage(), root, &candidates)
-            .await
-            .map_err(|error| {
-                crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
-            })?;
-        Ok(
-            crate::sync::store::snapshot::select_maximal_store_snapshot(candidates).map(
-                |snapshot| crate::sync::store_commit::StoreSnapshotLocator {
-                    author_registration: snapshot.meta.author_registration,
-                    snapshot: snapshot.reference,
-                },
-            ),
-        )
-    }
-
     pub(crate) async fn drain_acknowledgements(
-        &self,
+        &mut self,
         identity: &UserKeypair,
     ) -> Result<u64, StoreAckError> {
         let device_id = self
@@ -664,14 +624,17 @@ impl AuthorizedStore<'_> {
             }
             let candidate = match outbound.activation.clone() {
                 crate::database::OutboundStoreAckActivation::AwaitingCandidate => {
-                    let plan = operations::prepare_plan(
-                        self.database(),
-                        self.storage(),
-                        self.membership(),
-                        &device_id,
-                        identity,
-                    )
-                    .await?;
+                    let plan = {
+                        let authority = self.operation_authority();
+                        operations::prepare_plan_with_history(
+                            authority.database,
+                            authority.history_verifier,
+                            &*authority.membership,
+                            &device_id,
+                            identity,
+                        )
+                        .await?
+                    };
                     plan.common()
                         .validate_acknowledgement(&outbound.ack.value)?;
                     let candidate = Box::pin(operations::prepare_candidate(
@@ -723,14 +686,18 @@ impl AuthorizedStore<'_> {
             )
             .await?;
             let _authorship = self.database().author_own_stream().await;
-            match Box::pin(operations::publish_prepared(
-                self.database(),
-                self.storage(),
-                Box::new(candidate),
-                None,
-                None,
-            ))
-            .await?
+            let publication = {
+                let authority = self.operation_authority();
+                Box::pin(operations::publish_prepared_with_history(
+                    authority.database,
+                    authority.history_verifier,
+                    Box::new(candidate),
+                    None,
+                    None,
+                ))
+                .await?
+            };
+            match publication
             {
                 crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {
                     self.database()
@@ -755,6 +722,54 @@ impl AuthorizedStore<'_> {
         }
         Ok(published)
     }
+}
+
+async fn select_acknowledgement_snapshot(
+    database: &StoreDatabase,
+    history_verifier: &mut pull::MergeHistoryVerifier<'_>,
+    frontier: &CommitFrontier,
+    device_state: &crate::sync::store_commit::StoreDeviceStateRef,
+) -> Result<Option<crate::sync::store_commit::StoreSnapshotLocator>, StoreAckError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
+    let registrations = database
+        .activated_store_device_registration_records()
+        .await?;
+    let mut candidates = Vec::new();
+    for (registration_ref, registration) in registrations {
+        for snapshot in crate::sync::store::snapshot::load_store_snapshot_stream(
+            storage,
+            &root,
+            &registration_ref,
+            &registration,
+        )
+        .await?
+        {
+            if !frontier.covers(&snapshot.meta.coverage)
+                || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
+                || snapshot.meta.state.devices.recovery() != device_state.recovery()
+            {
+                continue;
+            }
+            candidates.push(snapshot);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    pull::verify_snapshots_for_acknowledgement_with_history(history_verifier, &candidates)
+        .await
+        .map_err(|error| {
+            crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
+        })?;
+    Ok(
+        crate::sync::store::snapshot::select_maximal_store_snapshot(candidates).map(|snapshot| {
+            crate::sync::store_commit::StoreSnapshotLocator {
+                author_registration: snapshot.meta.author_registration,
+                snapshot: snapshot.reference,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]

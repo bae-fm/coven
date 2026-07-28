@@ -334,7 +334,7 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .expect("enqueue the membership-revocation witness");
     let owner_device_id = local_device_id(&revoked.owner_db).await;
     let (_owner_temp, owner_store_dir) = temp_store_dir();
-    let owner_authorization =
+    let mut owner_authorization =
         crate::sync::store::Store::authorize_borrowed(&revoked.store.storage, &revoked.owner_db)
             .await
             .expect("authorize the revocation witness");
