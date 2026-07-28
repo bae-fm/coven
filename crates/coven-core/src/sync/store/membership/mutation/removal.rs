@@ -16,7 +16,7 @@ use super::{
     chain_with_exact_entry, decode_membership_mutation, ed25519_hex_to_x25519,
     encode_membership_mutation, encode_membership_progress, exact_owned_remote,
     finish_membership_transition, load_authorized_owner_keyring, prepare_membership_publication,
-    prepare_membership_transition, publish_prepared_merge_membership_activation,
+    prepare_membership_transition, publish_prepared_merge_membership_activation_with_history,
     publish_prepared_merge_membership_authority, select_mutation_author_stream, signed_wrapped_key,
     unwrap_store_keyring_for_refs, validate_prepared_publication, validate_prepared_transition,
     InviteError, MembershipMutationPlan, MembershipMutationProgress, MutationPersistence,
@@ -35,7 +35,7 @@ use super::{
 /// the candidate published, and clearing the staged mutation, so the next removal
 /// composes at the position that follows.
 async fn build_revoke_mutation(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     store_root_hash: store_commit::ObjectHash,
     chain: &MembershipChain,
@@ -46,6 +46,7 @@ async fn build_revoke_mutation(
     timestamp: &str,
     current_encryption: &EncryptionService,
 ) -> Result<RevokeMutationPlan, InviteError> {
+    let storage = history_verifier.storage();
     if chain.store_id() != Some(store_id) {
         return Err(InviteError::InvalidDurableMutation(format!(
             "membership chain store {:?} differs from requested store {store_id:?}",
@@ -123,9 +124,9 @@ async fn build_revoke_mutation(
                     "local Store device registration is absent".to_string(),
                 )
             })?;
-        let operation = Box::pin(crate::sync::store::operations::prepare_plan(
+        let operation = Box::pin(crate::sync::store::operations::prepare_plan_with_history(
             database,
-            storage,
+            history_verifier,
             chain,
             &device_id,
             owner_keypair,
@@ -499,7 +500,7 @@ async fn finish_nonactivating_revoke_with_targets(
 }
 
 async fn execute_revoke_mutation(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     cloud_home: &dyn CloudHome,
     store_root_hash: store_commit::ObjectHash,
     chain: &mut MembershipChain,
@@ -508,6 +509,7 @@ async fn execute_revoke_mutation(
     mut persistence: MutationPersistence<'_>,
     pending_rotation: &cloud_storage::PendingRotation,
 ) -> Result<EncryptionService, InviteError> {
+    let storage = history_verifier.storage();
     plan.validate_closed_shape()?;
     if matches!(progress, MembershipMutationProgress::InviteGranted { .. }) {
         return Err(InviteError::InvalidDurableMutation(
@@ -774,10 +776,9 @@ async fn execute_revoke_mutation(
                             .collect::<Vec<_>>(),
                     )
                     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-                let outcome = Box::pin(publish_prepared_merge_membership_activation(
+                let outcome = Box::pin(publish_prepared_merge_membership_activation_with_history(
                     persistence.database,
-                    storage,
-                    &root,
+                    history_verifier,
                     &author,
                     &transition,
                     &publication,
@@ -981,6 +982,7 @@ async fn complete_already_removed_member(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn revoke_member_durable(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
@@ -994,6 +996,48 @@ pub(crate) async fn revoke_member_durable(
     pending_rotation: &cloud_storage::PendingRotation,
     database: &StoreDatabase,
 ) -> Result<EncryptionService, InviteError> {
+    let root = database.local_store_root_ref().await?.ok_or_else(|| {
+        InviteError::InvalidDurableMutation("local Store root is absent".to_string())
+    })?;
+    if root.store_root_hash != store_root_hash {
+        return Err(InviteError::InvalidDurableMutation(
+            "membership mutation root differs from the local Store root".to_string(),
+        ));
+    }
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+    revoke_member_durable_with_history(
+        &mut history_verifier,
+        cloud_home,
+        store_root_hash,
+        chain,
+        owner_keypair,
+        revokee_pubkey,
+        store_id,
+        timestamp,
+        current_encryption,
+        pending_rotation,
+        database,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revoke_member_durable_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    cloud_home: &dyn CloudHome,
+    store_root_hash: store_commit::ObjectHash,
+    chain: &mut MembershipChain,
+    owner_keypair: &UserKeypair,
+    revokee_pubkey: &str,
+    store_id: &str,
+    timestamp: &str,
+    current_encryption: &EncryptionService,
+    pending_rotation: &cloud_storage::PendingRotation,
+    database: &StoreDatabase,
+) -> Result<EncryptionService, InviteError> {
+    let storage = history_verifier.storage();
     let _mutation = database.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
@@ -1037,7 +1081,7 @@ pub(crate) async fn revoke_member_durable(
             }
             let stream_id = select_mutation_author_stream(database, chain, owner_keypair).await?;
             let plan = Box::pin(build_revoke_mutation(
-                storage,
+                history_verifier,
                 database,
                 store_root_hash,
                 chain,
@@ -1095,7 +1139,7 @@ pub(crate) async fn revoke_member_durable(
     }
     .map_err(InviteError::InvalidDurableMutation)?;
     Box::pin(execute_revoke_mutation(
-        storage,
+        history_verifier,
         cloud_home,
         store_root_hash,
         chain,

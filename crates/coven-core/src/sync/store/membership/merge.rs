@@ -135,33 +135,8 @@ async fn invite_merge_member_impl(
 }
 
 /// Remove a member through Merge membership authority and adopt the rotated key.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) async fn remove_member(
-    storage: &dyn SyncStorage,
-    cloud_home: &dyn crate::storage::cloud::CloudHome,
-    user_keypair: &UserKeypair,
-    hlc: &Hlc,
-    public_key_hex: &str,
-    current_encryption: &EncryptionService,
-    custody: &dyn MasterKeyCustody,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    database: &crate::sync::store::database::StoreDatabase,
-) -> Result<String, MembershipOpsError> {
-    remove_merge_member_impl(
-        storage,
-        cloud_home,
-        user_keypair,
-        hlc,
-        public_key_hex,
-        current_encryption,
-        custody,
-        cipher,
-        pending_rotation,
-        database,
-    )
-    .await
-}
-async fn remove_merge_member_impl(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     user_keypair: &UserKeypair,
@@ -175,27 +150,66 @@ async fn remove_merge_member_impl(
 ) -> Result<String, MembershipOpsError> {
     let db = database.sqlite();
     let root_ref = required_store_root_ref(database).await?;
-    let protocol_store_id = root_ref.store_root_id.to_string();
-    // Download existing membership entries and build the chain.
-    let store_root_hash = root_ref.store_root_hash;
-
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoMembershipChain)?;
-    let mut chain =
-        load_current_exact_chain(storage, &root_ref, Some(&pinned_owner), Some(database)).await?;
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root_ref)
+            .await
+            .map_err(|error| {
+                MembershipOpsError::Chain(AnchoredChainError::LoadFailed(error.to_string()))
+            })?;
+    let mut chain = load_current_exact_chain_with_history(
+        &mut history_verifier,
+        Some(&pinned_owner),
+        Some(database),
+    )
+    .await?;
     require_resolved_membership(&chain)?;
+    remove_member_with_history(
+        &mut history_verifier,
+        &mut chain,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        current_encryption,
+        custody,
+        cipher,
+        pending_rotation,
+        database,
+    )
+    .await
+}
+
+pub(crate) async fn remove_member_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    chain: &mut MembershipChain,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    current_encryption: &EncryptionService,
+    custody: &dyn MasterKeyCustody,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    database: &crate::sync::store::database::StoreDatabase,
+) -> Result<String, MembershipOpsError> {
+    let root_ref = history_verifier.root().clone();
+    let protocol_store_id = root_ref.store_root_id.to_string();
+    let store_root_hash = root_ref.store_root_hash;
+    require_resolved_membership(chain)?;
 
     // Revoke the member and rotate the cloud key. On return the rotation is
     // committed for every remaining member.
     let revoke_ts = hlc.now().to_string();
-    let new_key = super::revoke_member_durable(
-        storage,
+    let new_key = super::revoke_member_durable_with_history(
+        history_verifier,
         cloud_home,
         store_root_hash,
-        &mut chain,
+        chain,
         user_keypair,
         public_key_hex,
         &protocol_store_id,

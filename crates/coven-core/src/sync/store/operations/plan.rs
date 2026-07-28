@@ -324,6 +324,7 @@ impl StoreOperationCommitPlan {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn prepare_merge_conflict_resolution_commit(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -331,8 +332,32 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
     keypair: &UserKeypair,
     candidate_membership_heads: &[super::membership::MembershipHeadRef],
 ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
+    let root = required_store_root(database).await?;
+    let mut history_verifier = super::pull::MergeHistoryVerifier::new(storage, &root).await?;
+    prepare_merge_conflict_resolution_commit_with_history(
+        database,
+        &mut history_verifier,
+        device_id,
+        keypair,
+        candidate_membership_heads,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_merge_conflict_resolution_commit_with_history(
+    database: &StoreDatabase,
+    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    device_id: &str,
+    keypair: &UserKeypair,
+    candidate_membership_heads: &[super::membership::MembershipHeadRef],
+) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
     let (root, registration_ref, registration, device_signer) =
         load_local_store_authority(database, device_id, keypair).await?;
+    if &root != history_verifier.root() {
+        return Err(StoreError::InvalidOutbound(
+            "conflict-resolution authority differs from its verified Store root".to_string(),
+        ));
+    }
     let base = database.local_commit_base().await?;
     let previous = base.predecessor;
     let dependencies = super::store_commit::CommitFrontier::from_refs(base.frontier)
@@ -351,17 +376,17 @@ pub(crate) async fn prepare_merge_conflict_resolution_commit(
         predecessor: previous,
         dependencies: dependencies.0,
     };
-    let authorization = crate::sync::store::pull::load_merge_conflict_resolution_authorization(
-        database,
-        storage,
-        &root,
-        &order,
-        candidate_membership_heads,
-        &registration_ref,
-        &registration.author_pubkey,
-    )
-    .await
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let authorization =
+        crate::sync::store::pull::load_merge_conflict_resolution_authorization_with_verifier(
+            database,
+            history_verifier.commit_verifier_ref(),
+            &order,
+            candidate_membership_heads,
+            &registration_ref,
+            &registration.author_pubkey,
+        )
+        .await
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     Ok(MergeConflictResolutionCommitPlan {
         authorship: base.authorship,
         root,

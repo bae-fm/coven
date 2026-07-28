@@ -392,31 +392,6 @@ pub(crate) async fn publish_prepared_merge_membership_authority(
     Ok(())
 }
 
-pub(crate) async fn publish_prepared_merge_membership_activation(
-    database: &crate::sync::store::StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &store_commit::StoreRootRef,
-    author: &store_commit::StoreDeviceRegistration,
-    transition: &PreparedMembershipTransition,
-    publication: &PreparedMembershipPublication,
-    candidate: Box<operations::PreparedStoreOperationCommit>,
-    completion: operations::StoreMembershipJournalCompletion,
-) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
-        .await
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    publish_prepared_merge_membership_activation_with_history(
-        database,
-        &mut history_verifier,
-        author,
-        transition,
-        publication,
-        candidate,
-        completion,
-    )
-    .await
-}
-
 pub(crate) async fn publish_prepared_merge_membership_activation_with_history(
     database: &crate::sync::store::StoreDatabase,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,

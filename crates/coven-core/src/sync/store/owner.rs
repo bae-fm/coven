@@ -283,9 +283,13 @@ impl Store {
         crate::sync::membership::StoreMembershipConflictResolutionRef,
         membership::MembershipOpsError,
     > {
-        let mut chain =
-            membership::load_current_membership_chain(&**self.storage(), self.database()).await?;
-        let valid_choice = match (chain.status(), choice.selection()) {
+        let mut authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        let authority = authorization.operation_authority();
+        let valid_choice = match (authority.membership.status(), choice.selection()) {
             (
                 crate::sync::membership::MembershipStatus::Conflict(
                     crate::sync::membership::MembershipConflict::ConcurrentMemberAssignments {
@@ -319,9 +323,9 @@ impl Store {
             )
             .into());
         }
-        let result = membership::resolve_membership_conflict(
-            &**self.storage(),
-            &mut chain,
+        let result = membership::resolve_membership_conflict_with_history(
+            authority.history_verifier,
+            authority.membership,
             identity,
             device_id,
             choice.conflict_hash(),
@@ -420,8 +424,15 @@ impl Store {
         cipher: &crate::sync::cloud_storage::CloudCipherState,
         pending_rotation: &crate::sync::cloud_storage::PendingRotation,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
-        crate::sync::store::membership::remove_member(
-            &**self.storage(),
+        let mut authorization = self.authorize().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        let authority = authorization.operation_authority();
+        crate::sync::store::membership::remove_member_with_history(
+            authority.history_verifier,
+            authority.membership,
             self.storage().cloud_home(),
             identity,
             hlc,

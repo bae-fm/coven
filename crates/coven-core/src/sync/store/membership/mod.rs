@@ -128,20 +128,22 @@ mod refresh;
 pub use cursors::seed_head_watermark;
 pub use exact_chain::AnchoredChainError;
 pub(crate) use key_rotation::apply_key_rotation;
-pub(crate) use listing::{
-    current_membership_floor, get_members, get_membership_conflict, load_current_membership_chain,
-};
-pub(crate) use merge::{invite_member, remove_member};
+pub(crate) use listing::{current_membership_floor, get_members, get_membership_conflict};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use merge::remove_member;
+pub(crate) use merge::{invite_member, remove_member_with_history};
 pub use mutation::{unwrap_store_keyring, InviteError};
 
+#[cfg(test)]
+pub(crate) use mutation::revoke_member_durable;
 #[cfg(test)]
 pub(crate) use mutation::signed_wrapped_keyring_for_test;
 pub(crate) use mutation::{
     complete_revoke_rotation_adoption, create_invitation_with_encryption_durable,
     ed25519_hex_to_x25519, finish_membership_transition, load_authorized_owner_keyring,
     prepare_membership_transition, publish_prepared_merge_membership_activation_with_history,
-    publish_prepared_merge_membership_authority, resolve_membership_conflict,
-    revoke_member_durable, signed_wrapped_key, unwrap_store_keyring_for_refs,
+    publish_prepared_merge_membership_authority, resolve_membership_conflict_with_history,
+    revoke_member_durable_with_history, signed_wrapped_key, unwrap_store_keyring_for_refs,
     validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
     PreparedMembershipTransition,
 };

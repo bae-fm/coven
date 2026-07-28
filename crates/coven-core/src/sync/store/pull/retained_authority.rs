@@ -95,6 +95,7 @@ pub(crate) async fn retained_merge_device_state_for_order(
     retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await
 }
 
+#[cfg(test)]
 pub(crate) async fn load_merge_conflict_resolution_authorization(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
@@ -104,6 +105,28 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
     author_registration: &StoreDeviceRegistrationRef,
     resolver_pubkey: &str,
 ) -> Result<MergeConflictResolutionAuthorization, StorePullError> {
+    let commit_verifier = StoreCommitVerifier::new(storage, root).await?;
+    load_merge_conflict_resolution_authorization_with_verifier(
+        database,
+        &commit_verifier,
+        order,
+        candidate_membership_heads,
+        author_registration,
+        resolver_pubkey,
+    )
+    .await
+}
+
+pub(crate) async fn load_merge_conflict_resolution_authorization_with_verifier(
+    database: &StoreDatabase,
+    commit_verifier: &StoreCommitVerifier<'_>,
+    order: &super::store_commit::StoreCommitOrder,
+    candidate_membership_heads: &[super::membership::MembershipHeadRef],
+    author_registration: &StoreDeviceRegistrationRef,
+    resolver_pubkey: &str,
+) -> Result<MergeConflictResolutionAuthorization, StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let frontier = order
         .predecessor_cut()
         .map_err(|error| StorePullError::Database(error.to_string()))?
@@ -121,12 +144,12 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
             "Merge conflict resolution is missing its retained predecessor authority".to_string(),
         ));
     }
-    let root_value = load_store_protocol_root(storage, root).await?.value;
+    let root_value = commit_verifier.verified_root();
     let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
     let membership = super::membership_ops::project_anchored_chain_to_verified_store_prefix(
         storage,
         root,
-        &root_value,
+        root_value,
         candidate_membership_heads,
         &prefix,
     )
@@ -137,7 +160,7 @@ pub(crate) async fn load_merge_conflict_resolution_authorization(
         .validate_complete_membership(&membership)
         .map_err(StorePullError::Database)?;
     let (device_state_ref, device_state) =
-        retained_merge_device_state(storage, root, &root_value, &frontier, &checkpoints).await?;
+        retained_merge_device_state(storage, root, root_value, &frontier, &checkpoints).await?;
     if !device_state_has_active_registration(&device_state, author_registration) {
         return Err(StorePullError::Database(
             "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),

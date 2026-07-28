@@ -11,9 +11,10 @@ use crate::sync::store_objects;
 use super::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
     exact_owned_remote, finish_membership_transition, prepare_membership_transition,
-    publish_prepared_merge_membership_activation, publish_prepared_merge_membership_authority,
-    validate_prepared_publication, validate_prepared_transition, InviteError,
-    MembershipMutationPlan, MembershipMutationProgress, MutationPersistence, ResolveMutationPlan,
+    publish_prepared_merge_membership_activation_with_history,
+    publish_prepared_merge_membership_authority, validate_prepared_publication,
+    validate_prepared_transition, InviteError, MembershipMutationPlan, MembershipMutationProgress,
+    MutationPersistence, ResolveMutationPlan,
 };
 
 impl ResolveMutationPlan {
@@ -79,7 +80,7 @@ impl ResolveMutationPlan {
 /// and clearing the staged mutation, so the next resolution composes at the
 /// position that follows.
 async fn build_resolution_mutation(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     chain: &MembershipChain,
     signer: &UserKeypair,
@@ -88,9 +89,10 @@ async fn build_resolution_mutation(
     selection: membership::MembershipConflictSelection,
     created_at: &str,
 ) -> Result<ResolveMutationPlan, InviteError> {
-    let base = operations::prepare_merge_conflict_resolution_commit(
+    let storage = history_verifier.storage();
+    let base = operations::prepare_merge_conflict_resolution_commit_with_history(
         database,
-        storage,
+        history_verifier,
         device_id,
         signer,
         chain.head_refs(),
@@ -310,12 +312,13 @@ async fn finish_nonactivating_resolution(
 }
 
 async fn execute_resolution_mutation(
-    storage: &dyn SyncStorage,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     chain: &mut MembershipChain,
     mut plan: ResolveMutationPlan,
     progress: MembershipMutationProgress,
     mut persistence: MutationPersistence<'_>,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
+    let storage = history_verifier.storage();
     plan.validate_closed_shape()?;
     if let MembershipMutationProgress::ResolutionCandidateNonactivating { nonactivation } =
         &progress
@@ -412,10 +415,9 @@ async fn execute_resolution_mutation(
     loop {
         let previous = plan.candidate.as_ref().clone();
         let current_remotes = plan.remote_objects()?;
-        let outcome = publish_prepared_merge_membership_activation(
+        let outcome = publish_prepared_merge_membership_activation_with_history(
             persistence.database,
-            storage,
-            &root,
+            history_verifier,
             &author,
             &plan.transition,
             &plan.publication,
@@ -510,8 +512,8 @@ async fn execute_resolution_mutation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn resolve_membership_conflict(
-    storage: &dyn SyncStorage,
+pub(crate) async fn resolve_membership_conflict_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     chain: &mut MembershipChain,
     signer: &UserKeypair,
     device_id: &str,
@@ -542,7 +544,7 @@ pub(crate) async fn resolve_membership_conflict(
         }
         None => {
             let plan = build_resolution_mutation(
-                storage,
+                history_verifier,
                 database,
                 chain,
                 signer,
@@ -566,7 +568,7 @@ pub(crate) async fn resolve_membership_conflict(
         }
     };
     execute_resolution_mutation(
-        storage,
+        history_verifier,
         chain,
         plan,
         progress,
