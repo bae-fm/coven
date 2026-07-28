@@ -563,9 +563,18 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         object: prepared.reference().clone(),
     };
 
-    load_anchored_chain_at_exact_heads(
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
         &fixture.store.storage,
         &fixture.store.root,
+    )
+    .await
+    .expect("open relocated membership history");
+    let verified_root = history_verifier.verified_root().clone();
+    load_anchored_chain_at_exact_heads_with_root_and_history(
+        &mut history_verifier,
+        &fixture.store.storage,
+        &fixture.store.root,
+        &verified_root,
         &fixture.owner_pubkey,
         &[relocated_ref],
         &[],

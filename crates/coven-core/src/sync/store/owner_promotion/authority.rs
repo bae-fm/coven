@@ -21,12 +21,25 @@ pub(super) async fn load_current_merge_membership(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<MembershipChain, OwnerPromotionError> {
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    load_current_merge_membership_with_history(&mut history_verifier, database, storage, root).await
+}
+
+pub(super) async fn load_current_merge_membership_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    database: &StoreDatabase,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+) -> Result<MembershipChain, OwnerPromotionError> {
     let founder = database
         .sqlite()
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or_else(|| OwnerPromotionError::Protocol("Store founder is absent".to_string()))?;
-    let loaded = crate::sync::store::membership::load_current_exact_chain(
+    let loaded = crate::sync::store::membership::load_current_exact_chain_with_history(
+        history_verifier,
         storage,
         root,
         Some(&founder),

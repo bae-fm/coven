@@ -17,6 +17,26 @@ pub(crate) async fn load_current_exact_chain(
     owner_pubkey: Option<&str>,
     database: Option<&StoreDatabase>,
 ) -> Result<MembershipChain, MembershipOpsError> {
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(map_membership_history_error)?;
+    load_current_exact_chain_with_history(
+        &mut history_verifier,
+        storage,
+        root,
+        owner_pubkey,
+        database,
+    )
+    .await
+}
+
+pub(crate) async fn load_current_exact_chain_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    owner_pubkey: Option<&str>,
+    database: Option<&StoreDatabase>,
+) -> Result<MembershipChain, MembershipOpsError> {
     let _membership_load = match database {
         Some(database) => Some(database.lock_membership_load().await),
         None => None,
@@ -27,7 +47,8 @@ pub(crate) async fn load_current_exact_chain(
             .map_err(MembershipOpsError::Database)?,
         None => Vec::new(),
     };
-    let chain = Box::pin(load_exact_anchored_chain(
+    let chain = Box::pin(load_exact_anchored_chain_with_history(
+        history_verifier,
         storage,
         root,
         &cursors,
@@ -593,29 +614,6 @@ fn load_exact_membership_head_with_root<'a>(
         }
         Ok(head)
     })
-}
-
-pub(crate) async fn load_anchored_chain_at_exact_heads(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    owner_pubkey: &str,
-    exact_heads: &[MembershipHeadRef],
-    exact_resolutions: &[StoreMembershipConflictResolutionRef],
-) -> Result<MembershipChain, AnchoredChainError> {
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
-        .await
-        .map_err(map_membership_history_error)?;
-    let root_value = history_verifier.verified_root().clone();
-    Box::pin(load_anchored_chain_at_exact_heads_with_root_and_history(
-        &mut history_verifier,
-        storage,
-        root,
-        &root_value,
-        owner_pubkey,
-        exact_heads,
-        exact_resolutions,
-    ))
-    .await
 }
 
 pub(crate) async fn load_anchored_chain_at_exact_heads_with_root(

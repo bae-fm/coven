@@ -23,7 +23,14 @@ pub(in crate::sync::store) async fn find_request_activation(
             "Owner-promotion request verifier belongs to another Store root".to_string(),
         ));
     }
-    let promoter = load_registration_ref(storage, root, &request.promoter_registration).await?;
+    let verified_root = history_verifier.verified_root().clone();
+    let promoter = load_registration_ref_with_root(
+        storage,
+        root,
+        &verified_root,
+        &request.promoter_registration,
+    )
+    .await?;
     request
         .verify(root, &promoter.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -60,7 +67,8 @@ pub(in crate::sync::store) async fn find_request_activation(
     })
 }
 
-pub(in crate::sync::store) async fn verify_acceptance(
+pub(in crate::sync::store) async fn verify_acceptance_with_history(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
@@ -69,7 +77,6 @@ pub(in crate::sync::store) async fn verify_acceptance(
         commit: activation_commit,
         ..
     } = &acceptance.activation;
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
     history_verifier
         .verify_refs([activation_commit.clone()])
         .await?;
@@ -124,8 +131,21 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
         commit: activation_commit,
         head: activation_head,
     } = &acceptance.activation;
-    let promoter = load_registration_ref(storage, root, &request.promoter_registration).await?;
-    let candidate = load_registration_ref(storage, root, &request.member_registration).await?;
+    let verified_root = commit_verifier.verified_root().clone();
+    let promoter = load_registration_ref_with_root(
+        storage,
+        root,
+        &verified_root,
+        &request.promoter_registration,
+    )
+    .await?;
+    let candidate = load_registration_ref_with_root(
+        storage,
+        root,
+        &verified_root,
+        &request.member_registration,
+    )
+    .await?;
     request
         .verify(root, &promoter.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;

@@ -629,12 +629,18 @@ pub(in crate::sync::store) async fn verify_owner_promotion_acceptance_from_reque
     .map(|()| VerifiedOwnerPromotionAcceptance)
 }
 
-pub(crate) async fn verify_owner_promotion_acceptance(
+pub(crate) async fn verify_owner_promotion_acceptance_with_history(
+    history_verifier: &mut pull::MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
 ) -> Result<VerifiedOwnerPromotionAcceptance, pull::StorePullError> {
-    pull::verify_owner_promotion_acceptance(storage, root, acceptance)
-        .await
-        .map(|()| VerifiedOwnerPromotionAcceptance)
+    pull::verify_owner_promotion_acceptance_with_history(
+        history_verifier,
+        storage,
+        root,
+        acceptance,
+    )
+    .await
+    .map(|()| VerifiedOwnerPromotionAcceptance)
 }
