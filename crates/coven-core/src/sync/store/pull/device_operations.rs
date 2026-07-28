@@ -139,10 +139,15 @@ async fn verify_merge_device_exclusion_proof(
                 "device exclusion proof repeats a remaining registration".to_string(),
             ));
         }
-        let registration = load_registration_ref(storage, &root, &required_record.registration)
-            .await
-            .map_err(RegistrationLoadError::Object)?
-            .value;
+        let registration = load_registration_ref_with_root(
+            storage,
+            &root,
+            commit_verifier.verified_root(),
+            &required_record.registration,
+        )
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
         let ack = load_store_ack_ref(storage, &root, reference, &registration)
             .await
             .map_err(RegistrationLoadError::Object)?

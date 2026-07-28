@@ -221,6 +221,7 @@ async fn traverse_exact_membership_stream(
     authority: &mut MembershipActivationAuthority<'_, '_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    root_value: &crate::sync::store_commit::StoreProtocolRoot,
     author: &str,
     grant: &MembershipGrantId,
     stream_id: crate::sync::membership::AuthorStreamId,
@@ -292,9 +293,10 @@ async fn traverse_exact_membership_stream(
                 "membership head {coord:?} does not extend its exact predecessor"
             )));
         }
-        let registration = crate::sync::store_objects::load_registration_ref(
+        let registration = crate::sync::store_objects::load_registration_ref_with_root(
             storage,
             root,
+            root_value,
             &head.body.author_registration,
         )
         .await
@@ -417,6 +419,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
         &mut activation_authority,
         storage,
         &root,
+        &root_value,
         &root_value.descriptor.founder_pubkey,
         &root_value.descriptor.founder_grant,
         founder_stream,
@@ -491,6 +494,7 @@ pub(crate) async fn load_exact_anchored_chain_with_history(
                 &mut activation_authority,
                 storage,
                 &root,
+                &root_value,
                 &stream.author_pubkey,
                 &stream.author_owner_grant,
                 stream.stream_id,

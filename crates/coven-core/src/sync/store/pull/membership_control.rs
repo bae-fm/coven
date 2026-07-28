@@ -104,10 +104,14 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         return Err("Merge membership verifier received another Store control".to_string());
     };
     let state = &commit.membership_state;
-    let commit_author =
-        super::store_objects::load_registration_ref(storage, &root, &commit.author_registration)
-            .await
-            .map_err(|error| error.to_string())?;
+    let commit_author = super::store_objects::load_registration_ref_with_root(
+        storage,
+        &root,
+        commit_verifier.verified_root(),
+        &commit.author_registration,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if transition.body.author_registration != commit.author_registration
         || transition.body.entry.coord.author_pubkey != commit_author.value.author_pubkey
         || transition.body.resolutions != state.resolutions

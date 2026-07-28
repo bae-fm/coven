@@ -277,8 +277,13 @@ pub(crate) async fn verify_membership_grant_revocation_nonactivation(
             "membership revocation witness head differs from its exact activation".to_string(),
         ));
     }
-    let witness_author =
-        load_registration_ref(storage, &root, &witness_head.author_registration).await?;
+    let witness_author = load_registration_ref_with_root(
+        storage,
+        &root,
+        history_verifier.verified_root(),
+        &witness_head.author_registration,
+    )
+    .await?;
     let opened = super::store_objects::load_head_ref(
         storage,
         root.store_root_hash,
