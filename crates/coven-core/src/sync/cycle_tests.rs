@@ -175,7 +175,7 @@ async fn run_cycle_in_task(
 ) -> Result<(), cycle::SyncCycleFailure> {
     tokio::spawn(async move {
         run_single_sync_cycle(
-            storage.as_ref(),
+            &storage.storage,
             &device_id,
             hlc.as_ref(),
             &SystemClock,
@@ -3196,55 +3196,65 @@ use crate::sync::storage::StorageError;
 /// cycle.
 struct CycleStorageInterceptor {
     inner: Arc<TestStore>,
-    interception: CycleStorageInterception,
-    protocol_read_calls: AtomicUsize,
+    storage: crate::sync::test_helpers::InterceptedStorage<
+        Arc<CloudSyncStorage>,
+        CycleStorageInterception,
+    >,
 }
 
 enum CycleStorageInterception {
-    PassThrough,
-    RejectAckCreate,
+    PassThrough {
+        protocol_read_calls: AtomicUsize,
+    },
+    RejectAckCreate {
+        protocol_read_calls: AtomicUsize,
+    },
     InjectHostWrite {
         db: Database,
         write_sql: String,
         fired: AtomicBool,
+        protocol_read_calls: AtomicUsize,
     },
     RejectBlobCreate {
         reject_create_call: Option<usize>,
         reject_prepare_call: Option<usize>,
-        allocate_calls: std::sync::atomic::AtomicUsize,
-        prepare_calls: std::sync::atomic::AtomicUsize,
-        create_calls: std::sync::atomic::AtomicUsize,
+        allocate_calls: AtomicUsize,
+        prepare_calls: AtomicUsize,
+        create_calls: AtomicUsize,
         attempted: std::sync::Mutex<Vec<crate::blob::locator::StoredBlobRef>>,
+        protocol_read_calls: AtomicUsize,
     },
 }
 
 impl CycleStorageInterceptor {
     fn pass_through(inner: Arc<TestStore>) -> Self {
-        Self {
+        Self::new(
             inner,
-            interception: CycleStorageInterception::PassThrough,
-            protocol_read_calls: AtomicUsize::new(0),
-        }
+            CycleStorageInterception::PassThrough {
+                protocol_read_calls: AtomicUsize::new(0),
+            },
+        )
     }
 
     fn reject_ack_create(inner: Arc<TestStore>) -> Self {
-        Self {
+        Self::new(
             inner,
-            interception: CycleStorageInterception::RejectAckCreate,
-            protocol_read_calls: AtomicUsize::new(0),
-        }
+            CycleStorageInterception::RejectAckCreate {
+                protocol_read_calls: AtomicUsize::new(0),
+            },
+        )
     }
 
     fn inject_host_write(inner: TestStore, db: Database, write_sql: &str) -> Self {
-        Self {
-            inner: Arc::new(inner),
-            interception: CycleStorageInterception::InjectHostWrite {
+        Self::new(
+            Arc::new(inner),
+            CycleStorageInterception::InjectHostWrite {
                 db,
                 write_sql: write_sql.to_string(),
                 fired: AtomicBool::new(false),
+                protocol_read_calls: AtomicUsize::new(0),
             },
-            protocol_read_calls: AtomicUsize::new(0),
-        }
+        )
     }
 
     fn reject_blob_create(inner: Arc<TestStore>) -> Self {
@@ -3253,230 +3263,171 @@ impl CycleStorageInterceptor {
 
     fn reject_blob_create_on(inner: Arc<TestStore>, reject_call: usize) -> Self {
         assert!(reject_call > 0, "blob create call numbers are 1-based");
-        Self {
+        Self::new(
             inner,
-            interception: CycleStorageInterception::RejectBlobCreate {
+            CycleStorageInterception::RejectBlobCreate {
                 reject_create_call: Some(reject_call),
                 reject_prepare_call: None,
-                allocate_calls: std::sync::atomic::AtomicUsize::new(0),
-                prepare_calls: std::sync::atomic::AtomicUsize::new(0),
-                create_calls: std::sync::atomic::AtomicUsize::new(0),
+                allocate_calls: AtomicUsize::new(0),
+                prepare_calls: AtomicUsize::new(0),
+                create_calls: AtomicUsize::new(0),
                 attempted: std::sync::Mutex::new(Vec::new()),
+                protocol_read_calls: AtomicUsize::new(0),
             },
-            protocol_read_calls: AtomicUsize::new(0),
-        }
+        )
     }
 
     fn reject_blob_prepare(inner: Arc<TestStore>) -> Self {
-        Self {
+        Self::new(
             inner,
-            interception: CycleStorageInterception::RejectBlobCreate {
+            CycleStorageInterception::RejectBlobCreate {
                 reject_create_call: None,
                 reject_prepare_call: Some(1),
-                allocate_calls: std::sync::atomic::AtomicUsize::new(0),
-                prepare_calls: std::sync::atomic::AtomicUsize::new(0),
-                create_calls: std::sync::atomic::AtomicUsize::new(0),
+                allocate_calls: AtomicUsize::new(0),
+                prepare_calls: AtomicUsize::new(0),
+                create_calls: AtomicUsize::new(0),
                 attempted: std::sync::Mutex::new(Vec::new()),
+                protocol_read_calls: AtomicUsize::new(0),
             },
-            protocol_read_calls: AtomicUsize::new(0),
+        )
+    }
+
+    fn new(inner: Arc<TestStore>, interceptor: CycleStorageInterception) -> Self {
+        Self {
+            storage: crate::sync::test_helpers::InterceptedStorage::new(
+                Arc::clone(&inner.storage),
+                interceptor,
+            ),
+            inner,
         }
     }
 
     fn rejected_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
-        match &self.interception {
-            CycleStorageInterception::RejectBlobCreate { attempted, .. } => attempted
-                .lock()
-                .expect("attempted blob record lock")
-                .clone(),
-            CycleStorageInterception::PassThrough
-            | CycleStorageInterception::RejectAckCreate
-            | CycleStorageInterception::InjectHostWrite { .. } => {
-                panic!("storage interception does not reject blob creates")
-            }
-        }
+        self.storage.interceptor().rejected_blobs()
     }
 
     fn blob_write_calls(&self) -> (usize, usize, usize) {
-        match &self.interception {
-            CycleStorageInterception::RejectBlobCreate {
-                allocate_calls,
-                prepare_calls,
-                create_calls,
-                ..
-            } => (
-                allocate_calls.load(Ordering::SeqCst),
-                prepare_calls.load(Ordering::SeqCst),
-                create_calls.load(Ordering::SeqCst),
-            ),
-            CycleStorageInterception::PassThrough
-            | CycleStorageInterception::RejectAckCreate
-            | CycleStorageInterception::InjectHostWrite { .. } => {
-                panic!("storage interception does not record blob writes")
+        self.storage.interceptor().blob_write_calls()
+    }
+}
+
+impl std::ops::Deref for CycleStorageInterceptor {
+    type Target = crate::sync::test_helpers::InterceptedStorage<
+        Arc<CloudSyncStorage>,
+        CycleStorageInterception,
+    >;
+
+    fn deref(&self) -> &Self::Target {
+        &self.storage
+    }
+}
+
+impl CycleStorageInterception {
+    fn protocol_read_calls(&self) -> &AtomicUsize {
+        match self {
+            Self::PassThrough {
+                protocol_read_calls,
             }
+            | Self::RejectAckCreate {
+                protocol_read_calls,
+            }
+            | Self::InjectHostWrite {
+                protocol_read_calls,
+                ..
+            }
+            | Self::RejectBlobCreate {
+                protocol_read_calls,
+                ..
+            } => protocol_read_calls,
         }
+    }
+
+    fn rejected_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
+        let Self::RejectBlobCreate { attempted, .. } = self else {
+            panic!("storage interception does not reject blob creates");
+        };
+        attempted
+            .lock()
+            .expect("attempted blob record lock")
+            .clone()
+    }
+
+    fn blob_write_calls(&self) -> (usize, usize, usize) {
+        let Self::RejectBlobCreate {
+            allocate_calls,
+            prepare_calls,
+            create_calls,
+            ..
+        } = self
+        else {
+            panic!("storage interception does not record blob writes");
+        };
+        (
+            allocate_calls.load(Ordering::SeqCst),
+            prepare_calls.load(Ordering::SeqCst),
+            create_calls.load(Ordering::SeqCst),
+        )
     }
 }
 
 #[async_trait]
-impl SyncStorage for CycleStorageInterceptor {
-    fn store_blob_protection(
-        &self,
-    ) -> Result<crate::sync::storage::BlobSpoolProtection, StorageError> {
-        self.inner.storage.store_blob_protection()
-    }
-
-    async fn provider_binding(
-        &self,
-    ) -> Result<crate::sync::storage::ResolvedProviderBinding, StorageError> {
-        self.inner.storage.provider_binding().await
-    }
-
-    async fn allocate_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        semantic_prefix: &str,
-        extension: &str,
-    ) -> Result<crate::storage::cloud::ObjectSlot, StorageError> {
-        self.inner
-            .storage
-            .allocate_protocol_slot(context, semantic_prefix, extension)
-            .await
-    }
-
-    fn prepare_protocol_object(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-        data: Vec<u8>,
-    ) -> Result<crate::sync::storage::PreparedExactObject, StorageError> {
-        self.inner
-            .storage
-            .prepare_protocol_object(context, slot, semantic_prefix, data)
-    }
-
-    async fn create_protocol_object(
+impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception {
+    async fn before_protocol_create(
         &self,
         prepared: &crate::sync::storage::PreparedExactObject,
     ) -> Result<(), StorageError> {
-        if matches!(
-            &self.interception,
-            CycleStorageInterception::RejectAckCreate
-        ) && prepared
-            .reference()
-            .slot()
-            .logical_key()
-            .starts_with("store-v1/acks/")
+        if matches!(self, Self::RejectAckCreate { .. })
+            && prepared
+                .reference()
+                .slot()
+                .logical_key()
+                .starts_with("store-v1/acks/")
         {
             return Err(StorageError::Storage(
                 "unexpected Store acknowledgement create".to_string(),
             ));
         }
-        self.inner.storage.create_protocol_object(prepared).await
+        Ok(())
     }
 
-    async fn read_protocol_object(
+    async fn before_protocol_read(
         &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        object: &crate::sync::storage::ExactObjectRef,
+        read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
-        if semantic_prefix.starts_with("store-v1/candidates/")
+    ) -> Result<(), StorageError> {
+        self.protocol_read_calls().fetch_add(1, Ordering::SeqCst);
+        if read == crate::sync::test_helpers::ProtocolRead::Object
+            && semantic_prefix.starts_with("store-v1/candidates/")
             && semantic_prefix.contains("/packages/")
         {
-            if let CycleStorageInterception::InjectHostWrite {
+            if let Self::InjectHostWrite {
                 db,
                 write_sql,
                 fired,
-            } = &self.interception
+                ..
+            } = self
             {
                 if !fired.swap(true, Ordering::SeqCst) {
                     host_exec(db, write_sql).await;
                 }
             }
         }
-        self.inner
-            .storage
-            .read_protocol_object(context, object, semantic_prefix)
-            .await
+        Ok(())
     }
 
-    async fn read_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::sync::storage::ExactObjectRef), StorageError> {
-        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner
-            .storage
-            .read_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn read_prepared_protocol_slot(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::sync::storage::PreparedExactObject), StorageError> {
-        self.protocol_read_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner
-            .storage
-            .read_prepared_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn delete_protocol_object(
-        &self,
-        object: &crate::sync::storage::ExactObjectRef,
-    ) -> Result<(), StorageError> {
-        self.inner.storage.delete_protocol_object(object).await
-    }
-
-    async fn allocate_blob_slot(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-    ) -> Result<crate::storage::cloud::ObjectSlot, StorageError> {
-        if let CycleStorageInterception::RejectBlobCreate { allocate_calls, .. } =
-            &self.interception
-        {
+    async fn before_blob_allocate(&self) -> Result<(), StorageError> {
+        if let Self::RejectBlobCreate { allocate_calls, .. } = self {
             allocate_calls.fetch_add(1, Ordering::SeqCst);
         }
-        self.inner
-            .storage
-            .allocate_blob_slot(locator, authority)
-            .await
+        Ok(())
     }
 
-    async fn seal_blob_to_spool(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        protection: crate::sync::storage::BlobSpoolProtection,
-        plaintext_file: &std::path::Path,
-        spool_file: &std::path::Path,
-    ) -> Result<crate::sync::storage::BlobSpoolWrite, StorageError> {
-        self.inner
-            .storage
-            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
-            .await
-    }
-
-    async fn prepare_blob_object(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        slot: crate::storage::cloud::ObjectSlot,
-        stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
-        if let CycleStorageInterception::RejectBlobCreate {
+    async fn before_blob_prepare(&self) -> Result<(), StorageError> {
+        if let Self::RejectBlobCreate {
             reject_prepare_call,
             prepare_calls,
             ..
-        } = &self.interception
+        } = self
         {
             let call = prepare_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if *reject_prepare_call == Some(call) {
@@ -3485,25 +3436,19 @@ impl SyncStorage for CycleStorageInterceptor {
                 )));
             }
         }
-        self.inner
-            .storage
-            .prepare_blob_object(locator, authority, slot, stored_file)
-            .await
+        Ok(())
     }
 
-    async fn create_blob_object_from_file(
+    async fn before_blob_create(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
-        stored_file: &std::path::Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
     ) -> Result<(), StorageError> {
-        if let CycleStorageInterception::RejectBlobCreate {
+        if let Self::RejectBlobCreate {
             reject_create_call,
             create_calls,
             attempted,
             ..
-        } = &self.interception
+        } = self
         {
             attempted
                 .lock()
@@ -3516,58 +3461,7 @@ impl SyncStorage for CycleStorageInterceptor {
                 )));
             }
         }
-        self.inner
-            .storage
-            .create_blob_object_from_file(blob, authority, stored_file, progress)
-            .await
-    }
-
-    async fn verify_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError> {
-        self.inner.storage.verify_blob_object(blob).await
-    }
-
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
-        self.inner
-            .storage
-            .stage_exact_blob_download(blob, dest)
-            .await
-    }
-
-    async fn stage_verified_blob_plaintext(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::sync::storage::BlobSpoolProtection,
-        dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
-        self.inner
-            .storage
-            .stage_verified_blob_plaintext(blob, protection, dest)
-            .await
-    }
-
-    async fn open_blob_range_reader(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::sync::storage::BlobSpoolProtection,
-    ) -> Result<crate::sync::cloud_storage::BlobRangeReader, StorageError> {
-        self.inner
-            .storage
-            .open_blob_range_reader(blob, protection)
-            .await
-    }
-
-    async fn delete_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError> {
-        self.inner.storage.delete_blob_object(blob).await
+        Ok(())
     }
 }
 
@@ -5500,7 +5394,7 @@ async fn run_cycle_m_storage(
         .expect("read exact test device id")
         .expect("exact test device id exists");
     run_single_sync_cycle(
-        storage,
+        &storage.storage,
         &device_id,
         hlc,
         &SystemClock,

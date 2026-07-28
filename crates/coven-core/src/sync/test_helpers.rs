@@ -2470,7 +2470,10 @@ pub(crate) trait StorageInterceptor: Send + Sync {
         Ok(())
     }
 
-    async fn before_blob_create(&self) -> Result<(), crate::sync::storage::StorageError> {
+    async fn before_blob_create(
+        &self,
+        _blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
         Ok(())
     }
 
@@ -2482,14 +2485,20 @@ pub(crate) trait StorageInterceptor: Send + Sync {
 /// A [`SyncStorage`] that forwards every call to `inner`, giving `interceptor`
 /// its chance first.
 #[cfg(test)]
-pub(crate) struct InterceptedStorage<'a, I: StorageInterceptor> {
-    inner: &'a dyn crate::sync::storage::SyncStorage,
+pub(crate) struct InterceptedStorage<S, I: StorageInterceptor>
+where
+    S: std::ops::Deref,
+{
+    inner: S,
     interceptor: I,
 }
 
 #[cfg(test)]
-impl<'a, I: StorageInterceptor> InterceptedStorage<'a, I> {
-    pub(crate) fn new(inner: &'a dyn crate::sync::storage::SyncStorage, interceptor: I) -> Self {
+impl<S, I: StorageInterceptor> InterceptedStorage<S, I>
+where
+    S: std::ops::Deref,
+{
+    pub(crate) fn new(inner: S, interceptor: I) -> Self {
         Self { inner, interceptor }
     }
 
@@ -2500,7 +2509,12 @@ impl<'a, I: StorageInterceptor> InterceptedStorage<'a, I> {
 
 #[cfg(test)]
 #[async_trait::async_trait]
-impl<I: StorageInterceptor> crate::sync::storage::SyncStorage for InterceptedStorage<'_, I> {
+impl<S, I> crate::sync::storage::SyncStorage for InterceptedStorage<S, I>
+where
+    S: std::ops::Deref + Send + Sync,
+    S::Target: crate::sync::storage::SyncStorage,
+    I: StorageInterceptor,
+{
     fn store_blob_protection(
         &self,
     ) -> Result<crate::sync::storage::BlobSpoolProtection, crate::sync::storage::StorageError> {
@@ -2639,7 +2653,7 @@ impl<I: StorageInterceptor> crate::sync::storage::SyncStorage for InterceptedSto
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
     ) -> Result<(), crate::sync::storage::StorageError> {
-        self.interceptor.before_blob_create().await?;
+        self.interceptor.before_blob_create(blob).await?;
         self.inner
             .create_blob_object_from_file(blob, authority, stored_file, progress)
             .await
