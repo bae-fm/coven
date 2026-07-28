@@ -545,7 +545,9 @@ pub(crate) async fn verify_accepted_provider_access_activation(
     provider_admin: &super::provider::ProviderAdminGrantRecord,
     administrator: &super::store_commit::StoreDeviceRegistration,
 ) -> Result<(), pull::StorePullError> {
+    let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
     pull::verify_accepted_provider_access_activation(
+        &mut history_verifier,
         storage,
         root,
         access,

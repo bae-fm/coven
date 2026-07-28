@@ -330,7 +330,10 @@ pub(crate) async fn accept_device_registration_request(
     request
         .approval
         .verify(&root_value, &owner, &administrator)?;
-    crate::sync::store::verify_accepted_provider_access_activation(
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(storage, &offer.store_root).await?;
+    crate::sync::store::pull::verify_accepted_provider_access_activation(
+        &mut history_verifier,
         storage,
         &offer.store_root,
         &request.approval.access_grant,
@@ -380,8 +383,7 @@ pub(crate) async fn accept_device_registration_request(
         .await;
     let cut = plan.predecessor_cut()?;
     if !crate::sync::store::pull::history_cut_covers(
-        storage,
-        &offer.store_root,
+        history_verifier.commit_verifier(),
         &cut,
         &request.approval.access_grant.activation,
     )

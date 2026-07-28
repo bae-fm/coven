@@ -128,19 +128,15 @@ fn coverage_error(error: CommitCoverageError) -> StorePullError {
 }
 
 pub(crate) async fn history_cut_covers(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     cut: &StoreHistoryCut,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StorePullError> {
     let covering = cut.0.get(&covered.coord.stream_id);
     match covering {
-        Some(covering) => {
-            let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
-            commit_position_covers(&mut commit_verifier, covering, covered)
-                .await
-                .map_err(coverage_error)
-        }
+        Some(covering) => commit_position_covers(commit_verifier, covering, covered)
+            .await
+            .map_err(coverage_error),
         None => Ok(false),
     }
 }

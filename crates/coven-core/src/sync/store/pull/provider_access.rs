@@ -2,21 +2,16 @@ use super::registration_authority::verify_merge_provider_administrator;
 use super::*;
 
 pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     access: &crate::sync::provider::ActivatedStoreMemberProviderAccessGrant,
     provider_admin: &crate::sync::provider::ProviderAdminGrantRecord,
     administrator: &StoreDeviceRegistration,
 ) -> Result<(), StorePullError> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
-    let activation = load_provider_access_activation(
-        &mut history_verifier,
-        storage,
-        root,
-        access,
-        administrator,
-    )
-    .await?;
+    let activation =
+        load_provider_access_activation(history_verifier, storage, root, access, administrator)
+            .await?;
     let membership =
         load_merge_predecessor_membership(storage, root, &activation.value().membership_state)
             .await
@@ -36,7 +31,7 @@ pub(in crate::sync::store) async fn verify_accepted_provider_access_activation(
         ));
     }
     if !current_history_contains(
-        &mut history_verifier,
+        history_verifier,
         storage,
         root,
         &membership,
