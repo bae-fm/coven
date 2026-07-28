@@ -70,7 +70,9 @@ pub(crate) async fn verify_merge_membership_control(
         &predecessor_state,
     )
     .map_err(|error| error.to_string())?;
+    let (commit_verifier, history) = history_verifier.verification_parts();
     verify_merge_membership_control_with_history(
+        commit_verifier,
         storage,
         root,
         commit_ref,
@@ -85,6 +87,7 @@ pub(crate) async fn verify_merge_membership_control(
 }
 
 pub(crate) async fn verify_merge_membership_control_with_history(
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
@@ -266,6 +269,7 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         );
     }
     super::owner_promotion::verify_merge_owner_promotion_acceptance_with_history(
+        commit_verifier,
         storage,
         root,
         acceptance,

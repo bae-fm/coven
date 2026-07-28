@@ -61,10 +61,18 @@ impl Store {
                     .to_string(),
             ));
         }
-        let verified_activation =
-            crate::sync::store::find_owner_promotion_request_activation(storage, &root, &request)
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
                 .await
                 .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let verified_activation = crate::sync::store::find_owner_promotion_request_activation(
+            &mut history_verifier,
+            storage,
+            &root,
+            &request,
+        )
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let membership_stream = StreamActivation::grant_authorized_stream_id(
             root.store_root_hash,
             &registration_ref,
@@ -113,6 +121,7 @@ impl Store {
         )
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         crate::sync::store::verify_owner_promotion_acceptance_from_request_activation(
+            &mut history_verifier,
             storage,
             &root,
             &acceptance,

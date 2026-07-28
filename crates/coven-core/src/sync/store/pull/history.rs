@@ -1189,6 +1189,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self.commit_verifier
     }
 
+    pub(crate) fn verification_parts(
+        &mut self,
+    ) -> (&mut StoreCommitVerifier<'a>, &VerifiedMergeHistory) {
+        (&mut self.commit_verifier, &self.history)
+    }
+
     pub(crate) fn into_commit_verifier(self) -> StoreCommitVerifier<'a> {
         self.commit_verifier
     }
@@ -1360,6 +1366,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 if let Some(super::store_commit::StoreControl { transition }) = commit.control() {
                     let (activations, conflict_resolution) =
                         Box::pin(verify_merge_membership_control_with_history(
+                            &mut self.commit_verifier,
                             storage,
                             root,
                             &reference,
