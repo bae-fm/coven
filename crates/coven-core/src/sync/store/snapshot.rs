@@ -2227,14 +2227,14 @@ mod tests {
             .expect("read snapshot test Store root")
             .expect("snapshot test Store root exists");
         let origin = crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: root.descriptor.creation_id,
+            creation_id: root.value.descriptor.creation_id,
         };
         let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root_ref, &origin);
         let membership =
             crate::sync::store::pull::load_cycle_membership(storage, &store_database(db))
                 .await
                 .expect("load snapshot test membership");
-        (root.object_hash(), device_id.to_string(), membership)
+        (root.value.object_hash(), device_id.to_string(), membership)
     }
 
     fn snapshot(bytes: &[u8]) -> CreatedSnapshot {

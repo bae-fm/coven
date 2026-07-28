@@ -151,10 +151,9 @@ pub(crate) use mutation::{
     PreparedMembershipTransition,
 };
 
-pub(crate) use cursors::{
-    load_and_persist_owner_anchor, load_and_persist_owner_anchor_with_history,
-    upsert_head_cursor_on,
-};
+#[cfg(test)]
+pub(crate) use cursors::load_and_persist_owner_anchor;
+pub(crate) use cursors::{load_and_persist_owner_anchor_with_history, upsert_head_cursor_on};
 use cursors::{persist_head_cursors, read_head_cursors};
 #[cfg(test)]
 pub(crate) use exact_chain::load_exact_membership_head;

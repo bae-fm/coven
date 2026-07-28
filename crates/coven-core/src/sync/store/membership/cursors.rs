@@ -99,6 +99,7 @@ pub async fn seed_head_watermark(db: &Database, floor: &[MembershipHeadRef]) -> 
     persist_head_cursors(db, floor).await
 }
 
+#[cfg(test)]
 pub(crate) async fn load_and_persist_owner_anchor(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,

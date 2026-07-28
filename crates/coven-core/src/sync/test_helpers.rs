@@ -1195,8 +1195,14 @@ pub async fn open_exact_test_store_as(
     let protocol_root = crate::sync::store::protocol_root::open_store(&database, storage, root)
         .await
         .map_err(|error| error.to_string())?;
-    crate::sync::store::anchor_owner_membership(storage, &database, root, &protocol_root, identity)
-        .await
+    crate::sync::store::anchor_owner_membership(
+        storage,
+        &database,
+        root,
+        &protocol_root.value,
+        identity,
+    )
+    .await
 }
 
 pub async fn initialize_store_fixture(
@@ -2269,7 +2275,7 @@ impl TestStore {
             &self.storage,
             &database,
             &self.root,
-            &root,
+            &root.value,
             &self.signer,
         );
         ensure.await?;

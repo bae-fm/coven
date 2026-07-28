@@ -2732,7 +2732,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
         &storage.storage,
         &store_database(&opened_db),
         &storage.root,
-        &root,
+        &root.value,
         &owner,
     )
     .await
@@ -2800,7 +2800,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
             &seeded.storage,
             &store_database(&fresh_db),
             &seeded.root,
-            &foreign_root,
+            &foreign_root.value,
             &owner,
         )
         .await

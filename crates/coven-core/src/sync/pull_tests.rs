@@ -507,7 +507,7 @@ async fn pull_exact_store_into(
         storage,
         &destination_store,
         &root,
-        &protocol_root,
+        &protocol_root.value,
         storage.user_keypair(),
     )
     .await

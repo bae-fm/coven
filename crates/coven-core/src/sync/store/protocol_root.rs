@@ -847,7 +847,7 @@ pub(in crate::sync) async fn create_store(
     storage: &crate::sync::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
-) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
+) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let _creation = database.lock_store_creation().await;
     let mut graph = match database
         .local_store_founder_graph()
@@ -930,7 +930,7 @@ async fn publish_store_founder_graph(
     founder_timestamp: &str,
     signer: &UserKeypair,
     graph: &crate::database::DurableFounderGraph,
-) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
+) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let root_ref = StoreRootRef {
         store_root_id: graph.root.value.descriptor.store_root_id(),
         store_root_hash: graph.root.value.object_hash(),
@@ -966,10 +966,9 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&graph.root.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let opened_root = crate::sync::store_objects::load_store_protocol_root(storage, &root_ref)
-        .await?
-        .value;
-    if opened_root != store_protocol_root {
+    let opened_root =
+        crate::sync::store_objects::load_store_protocol_root(storage, &root_ref).await?;
+    if opened_root.value != store_protocol_root {
         return Err(StoreProtocolRootError::Missing(root_ref.store_root_hash));
     }
     storage
@@ -979,7 +978,7 @@ async fn publish_store_founder_graph(
     let registration = crate::sync::store_objects::load_registration_ref_with_root(
         storage,
         &root_ref,
-        &opened_root,
+        &opened_root.value,
         &registration_ref,
     )
     .await?
@@ -1064,14 +1063,14 @@ async fn publish_store_founder_graph(
     )
     .await
     .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-    Ok(store_protocol_root)
+    Ok(opened_root)
 }
 
 pub(in crate::sync) async fn open_store(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
-) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
+) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let db = database.sqlite();
     let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
@@ -1121,10 +1120,15 @@ pub(in crate::sync) async fn open_store(
         });
     }
     database
-        .install_store_root_authority(expected.clone(), bytes)
+        .install_store_root_authority(expected.clone(), bytes.clone())
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-    Ok(verified)
+    Ok(crate::sync::store_objects::VerifiedObject {
+        value: verified,
+        bytes,
+        semantic_hash: expected.store_root_hash,
+        object: expected.object.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -1173,7 +1177,7 @@ mod tests {
             &storage,
             &store_database(&db),
             &root_ref,
-            &root,
+            &root.value,
             &founder,
         )
         .await

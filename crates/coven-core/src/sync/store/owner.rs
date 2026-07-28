@@ -92,7 +92,7 @@ impl Store {
     async fn finish_initialization(
         database: StoreDatabase,
         storage: Arc<CloudSyncStorage>,
-        protocol_root: StoreProtocolRoot,
+        protocol_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
         let store_root = database
@@ -104,7 +104,17 @@ impl Store {
                     "opened Store root has no durable exact reference".to_string(),
                 )
             })?;
-        anchor_owner_membership(&*storage, &database, &store_root, &protocol_root, identity)
+        let commit_verifier = crate::sync::store::pull::StoreCommitVerifier::from_verified_root(
+            &*storage,
+            &store_root,
+            protocol_root,
+        )
+        .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::from_commit_verifier(commit_verifier)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        anchor_owner_membership_with_history(&mut history_verifier, &database, identity)
             .await
             .map_err(StoreInitializationError::MembershipAnchor)?;
 
@@ -114,13 +124,14 @@ impl Store {
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         if device_id.is_none()
-            && protocol_root.descriptor.founder_pubkey == crate::keys::public_key_hex(identity)
+            && history_verifier.verified_root().descriptor.founder_pubkey
+                == crate::keys::public_key_hex(identity)
         {
             registration::install_existing_founder_device(
                 &database,
                 &*storage,
                 &store_root,
-                &protocol_root,
+                history_verifier.verified_root(),
                 identity,
             )
             .await
@@ -136,6 +147,8 @@ impl Store {
                 "initialized Store has no local device registration id".to_string(),
             )
         })?;
+        let protocol_root = history_verifier.verified_root().clone();
+        drop(history_verifier);
         let store = Self::new(database, storage, store_root, &protocol_root)
             .map_err(StoreInitializationError::ProtocolRoot)?;
         Ok(InitializedStore { store, device_id })
@@ -622,6 +635,7 @@ impl<'storage> AuthorizedStore<'storage> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) async fn anchor_owner_membership(
     storage: &dyn SyncStorage,
     database: &StoreDatabase,
@@ -629,12 +643,22 @@ pub(crate) async fn anchor_owner_membership(
     protocol_root: &StoreProtocolRoot,
     owner: &UserKeypair,
 ) -> Result<(), String> {
-    if root.store_root_hash != protocol_root.object_hash() {
-        return Err("local Store root reference differs from the opened Store root".to_string());
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(|error| error.to_string())?;
+    if history_verifier.verified_root() != protocol_root {
+        return Err("opened Store root differs from membership authority".to_string());
     }
-    let chain = membership::load_and_persist_owner_anchor(
-        storage,
-        root,
+    anchor_owner_membership_with_history(&mut history_verifier, database, owner).await
+}
+
+async fn anchor_owner_membership_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    database: &StoreDatabase,
+    owner: &UserKeypair,
+) -> Result<(), String> {
+    let chain = membership::load_and_persist_owner_anchor_with_history(
+        history_verifier,
         &crate::keys::public_key_hex(owner),
         database,
     )
@@ -643,7 +667,8 @@ pub(crate) async fn anchor_owner_membership(
     let founder = chain
         .founder_entry()
         .ok_or_else(|| "membership founder is absent from Store membership chain".to_string())?;
-    if protocol_root
+    if history_verifier
+        .verified_root()
         .descriptor
         .validate_merge_founder_entry(founder)
         .is_err()
