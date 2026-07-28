@@ -939,6 +939,7 @@ async fn prepare_outcome(
     let proposal = crate::sync::store_objects::load_device_exclusion_proposal_ref(
         storage,
         plan.root(),
+        history_verifier.verified_root(),
         proposal_ref,
     )
     .await?;
@@ -1317,6 +1318,7 @@ async fn prepare_replacement_candidate(
     let proposal = crate::sync::store_objects::load_device_exclusion_proposal_ref(
         storage,
         plan.root(),
+        history_verifier.verified_root(),
         reference.proposal(),
     )
     .await?;
@@ -1370,6 +1372,7 @@ async fn resolve_exclusion_object_collision(
     let proposal = crate::sync::store_objects::load_device_exclusion_proposal_ref(
         storage,
         history_verifier.root(),
+        history_verifier.verified_root(),
         intended_ref.proposal(),
     )
     .await?;
@@ -1387,6 +1390,7 @@ async fn resolve_exclusion_object_collision(
     let winner = crate::sync::store_objects::load_device_exclusion_outcome_ref(
         storage,
         history_verifier.root(),
+        history_verifier.verified_root(),
         &winner_ref,
         &proposal,
     )

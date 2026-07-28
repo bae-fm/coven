@@ -976,10 +976,14 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&graph.registration.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let registration =
-        crate::sync::store_objects::load_registration_ref(storage, &root_ref, &registration_ref)
-            .await?
-            .value;
+    let registration = crate::sync::store_objects::load_registration_ref_with_root(
+        storage,
+        &root_ref,
+        &opened_root,
+        &registration_ref,
+    )
+    .await?
+    .value;
     if registration != graph.registration.value {
         return Err(StoreProtocolRootError::Database(
             "founder registration readback differs from durable bytes".to_string(),

@@ -484,6 +484,7 @@ async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() 
     let opened_receipt = crate::sync::store_objects::load_reclaim_receipt_ref(
         &store.storage,
         &store.root,
+        &store.protocol_root,
         &receipt_ref,
     )
     .await

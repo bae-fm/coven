@@ -449,23 +449,29 @@ fn validate_circle_snapshot_activated_reclaim_target(
 }
 
 async fn validate_commit_reclaim_receipt(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimReceiptRef,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
             "reclaim receipt activation has no exact predecessor provider authority".to_string(),
         )
     })?;
     let (receipt_executor, provider_admin_state, provider_admin_grant, authorization, executor) = {
-        let opened = Box::pin(load_reclaim_receipt_ref(storage, root, reference))
-            .await
-            .map_err(RegistrationLoadError::Object)?;
+        let opened = Box::pin(load_reclaim_receipt_ref(
+            storage,
+            root,
+            commit_verifier.verified_root(),
+            reference,
+        ))
+        .await
+        .map_err(RegistrationLoadError::Object)?;
         (
             opened.receipt.value.executor.clone(),
             opened.receipt.value.provider_admin_state.clone(),
@@ -539,8 +545,7 @@ pub(super) async fn load_commit_registrations(
     }
     if let Some(reference) = commit.reclaim_receipt() {
         Box::pin(validate_commit_reclaim_receipt(
-            storage,
-            root,
+            history_verifier.commit_verifier_ref(),
             commit,
             reference,
             activating_author,

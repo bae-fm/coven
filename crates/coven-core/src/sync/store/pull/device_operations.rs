@@ -259,9 +259,14 @@ pub(crate) async fn load_commit_device_operations(
     })?;
     let mut proposals = Vec::with_capacity(commit.device_exclusion_proposals().len());
     for reference in commit.device_exclusion_proposals() {
-        let opened = load_device_exclusion_proposal_ref(storage, &root, reference)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
+        let opened = load_device_exclusion_proposal_ref(
+            storage,
+            &root,
+            commit_verifier.verified_root(),
+            reference,
+        )
+        .await
+        .map_err(RegistrationLoadError::Object)?;
         let proposal = &opened.object.value;
         if proposal.frozen_device_state != commit.device_state
             || !device_state_has_active_registration(predecessor_state, &proposal.target)
@@ -290,12 +295,23 @@ pub(crate) async fn load_commit_device_operations(
                 "device exclusion outcome does not resolve an exact pending proposal".to_string(),
             ));
         }
-        let proposal = load_device_exclusion_proposal_ref(storage, &root, reference.proposal())
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-        let outcome = load_device_exclusion_outcome_ref(storage, &root, reference, &proposal)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
+        let proposal = load_device_exclusion_proposal_ref(
+            storage,
+            &root,
+            commit_verifier.verified_root(),
+            reference.proposal(),
+        )
+        .await
+        .map_err(RegistrationLoadError::Object)?;
+        let outcome = load_device_exclusion_outcome_ref(
+            storage,
+            &root,
+            commit_verifier.verified_root(),
+            reference,
+            &proposal,
+        )
+        .await
+        .map_err(RegistrationLoadError::Object)?;
         let (owner_registration, owner_grant) = match &outcome.object.value {
             StoreDeviceExclusionOutcome::Excluded(exclusion) => {
                 (&exclusion.owner_registration, &exclusion.owner_grant)

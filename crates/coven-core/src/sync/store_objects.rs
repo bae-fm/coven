@@ -451,6 +451,7 @@ pub async fn load_device_join_outcome_ref(
 pub async fn load_device_exclusion_proposal_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
+    pinned_root: &StoreProtocolRoot,
     reference: &StoreDeviceExclusionProposalRef,
 ) -> Result<VerifiedDeviceExclusionProposal, StoreObjectError> {
     let context = ProtocolObjectContext::signed_plaintext(
@@ -478,12 +479,18 @@ pub async fn load_device_exclusion_proposal_ref(
         },
     )
     .await?;
-    let target = load_registration_ref(storage, store_root, &opened.value.target)
-        .await?
-        .value;
-    let owner = load_registration_ref(storage, store_root, &opened.value.owner_registration)
-        .await?
-        .value;
+    let target =
+        load_registration_ref_with_root(storage, store_root, pinned_root, &opened.value.target)
+            .await?
+            .value;
+    let owner = load_registration_ref_with_root(
+        storage,
+        store_root,
+        pinned_root,
+        &opened.value.owner_registration,
+    )
+    .await?
+    .value;
     let verified =
         StoreDeviceExclusionProposal::parse_at(&opened.bytes, reference, &target, &owner).map_err(
             |source| StoreObjectError::InvalidObject {
@@ -506,6 +513,7 @@ pub async fn load_device_exclusion_proposal_ref(
 pub async fn load_device_exclusion_outcome_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
+    pinned_root: &StoreProtocolRoot,
     reference: &StoreDeviceExclusionOutcomeRef,
     proposal: &VerifiedDeviceExclusionProposal,
 ) -> Result<VerifiedDeviceExclusionOutcome, StoreObjectError> {
@@ -539,7 +547,7 @@ pub async fn load_device_exclusion_outcome_ref(
         StoreDeviceExclusionOutcome::Excluded(exclusion) => &exclusion.owner_registration,
         StoreDeviceExclusionOutcome::Cancelled(cancellation) => &cancellation.owner_registration,
     };
-    let owner = load_registration_ref(storage, store_root, owner_ref)
+    let owner = load_registration_ref_with_root(storage, store_root, pinned_root, owner_ref)
         .await?
         .value;
     let verified = StoreDeviceExclusionOutcome::parse_at(
@@ -656,6 +664,7 @@ pub async fn load_reclaim_authorization_ref(
 pub async fn load_reclaim_receipt_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
+    pinned_root: &StoreProtocolRoot,
     reference: &super::store::ReclaimReceiptRef,
 ) -> Result<VerifiedReclaimReceipt, StoreObjectError> {
     let authorization = Box::pin(load_reclaim_authorization_ref(
@@ -678,9 +687,10 @@ pub async fn load_reclaim_receipt_ref(
             key: reference.object.slot().logical_key().to_string(),
             source: Box::new(StoreProtocolError::Malformed(error.to_string())),
         })?;
-    let executor = load_registration_ref(storage, store_root, &unverified.executor)
-        .await?
-        .value;
+    let executor =
+        load_registration_ref_with_root(storage, store_root, pinned_root, &unverified.executor)
+            .await?
+            .value;
     let receipt = reference
         .verify(&unverified, &executor)
         .and_then(|()| {
