@@ -209,10 +209,14 @@ async fn load_circle_activations(
         author,
     )
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     super::load_circle_activations(
         &StoreDatabase::new(db),
         storage,
         root,
+        &mut history_verifier,
         &verified,
         identity,
         Some(&routing_key),

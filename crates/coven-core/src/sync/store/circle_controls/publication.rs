@@ -48,13 +48,15 @@ pub(super) async fn publish_circle_operation(
             "Circle commit names a different Store root".to_string(),
         ));
     }
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(storage, &root).await?;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     let circle_encryption = EncryptionService::from(
         MasterKeyring::from_serialized(&creation.keyring)
             .map_err(|error| CircleOperationError::Journal(format!("circle keyring: {error}")))?,
     );
-    let verified_commit = commit_verifier
+    let verified_commit = history_verifier
+        .commit_verifier()
         .authenticate_bytes(
             &journal.operation().commit_ref,
             &journal.operation().commit_bytes,
@@ -492,6 +494,7 @@ pub(super) async fn publish_circle_operation(
         database,
         storage,
         &root,
+        &mut history_verifier,
         &verified_commit,
         identity,
         routing_key,
@@ -556,7 +559,7 @@ pub(super) async fn publish_circle_operation(
             block_lost_position(
                 database,
                 storage,
-                &mut commit_verifier,
+                history_verifier.commit_verifier(),
                 &journal,
                 &head,
                 &verified_commit,

@@ -1447,27 +1447,24 @@ pub(crate) async fn load_circle_activations(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let commit = verified.value();
-    let history = crate::sync::store::pull::verify_merge_history_refs(
-        storage,
-        root,
-        crate::sync::store::pull::commit_predecessor_references(commit),
-    )
-    .await
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let verified_membership_prefix = crate::sync::store::pull::verified_merge_membership_prefix(
-        &history.commits,
-        crate::sync::store::pull::commit_predecessor_references(commit),
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let verified_root = crate::sync::store_objects::load_store_protocol_root(storage, root)
+    history_verifier
+        .verify_refs(crate::sync::store::pull::commit_predecessor_references(
+            commit,
+        ))
         .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-        .value;
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let verified_membership_prefix = crate::sync::store::pull::verified_merge_membership_prefix(
+        &history_verifier.history().commits,
+        crate::sync::store::pull::commit_predecessor_references(commit),
+    )
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let verified_root = history_verifier.verified_root().clone();
     let verified_prefix = VerifiedStreamActivationPrefix::empty();
     Box::pin(load_circle_activations_with_prefix(
         database,
