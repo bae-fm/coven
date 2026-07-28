@@ -1,5 +1,5 @@
 use super::{
-    prepare_circle_operation, prepare_circle_operation_request, publish_circle_operation,
+    prepare_circle_operation, prepare_circle_operation_request,
     publish_circle_operation_with_history, CircleAuthoringState, CircleOperationError,
     CircleOperationIntent, CircleTransitionHistory,
 };
@@ -695,6 +695,14 @@ impl Store {
         }
         let database = self.database();
         let storage = &**self.storage();
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         crate::sync::store::ensure_active_registration(database, storage).await?;
         let journal = database
             .circle_operation(operation_id)
@@ -720,9 +728,9 @@ impl Store {
             })
             .transpose()
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
-            storage,
+            &mut history_verifier,
             operation_id,
             signer,
             routing_key.as_ref(),

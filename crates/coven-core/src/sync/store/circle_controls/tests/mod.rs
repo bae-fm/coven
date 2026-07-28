@@ -83,18 +83,22 @@ async fn publish_circle_operation(
     operation_id: &CircleOperationId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let root = StoreDatabase::new(db)
+    let database = StoreDatabase::new(db);
+    let root = database
         .local_store_root_ref()
         .await?
         .expect("Circle test Store root is installed");
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
         root.store_root_hash,
     )
     .expect("derive Circle test routing key");
-    super::publish_circle_operation(
-        &StoreDatabase::new(db),
-        storage,
+    super::publish_circle_operation_with_history(
+        &database,
+        &mut history_verifier,
         operation_id,
         signer,
         Some(&routing_key),

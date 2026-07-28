@@ -20,30 +20,6 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 
-pub(super) async fn publish_circle_operation(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    operation_id: &CircleOperationId,
-    identity: &UserKeypair,
-    routing_key: Option<&crate::sync::circle::RowRoutingKey>,
-) -> Result<(), CircleOperationError> {
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    publish_circle_operation_with_history(
-        database,
-        &mut history_verifier,
-        operation_id,
-        identity,
-        routing_key,
-    )
-    .await
-}
-
 pub(super) async fn publish_circle_operation_with_history(
     database: &StoreDatabase,
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
