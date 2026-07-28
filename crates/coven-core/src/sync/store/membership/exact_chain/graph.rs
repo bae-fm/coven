@@ -457,8 +457,6 @@ fn load_exact_membership_graph<'a>(
         for node in graph.path_heads.values() {
             if !Box::pin(validate_membership_head_activation(
                 activation_authority,
-                storage,
-                root,
                 &node.reference,
                 &node.head,
                 &node.entry,

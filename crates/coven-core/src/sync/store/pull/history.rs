@@ -1353,8 +1353,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                     let (activations, conflict_resolution) =
                         Box::pin(verify_merge_membership_control_with_history(
                             &mut self.commit_verifier,
-                            storage,
-                            root,
                             &reference,
                             &commit,
                             &membership,

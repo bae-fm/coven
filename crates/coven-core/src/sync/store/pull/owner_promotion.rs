@@ -62,8 +62,6 @@ pub(in crate::sync::store) async fn find_request_activation(
 
 pub(in crate::sync::store) async fn verify_acceptance_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
 ) -> Result<(), StorePullError> {
     let super::store_commit::OwnerPromotionRequestActivation {
@@ -76,8 +74,6 @@ pub(in crate::sync::store) async fn verify_acceptance_with_history(
     let (commit_verifier, history) = history_verifier.verification_parts();
     verify_merge_owner_promotion_acceptance_with_history(
         commit_verifier,
-        storage,
-        root,
         acceptance,
         &history.commits,
     )
@@ -86,8 +82,6 @@ pub(in crate::sync::store) async fn verify_acceptance_with_history(
 
 pub(in crate::sync::store) async fn verify_acceptance_from_request_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
     verified: VerifiedOwnerPromotionRequestActivation,
 ) -> Result<(), StorePullError> {
@@ -99,8 +93,6 @@ pub(in crate::sync::store) async fn verify_acceptance_from_request_activation(
     let (commit_verifier, history) = history_verifier.verification_parts();
     verify_merge_owner_promotion_acceptance_with_history(
         commit_verifier,
-        storage,
-        root,
         acceptance,
         &history.commits,
     )
@@ -109,16 +101,11 @@ pub(in crate::sync::store) async fn verify_acceptance_from_request_activation(
 
 pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
     verified_commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 ) -> Result<(), StorePullError> {
-    if commit_verifier.root() != root {
-        return Err(StorePullError::Database(
-            "Owner-promotion acceptance verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let request = &acceptance.request;
     let super::store_commit::OwnerPromotionRequestActivation {
         commit: activation_commit,
@@ -127,20 +114,20 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
     let verified_root = commit_verifier.verified_root().clone();
     let promoter = load_registration_ref_with_root(
         storage,
-        root,
+        &root,
         &verified_root,
         &request.promoter_registration,
     )
     .await?;
     let candidate = load_registration_ref_with_root(
         storage,
-        root,
+        &root,
         &verified_root,
         &request.member_registration,
     )
     .await?;
     request
-        .verify(root, &promoter.value)
+        .verify(&root, &promoter.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     acceptance
         .verify(&candidate.value)
@@ -175,7 +162,7 @@ pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
     })?;
     let (_, exact_head) = crate::sync::store::operations::exact_next_announcement_slot(
         storage,
-        root,
+        &root,
         &request.promoter_registration,
         &promoter.value,
         commit_verifier,

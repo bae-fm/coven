@@ -392,8 +392,6 @@ pub(crate) fn publish<'a>(
             .await?;
             let activations = super::pull::verify_merge_membership_control(
                 &mut history_verifier,
-                storage,
-                &root,
                 &verified_commit,
             )
             .await

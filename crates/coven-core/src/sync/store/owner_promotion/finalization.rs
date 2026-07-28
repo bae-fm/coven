@@ -97,8 +97,6 @@ impl Store {
         Box::pin(
             crate::sync::store::verify_owner_promotion_acceptance_with_history(
                 &mut history_verifier,
-                storage,
-                &root,
                 &acceptance,
             ),
         )

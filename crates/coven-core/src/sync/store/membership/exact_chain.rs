@@ -165,8 +165,6 @@ fn membership_entry_requires_store_activation(entry: &MembershipEntry) -> bool {
 
 async fn validate_membership_head_activation(
     authority: &mut MembershipActivationAuthority<'_, '_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     reference: &MembershipHeadRef,
     head: &AuthorHead,
     entry: &MembershipEntry,
@@ -198,7 +196,7 @@ async fn validate_membership_head_activation(
                 }
                 MembershipActivationAuthority::History(history) => Box::pin(
                     crate::sync::store::pull::verify_merge_membership_head_activation(
-                        history, storage, root, reference, head, commit,
+                        history, reference, head, commit,
                     ),
                 )
                 .await
@@ -328,15 +326,8 @@ async fn traverse_exact_membership_stream(
                 "membership head {coord:?} carries a resolution cut different from its entry"
             )));
         }
-        if !validate_membership_head_activation(
-            authority,
-            storage,
-            root,
-            &reference,
-            &head,
-            &loaded_entry.value,
-        )
-        .await?
+        if !validate_membership_head_activation(authority, &reference, &head, &loaded_entry.value)
+            .await?
         {
             if cursor == Some(&reference) {
                 return Err(AnchoredChainError::LoadFailed(

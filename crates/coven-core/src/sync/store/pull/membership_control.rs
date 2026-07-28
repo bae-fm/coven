@@ -19,10 +19,10 @@ pub(crate) fn membership_authorizes(
 
 pub(crate) async fn verify_merge_membership_control(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     verified_commit: &VerifiedStoreBatchCommit,
 ) -> Result<VerifiedCircleActivations, String> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     if verified_commit.store_root_hash() != root.store_root_hash {
         return Err("authenticated Merge membership control belongs to another Store root".into());
     }
@@ -72,8 +72,6 @@ pub(crate) async fn verify_merge_membership_control(
     let (commit_verifier, history) = history_verifier.verification_parts();
     verify_merge_membership_control_with_history(
         commit_verifier,
-        storage,
-        root,
         commit_ref,
         commit,
         &predecessor_membership,
@@ -87,8 +85,6 @@ pub(crate) async fn verify_merge_membership_control(
 
 pub(crate) async fn verify_merge_membership_control_with_history(
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     predecessor_membership: &MembershipChain,
@@ -102,12 +98,14 @@ pub(crate) async fn verify_merge_membership_control_with_history(
     ),
     String,
 > {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Err("Merge membership verifier received another Store control".to_string());
     };
     let state = &commit.membership_state;
     let commit_author =
-        super::store_objects::load_registration_ref(storage, root, &commit.author_registration)
+        super::store_objects::load_registration_ref(storage, &root, &commit.author_registration)
             .await
             .map_err(|error| error.to_string())?;
     if transition.body.author_registration != commit.author_registration
@@ -269,8 +267,6 @@ pub(crate) async fn verify_merge_membership_control_with_history(
     }
     super::owner_promotion::verify_merge_owner_promotion_acceptance_with_history(
         commit_verifier,
-        storage,
-        root,
         acceptance,
         verified_commits,
     )
@@ -368,15 +364,12 @@ pub(crate) async fn verify_merge_membership_control_with_history(
 
 pub(crate) async fn verify_merge_membership_head_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     reference: &super::membership::MembershipHeadRef,
     head: &super::membership::AuthorHead,
     activation: &StoreBatchCommitRef,
 ) -> Result<bool, String> {
-    if history_verifier.commit_verifier().root() != root {
-        return Err("membership activation verifier belongs to another Store root".to_string());
-    }
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let verified = history_verifier
         .load_ref(activation)
         .await

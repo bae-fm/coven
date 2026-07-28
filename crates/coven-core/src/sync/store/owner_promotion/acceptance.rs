@@ -128,8 +128,6 @@ impl Store {
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         crate::sync::store::verify_owner_promotion_acceptance_from_request_activation(
             &mut history_verifier,
-            storage,
-            &root,
             &acceptance,
             verified_activation,
         )
