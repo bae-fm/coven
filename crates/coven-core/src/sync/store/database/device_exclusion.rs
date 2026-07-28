@@ -636,22 +636,11 @@ impl StoreDatabase {
                     ));
                 }
             };
-            let commit =
-                load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-            if let Some(object) = commit.cleanup_target() {
-                Ok(vec![CandidateCleanupObject {
-                    object: object.clone(),
-                }])
-            } else if commit
-                .candidate_cleanup_complete(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-            {
-                Ok(Vec::new())
-            } else {
-                Err(DbError::Message(
-                    "losing Store-device exclusion commit is not awaiting deletion".to_string(),
-                ))
-            }
+            super::candidate_records::candidate_cleanup_targets_on(
+                conn,
+                &candidate.reference,
+                std::slice::from_ref(&candidate.reference.object),
+            )
         }))
         .await
     }
@@ -680,63 +669,55 @@ impl StoreDatabase {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&losing.candidate.reference.object);
+            let head = losing.candidate.head_ref();
+            let head_id = remote_object_id(&head.object);
+            super::candidate_records::require_candidate_cleanup_complete_on(
+                &tx,
+                &losing.candidate.reference,
+                &[
+                    losing.candidate.reference.object.clone(),
+                    object.object().clone(),
+                    head.object.clone(),
+                ],
+                "replaced exclusion cleanup is incomplete",
+            )?;
             let commit = load_remote_object_on(&tx, commit_id)?;
-            if !commit
-                .candidate_cleanup_complete(&losing.candidate.reference)
+            if commit
+                .candidate_nonactivation_proof(&losing.candidate.reference)
                 .map_err(|error| DbError::Message(error.to_string()))?
-                || commit
-                    .candidate_nonactivation_proof(&losing.candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(&losing.proof)
+                != Some(&losing.proof)
             {
                 return Err(DbError::Message(
                     "replaced exclusion commit lacks complete nonactivation evidence".to_string(),
                 ));
             }
             let authority = load_remote_object_on(&tx, remote_object_id(object.object()))?;
-            if !authority
-                .candidate_cleanup_complete(&losing.candidate.reference)
+            if authority
+                .candidate_nonactivation_proof(&losing.candidate.reference)
                 .map_err(|error| DbError::Message(error.to_string()))?
-                || authority
-                    .candidate_nonactivation_proof(&losing.candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(&losing.proof)
+                != Some(&losing.proof)
             {
                 return Err(DbError::Message(
                     "reusable exclusion outcome lacks its former candidate proof".to_string(),
                 ));
             }
             let mut removable = vec![commit_id];
-            let head = losing.candidate.head_ref();
-            let head_id = remote_object_id(&head.object);
             let remote = load_remote_object_on(&tx, head_id)?;
-            if !remote
-                .candidate_cleanup_complete(&losing.candidate.reference)
+            if remote
+                .candidate_nonactivation_proof(&losing.candidate.reference)
                 .map_err(|error| DbError::Message(error.to_string()))?
-                || remote
-                    .candidate_nonactivation_proof(&losing.candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(&losing.proof)
+                != Some(&losing.proof)
             {
                 return Err(DbError::Message(
                     "replaced exclusion head lacks complete nonactivation evidence".to_string(),
                 ));
             }
             removable.push(head_id);
-            for object_id in removable {
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(format!(
-                        "replaced exclusion object {object_id} disappeared during cleanup"
-                    )));
-                }
-            }
+            super::candidate_records::delete_remote_objects_on(
+                &tx,
+                removable,
+                "replaced exclusion",
+            )?;
             update_store_device_exclusion_on(&tx, &expected, &next, true)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)
@@ -771,14 +752,19 @@ impl StoreDatabase {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&candidate.reference.object);
+            let head = candidate.head_ref();
+            let head_id = remote_object_id(&head.object);
+            super::candidate_records::require_candidate_cleanup_complete_on(
+                &tx,
+                &candidate.reference,
+                &[candidate.reference.object.clone(), head.object.clone()],
+                "nonactivating exclusion cleanup is incomplete",
+            )?;
             let commit = load_remote_object_on(&tx, commit_id)?;
-            if !commit
-                .candidate_cleanup_complete(&candidate.reference)
+            if commit
+                .candidate_nonactivation_proof(&candidate.reference)
                 .map_err(|error| DbError::Message(error.to_string()))?
-                || commit
-                    .candidate_nonactivation_proof(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(&proof)
+                != Some(&proof)
             {
                 return Err(DbError::Message(
                     "losing exclusion commit lacks complete exact nonactivation evidence"
@@ -796,36 +782,22 @@ impl StoreDatabase {
                 ));
             }
             let mut removable = vec![commit_id];
-            let head = candidate.head_ref();
-            let head_id = remote_object_id(&head.object);
             let head_remote = load_remote_object_on(&tx, head_id)?;
-            if !head_remote
-                .candidate_cleanup_complete(&candidate.reference)
+            if head_remote
+                .candidate_nonactivation_proof(&candidate.reference)
                 .map_err(|error| DbError::Message(error.to_string()))?
-                || head_remote
-                    .candidate_nonactivation_proof(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(&proof)
+                != Some(&proof)
             {
                 return Err(DbError::Message(
                     "losing exclusion head lacks complete nonactivation evidence".to_string(),
                 ));
             }
             removable.push(head_id);
-            for object_id in removable {
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(format!(
-                        "nonactivating exclusion object {object_id} disappeared during completion"
-                    )));
-                }
-            }
+            super::candidate_records::delete_remote_objects_on(
+                &tx,
+                removable,
+                "nonactivating exclusion",
+            )?;
             update_store_device_exclusion_on(&tx, &expected, &next, false)?;
             tx.commit().map_err(DbError::from)?;
             Ok(next)

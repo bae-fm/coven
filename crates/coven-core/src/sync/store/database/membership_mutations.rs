@@ -625,23 +625,20 @@ impl StoreDatabase {
         self.sqlite().call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut unique = BTreeSet::new();
-            for object in &candidate_objects {
+            for object in candidate_objects.iter().chain(&retained_authorities) {
                 let object_id = remote_object_id(object);
                 if !unique.insert(object_id) {
                     return Err(DbError::Message(
                         "nonactivating membership candidate repeats an exact object".to_string(),
                     ));
                 }
-                let remote = load_remote_object_on(&tx, object_id)?;
-                if !remote
-                    .candidate_cleanup_complete(&candidate)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                {
-                    return Err(DbError::Message(format!(
-                        "losing membership object {object_id} cleanup is incomplete"
-                    )));
-                }
             }
+            super::candidate_records::require_candidate_cleanup_complete_on(
+                &tx,
+                &candidate,
+                &candidate_objects,
+                "losing membership candidate cleanup is incomplete",
+            )?;
             for object in &retained_authorities {
                 let object_id = remote_object_id(object);
                 if !unique.insert(object_id) {
@@ -687,21 +684,11 @@ impl StoreDatabase {
                     }
                 }
             }
-            for object in candidate_objects {
-                let object_id = remote_object_id(&object);
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(format!(
-                        "losing membership object {object_id} disappeared during completion"
-                    )));
-                }
-            }
+            super::candidate_records::delete_remote_objects_on(
+                &tx,
+                candidate_objects.iter().map(remote_object_id),
+                "losing membership",
+            )?;
             for object in retained_authorities {
                 let object_id = remote_object_id(&object);
                 let removable = tx

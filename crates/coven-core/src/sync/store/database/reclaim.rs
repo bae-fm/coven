@@ -744,24 +744,11 @@ impl StoreDatabase {
                 let losing = current.losing_candidate().ok_or_else(|| {
                     DbError::Message("Store reclaim operation has no losing candidate".to_string())
                 })?;
-                let commit = load_remote_object_on(
+                super::candidate_records::candidate_cleanup_targets_on(
                     conn,
-                    remote_object_id(&losing.candidate.reference.object),
-                )?;
-                if let Some(object) = commit.cleanup_target() {
-                    Ok(vec![CandidateCleanupObject {
-                        object: object.clone(),
-                    }])
-                } else if commit
-                    .candidate_cleanup_complete(&losing.candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                {
-                    Ok(Vec::new())
-                } else {
-                    Err(DbError::Message(
-                        "losing reclaim commit is not awaiting exact cleanup".to_string(),
-                    ))
-                }
+                    &losing.candidate.reference,
+                    std::slice::from_ref(&losing.candidate.reference.object),
+                )
             })
             .await
     }
@@ -812,27 +799,22 @@ impl StoreDatabase {
                     ));
                 }
                 let object_id = remote_object_id(&losing.candidate.reference.object);
-                let commit = load_remote_object_on(&tx, object_id)?;
-                if !commit
-                    .candidate_cleanup_complete(&losing.candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
+                if !super::candidate_records::candidate_cleanup_targets_on(
+                    &tx,
+                    &losing.candidate.reference,
+                    std::slice::from_ref(&losing.candidate.reference.object),
+                )?
+                .is_empty()
                 {
                     return Err(DbError::Message(
                         "losing reclaim commit cleanup is incomplete".to_string(),
                     ));
                 }
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(
-                        "losing reclaim commit disappeared during completion".to_string(),
-                    ));
-                }
+                super::candidate_records::delete_remote_objects_on(
+                    &tx,
+                    [object_id],
+                    "losing reclaim",
+                )?;
                 update_store_reclaim_operation_on(&tx, &expected, &next)?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(next)

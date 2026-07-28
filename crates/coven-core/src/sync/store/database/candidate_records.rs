@@ -103,6 +103,47 @@ pub(super) fn candidate_cleanup_targets_on(
     Ok(cleanup)
 }
 
+pub(super) fn require_candidate_cleanup_complete_on(
+    conn: &Connection,
+    candidate: &StoreBatchCommitRef,
+    objects: &[ExactObjectRef],
+    context: &str,
+) -> Result<(), DbError> {
+    if candidate_cleanup_targets_on(conn, candidate, objects)?.is_empty() {
+        Ok(())
+    } else {
+        Err(DbError::Message(context.to_string()))
+    }
+}
+
+pub(super) fn delete_remote_objects_on(
+    tx: &rusqlite::Transaction<'_>,
+    object_ids: impl IntoIterator<Item = ObjectHash>,
+    context: &str,
+) -> Result<(), DbError> {
+    let mut unique = BTreeSet::new();
+    for object_id in object_ids {
+        if !unique.insert(object_id) {
+            return Err(DbError::Message(format!(
+                "{context} repeats remote object {object_id}"
+            )));
+        }
+        if tx
+            .execute(
+                "DELETE FROM remote_objects WHERE object_id = ?1",
+                [object_id.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(format!(
+                "{context} object {object_id} disappeared during cleanup"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_prepared_merge_candidate_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,

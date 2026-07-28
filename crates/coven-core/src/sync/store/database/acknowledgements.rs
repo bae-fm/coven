@@ -353,22 +353,13 @@ impl StoreDatabase {
                         "Store acknowledgement activation is not nonactivating Merge".to_string(),
                     ));
                 };
-                let commit =
-                    load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-                if let Some(object) = commit.cleanup_target() {
-                    return Ok(Some(CandidateCleanupObject {
-                        object: object.clone(),
-                    }));
-                }
-                if !commit
-                    .candidate_cleanup_complete(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                {
-                    return Err(DbError::Message(
-                        "losing Store acknowledgement commit is not awaiting cleanup".to_string(),
-                    ));
-                }
-                Ok(None)
+                Ok(super::candidate_records::candidate_cleanup_targets_on(
+                    conn,
+                    &candidate.reference,
+                    std::slice::from_ref(&candidate.reference.object),
+                )?
+                .into_iter()
+                .next())
             })
             .await
     }
@@ -394,16 +385,23 @@ impl StoreDatabase {
                         "Store acknowledgement activation is not nonactivating Merge".to_string(),
                     ));
                 };
-                let commit_id = remote_object_id(&candidate.reference.object);
-                let commit = load_remote_object_on(&tx, commit_id)?;
-                if !commit
-                    .candidate_cleanup_complete(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
+                let head = StoreDeviceHeadRef {
+                    head_hash: candidate.head.head_hash(),
+                    object: candidate.prepared_head.reference().clone(),
+                };
+                if !super::candidate_records::candidate_cleanup_targets_on(
+                    &tx,
+                    &candidate.reference,
+                    &[candidate.reference.object.clone(), head.object.clone()],
+                )?
+                .is_empty()
                 {
                     return Err(DbError::Message(
-                        "losing Store acknowledgement commit cleanup is incomplete".to_string(),
+                        "losing Store acknowledgement cleanup is incomplete".to_string(),
                     ));
                 }
+                let commit_id = remote_object_id(&candidate.reference.object);
+                let commit = load_remote_object_on(&tx, commit_id)?;
                 let proof = commit
                     .candidate_nonactivation_proof(&candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
@@ -417,20 +415,8 @@ impl StoreDatabase {
                         "nonactivating Merge acknowledgement carries another proof".to_string(),
                     ));
                 }
-                let head = StoreDeviceHeadRef {
-                    head_hash: candidate.head.head_hash(),
-                    object: candidate.prepared_head.reference().clone(),
-                };
                 let head_id = remote_object_id(&head.object);
                 let head_remote = load_remote_object_on(&tx, head_id)?;
-                if !head_remote
-                    .candidate_cleanup_complete(&candidate.reference)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                {
-                    return Err(DbError::Message(
-                        "losing Store acknowledgement head proof is incomplete".to_string(),
-                    ));
-                }
                 if head_remote
                     .candidate_nonactivation_proof(&candidate.reference)
                     .map_err(|error| DbError::Message(error.to_string()))?
@@ -453,19 +439,11 @@ impl StoreDatabase {
                         "protocol-inert acknowledgement lacks its candidate proof".to_string(),
                     ));
                 }
-                for object_id in [commit_id, head_id] {
-                    let removed = tx
-                        .execute(
-                            "DELETE FROM remote_objects WHERE object_id = ?1",
-                            [object_id.to_string()],
-                        )
-                        .map_err(DbError::from)?;
-                    if removed != 1 {
-                        return Err(DbError::Message(format!(
-                            "nonactivating remote object {object_id} disappeared during completion"
-                        )));
-                    }
-                }
+                super::candidate_records::delete_remote_objects_on(
+                    &tx,
+                    [commit_id, head_id],
+                    "nonactivating acknowledgement",
+                )?;
                 finish_outbound_store_ack_on(
                     &tx,
                     &expected,
