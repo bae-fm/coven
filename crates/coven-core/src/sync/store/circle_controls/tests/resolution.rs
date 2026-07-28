@@ -443,12 +443,19 @@ async fn resolve_request(
 async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict() {
     let fixture = conflict_fixture("resolve-stale").await;
     let (chosen, _losing) = fork(&fixture).await;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
+        &*fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("open Circle resolution history");
 
     // A resolution whose captured conflicting set omits a currently retained
     // branch no longer equals the retained set inside the journal transaction,
     // so preparation fails loud rather than silently dropping the omitted
     // branch. Here the captured set names only the chosen branch.
     let stale = prepare_circle_operation_request(
+        &mut history_verifier,
         &StoreDatabase::new(&fixture.db1),
         &*fixture.store.storage,
         &fixture.device1,
@@ -846,7 +853,14 @@ async fn journal_resolution(
     chosen: &CircleControlCoord,
 ) -> CircleOperationJournal {
     let request = resolve_request(fixture, chosen, fixture.conflict_branches_device1().await).await;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
+        &*fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("open Circle resolution history");
     let journal = prepare_circle_operation_request(
+        &mut history_verifier,
         &StoreDatabase::new(&fixture.db1),
         &*fixture.store.storage,
         &fixture.device1,

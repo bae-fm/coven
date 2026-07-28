@@ -25,15 +25,22 @@ use crate::sync::store_objects::StoreObjectError;
 async fn ensure_not_rotation_required(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     circle_id: CircleId,
 ) -> Result<(), CircleOperationError> {
-    let membership = crate::sync::store::pull::load_cycle_membership(storage, database)
-        .await
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "load Store membership for Circle rotation check: {error}"
-            ))
-        })?;
+    let membership = crate::sync::store::pull::load_cycle_membership_with_history(
+        history_verifier,
+        storage,
+        database,
+        root,
+    )
+    .await
+    .map_err(|error| {
+        CircleOperationError::InvalidState(format!(
+            "load Store membership for Circle rotation check: {error}"
+        ))
+    })?;
     let chain = membership;
     let active_store_members = chain
         .current_members()
@@ -148,7 +155,16 @@ impl Store {
         let database = self.database();
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let journal = Box::pin(prepare_circle_operation(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -160,9 +176,11 @@ impl Store {
         let circle_id = journal.circle_id();
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             None,
@@ -186,7 +204,6 @@ impl Store {
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
         ensure_not_deleted(database, circle_id).await?;
-        ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)
@@ -199,6 +216,8 @@ impl Store {
             crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        ensure_not_rotation_required(database, storage, &root, &mut history_verifier, circle_id)
+            .await?;
         let activation_commit = history_verifier
             .commit_verifier()
             .load_ref(&activation_commit_ref)
@@ -221,6 +240,7 @@ impl Store {
                 ))
             })?;
         let journal = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -271,7 +291,6 @@ impl Store {
         let storage = &**self.storage();
         crate::sync::store::ensure_active_registration(database, storage).await?;
         ensure_not_deleted(database, circle_id).await?;
-        ensure_not_rotation_required(database, storage, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)
@@ -284,6 +303,8 @@ impl Store {
             crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        ensure_not_rotation_required(database, storage, &root, &mut history_verifier, circle_id)
+            .await?;
         let activation_commit = history_verifier
             .commit_verifier()
             .load_ref(&activation_commit_ref)
@@ -325,6 +346,7 @@ impl Store {
         )
         .await?;
         let journal = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -426,6 +448,7 @@ impl Store {
         )
         .await?;
         let journal = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -489,6 +512,14 @@ impl Store {
             return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
         }
         let identity_pubkey = keys::public_key_hex(signer);
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let chosen_activation = database
             .verified_circle_activation(circle_id, chosen.clone())
             .await?
@@ -532,6 +563,7 @@ impl Store {
             });
         }
         let journal = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -552,9 +584,11 @@ impl Store {
         }
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &operation_id,
             signer,
             None,
@@ -584,6 +618,14 @@ impl Store {
         crate::sync::store::ensure_active_registration(database, storage).await?;
         ensure_not_deleted(database, circle_id).await?;
         let identity_pubkey = keys::public_key_hex(signer);
+        let root = database
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let mut history_verifier =
+            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let mut journal = database
             .waiting_circle_operations()
             .await?
@@ -618,6 +660,7 @@ impl Store {
             )));
         }
         let prepared = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,
@@ -644,9 +687,11 @@ impl Store {
         database
             .begin_circle_operation_finalization(journal.clone())
             .await?;
-        Box::pin(publish_circle_operation(
+        Box::pin(publish_circle_operation_with_history(
             database,
             storage,
+            &root,
+            &mut history_verifier,
             &journal.operation_id,
             signer,
             None,
@@ -955,6 +1000,7 @@ impl Store {
                 ))
             })?;
         let journal = Box::pin(prepare_circle_operation_request(
+            &mut history_verifier,
             database,
             storage,
             device_id,

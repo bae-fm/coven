@@ -112,8 +112,8 @@ pub(crate) use registration::*;
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
 pub(crate) use support::{
-    advance_max_updated_at, cache_eager_blobs, download_blobs, local_blob_cleanup_intents,
-    verify_package_blobs, BlobDownload,
+    advance_max_updated_at, cache_eager_blobs, download_blobs, load_cycle_membership_with_history,
+    local_blob_cleanup_intents, verify_package_blobs, BlobDownload,
 };
 pub use support::{
     load_cycle_membership, BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures,

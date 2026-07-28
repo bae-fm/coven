@@ -118,7 +118,7 @@ pub(super) async fn publish_circle_operation_with_history(
         ));
     }
     if let CurrentMergeAuthority::Revoked { grant_id } =
-        current_merge_authority(database, storage, commit, &author).await?
+        current_merge_authority(database, storage, root, history_verifier, commit, &author).await?
     {
         let block = crate::sync::circle::CircleOperationBlock::AuthorityLost { grant_id };
         database
@@ -655,6 +655,8 @@ enum CurrentMergeAuthority {
 async fn current_merge_authority(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
 ) -> Result<CurrentMergeAuthority, CircleOperationError> {
@@ -663,17 +665,17 @@ async fn current_merge_authority(
         .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await?
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store root reference"))?;
     if root.store_root_hash != commit.store_root_hash {
         return Err(CircleOperationError::InvalidState(
             "Circle commit names a different Store root".to_string(),
         ));
     }
-    let current = crate::sync::store::membership::load_and_persist_owner_anchor(
-        storage, &root, &founder, database,
+    let current = crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
+        history_verifier,
+        storage,
+        root,
+        &founder,
+        database,
     )
     .await
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

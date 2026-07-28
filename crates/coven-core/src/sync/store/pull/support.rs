@@ -20,31 +20,62 @@ pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     database: &crate::sync::store::database::StoreDatabase,
 ) -> Result<MembershipChain, PullError> {
-    let db = database.sqlite();
-    let pinned_owner = db
-        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
     let root = database
         .local_store_root_ref()
         .await
         .map_err(|error| PullError::Apply(format!("read Store root reference: {error}")))?
         .ok_or_else(|| PullError::Apply("Store root reference is absent".to_string()))?;
-    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, &root)
+    let mut history_verifier = super::MergeHistoryVerifier::new(storage, &root)
         .await
-        .map_err(PullError::MembershipObject)?
-        .value;
-    let owner = pinned_owner
-        .clone()
-        .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
-    crate::sync::store::membership::load_and_persist_owner_anchor(storage, &root, &owner, database)
+        .map_err(map_membership_verifier_error)?;
+    load_cycle_membership_with_history(&mut history_verifier, storage, database, &root).await
+}
+
+pub(crate) async fn load_cycle_membership_with_history(
+    history_verifier: &mut super::MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    database: &crate::sync::store::database::StoreDatabase,
+    root: &crate::sync::store_commit::StoreRootRef,
+) -> Result<MembershipChain, PullError> {
+    let db = database.sqlite();
+    let pinned_owner = db
+        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
         .await
-        .map_err(|error| match error {
-            crate::sync::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
-                PullError::MembershipLoad(error)
-            }
-            _ => PullError::MembershipTampered(error.to_string()),
-        })
+        .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
+    if history_verifier.commit_verifier().root() != root {
+        return Err(PullError::MembershipTampered(
+            "membership verifier belongs to another Store root".to_string(),
+        ));
+    }
+    let owner = pinned_owner.clone().unwrap_or_else(|| {
+        history_verifier
+            .verified_root()
+            .descriptor
+            .founder_pubkey
+            .clone()
+    });
+    crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
+        history_verifier,
+        storage,
+        root,
+        &owner,
+        database,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::sync::store::membership::AnchoredChainError::StorageUnavailable { .. } => {
+            PullError::MembershipLoad(error)
+        }
+        _ => PullError::MembershipTampered(error.to_string()),
+    })
+}
+
+fn map_membership_verifier_error(error: super::StorePullError) -> PullError {
+    match error {
+        super::StorePullError::Object(error) => PullError::MembershipObject(error),
+        super::StorePullError::Storage(error) => PullError::Storage(error),
+        error => PullError::MembershipTampered(error.to_string()),
+    }
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each

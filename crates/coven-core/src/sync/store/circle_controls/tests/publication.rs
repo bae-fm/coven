@@ -2938,7 +2938,14 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .expect("closing control is present in its activating commit")
         .clone();
     let device_id = local_device_id(&fixture.db).await;
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
+        &fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("open Circle preparation history");
     let journal = prepare_circle_operation_request(
+        &mut history_verifier,
         &StoreDatabase::new(&fixture.db),
         &fixture.store.storage,
         &device_id,
@@ -3039,7 +3046,14 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
         })
         .expect("closing control is present in its activating commit")
         .clone();
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
+        &fixture.store.storage,
+        &fixture.store.root,
+    )
+    .await
+    .expect("open Circle preparation history");
     let prepared = prepare_circle_operation_request(
+        &mut history_verifier,
         &StoreDatabase::new(&fixture.db),
         &fixture.store.storage,
         &device_id,

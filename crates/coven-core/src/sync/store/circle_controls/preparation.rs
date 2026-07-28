@@ -1214,6 +1214,7 @@ pub(super) async fn prepare_circle_activation_objects(
     ))
 }
 pub(super) async fn prepare_circle_operation(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -1222,6 +1223,7 @@ pub(super) async fn prepare_circle_operation(
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     Box::pin(prepare_circle_operation_request(
+        history_verifier,
         database,
         storage,
         device_id,
@@ -1235,6 +1237,7 @@ pub(super) async fn prepare_circle_operation(
 }
 
 pub(super) async fn prepare_circle_operation_request(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -1245,6 +1248,11 @@ pub(super) async fn prepare_circle_operation_request(
     let (root, author_registration, author, device_signer) =
         crate::sync::store::operations::load_local_store_authority(database, device_id, signer)
             .await?;
+    if history_verifier.commit_verifier().root() != &root {
+        return Err(CircleOperationError::InvalidState(
+            "Circle preparation verifier belongs to another Store root".to_string(),
+        ));
+    }
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let founder = db
@@ -1262,8 +1270,12 @@ pub(super) async fn prepare_circle_operation_request(
     let history = request.history();
     let intent = request.intent();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
-        let current = crate::sync::store::membership::load_and_persist_owner_anchor(
-            storage, &root, &founder, database,
+        let current = crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
+            history_verifier,
+            storage,
+            &root,
+            &founder,
+            database,
         )
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

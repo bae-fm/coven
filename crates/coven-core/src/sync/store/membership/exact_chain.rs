@@ -377,14 +377,33 @@ pub(crate) async fn load_exact_anchored_chain(
     cursors: &[MembershipHeadRef],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .map_err(map_membership_object_error)?
-        .value;
     let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(map_membership_history_error)?;
-    let mut activation_authority = MembershipActivationAuthority::History(&mut history_verifier);
+    load_exact_anchored_chain_with_history(
+        &mut history_verifier,
+        storage,
+        root,
+        cursors,
+        owner_pubkey,
+    )
+    .await
+}
+
+pub(crate) async fn load_exact_anchored_chain_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    cursors: &[MembershipHeadRef],
+    owner_pubkey: Option<&str>,
+) -> Result<MembershipChain, AnchoredChainError> {
+    if history_verifier.commit_verifier().root() != root {
+        return Err(AnchoredChainError::LoadFailed(
+            "membership history verifier belongs to another Store root".to_string(),
+        ));
+    }
+    let root_value = history_verifier.verified_root().clone();
+    let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     if let Some(owner) = owner_pubkey {
         if root_value.descriptor.founder_pubkey != owner {
             return Err(AnchoredChainError::FounderMismatch {
@@ -583,23 +602,18 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root_value = crate::sync::store_objects::load_store_protocol_root(storage, root)
-        .await
-        .map_err(map_membership_object_error)?
-        .value;
     let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
         .await
         .map_err(map_membership_history_error)?;
-    let mut activation_authority = MembershipActivationAuthority::History(&mut history_verifier);
-    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
-        &mut activation_authority,
+    let root_value = history_verifier.verified_root().clone();
+    Box::pin(load_anchored_chain_at_exact_heads_with_root_and_history(
+        &mut history_verifier,
         storage,
         root,
         &root_value,
         owner_pubkey,
         exact_heads,
         exact_resolutions,
-        None,
     ))
     .await
 }
@@ -726,7 +740,7 @@ pub(super) fn map_membership_object_error(error: StoreObjectError) -> AnchoredCh
     }
 }
 
-fn map_membership_history_error(
+pub(super) fn map_membership_history_error(
     error: crate::sync::store::pull::StorePullError,
 ) -> AnchoredChainError {
     match error {

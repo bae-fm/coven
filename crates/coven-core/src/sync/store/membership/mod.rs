@@ -146,7 +146,10 @@ pub(crate) use mutation::{
     PreparedMembershipTransition,
 };
 
-pub(crate) use cursors::{load_and_persist_owner_anchor, upsert_head_cursor_on};
+pub(crate) use cursors::{
+    load_and_persist_owner_anchor, load_and_persist_owner_anchor_with_history,
+    upsert_head_cursor_on,
+};
 use cursors::{persist_head_cursors, read_head_cursors};
 use exact_chain::map_membership_object_error;
 pub(crate) use exact_chain::{
@@ -154,8 +157,9 @@ pub(crate) use exact_chain::{
     load_anchored_chain_at_exact_heads_with_root,
     load_anchored_chain_at_exact_heads_with_root_and_history,
     load_anchored_chain_at_exact_heads_with_root_and_verified_activations,
-    load_current_exact_chain, load_exact_anchored_chain, load_exact_membership_head,
-    project_anchored_chain_to_verified_store_prefix, MembershipAuthorRequirement,
+    load_current_exact_chain, load_exact_anchored_chain, load_exact_anchored_chain_with_history,
+    load_exact_membership_head, project_anchored_chain_to_verified_store_prefix,
+    MembershipAuthorRequirement,
 };
 
 #[cfg(test)]

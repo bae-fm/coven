@@ -58,8 +58,17 @@ async fn prepare_circle_operation(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
+    let database = StoreDatabase::new(db);
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .expect("Circle test Store root is installed");
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     super::prepare_circle_operation(
-        &StoreDatabase::new(db),
+        &mut history_verifier,
+        &database,
         storage,
         device_id,
         metadata_stamp,

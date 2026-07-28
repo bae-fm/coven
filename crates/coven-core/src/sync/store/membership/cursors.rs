@@ -105,12 +105,39 @@ pub(crate) async fn load_and_persist_owner_anchor(
     owner_pubkey: &str,
     database: &StoreDatabase,
 ) -> Result<MembershipChain, AnchoredChainError> {
+    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+        .await
+        .map_err(super::exact_chain::map_membership_history_error)?;
+    load_and_persist_owner_anchor_with_history(
+        &mut history_verifier,
+        storage,
+        root,
+        owner_pubkey,
+        database,
+    )
+    .await
+}
+
+pub(crate) async fn load_and_persist_owner_anchor_with_history(
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    owner_pubkey: &str,
+    database: &StoreDatabase,
+) -> Result<MembershipChain, AnchoredChainError> {
     let db = database.sqlite();
     let _membership_load = database.lock_membership_load().await;
     let cursors = read_head_cursors(db)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
-    let chain = load_exact_anchored_chain(storage, root, &cursors, Some(owner_pubkey)).await?;
+    let chain = load_exact_anchored_chain_with_history(
+        history_verifier,
+        storage,
+        root,
+        &cursors,
+        Some(owner_pubkey),
+    )
+    .await?;
     let founder = chain.founder_coord().ok_or_else(|| {
         AnchoredChainError::LoadFailed("owner-anchored membership chain is empty".to_string())
     })?;
