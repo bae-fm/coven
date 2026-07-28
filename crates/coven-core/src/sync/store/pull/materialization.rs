@@ -304,8 +304,12 @@ pub(super) async fn apply_candidate(
             ));
         }
     }
-    let membership_objects =
-        verified_merge_membership_objects(storage, &root, commit_ref, commit).await?;
+    let membership_objects = verified_merge_membership_objects(
+        history_verifier.commit_verifier_ref(),
+        commit_ref,
+        commit,
+    )
+    .await?;
     let (local_store_membership, membership_after_candidate) =
         local_store_membership_after_candidate(
             latest_membership,
@@ -1059,11 +1063,12 @@ pub(crate) fn apply_prepared_merge_materialization_on(
 }
 
 pub(crate) async fn verified_merge_membership_objects(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
+    commit_verifier: &StoreCommitVerifier<'_>,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Option<VerifiedMergeMembershipClosure>, StorePullError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Ok(None);
     };
@@ -1074,9 +1079,10 @@ pub(crate) async fn verified_merge_membership_objects(
     )
     .await
     .map_err(StorePullError::Object)?;
-    let author = super::store_objects::load_registration_ref(
+    let author = super::store_objects::load_registration_ref_with_root(
         storage,
         root,
+        commit_verifier.verified_root(),
         &transition.body.author_registration,
     )
     .await

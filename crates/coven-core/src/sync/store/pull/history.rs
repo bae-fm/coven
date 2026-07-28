@@ -1384,7 +1384,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let membership_closure = Box::pin(verified_merge_membership_objects(
-                storage, &root, &reference, &commit,
+                &self.commit_verifier,
+                &reference,
+                &commit,
             ))
             .await?;
             let retained_registrations = commit
