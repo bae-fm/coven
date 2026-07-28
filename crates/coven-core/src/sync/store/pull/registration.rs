@@ -82,39 +82,41 @@ pub(crate) struct LoadedDeviceJoinCleanupActivation {
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
 }
 
-pub(crate) fn load_device_join_cleanup_activation<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    activation: &'a super::device_join::DeviceJoinCleanupActivation,
-) -> StorePullFuture<'a, LoadedDeviceJoinCleanupActivation> {
-    Box::pin(async move {
-        let mut commit_verifier = StoreCommitVerifier::new(storage, root).await?;
-        let root_value = commit_verifier.verified_root().clone();
-        let verified_commit = commit_verifier.load_ref(&activation.activation).await?;
-        if verified_commit.value().device_join_cleanup_receipts()
-            != std::slice::from_ref(&activation.receipt)
-        {
-            return Err(StorePullError::Database(
-                "device join cleanup activation does not contain its exact sole receipt"
-                    .to_string(),
-            ));
-        }
-        let receipts = load_commit_join_cleanup_receipts(
-            storage,
-            root,
-            &root_value,
-            verified_commit.value(),
-            verified_commit.author(),
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-        Ok(LoadedDeviceJoinCleanupActivation {
-            verified_commit,
-            receipts,
-        })
+pub(crate) async fn load_device_join_cleanup_activation(
+    history_verifier: &mut MergeHistoryVerifier<'_>,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    activation: &super::device_join::DeviceJoinCleanupActivation,
+) -> Result<LoadedDeviceJoinCleanupActivation, StorePullError> {
+    if history_verifier.commit_verifier().root() != root {
+        return Err(StorePullError::Database(
+            "device join cleanup verifier belongs to another Store root".to_string(),
+        ));
+    }
+    let root_value = history_verifier.verified_root().clone();
+    let verified_commit = history_verifier.load_ref(&activation.activation).await?;
+    if verified_commit.value().device_join_cleanup_receipts()
+        != std::slice::from_ref(&activation.receipt)
+    {
+        return Err(StorePullError::Database(
+            "device join cleanup activation does not contain its exact sole receipt".to_string(),
+        ));
+    }
+    let receipts = load_commit_join_cleanup_receipts(
+        storage,
+        root,
+        &root_value,
+        verified_commit.value(),
+        verified_commit.author(),
+    )
+    .await
+    .map_err(|error| match error {
+        RegistrationLoadError::Object(error) => StorePullError::Object(error),
+        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+    })?;
+    Ok(LoadedDeviceJoinCleanupActivation {
+        verified_commit,
+        receipts,
     })
 }
 

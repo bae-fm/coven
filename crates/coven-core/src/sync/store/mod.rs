@@ -533,8 +533,16 @@ pub(crate) fn verify_device_join_cleanup_activation<'a>(
     activation: &'a device_join::DeviceJoinCleanupActivation,
 ) -> pull::StorePullFuture<'a, device_join::JoinerJoinTerminal> {
     Box::pin(async move {
-        let evidence = pull::load_device_join_cleanup_activation(storage, root, activation).await?;
-        pull::verify_device_join_cleanup_activation(storage, root, evidence).await
+        let mut history_verifier = pull::MergeHistoryVerifier::new(storage, root).await?;
+        let evidence = pull::load_device_join_cleanup_activation(
+            &mut history_verifier,
+            storage,
+            root,
+            activation,
+        )
+        .await?;
+        pull::verify_device_join_cleanup_activation(&mut history_verifier, storage, root, evidence)
+            .await
     })
 }
 
