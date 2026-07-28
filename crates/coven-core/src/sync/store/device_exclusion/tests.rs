@@ -71,7 +71,10 @@ async fn resume_device_exclusion(
     storage: &dyn SyncStorage,
     identity_signer: &UserKeypair,
 ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-    super::resume_device_exclusion(&store_database(db), storage, identity_signer).await
+    let mut authority = Store::authorize_borrowed(storage, db)
+        .await
+        .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+    authority.resume_device_exclusion(identity_signer).await
 }
 
 async fn get_device_exclusion_operations(

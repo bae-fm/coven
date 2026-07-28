@@ -381,6 +381,9 @@ async fn run_single_sync_cycle_with_authorization(
     observer: Option<&dyn BlobTransitionObserver>,
     mut authorization: AuthorizedStore<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
+    authorization
+        .resume_operations(user_keypair, routing_encryption)
+        .await?;
     let prepared = match Box::pin(prepare_cycle_before_pull(
         hlc,
         clock,
@@ -1201,9 +1204,6 @@ impl SyncComponents {
         store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
-        self.store
-            .resume_operations(&self.user_keypair, self.routing_encryption.as_ref())
-            .await?;
         let authorization = self.store.authorize().await?;
         run_single_sync_cycle_with_authorization(
             &self.device_id,

@@ -28,6 +28,7 @@ pub(super) fn resolved_provider_admin(
         .ok_or(DeviceJoinError::ProviderAdministratorRequired)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) async fn load_current_device_join_authorization(
     database: &StoreDatabase,
     storage: &dyn SyncStorage,

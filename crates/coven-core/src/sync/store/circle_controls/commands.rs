@@ -14,7 +14,7 @@ use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use crate::sync::store::database::StoreDatabase;
-use crate::sync::store::Store;
+use crate::sync::store::{AuthorizedStore, Store};
 use crate::sync::store_commit::CircleControlRef;
 use crate::sync::store_objects::StoreObjectError;
 
@@ -1010,28 +1010,22 @@ impl Store {
         ))
         .await
     }
+}
 
+impl AuthorizedStore<'_> {
     pub(crate) async fn resume_circle_operations(
-        &self,
+        &mut self,
         identity: &UserKeypair,
         routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
-        let database = self.database();
-        let storage = &**self.storage();
-        let root = database
-            .local_store_root_ref()
-            .await?
-            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
-        let mut history_verifier =
-            crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
-                .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let authority = self.operation_authority();
+        let database = authority.database;
         // Interrupted discards resume first: a durable `Discarding` row plus the
         // per-object cleanup states carry an unfinished discard to completion
         // before any pending operation republishes.
         Box::pin(resume_discarding_circle_operations(
             database,
-            &mut history_verifier,
+            authority.history_verifier,
         ))
         .await?;
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
@@ -1043,7 +1037,7 @@ impl Store {
             }
             match Box::pin(publish_circle_operation_with_history(
                 database,
-                &mut history_verifier,
+                authority.history_verifier,
                 &journal.operation_id,
                 identity,
                 routing_key,

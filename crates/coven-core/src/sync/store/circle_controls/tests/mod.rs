@@ -113,7 +113,11 @@ async fn resume_circle_operations(
         store.store_root().store_root_hash,
     )
     .expect("derive Circle test routing key");
-    store
+    let mut authority = store
+        .authorize()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    authority
         .resume_circle_operations(signer, Some(&routing_key))
         .await
 }

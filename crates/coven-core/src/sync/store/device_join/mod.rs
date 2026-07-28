@@ -43,7 +43,8 @@ mod journal;
 mod owner;
 mod provider_administrator;
 
-pub(crate) use authority::*;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use authority::load_current_device_join_authorization;
 pub use cleanup::*;
 pub use error::*;
 pub use exchange::*;
