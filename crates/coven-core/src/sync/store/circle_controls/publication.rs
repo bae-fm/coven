@@ -518,8 +518,6 @@ pub(super) async fn publish_circle_operation_with_history(
     }
     let verified = load_circle_activations(
         database,
-        storage,
-        root,
         history_verifier,
         &verified_commit,
         identity,

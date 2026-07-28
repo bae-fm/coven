@@ -8,13 +8,10 @@ pub(crate) enum PullCircleActivationError {
 pub(crate) async fn load_circle_payload_activations(
     database: &StoreDatabase,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     verified: &VerifiedStoreBatchCommit,
     identity: Option<&crate::keys::UserKeypair>,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    verified_root: &super::store_commit::StoreProtocolRoot,
     verified_membership_prefix: &VerifiedMergeMembershipPrefix,
 ) -> Result<VerifiedCircleActivations, PullCircleActivationError> {
     let commit = verified.value();
@@ -27,13 +24,10 @@ pub(crate) async fn load_circle_payload_activations(
         crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
             database,
             commit_verifier,
-            storage,
-            root,
             verified,
             identity,
             routing_key,
             verified_prefix,
-            verified_root,
             verified_membership_prefix,
         ),
     )
@@ -44,13 +38,12 @@ pub(crate) async fn load_circle_payload_activations(
 pub(crate) async fn load_applicable_circle_packages(
     database: &StoreDatabase,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     verified: &VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
     local_store_membership: LocalStoreMembership,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
+    let storage = commit_verifier.storage();
     let db = database.sqlite();
     let commit_ref = verified.reference();
     let commit = verified.value();
@@ -170,8 +163,6 @@ pub(crate) async fn load_applicable_circle_packages(
                 crate::sync::store::circle_controls::activation::load_circle_control_roster_chain(
                     database,
                     commit_verifier,
-                    storage,
-                    root,
                     &historical_commit,
                     &historical.reference,
                     &historical.control,

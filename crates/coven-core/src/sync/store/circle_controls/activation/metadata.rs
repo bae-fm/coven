@@ -10,25 +10,23 @@ use crate::sync::circle::{
     CircleMetadataHeadRef, CircleSemanticSlot,
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
-use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreRootRef, StreamActivationId,
+    StreamActivationId,
 };
 
 async fn load_metadata_author_roster(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
     roster_ref: &crate::sync::circle::CircleRosterStateRef,
     encryption: EncryptionService,
     objects: &CircleActivationObjects,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
@@ -36,8 +34,6 @@ async fn load_metadata_author_roster(
         database,
         commit_verifier,
         verified_prefix,
-        storage,
-        root,
         commit_ref,
         commit,
         circle_id,
@@ -53,16 +49,16 @@ pub(super) async fn load_circle_metadata_state(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
     state: &crate::sync::circle::CircleMetadataStateRef,
     encryption: EncryptionService,
     objects: &CircleActivationObjects,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMetadata, CircleOperationError> {
+    let storage = commit_verifier.storage();
+    let root = commit_verifier.root().clone();
     commit_ref
         .verify_commit(commit)
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -131,8 +127,6 @@ pub(super) async fn load_circle_metadata_state(
             database,
             commit_verifier,
             verified_prefix,
-            storage,
-            root,
             commit_ref,
             commit,
             head.successor.activation,
@@ -257,13 +251,11 @@ pub(super) async fn load_circle_metadata_state(
             database,
             commit_verifier,
             verified_prefix,
-            storage,
             commit,
             circle_id,
             &entry.author_roster,
             encryption.clone(),
             objects,
-            root,
             commit_ref,
             consumed_stream_activations,
         )

@@ -38,7 +38,6 @@ pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
 pub(crate) async fn readiness(
     database: &StoreDatabase,
     commit_verifier: &mut StoreCommitVerifier<'_>,
-    root: &StoreRootRef,
     coverage: &super::store_commit::CommitFrontier,
     frontier: &BTreeMap<String, StoreBatchCommitRef>,
     device_state: &ResolvedStoreDeviceState,
@@ -46,6 +45,7 @@ pub(crate) async fn readiness(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Readiness, StorePullError> {
+    let root = commit_verifier.root().clone();
     let stream_id = commit_stream_id(&commit_ref.coord);
     if let Some(current) = frontier.get(&stream_id) {
         if commit_ref.coord.sequence() <= current.coord.sequence() {
@@ -277,8 +277,6 @@ pub(crate) async fn verify_merge_commit_currently_materialized(
 pub(super) async fn apply_candidate(
     database: &StoreDatabase,
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     merge_candidate: &MergeCandidate,
@@ -286,8 +284,9 @@ pub(super) async fn apply_candidate(
     identity: Option<&crate::keys::UserKeypair>,
     latest_membership: &mut MembershipChain,
     routing_key: Option<&super::circle::RowRoutingKey>,
-    verified_root: &super::store_commit::StoreProtocolRoot,
 ) -> Result<ApplyOutcome, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
     let commit = candidate.commit();
@@ -306,11 +305,11 @@ pub(super) async fn apply_candidate(
         }
     }
     let membership_objects =
-        verified_merge_membership_objects(storage, root, commit_ref, commit).await?;
+        verified_merge_membership_objects(storage, &root, commit_ref, commit).await?;
     let (local_store_membership, membership_after_candidate) =
         local_store_membership_after_candidate(
             latest_membership,
-            root,
+            &root,
             &merge_candidate.predecessor_membership,
             membership_objects.as_ref(),
             identity,
@@ -327,13 +326,10 @@ pub(super) async fn apply_candidate(
         load_circle_payload_activations(
             database,
             history_verifier.commit_verifier(),
-            storage,
-            root,
             &candidate.verified,
             identity.filter(|_| local_store_membership.allows_circle_access()),
             routing_key,
             &verified_prefix,
-            verified_root,
             &merge_candidate.membership_prefix,
         )
         .await
@@ -376,8 +372,6 @@ pub(super) async fn apply_candidate(
     let circle_packages = match load_applicable_circle_packages(
         database,
         history_verifier.commit_verifier(),
-        storage,
-        root,
         &candidate.verified,
         verified_circle_activations.circles(),
         author,
@@ -444,8 +438,6 @@ pub(super) async fn apply_candidate(
     }
     let outcome = Box::pin(commit_candidate(
         database,
-        storage,
-        root,
         history_verifier,
         merge_candidate,
         packages,
@@ -1267,8 +1259,6 @@ fn activate_merge_membership_authority(
 
 async fn commit_candidate(
     database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     merge_candidate: &MergeCandidate,
     packages: Vec<PreparedMergeMaterializationPackage>,
@@ -1279,6 +1269,8 @@ async fn commit_candidate(
     local_store_membership: LocalStoreMembership,
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     let db = database.sqlite();
     let candidate = &merge_candidate.candidate;
     let commit = candidate.commit();
@@ -1294,7 +1286,7 @@ async fn commit_candidate(
     let (authorized_predecessor, recovery_author) =
         predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let owner_recovery = verify_commit_owner_recovery_activation(storage, root, commit).await?;
+    let owner_recovery = verify_commit_owner_recovery_activation(storage, &root, commit).await?;
     let state_after = device_operations
         .apply_to(authorized_predecessor.clone(), &commit.device_state)
         .and_then(|state| {
@@ -1307,7 +1299,7 @@ async fn commit_candidate(
             )
         })
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let acknowledgement = validate_commit_acknowledgement(storage, root, commit, author)
+    let acknowledgement = validate_commit_acknowledgement(storage, &root, commit, author)
         .await
         .map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
@@ -1317,7 +1309,7 @@ async fn commit_candidate(
         Some((acknowledgement_ref, acknowledgement_value)) => Some(
             retain_activated_acknowledgement(
                 storage,
-                root,
+                &root,
                 commit_ref,
                 commit,
                 author,
@@ -1339,7 +1331,7 @@ async fn commit_candidate(
         .collect();
     let history = prepare_merge_history_successor(
         database,
-        root,
+        &root,
         &candidate.verified,
         predecessor_membership,
         recovery_author.as_ref(),
@@ -1374,7 +1366,7 @@ async fn commit_candidate(
     let retractions = Box::pin(verified_terminal_merge_retractions(
         database,
         storage,
-        root,
+        &root,
         history_verifier,
         &merge_candidate.activation_head,
         &merge_candidate.activation_head_object,
@@ -1580,6 +1572,6 @@ async fn commit_candidate(
     for (write_id, status) in applied.write_status_notifications {
         db.notify_write_status(write_id, status);
     }
-    resume_merge_retraction_cleanups(database, storage, root, history_verifier).await?;
+    resume_merge_retraction_cleanups(database, storage, &root, history_verifier).await?;
     Ok(applied.outcome)
 }

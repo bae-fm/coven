@@ -329,8 +329,6 @@ impl Store {
         let roster_chain = super::activation::load_circle_control_roster_chain(
             database,
             history_verifier.commit_verifier(),
-            storage,
-            &root,
             &activation_commit,
             reference,
             &current.control,
@@ -431,8 +429,6 @@ impl Store {
         let roster_chain = super::activation::load_circle_control_roster_chain(
             database,
             history_verifier.commit_verifier(),
-            storage,
-            &root,
             &activation_commit,
             reference,
             &current.control,

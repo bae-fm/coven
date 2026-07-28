@@ -450,7 +450,6 @@ pub fn pull_store_commits<'a>(
                 );
             }
         }
-        let history_root = history_verifier.verified_root().clone();
         let mut loaded_predecessor_memberships = BTreeMap::new();
         for materialization in retained {
             if materialization.commit().membership_authority.is_none() {
@@ -530,7 +529,6 @@ pub fn pull_store_commits<'a>(
                 match readiness(
                     database,
                     history_verifier.commit_verifier(),
-                    &root,
                     &coverage,
                     &frontier,
                     &current_device_state,
@@ -562,8 +560,6 @@ pub fn pull_store_commits<'a>(
                         match Box::pin(apply_candidate(
                             database,
                             &mut history_verifier,
-                            storage,
-                            &root,
                             store_dir,
                             schema.clone(),
                             &candidate,
@@ -571,7 +567,6 @@ pub fn pull_store_commits<'a>(
                             identity,
                             &mut latest_membership,
                             routing_key.as_ref(),
-                            &history_root,
                         ))
                         .await?
                         {

@@ -1656,7 +1656,6 @@ pub(crate) async fn select_staged_circle_decisions(
         let access = resolve_restorer_circle_access(
             history_verifier,
             query_db,
-            storage,
             restorer_identity,
             routing_key,
             circle_id,
@@ -1740,7 +1739,6 @@ pub(crate) async fn select_staged_circle_decisions(
 async fn resolve_restorer_circle_access(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
     query_db: &crate::sync::store::StoreDatabase,
-    storage: &dyn SyncStorage,
     restorer_identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     circle_id: CircleId,
@@ -1773,7 +1771,6 @@ async fn resolve_restorer_circle_access(
     crate::sync::store::circle_controls::activation::resolve_local_circle_access(
         history_verifier,
         query_db,
-        storage,
         &commit,
         &reference.reference,
         &reference.control,

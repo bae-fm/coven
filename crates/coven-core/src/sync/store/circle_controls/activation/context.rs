@@ -1,7 +1,7 @@
 use crate::sync::circle::{PreparedCircleControl, StoreMembershipStateRef};
 use crate::sync::storage::{ExactObjectRef, ProtocolObjectContext, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
-use crate::sync::store_commit::{CircleControlRef, StoreRootRef, VerifiedStoreBatchCommit};
+use crate::sync::store_commit::{CircleControlRef, VerifiedStoreBatchCommit};
 
 pub(super) async fn verify_control_membership(
     history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
@@ -21,17 +21,16 @@ pub(super) async fn verify_control_membership(
 }
 
 pub(super) async fn verify_control_membership_with_verified_activations(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    verified_root: &crate::sync::store_commit::StoreProtocolRoot,
+    commit_verifier: &crate::sync::store::pull::StoreCommitVerifier<'_>,
     control: &PreparedCircleControl,
     verified_activations: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
+    let verified_root = commit_verifier.verified_root();
     let state = &control.value.access_epoch().store_membership;
     let chain = Box::pin(
         crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-            storage,
-            root,
+            commit_verifier.storage(),
+            commit_verifier.root(),
             verified_root,
             &verified_root.descriptor.founder_pubkey,
             &state.heads,

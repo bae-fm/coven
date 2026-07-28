@@ -121,8 +121,6 @@ impl AuthorizedStore<'_> {
             let roster_chain = super::activation::load_circle_control_roster_chain(
                 self.database(),
                 history_verifier.commit_verifier(),
-                self.storage(),
-                &root,
                 &activation,
                 reference,
                 &current.control,

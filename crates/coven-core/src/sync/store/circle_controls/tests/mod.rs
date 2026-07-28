@@ -223,8 +223,6 @@ async fn load_circle_activations(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     super::load_circle_activations(
         &StoreDatabase::new(db),
-        storage,
-        root,
         &mut history_verifier,
         &verified,
         identity,

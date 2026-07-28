@@ -1736,7 +1736,6 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let readiness = readiness(
         &target_database,
         &mut commit_verifier,
-        &store.root,
         &coverage,
         &frontier,
         &device_state,

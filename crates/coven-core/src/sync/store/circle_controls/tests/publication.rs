@@ -1474,8 +1474,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let loaded_packages = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &mut commit_verifier,
-        &store.storage,
-        &store.root,
         &package_commit,
         &[],
         &package_author,
@@ -1816,8 +1814,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let accepted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
         &StoreDatabase::new(&db),
         &mut commit_verifier,
-        &store.storage,
-        &store.root,
         &package_commit,
         &[],
         &package_author,
@@ -1997,8 +1993,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         match crate::sync::store::pull::load_applicable_circle_packages(
             &StoreDatabase::new(&candidate_base_database),
             &mut commit_verifier,
-            &store.storage,
-            &store.root,
             &verified_candidate,
             std::slice::from_ref(&activation),
             successor_author,

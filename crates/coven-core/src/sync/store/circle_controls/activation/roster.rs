@@ -15,15 +15,13 @@ use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreRootRef, StreamActivationId,
+    StreamActivationId,
 };
 
 pub(super) async fn load_circle_roster_state(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -36,8 +34,6 @@ pub(super) async fn load_circle_roster_state(
         database,
         commit_verifier,
         verified_prefix,
-        storage,
-        root,
         commit_ref,
         commit,
         circle_id,
@@ -56,8 +52,6 @@ pub(super) async fn load_circle_roster_chain(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -66,6 +60,7 @@ pub(super) async fn load_circle_roster_chain(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
+    let storage = commit_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     if state.heads.is_empty()
         || !state
@@ -91,8 +86,6 @@ pub(super) async fn load_circle_roster_chain(
         database,
         commit_verifier,
         verified_prefix,
-        storage,
-        root,
         commit_ref,
         commit,
         circle_id,
@@ -142,8 +135,6 @@ pub(super) async fn load_circle_roster_chain(
             database,
             commit_verifier,
             verified_prefix,
-            storage,
-            root,
             commit_ref,
             commit,
             circle_id,
@@ -286,8 +277,6 @@ async fn load_exact_circle_roster_heads(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -296,6 +285,7 @@ async fn load_exact_circle_roster_heads(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<Vec<crate::sync::circle::ExactCircleRosterHead>, CircleOperationError> {
+    let storage = commit_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     let mut loaded_heads = Vec::with_capacity(references.len());
     for reference in references {
@@ -323,8 +313,6 @@ async fn load_exact_circle_roster_heads(
             database,
             commit_verifier,
             verified_prefix,
-            storage,
-            root,
             commit_ref,
             commit,
             head.successor.activation,
@@ -395,8 +383,6 @@ async fn replay_circle_roster_resolutions(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -407,6 +393,7 @@ async fn replay_circle_roster_resolutions(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
+    let storage = commit_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     let known_resolution_refs = resolutions
         .iter()
@@ -455,8 +442,6 @@ async fn replay_circle_roster_resolutions(
             database,
             commit_verifier,
             verified_prefix,
-            storage,
-            root,
             commit_ref,
             commit,
             circle_id,
@@ -698,13 +683,11 @@ pub(super) async fn load_circle_authority_roster(
     database: &StoreDatabase,
     commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
     control: &PreparedCircleControl,
     encryption: EncryptionService,
     objects: &CircleActivationObjects,
-    root: &StoreRootRef,
     commit_ref: &StoreBatchCommitRef,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
@@ -721,8 +704,6 @@ pub(super) async fn load_circle_authority_roster(
         database,
         commit_verifier,
         verified_prefix,
-        storage,
-        root,
         commit_ref,
         commit,
         circle_id,
