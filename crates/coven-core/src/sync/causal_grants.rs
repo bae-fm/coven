@@ -158,6 +158,31 @@ impl<R: Clone + Eq, T: Clone + Ord> GrantState<R, T> {
     }
 }
 
+/// Merge one branch's grant state into a conflict result. A grant's record is
+/// immutable; divergent records are an invalid conflict, while retirement
+/// evidence accumulates across every selected branch.
+pub(crate) fn merge_conflict_grant_state<R: Clone + Eq, T: Clone + Ord>(
+    grants: &mut BTreeMap<MembershipGrantId, GrantState<R, T>>,
+    grant: MembershipGrantId,
+    state: &GrantState<R, T>,
+) -> Result<(), ()> {
+    match grants.entry(grant) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(state.clone());
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if entry.get().record() != state.record() {
+                return Err(());
+            }
+            if !entry.get_mut().merge(state) {
+                return Err(());
+            }
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn try_map_grant_state<C, A, R, T, E>(
     state: &GrantState<GrantRecord<C, A>, CausalGrantRetirement<C>>,
     record: R,

@@ -1078,31 +1078,15 @@ pub(crate) fn resolve_store_membership_conflict(
                 .collect::<BTreeMap<_, _>>();
             for branch in maximal_valid_branches {
                 for (grant, state) in &branch.grants {
-                    let GrantState::Tombstoned {
-                        record,
-                        retirements,
-                    } = state
-                    else {
-                        continue;
-                    };
-                    match resolved.entry(grant.clone()) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(state.clone());
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            if entry.get().record() != record {
-                                return Err(MembershipError::InvalidConflictResolution);
-                            }
-                            let current = entry.get_mut();
-                            let mut merged = retirements.clone();
-                            if let Some(current_retirements) = current.retirements() {
-                                merged.extend(current_retirements.iter().cloned());
-                            }
-                            *current = GrantState::Tombstoned {
-                                record: record.clone(),
-                                retirements: merged,
-                            };
-                        }
+                    if state.retirements().is_some()
+                        && causal_grants::merge_conflict_grant_state(
+                            &mut resolved,
+                            grant.clone(),
+                            state,
+                        )
+                        .is_err()
+                    {
+                        return Err(MembershipError::InvalidConflictResolution);
                     }
                 }
             }

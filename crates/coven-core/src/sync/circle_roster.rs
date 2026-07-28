@@ -811,30 +811,11 @@ pub fn resolve_circle_roster_conflict(
         .collect::<BTreeMap<_, _>>();
     for branch in maximal_valid_branches {
         for (grant, state) in &branch.grants {
-            let GrantState::Tombstoned {
-                record,
-                retirements,
-            } = state
-            else {
-                continue;
-            };
-            match grants.entry(grant.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(state.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if entry.get().record() != record {
-                        return Err(CircleRosterError::InvalidConflictResolution);
-                    }
-                    let mut merged = retirements.clone();
-                    if let Some(current_retirements) = entry.get().retirements() {
-                        merged.extend(current_retirements.iter().cloned());
-                    }
-                    *entry.get_mut() = GrantState::Tombstoned {
-                        record: record.clone(),
-                        retirements: merged,
-                    };
-                }
+            if state.retirements().is_some()
+                && causal_grants::merge_conflict_grant_state(&mut grants, grant.clone(), state)
+                    .is_err()
+            {
+                return Err(CircleRosterError::InvalidConflictResolution);
             }
         }
     }
