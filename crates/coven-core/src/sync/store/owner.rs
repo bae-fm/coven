@@ -46,7 +46,8 @@ struct StoreAccess<'a> {
 }
 
 pub(crate) struct AuthorizedStore<'a> {
-    access: StoreAccess<'a>,
+    database: StoreDatabase,
+    history_verifier: crate::sync::store::pull::MergeHistoryVerifier<'a>,
     membership: crate::sync::membership::MembershipChain,
 }
 
@@ -388,15 +389,6 @@ impl Store {
             .await
             .map_err(|error| format!("read Store root reference: {error}"))?
             .ok_or_else(|| "Store root reference is absent".to_string())?;
-        let verified_root =
-            crate::sync::store_objects::load_store_protocol_root(storage, &store_root)
-                .await
-                .map_err(|error| SyncCycleFailure::operation("load Store protocol root", error))?;
-        if verified_root.value.object_hash() != store_root.store_root_hash {
-            return Err("verified Store root differs from local authority"
-                .to_string()
-                .into());
-        }
         authorize(StoreAccess {
             database,
             storage,
@@ -461,32 +453,39 @@ impl Store {
     }
 }
 
-impl AuthorizedStore<'_> {
+impl<'storage> AuthorizedStore<'storage> {
     pub(crate) fn db(&self) -> &Database {
-        self.access.database.sqlite()
+        self.database.sqlite()
     }
 
     pub(crate) fn database(&self) -> &StoreDatabase {
-        &self.access.database
+        &self.database
     }
 
     pub(super) fn membership(&self) -> &crate::sync::membership::MembershipChain {
         &self.membership
     }
 
-    pub(super) fn adopt_verified_membership(
-        &mut self,
-        membership: crate::sync::membership::MembershipChain,
-    ) {
-        self.membership = membership;
-    }
-
     pub(crate) fn storage(&self) -> &dyn SyncStorage {
-        self.access.storage
+        self.history_verifier.storage()
     }
 
     pub(crate) fn store_root(&self) -> &StoreRootRef {
-        &self.access.store_root
+        self.history_verifier.root()
+    }
+
+    pub(super) fn pull_authority<'operation>(
+        &'operation mut self,
+    ) -> (
+        &'operation StoreDatabase,
+        &'operation mut crate::sync::store::pull::MergeHistoryVerifier<'storage>,
+        &'operation mut crate::sync::membership::MembershipChain,
+    ) {
+        (
+            &self.database,
+            &mut self.history_verifier,
+            &mut self.membership,
+        )
     }
 
     pub(crate) async fn drain_uploads(
@@ -606,14 +605,23 @@ pub(crate) async fn anchor_owner_membership(
 }
 
 async fn authorize(access: StoreAccess<'_>) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
-    let membership = load_authorized_membership(&access).await?;
-    Ok(AuthorizedStore { access, membership })
+    let mut history_verifier =
+        crate::sync::store::pull::MergeHistoryVerifier::new(access.storage, &access.store_root)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
+    let membership = load_authorized_membership(&mut history_verifier, &access.database).await?;
+    Ok(AuthorizedStore {
+        database: access.database,
+        history_verifier,
+        membership,
+    })
 }
 
 async fn load_authorized_membership(
-    access: &StoreAccess<'_>,
+    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    database: &StoreDatabase,
 ) -> Result<crate::sync::membership::MembershipChain, SyncCycleFailure> {
-    crate::sync::store::pull::load_cycle_membership(access.storage, &access.database)
+    crate::sync::store::pull::load_cycle_membership_with_history(history_verifier, database)
         .await
         .map_err(|error| SyncCycleFailure::operation("load membership chain", error))
 }

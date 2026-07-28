@@ -1035,7 +1035,7 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
 impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn new(
         storage: &'a dyn SyncStorage,
-        root: &'a StoreRootRef,
+        root: &StoreRootRef,
     ) -> Result<Self, StorePullError> {
         let commit_verifier = StoreCommitVerifier::new(storage, root).await?;
         Self::from_commit_verifier(commit_verifier).await
@@ -1055,7 +1055,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) fn from_verified_root_and_founder(
         storage: &'a dyn SyncStorage,
-        root: &'a StoreRootRef,
+        root: &StoreRootRef,
         verified_root: VerifiedObject<super::store_commit::StoreProtocolRoot>,
         founder: &VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<Self, StorePullError> {

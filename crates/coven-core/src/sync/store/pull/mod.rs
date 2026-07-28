@@ -206,19 +206,19 @@ impl AuthorizedStore<'_> {
         identity: &UserKeypair,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
-        let execution = pull_store_commits(
-            self.database(),
-            self.db().synced_tables(),
-            self.storage(),
-            self.store_root().store_root_hash,
+        let (database, history_verifier, membership) = self.pull_authority();
+        let execution = pull_store_commits_with_history(
+            database,
+            database.sqlite().synced_tables(),
+            history_verifier,
             store_dir,
-            self.membership(),
+            membership,
             Some(identity),
             routing_encryption,
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
-        self.adopt_verified_membership(execution.membership);
+        *membership = execution.membership;
         Ok(execution.result)
     }
 
@@ -240,9 +240,35 @@ pub fn pull_store_commits<'a>(
     routing_encryption: Option<&'a crate::encryption::EncryptionService>,
 ) -> Pin<Box<dyn Future<Output = Result<StorePullExecution, StorePullError>> + Send + 'a>> {
     Box::pin(async move {
-        let db = database.sqlite();
         let root = required_pull_root(database, store_root_hash).await?;
         let mut history_verifier = MergeHistoryVerifier::new(storage, &root).await?;
+        pull_store_commits_with_history(
+            database,
+            tables,
+            &mut history_verifier,
+            store_dir,
+            membership,
+            identity,
+            routing_encryption,
+        )
+        .await
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pull_store_commits_with_history<'a>(
+    database: &'a StoreDatabase,
+    tables: &'a [crate::sync::session::SyncedTable],
+    history_verifier: &'a mut MergeHistoryVerifier<'_>,
+    store_dir: &'a StoreDir,
+    membership: &'a crate::sync::membership::MembershipChain,
+    identity: Option<&'a UserKeypair>,
+    routing_encryption: Option<&'a crate::encryption::EncryptionService>,
+) -> Pin<Box<dyn Future<Output = Result<StorePullExecution, StorePullError>> + Send + 'a>> {
+    Box::pin(async move {
+        let db = database.sqlite();
+        let storage = history_verifier.storage();
+        let store_root_hash = history_verifier.root().store_root_hash;
         membership
             .ensure_resolved()
             .map_err(StorePullMembershipError::State)
@@ -273,7 +299,7 @@ pub fn pull_store_commits<'a>(
             database.retained_merge_replay_inputs_with_verified_commits(retained_commit_proofs),
         )
         .await?;
-        resume_merge_retraction_cleanups(database, &mut history_verifier).await?;
+        resume_merge_retraction_cleanups(database, history_verifier).await?;
 
         let local_frontier = database.materialized_frontier().await.map_err(|error| {
             StorePullError::Database(format!("load discovery device-state frontier: {error}"))
@@ -286,12 +312,12 @@ pub fn pull_store_commits<'a>(
             .store_device_state_for_history_cut(&StoreHistoryCut(local_frontier))
             .await?;
 
-        let mut active = load_active_merge_registrations(database, &history_verifier)
+        let mut active = load_active_merge_registrations(database, history_verifier)
             .await
             .map_err(|error| {
                 StorePullError::Database(format!("load active Merge registrations: {error}"))
             })?;
-        for recovered in discover_merge_owner_recoveries(&history_verifier, membership).await? {
+        for recovered in discover_merge_owner_recoveries(history_verifier, membership).await? {
             if active
                 .iter()
                 .all(|(reference, _)| reference != &recovered.0)
@@ -320,7 +346,7 @@ pub fn pull_store_commits<'a>(
                 None => None,
             };
             let discovered = discover_merge_stream(
-                &mut history_verifier,
+                history_verifier,
                 &registration_ref,
                 &registration,
                 inactive_cut,
@@ -455,7 +481,7 @@ pub fn pull_store_commits<'a>(
                 continue;
             }
             let membership = Box::pin(load_merge_predecessor_membership_with_history(
-                &mut history_verifier,
+                history_verifier,
                 &materialization.commit().membership_state,
             ))
             .await
@@ -558,7 +584,7 @@ pub fn pull_store_commits<'a>(
                         })?;
                         match Box::pin(apply_candidate(
                             database,
-                            &mut history_verifier,
+                            history_verifier,
                             store_dir,
                             schema.clone(),
                             &candidate,
