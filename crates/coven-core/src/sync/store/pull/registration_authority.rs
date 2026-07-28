@@ -1,16 +1,5 @@
 use super::*;
 
-pub(crate) async fn load_merge_predecessor_membership(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    state: &StoreMembershipStateRef,
-) -> Result<MembershipChain, RegistrationLoadError> {
-    let mut history_verifier = MergeHistoryVerifier::new(storage, root)
-        .await
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    load_merge_predecessor_membership_with_history(&mut history_verifier, state).await
-}
-
 pub(crate) async fn load_merge_predecessor_membership_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
     state: &StoreMembershipStateRef,
@@ -104,17 +93,4 @@ pub(crate) fn verify_merge_provider_administrator(
     };
     let state = resolved.provider_admin.combined_state();
     state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
-}
-
-pub(in crate::sync::store) async fn load_device_join_authorization(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    state: &StoreMembershipStateRef,
-) -> Result<MembershipChain, StorePullError> {
-    load_merge_predecessor_membership(storage, root, state)
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })
 }

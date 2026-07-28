@@ -142,7 +142,6 @@ pub(in crate::sync::store) use owner_promotion::{
 };
 pub(in crate::sync::store) use provider_access::verify_accepted_provider_access_activation;
 pub(in crate::sync::store) use registration::RegistrationLoadError;
-pub(in crate::sync::store) use registration_authority::load_device_join_authorization;
 pub(crate) use registration_authority::{
     load_merge_predecessor_membership_with_history,
     load_merge_predecessor_membership_with_verified_activations, verify_merge_membership_state_ref,

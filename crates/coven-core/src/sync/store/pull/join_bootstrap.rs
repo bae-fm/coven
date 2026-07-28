@@ -1,5 +1,4 @@
 use super::*;
-use crate::sync::store_objects::load_founder_registration;
 
 #[cfg(test)]
 pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
@@ -13,8 +12,6 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
         let mut history_verifier = MergeHistoryVerifier::new(storage, root).await?;
         prepare_device_join_bootstrap_with_history(
             &mut history_verifier,
-            storage,
-            root,
             coverage,
             attempt_activation,
             membership_state,
@@ -25,14 +22,22 @@ pub(in crate::sync::store) fn prepare_device_join_bootstrap<'a>(
 
 async fn prepare_device_join_bootstrap_with_history(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
     coverage: &StoreHistoryCut,
     attempt_activation: &StoreBatchCommitRef,
     membership_state: &StoreMembershipStateRef,
 ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
-    load_device_join_authorization(storage, root, membership_state).await?;
-    let founder = Box::pin(load_founder_registration(storage, root)).await?;
+    load_merge_predecessor_membership_with_history(history_verifier, membership_state)
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
+    let founder = Box::pin(load_founder_registration_with_root(
+        history_verifier.storage(),
+        history_verifier.root(),
+        history_verifier.verified_root(),
+    ))
+    .await?;
     let founder_reference =
         StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
     let genesis = history_verifier.history().genesis.clone();
@@ -140,8 +145,6 @@ pub(in crate::sync::store) fn verify_attempt_and_prepare_device_join_bootstrap<'
             .await?;
         let plan = prepare_device_join_bootstrap_with_history(
             &mut history_verifier,
-            storage,
-            root,
             &verified_attempt.value.bootstrap_cut,
             attempt_activation,
             &verified_attempt.value.membership,
