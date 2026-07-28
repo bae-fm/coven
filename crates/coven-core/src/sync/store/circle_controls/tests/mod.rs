@@ -58,23 +58,11 @@ async fn prepare_circle_operation(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
-    let database = StoreDatabase::new(db);
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .expect("Circle test Store root is installed");
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+    let mut authorized = crate::sync::store::Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    super::prepare_circle_operation(
-        &mut history_verifier,
-        &database,
-        device_id,
-        metadata_stamp,
-        name,
-        signer,
-    )
-    .await
+    let mut authority = authorized.operation_authority();
+    super::prepare_circle_operation(&mut authority, device_id, metadata_stamp, name, signer).await
 }
 
 async fn publish_circle_operation(
@@ -83,27 +71,16 @@ async fn publish_circle_operation(
     operation_id: &CircleOperationId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let database = StoreDatabase::new(db);
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .expect("Circle test Store root is installed");
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, &root)
+    let mut authorized = crate::sync::store::Store::authorize_borrowed(storage, db)
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let mut authority = authorized.operation_authority();
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
-        root.store_root_hash,
+        authority.history_verifier.root().store_root_hash,
     )
     .expect("derive Circle test routing key");
-    super::publish_circle_operation_with_history(
-        &database,
-        &mut history_verifier,
-        operation_id,
-        signer,
-        Some(&routing_key),
-    )
-    .await
+    super::publish_circle_operation(&mut authority, operation_id, signer, Some(&routing_key)).await
 }
 
 async fn resume_circle_operations(

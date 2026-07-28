@@ -12,7 +12,7 @@ use crate::sync::circle::{
 use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::{database::StoreDatabase, owner::AuthorizedStoreAuthority};
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
@@ -20,13 +20,15 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 
-pub(super) async fn publish_circle_operation_with_history(
-    database: &StoreDatabase,
-    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+pub(super) async fn publish_circle_operation(
+    authority: &mut AuthorizedStoreAuthority<'_, '_>,
     operation_id: &CircleOperationId,
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
 ) -> Result<(), CircleOperationError> {
+    let database = authority.database;
+    let current_membership = &*authority.membership;
+    let history_verifier = &mut *authority.history_verifier;
     let storage = history_verifier.storage();
     let root = history_verifier.root().clone();
     let mut journal = database
@@ -87,7 +89,7 @@ pub(super) async fn publish_circle_operation_with_history(
         ));
     }
     if let CurrentMergeAuthority::Revoked { grant_id } =
-        current_merge_authority(database, history_verifier, commit, &author).await?
+        current_merge_authority(history_verifier.root(), current_membership, commit, &author)?
     {
         let block = crate::sync::circle::CircleOperationBlock::AuthorityLost { grant_id };
         database
@@ -186,7 +188,7 @@ pub(super) async fn publish_circle_operation_with_history(
                         )
                     })?,
             }),
-            &serde_json::to_vec(metadata_head)
+            &serde_json::to_vec(&metadata_head)
                 .expect("circle metadata head serialization cannot fail"),
         )
         .await?;
@@ -617,29 +619,17 @@ enum CurrentMergeAuthority {
     },
 }
 
-async fn current_merge_authority(
-    database: &StoreDatabase,
-    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+fn current_merge_authority(
+    root: &crate::sync::store_commit::StoreRootRef,
+    current: &crate::sync::membership::MembershipChain,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
 ) -> Result<CurrentMergeAuthority, CircleOperationError> {
-    let db = database.sqlite();
-    let founder = db
-        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store founder"))?;
-    if history_verifier.root().store_root_hash != commit.store_root_hash {
+    if root.store_root_hash != commit.store_root_hash {
         return Err(CircleOperationError::InvalidState(
             "Circle commit names a different Store root".to_string(),
         ));
     }
-    let current = crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
-        history_verifier,
-        &founder,
-        database,
-    )
-    .await
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     let authority = commit.membership_authority.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(
             "Circle commit has no Store membership authority".to_string(),

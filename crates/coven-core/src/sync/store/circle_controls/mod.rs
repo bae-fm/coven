@@ -28,7 +28,7 @@ use preparation::{
 use preparation::{
     prepare_circle_operation, prepare_circle_operation_request, verify_prepared_objects_are_signed,
 };
-use publication::publish_circle_operation_with_history;
+use publication::publish_circle_operation;
 
 #[cfg(test)]
 mod tests;

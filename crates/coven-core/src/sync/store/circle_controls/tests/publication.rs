@@ -2910,13 +2910,14 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("create Store commit verifier");
-    let activation_commit = commit_verifier
+    let mut authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize Circle preparation");
+    let mut authority = authorized.operation_authority();
+    let activation_commit = authority
+        .history_verifier
+        .commit_verifier()
         .load_ref(&activation_commit_ref)
         .await
         .expect("load closing activation commit");
@@ -2932,15 +2933,8 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .expect("closing control is present in its activating commit")
         .clone();
     let device_id = local_device_id(&fixture.db).await;
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("open Circle preparation history");
     let journal = prepare_circle_operation_request(
-        &mut history_verifier,
-        &StoreDatabase::new(&fixture.db),
+        &mut authority,
         &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {
@@ -3019,13 +3013,14 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("create Store commit verifier");
-    let activation_commit = commit_verifier
+    let mut authorized =
+        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+            .await
+            .expect("authorize Circle preparation");
+    let mut authority = authorized.operation_authority();
+    let activation_commit = authority
+        .history_verifier
+        .commit_verifier()
         .load_ref(&activation_commit_ref)
         .await
         .expect("load closing activation commit");
@@ -3039,15 +3034,8 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
         })
         .expect("closing control is present in its activating commit")
         .clone();
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("open Circle preparation history");
     let prepared = prepare_circle_operation_request(
-        &mut history_verifier,
-        &StoreDatabase::new(&fixture.db),
+        &mut authority,
         &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {

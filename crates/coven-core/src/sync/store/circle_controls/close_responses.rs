@@ -1,6 +1,6 @@
 use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
 use super::{
-    prepare_circle_operation_request, publish_circle_operation_with_history, CircleOperationError,
+    prepare_circle_operation_request, publish_circle_operation, CircleOperationError,
     CircleOperationIntent,
 };
 use crate::keys::UserKeypair;
@@ -77,7 +77,7 @@ impl AuthorizedStore<'_> {
                     cutoff,
                 )
                 .await?;
-            let authority = self.operation_authority();
+            let mut authority = self.operation_authority();
             let activation = authority
                 .history_verifier
                 .commit_verifier()
@@ -132,8 +132,7 @@ impl AuthorizedStore<'_> {
                     ))
                 })?;
             let prepared = Box::pin(prepare_circle_operation_request(
-                authority.history_verifier,
-                authority.database,
+                &mut authority,
                 device_id,
                 CircleOperationRequest::FinalizeEpochClose(Box::new(
                     CircleFinalizeEpochCloseRequest {
@@ -174,9 +173,8 @@ impl AuthorizedStore<'_> {
                 authority.history_verifier.root().store_root_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            Box::pin(publish_circle_operation_with_history(
-                authority.database,
-                authority.history_verifier,
+            Box::pin(publish_circle_operation(
+                &mut authority,
                 &journal.operation_id,
                 identity,
                 Some(&routing_key),

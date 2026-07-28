@@ -16,7 +16,7 @@ use crate::sync::circle::{
 use crate::sync::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
-use crate::sync::store::database::StoreDatabase;
+use crate::sync::store::owner::AuthorizedStoreAuthority;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
@@ -1214,16 +1214,14 @@ pub(super) async fn prepare_circle_activation_objects(
     ))
 }
 pub(super) async fn prepare_circle_operation(
-    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    database: &StoreDatabase,
+    authority: &mut AuthorizedStoreAuthority<'_, '_>,
     device_id: &str,
     metadata_stamp: &str,
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     Box::pin(prepare_circle_operation_request(
-        history_verifier,
-        database,
+        authority,
         device_id,
         CircleOperationRequest::Create {
             name: name.to_string(),
@@ -1235,12 +1233,14 @@ pub(super) async fn prepare_circle_operation(
 }
 
 pub(super) async fn prepare_circle_operation_request(
-    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
-    database: &StoreDatabase,
+    authority: &mut AuthorizedStoreAuthority<'_, '_>,
     device_id: &str,
     request: CircleOperationRequest,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
+    let database = authority.database;
+    let history_verifier = &mut *authority.history_verifier;
+    let current = &*authority.membership;
     let storage = history_verifier.storage();
     let db = database.sqlite();
     let (root, author_registration, author, device_signer) =
@@ -1253,10 +1253,6 @@ pub(super) async fn prepare_circle_operation_request(
     }
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
-    let founder = db
-        .get_protocol_state(crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY)
-        .await?
-        .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let author_pubkey = keys::public_key_hex(signer);
     let (operation_id, write_id) = match request.settlement() {
         Some((operation_id, write_id)) => (operation_id, write_id),
@@ -1268,13 +1264,6 @@ pub(super) async fn prepare_circle_operation_request(
     let history = request.history();
     let intent = request.intent();
     let (creation, commit, commit_ref, policy, prepared_objects) = {
-        let current = crate::sync::store::membership::load_and_persist_owner_anchor_with_history(
-            history_verifier,
-            &founder,
-            database,
-        )
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let heads = current.head_refs().to_vec();
         let resolutions = current.resolution_refs().to_vec();
         let members = current.current_members();
@@ -1971,7 +1960,7 @@ pub(super) async fn prepare_circle_operation_request(
             database,
             &root,
             &verified_commit,
-            &current,
+            current,
             None,
             resolved_devices,
             crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),
