@@ -1119,13 +1119,6 @@ async fn reclaim_store_packages(
         Err(error) => return Err(error),
     };
     for (commit, package, snapshot) in store_targets {
-        let target = ReclaimTarget::StorePackage(StorePackageReclaimTarget {
-            package: package.clone(),
-            activation: commit.clone(),
-        });
-        if reclaim_target_is_recorded(database, &target).await? {
-            continue;
-        }
         if database
             .store_package_is_retained_for_replay(package.clone(), commit.clone())
             .await?
@@ -1258,13 +1251,6 @@ async fn prepare_beyond_cutoff_circle_reclaim_authorizations(
         {
             continue;
         }
-        let target = ReclaimTarget::CirclePackage(CirclePackageReclaimTarget {
-            package: package.clone(),
-            activation: commit.clone(),
-        });
-        if reclaim_target_is_recorded(database, &target).await? {
-            continue;
-        }
         if database
             .circle_package_is_retained_for_replay(package.clone(), commit.clone())
             .await?
@@ -1367,11 +1353,6 @@ async fn prepare_audience_blob_reclaim_authorizations(
             package,
             activation,
         };
-        if reclaim_target_is_recorded(database, &ReclaimTarget::AudienceBlob(target.clone()))
-            .await?
-        {
-            continue;
-        }
         Box::pin(prepare_reclaim_authorization(
             database,
             storage,
@@ -1425,14 +1406,6 @@ async fn prepare_circle_snapshot_image_reclaim_authorizations(
                 snapshot: reference.clone(),
                 image: meta.bootstrap.image.clone(),
             };
-            if reclaim_target_is_recorded(
-                database,
-                &ReclaimTarget::CircleSnapshotImage(target.clone()),
-            )
-            .await?
-            {
-                continue;
-            }
             if database
                 .circle_image_is_retained_for_replay(circle_id, target.image.clone())
                 .await?
@@ -1532,13 +1505,6 @@ async fn prepare_circle_reclaim_authorizations(
         )
         .await?;
         for (commit, package) in targets {
-            let target = ReclaimTarget::CirclePackage(CirclePackageReclaimTarget {
-                package: package.clone(),
-                activation: commit.clone(),
-            });
-            if reclaim_target_is_recorded(database, &target).await? {
-                continue;
-            }
             if database
                 .circle_package_is_retained_for_replay(package.clone(), commit.clone())
                 .await?
@@ -1871,10 +1837,6 @@ async fn prepare_circle_bootstrap_reclaim_authorizations(
                 continue;
             };
             let target = CircleBootstrapImageReclaimTarget { coverage };
-            let reclaim_target = ReclaimTarget::CircleBootstrapImage(target.clone());
-            if reclaim_target_is_recorded(database, &reclaim_target).await? {
-                continue;
-            }
             if database
                 .circle_bootstrap_image_is_retained_for_replay(target.coverage.clone())
                 .await?
@@ -1922,6 +1884,9 @@ async fn prepare_reclaim_authorization(
     commit_verifier: &mut StoreCommitVerifier<'_>,
     claim: ReclaimClaim,
 ) -> Result<(), StoreReclaimError> {
+    if reclaim_target_is_recorded(database, &claim.target()).await? {
+        return Ok(());
+    }
     let plan = Box::pin(super::operations::prepare_plan(
         database,
         storage,
