@@ -20,19 +20,15 @@ impl Database {
         Ok(())
     }
 
-    pub(super) fn notify_write_status_in(
-        statuses: &Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
-        write_id: &WriteId,
-        status: WriteStatus,
-    ) {
-        let senders = statuses.lock().expect("write status mutex poisoned");
-        if let Some(sender) = senders.get(write_id) {
+    pub(crate) fn notify_write_status(&self, write_id: WriteId, status: WriteStatus) {
+        let senders = self
+            .state
+            .write_statuses
+            .lock()
+            .expect("write status mutex poisoned");
+        if let Some(sender) = senders.get(&write_id) {
             sender.send_replace(status);
         }
-    }
-
-    pub(crate) fn notify_write_status(&self, write_id: WriteId, status: WriteStatus) {
-        Self::notify_write_status_in(&self.state.write_statuses, &write_id, status);
     }
 
     pub async fn write_status(&self, write_id: &WriteId) -> Result<WriteStatus, DbError> {
