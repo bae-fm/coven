@@ -428,3 +428,17 @@ The work is verified when:
   type-analysis failures; analyzer error logs now fail the index build. The
   three-view run resolved 14,856 callables into 72,473 edges and 102,038 call
   sites without analyzer errors.
+- Async blocks are indexed as callables, and closures and async blocks record
+  outer parameters and locals captured from their lexical scopes. Cargo target
+  traversal now carries module-level configuration conditions into definitions
+  and call sites.
+- Item macro expansions are read from rust-analyzer and attributed to their
+  source invocations. Direct calls into generated methods resolve to the
+  generated callable, while trait calls retain every generated implementation
+  permitted by the receiver. Validation caught and removed a false syntactic
+  edge from a standard thread-local expansion to an unrelated Coven method.
+- Cross-layer reports inventory deep ancestor paths, ancestor and sibling
+  imports, public re-exports, receiverless stateful associated functions,
+  duplicate receiver dependencies, constructor calls, and raw receiver-field
+  bundles. The generated review graph contains 15,060 callables across 397
+  modules, 3,799 directed module edges, and 11,699 reach-through candidates.

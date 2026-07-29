@@ -79,6 +79,53 @@ fn publish(database: &Database, storage: &dyn SyncStorage) {
         self.assertEqual(closure["binding"], "load")
         self.assertTrue(closure["calls"])
 
+    def test_closure_captures_only_outer_lexical_bindings(self):
+        records = self.inventory(
+            """
+fn run(database: &Database, ignored: u64) {
+    let offset = 3;
+    let callback = move |value: u64| {
+        let inner = value + 1;
+        database.load(offset + inner)
+    };
+    callback(ignored);
+}
+"""
+        )
+        closure = next(record for record in records if record["kind"] == "closure")
+        self.assertEqual(
+            closure["captured_values"],
+            [
+                {
+                    "declared_by": "coven_core::sample::run",
+                    "kind": "parameter",
+                    "name": "database",
+                    "type": "&Database",
+                },
+                {
+                    "declared_by": "coven_core::sample::run",
+                    "kind": "local",
+                    "name": "offset",
+                    "type": "",
+                },
+            ],
+        )
+
+    def test_async_block_records_outer_captures(self):
+        records = self.inventory(
+            """
+fn run(database: Database) {
+    let task = async move { database.load().await };
+    consume(task);
+}
+"""
+        )
+        block = next(record for record in records if record["kind"] == "async-block")
+        self.assertEqual(
+            [capture["name"] for capture in block["captured_values"]],
+            ["database"],
+        )
+
     def test_unicode_before_callable_does_not_shift_parser_offsets(self):
         records = self.inventory(
             """
@@ -105,6 +152,151 @@ impl Store {
         ]
         self.assertEqual(len(macro_calls), 1)
 
+    def test_item_macro_expansion_callables_are_attributed_to_invocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "crates" / "coven-core" / "src" / "sample.rs"
+            path.parent.mkdir(parents=True)
+            source = 'mod ids { generated_id!(CircleId); }'
+            path.write_text(source)
+            source_file = ownership_audit.parse_source(path, source)
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                invocation = ownership_audit.item_macro_invocations(source_file)[0]
+                records = ownership_audit.inventory_macro_expansion(
+                    invocation,
+                    "struct CircleId; impl CircleId { fn parse() {} }",
+                )
+            finally:
+                ownership_audit.ROOT = original_root
+        parse = next(record for record in records if record["name"] == "parse")
+        self.assertEqual(parse["module"], "coven_core::sample::ids")
+        self.assertEqual(parse["macro_origin"]["name"], "generated_id")
+        self.assertEqual(
+            parse["symbol"],
+            "coven_core::sample::ids::<CircleId>::parse",
+        )
+
+    def test_macro_generated_target_uses_the_call_receiver(self):
+        records = [
+            {
+                "symbol": "sample::<First>::generate",
+                "name": "generate",
+                "receiver_type": "First",
+                "signature": "fn generate() -> Self",
+                "macro_origin": {},
+            },
+            {
+                "symbol": "sample::<Second>::generate",
+                "name": "generate",
+                "receiver_type": "Second",
+                "signature": "fn generate() -> Self",
+                "macro_origin": {},
+            },
+        ]
+        target = {
+            "name": "generate",
+            "detail": "fn generate() -> Self",
+        }
+        self.assertEqual(
+            ownership_audit.macro_generated_target(
+                records,
+                target,
+                {"callee_text": "Second::generate"},
+            ),
+            "sample::<Second>::generate",
+        )
+
+    def test_trait_call_lists_macro_generated_implementations(self):
+        trait = {
+            "name": "from_action",
+            "receiver_type": "trait DeviceJoinArtifact",
+        }
+        records = [
+            trait,
+            {
+                "symbol": "sample::<DeviceJoinArtifact for Activation>::from_action",
+                "name": "from_action",
+                "receiver_type": "DeviceJoinArtifact for Activation",
+            },
+            {
+                "symbol": "sample::<Unrelated for Activation>::from_action",
+                "name": "from_action",
+                "receiver_type": "Unrelated for Activation",
+            },
+        ]
+        self.assertEqual(
+            ownership_audit.trait_implementation_candidates(
+                trait,
+                records,
+                "T::from_action",
+            ),
+            ["sample::<DeviceJoinArtifact for Activation>::from_action"],
+        )
+
+    def test_concrete_trait_call_narrows_generated_implementation(self):
+        trait = {
+            "name": "from_action",
+            "receiver_type": "trait DeviceJoinArtifact",
+        }
+        records = [
+            trait,
+            {
+                "symbol": "sample::<DeviceJoinArtifact for Activation>::from_action",
+                "name": "from_action",
+                "receiver_type": "DeviceJoinArtifact for Activation",
+            },
+            {
+                "symbol": "sample::<DeviceJoinArtifact for Cancellation>::from_action",
+                "name": "from_action",
+                "receiver_type": "DeviceJoinArtifact for Cancellation",
+            },
+        ]
+        self.assertEqual(
+            ownership_audit.trait_implementation_candidates(
+                trait,
+                records,
+                "Activation::from_action",
+            ),
+            ["sample::<DeviceJoinArtifact for Activation>::from_action"],
+        )
+
+    def test_macro_syntactic_target_requires_same_module_free_callable(self):
+        record = {
+            "module": "sample::ids",
+            "macro_origin": {},
+        }
+        records = [
+            {
+                "symbol": "sample::ids::generated_bytes",
+                "module": "sample::ids",
+                "kind": "free",
+                "name": "generated_bytes",
+            },
+            {
+                "symbol": "sample::storage::<Storage>::get",
+                "module": "sample::storage",
+                "kind": "method",
+                "name": "get",
+            },
+        ]
+        self.assertEqual(
+            ownership_audit.macro_syntactic_target(
+                record,
+                {"callee_text": "generated_bytes"},
+                records,
+            ),
+            "sample::ids::generated_bytes",
+        )
+        self.assertIsNone(
+            ownership_audit.macro_syntactic_target(
+                record,
+                {"callee_text": "get"},
+                records,
+            )
+        )
+
     def test_call_inventory_records_top_level_argument_expressions(self):
         records = self.inventory(
             "fn run() { target(value, || nested()); }"
@@ -130,6 +322,23 @@ fn install() {}
         symbols = {record["symbol"] for record in records}
         self.assertEqual(len(symbols), 2)
         self.assertTrue(all("@#[cfg" in symbol for symbol in symbols))
+
+    def test_callable_and_call_conditions_include_ancestor_cfg(self):
+        records = self.inventory(
+            """
+#[cfg(feature = "provider")]
+mod provider {
+    fn run() {
+        #[cfg(test)]
+        target();
+    }
+}
+"""
+        )
+        run = next(record for record in records if record["name"] == "run")
+        self.assertEqual(run["cfg"], ['#[cfg(feature = "provider")]'])
+        target = next(call for call in run["calls"] if call["callee_text"] == "target")
+        self.assertEqual(target["cfg"], ["#[cfg(test)]"])
 
     def test_nested_functions_belong_to_their_enclosing_callable(self):
         records = self.inventory(
@@ -172,6 +381,147 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
+    def test_graph_data_aggregates_calls_by_module(self):
+        index = {
+            "callables": [
+                {
+                    "symbol": "sample::left::run",
+                    "module": "sample::left",
+                    "kind": "free",
+                    "receiver_type": None,
+                    "retained_dependencies": ["database"],
+                    "ambient_dependencies": [],
+                    "effects": ["database-read"],
+                    "captured_values": [],
+                    "unresolved_calls": [],
+                    "semantic_views": ["library-default"],
+                    "bottom_up_rank": 1,
+                    "callees": [
+                        {
+                            "symbol": "sample::right::load",
+                            "sites": [
+                                {"views": ["one", "two", "three"]},
+                                {"views": ["one", "two"]},
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "symbol": "sample::right::load",
+                    "module": "sample::right",
+                    "kind": "free",
+                    "receiver_type": None,
+                    "retained_dependencies": [],
+                    "ambient_dependencies": [],
+                    "effects": [],
+                    "captured_values": [],
+                    "unresolved_calls": [],
+                    "semantic_views": ["library-default"],
+                    "bottom_up_rank": 0,
+                    "callees": [],
+                },
+            ],
+            "reach_throughs": {
+                "deep_ancestor_paths": [
+                    {"symbol": "sample::left::run"}
+                ]
+            },
+        }
+        graph = ownership_audit.build_graph_data(index)
+        self.assertEqual(len(graph["modules"]), 2)
+        self.assertEqual(
+            graph["edges"],
+            [
+                {
+                    "source": "sample::left",
+                    "target": "sample::right",
+                    "sites": 2,
+                }
+            ],
+        )
+        left = next(
+            module
+            for module in graph["modules"]
+            if module["id"] == "sample::left"
+        )
+        self.assertEqual(left["findings"], 1)
+        self.assertEqual(left["stateful"], 1)
+
+    def test_graph_html_contains_svg_and_embedded_index(self):
+        html = ownership_audit.render_graph_html(
+            {
+                "modules": [],
+                "edges": [],
+                "summary": {"callables": 0},
+            }
+        )
+        self.assertIn('<svg id="graph"', html)
+        self.assertIn('"callables": 0', html)
+
+    def test_reach_through_reports_cover_static_calls_and_field_bundles(self):
+        caller = {
+            "symbol": "sample::owner::child::<Worker>::run",
+            "kind": "method",
+            "module": "sample::owner::child",
+            "parameters": [
+                {"name": "self", "type": "&self"},
+                {"name": "database", "type": "&Database"},
+            ],
+            "paths": [
+                {
+                    "text": "super::super::history::load",
+                    "range": {
+                        "start": {"line": 3, "character": 8},
+                        "end": {"line": 3, "character": 35},
+                    },
+                }
+            ],
+            "calls": [
+                {
+                    "text": "Store::open(self.database, self.storage)",
+                    "arguments": [
+                        {"text": "self.database"},
+                        {"text": "self.storage"},
+                    ],
+                }
+            ],
+            "callees": [
+                {
+                    "symbol": "sample::store::<Store>::open",
+                    "sites": [
+                        {
+                            "range": {
+                                "start": {"line": 4, "character": 15},
+                                "end": {"line": 4, "character": 19},
+                            },
+                            "expression": "Store::open(self.database, self.storage)",
+                        }
+                    ],
+                }
+            ],
+        }
+        target = {
+            "symbol": "sample::store::<Store>::open",
+            "name": "open",
+            "kind": "associated",
+            "retained_dependencies": ["database", "storage"],
+            "ambient_dependencies": [],
+            "effects": ["database-read"],
+        }
+        reports = ownership_audit.build_reach_through_reports(
+            [caller, target],
+            {},
+        )
+        self.assertEqual(len(reports["deep_ancestor_paths"]), 1)
+        self.assertEqual(len(reports["associated_function_calls"]), 1)
+        self.assertEqual(len(reports["constructor_calls"]), 1)
+        self.assertEqual(len(reports["receiver_dependency_parameters"]), 1)
+        self.assertEqual(len(reports["field_bundle_calls"]), 1)
+        self.assertEqual(
+            reports["receiverless_stateful_callables"][0]["symbol"],
+            target["symbol"],
+        )
+
     def test_callable_argument_reference_ignores_borrow_wrappers(self):
         self.assertEqual(
             ownership_audit.callable_argument_reference("&mut build_request"),
@@ -632,11 +982,14 @@ mod direct;
 mod nested { mod child; }
 #[path = "alternate.rs"]
 mod renamed;
+#[cfg(test)]
+mod gated;
 """
             )
             (source / "direct.rs").write_text("fn direct() {}")
             (source / "nested" / "child.rs").write_text("fn child() {}")
             (source / "alternate.rs").write_text("fn alternate() {}")
+            (source / "gated.rs").write_text("fn gated() {}")
             (source / "orphan.rs").write_text("fn orphan() {}")
             (tests / "integration.rs").write_text("fn integration() {}")
             metadata = {
@@ -669,7 +1022,15 @@ mod renamed;
                 {path.relative_to(root.resolve()) for path in discovery.unreachable},
                 {Path("crates/sample/src/orphan.rs")},
             )
-            self.assertEqual(len(discovery.reachable), 5)
+            self.assertEqual(len(discovery.reachable), 6)
+            self.assertEqual(
+                discovery.conditions[(source / "gated.rs").resolve()],
+                (("#[cfg(test)]",),),
+            )
+            self.assertIn(
+                "crates/sample/src/gated.rs",
+                discovery.targets[0]["sources"],
+            )
 
     def test_rust_analyzer_does_not_inherit_compiler_wrappers(self):
         original_wrapper = ownership_audit.os.environ.get("RUSTC_WRAPPER")
