@@ -45,15 +45,12 @@ use crate::sync::store_commit::{
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
-use crate::sync::store_objects::{
-    run_blocking_object_verification, StoreObjectError, VerifiedObject,
-};
+use crate::sync::store_objects::{StoreObjectError, VerifiedObject};
 use crate::sync::{
     causal_grants, circle, gate, hlc, membership, provider, remote_object, session, store_commit,
     store_objects,
 };
 
-mod ancestry;
 mod circle_packages;
 mod device_join_attempt;
 mod device_lifecycle_state;
@@ -75,8 +72,8 @@ mod root_validation;
 mod snapshot_evidence;
 mod support;
 
-pub use ancestry::StoreCommitVerifier;
-pub(crate) use ancestry::{
+use super::verification::StoreCommitVerifier;
+pub(crate) use super::verification::{
     commit_position_covers, history_cut_covers, load_provider_access_activation,
     CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
 };

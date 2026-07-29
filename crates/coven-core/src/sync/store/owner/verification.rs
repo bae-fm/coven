@@ -1,9 +1,15 @@
-use super::*;
+use super::pull::*;
+use crate::sync::membership::MembershipChain;
+use crate::sync::storage::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
+use crate::sync::store::StoreError;
 use crate::sync::store::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
     ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
 };
+use crate::sync::store_commit::*;
 use crate::sync::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
     device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
@@ -14,13 +20,16 @@ use crate::sync::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
     StoreSnapshotRef,
 };
-use crate::sync::store_objects::{decode_protocol_object, verify_store_root};
+use crate::sync::store_objects::{
+    decode_protocol_object, run_blocking_object_verification, verify_store_root, StoreObjectError,
+    VerifiedObject,
+};
+use std::collections::BTreeMap;
 
-#[doc(hidden)]
-pub struct StoreCommitVerifier<'a> {
+pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
     root: StoreRootRef,
-    verified_root: VerifiedObject<super::store_commit::StoreProtocolRoot>,
+    verified_root: VerifiedObject<StoreProtocolRoot>,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
 
@@ -45,12 +54,12 @@ pub(crate) struct VerifiedReclaimReceipt {
 impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_membership_at_verified_prefix(
         &self,
-        heads: &[super::membership::MembershipHeadRef],
-        resolutions: &[super::membership::StoreMembershipConflictResolutionRef],
-        verified_activations: &super::VerifiedMergeMembershipPrefix,
-        pending_resolution: Option<&super::VerifiedMergeConflictResolutionActivation>,
+        heads: &[crate::sync::membership::MembershipHeadRef],
+        resolutions: &[crate::sync::membership::StoreMembershipConflictResolutionRef],
+        verified_activations: &VerifiedMergeMembershipPrefix,
+        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        super::history::load_membership_at_exact_heads_with_verified_activations(
+        load_membership_at_exact_heads_with_verified_activations(
             self,
             heads,
             resolutions,
@@ -63,7 +72,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) fn from_verified_root(
         storage: &'a dyn SyncStorage,
         root: &StoreRootRef,
-        verified_root: VerifiedObject<super::store_commit::StoreProtocolRoot>,
+        verified_root: VerifiedObject<StoreProtocolRoot>,
     ) -> Result<Self, StoreProtocolError> {
         let verified_reference = StoreRootRef {
             store_root_id: verified_root.value.descriptor.store_root_id(),
@@ -139,8 +148,7 @@ impl<'a> StoreCommitVerifier<'a> {
         registration: &StoreDeviceRegistration,
         previous: Option<&StoreBatchCommitRef>,
     ) -> Result<ExactAnnouncementPath, StoreError> {
-        let super::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
-            &registration.store_commits
+        let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits
         else {
             return Err(StoreError::InvalidOutbound(
                 "Merge registration has no Store announcement anchor".to_string(),
@@ -153,10 +161,10 @@ impl<'a> StoreCommitVerifier<'a> {
                 commits: Vec::new(),
             });
         };
-        let expected_stream = super::store_commit::StreamActivation::device_authorized_stream_id(
+        let expected_stream = StreamActivation::device_authorized_stream_id(
             self.root.store_root_hash,
             registration_ref,
-            super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            StreamAnchorDomain::StoreAnnouncements,
         );
         if target.coord.stream_id != expected_stream {
             return Err(StoreError::InvalidOutbound(
@@ -554,10 +562,12 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) async fn load_provider_access_grant(
         &self,
-        reference: &super::provider::StoreMemberProviderAccessGrantRef,
+        reference: &crate::sync::provider::StoreMemberProviderAccessGrantRef,
         administrator: &StoreDeviceRegistration,
-    ) -> Result<VerifiedObject<super::provider::StoreMemberProviderAccessGrant>, StoreObjectError>
-    {
+    ) -> Result<
+        VerifiedObject<crate::sync::provider::StoreMemberProviderAccessGrant>,
+        StoreObjectError,
+    > {
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::ProviderAccessGrant,
@@ -572,7 +582,7 @@ impl<'a> StoreCommitVerifier<'a> {
             &semantic_prefix,
             reference.grant_hash,
             move |bytes| {
-                let grant: super::provider::StoreMemberProviderAccessGrant =
+                let grant: crate::sync::provider::StoreMemberProviderAccessGrant =
                     decode_protocol_object(bytes)?;
                 expected
                     .verify(&grant)
@@ -705,7 +715,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_device_exclusion_proposal(
         &self,
         reference: &StoreDeviceExclusionProposalRef,
-    ) -> Result<super::store_commit::VerifiedDeviceExclusionProposal, StoreObjectError> {
+    ) -> Result<VerifiedDeviceExclusionProposal, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceExclusionProposal,
@@ -743,7 +753,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     key: reference.object.slot().logical_key().to_string(),
                     source: Box::new(source),
                 })?;
-        Ok(super::store_commit::VerifiedDeviceExclusionProposal {
+        Ok(VerifiedDeviceExclusionProposal {
             reference: reference.clone(),
             object: VerifiedObject {
                 value: verified,
@@ -757,8 +767,8 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_device_exclusion_outcome(
         &self,
         reference: &StoreDeviceExclusionOutcomeRef,
-        proposal: &super::store_commit::VerifiedDeviceExclusionProposal,
-    ) -> Result<super::store_commit::VerifiedDeviceExclusionOutcome, StoreObjectError> {
+        proposal: &VerifiedDeviceExclusionProposal,
+    ) -> Result<VerifiedDeviceExclusionOutcome, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceExclusionOutcome,
@@ -804,7 +814,7 @@ impl<'a> StoreCommitVerifier<'a> {
             key: reference.object().slot().logical_key().to_string(),
             source: Box::new(source),
         })?;
-        Ok(super::store_commit::VerifiedDeviceExclusionOutcome {
+        Ok(VerifiedDeviceExclusionOutcome {
             object: VerifiedObject {
                 value: verified,
                 ..opened
@@ -871,7 +881,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 &prefix,
                 reference.snapshot_hash,
                 move |bytes| {
-                    super::super::writer::snapshot::verify_store_snapshot_bytes(
+                    super::writer::snapshot::verify_store_snapshot_bytes(
                         &expected_root,
                         &expected_registration_ref,
                         &expected_registration,
@@ -1104,7 +1114,7 @@ impl<'a> StoreCommitVerifier<'a> {
         &self,
         reference: &OwnerRecoveryNodeRef,
     ) -> Result<VerifiedObject<OwnerRecoveryNode>, StoreObjectError> {
-        let semantic_prefix = super::store_commit::owner_recovery_semantic_prefix(
+        let semantic_prefix = owner_recovery_semantic_prefix(
             &reference.owner_pubkey,
             reference.owner_grant.clone(),
             reference.sequence,
@@ -1201,7 +1211,7 @@ impl<'a> StoreCommitVerifier<'a> {
         .map(Some)
     }
 
-    pub async fn load_ref(
+    pub(super) async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
     ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
@@ -1240,13 +1250,12 @@ impl<'a> StoreCommitVerifier<'a> {
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
-        let semantic_prefix =
-            super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
-                .map_err(|source| StoreObjectError::InvalidObject {
-                    semantic_prefix: "Store candidate commit".to_string(),
-                    key: reference.object.slot().logical_key().to_string(),
-                    source: Box::new(source),
-                })?;
+        let semantic_prefix = semantic_prefix_from_exact_object(&reference.object, ".json")
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })?;
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
@@ -1264,13 +1273,12 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &StoreBatchCommitRef,
         bytes: Vec<u8>,
     ) -> Result<VerifiedStoreBatchCommit, StoreObjectError> {
-        let semantic_prefix =
-            super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
-                .map_err(|source| StoreObjectError::InvalidObject {
-                    semantic_prefix: "Store candidate commit".to_string(),
-                    key: reference.object.slot().logical_key().to_string(),
-                    source: Box::new(source),
-                })?;
+        let semantic_prefix = semantic_prefix_from_exact_object(&reference.object, ".json")
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })?;
         #[derive(serde::Deserialize)]
         struct StoreCommitAuthorProjection {
             author_registration: StoreDeviceRegistrationRef,
@@ -1307,13 +1315,11 @@ impl<'a> StoreCommitVerifier<'a> {
         .await
     }
 
-    pub(crate) fn verified_root(&self) -> &super::store_commit::StoreProtocolRoot {
+    pub(crate) fn verified_root(&self) -> &StoreProtocolRoot {
         &self.verified_root.value
     }
 
-    pub(crate) fn verified_root_object(
-        &self,
-    ) -> &VerifiedObject<super::store_commit::StoreProtocolRoot> {
+    pub(crate) fn verified_root_object(&self) -> &VerifiedObject<StoreProtocolRoot> {
         &self.verified_root
     }
 
@@ -1359,12 +1365,12 @@ fn verify_opened_registration(
     bytes: &[u8],
     root: &StoreRootRef,
     reference: &StoreDeviceRegistrationRef,
-    pinned_root: &super::store_commit::StoreProtocolRoot,
+    pinned_root: &StoreProtocolRoot,
 ) -> Result<StoreDeviceRegistration, StoreProtocolError> {
     let registration = StoreDeviceRegistration::parse_at(bytes, root, reference.device_id)?;
     reference.verify_registration(&registration)?;
     let expected_prefix = match &registration.origin {
-        super::store_commit::StoreDeviceRegistrationOrigin::Founder { creation_id }
+        StoreDeviceRegistrationOrigin::Founder { creation_id }
             if *creation_id == pinned_root.descriptor.creation_id
                 && registration.provider
                     == pinned_root.descriptor.founder_provider_admin.provider
@@ -1372,7 +1378,7 @@ fn verify_opened_registration(
         {
             founder_registration_semantic_prefix(*creation_id)
         }
-        super::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } => {
+        StoreDeviceRegistrationOrigin::Founder { .. } => {
             return Err(StoreProtocolError::InvalidFounder);
         }
         _ if reference.object.slot() != &pinned_root.descriptor.founder_registration => {
@@ -1452,7 +1458,7 @@ pub(crate) async fn history_cut_covers(
 
 pub(crate) async fn load_provider_access_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
-    access: &super::provider::ActivatedStoreMemberProviderAccessGrant,
+    access: &crate::sync::provider::ActivatedStoreMemberProviderAccessGrant,
     administrator: &StoreDeviceRegistration,
 ) -> Result<VerifiedStoreBatchCommit, StorePullError> {
     let grant = history_verifier

@@ -11,7 +11,6 @@ use crate::sync::circle::{
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::store::circle_controls::CircleOperationError;
-use crate::sync::store::owner::pull::StoreCommitVerifier;
 use crate::sync::store_commit::{
     CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, CirclePackageRef, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
@@ -63,7 +62,7 @@ pub(crate) struct VerifiedCircleImage {
 }
 
 impl VerifiedCircleImage {
-    pub(super) fn new(
+    pub(crate) fn new(
         circle_id: CircleId,
         control: CircleControlCoord,
         access: &CircleAccessLeaf,
@@ -195,8 +194,8 @@ impl CirclePackageAccess {
 
     pub(crate) async fn open_package(
         &self,
-        verifier: &mut StoreCommitVerifier<'_>,
-        commit_ref: &StoreBatchCommitRef,
+        storage: &dyn crate::sync::storage::SyncStorage,
+        verified: &VerifiedStoreBatchCommit,
         reference: &CirclePackageRef,
         author: &StoreDeviceRegistration,
     ) -> Result<OpenedCirclePackage, CircleOperationError> {
@@ -218,7 +217,6 @@ impl CirclePackageAccess {
                 reference.circle_id
             )));
         }
-        let verified = verifier.load_ref(commit_ref).await?;
         let commit = verified.value();
         if !commit
             .circle_packages()
@@ -247,8 +245,7 @@ impl CirclePackageAccess {
             crate::sync::storage::ProtocolObjectDomain::CirclePackage,
             self.encryption.clone(),
         );
-        let bytes = verifier
-            .storage()
+        let bytes = storage
             .read_protocol_object(&context, &reference.package.object, &semantic_prefix)
             .await
             .map_err(crate::sync::store_objects::StoreObjectError::from)?;
@@ -407,7 +404,7 @@ impl VerifiedStreamActivations {
         })
     }
 
-    pub(super) fn from_verified_circle_commit(
+    pub(crate) fn from_verified_circle_commit(
         commit: &StoreBatchCommit,
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<Self, crate::sync::store_commit::StoreProtocolError> {
@@ -455,7 +452,7 @@ impl VerifiedStreamActivationPrefix {
         }
     }
 
-    pub(super) fn activation(
+    pub(crate) fn activation(
         &self,
         activation_id: StreamActivationId,
     ) -> Option<&(StreamActivation, StoreBatchCommitRef)> {
@@ -514,6 +511,22 @@ enum RetainedCircleAccessState {
 }
 
 impl VerifiedCircleActivations {
+    pub(crate) fn from_verified_parts(
+        circles: Vec<VerifiedCircleReference>,
+        stream_activations: VerifiedStreamActivations,
+        bootstraps: Vec<VerifiedCircleImage>,
+        local_exclusions: Vec<LocalCircleExclusion>,
+        bootstrap_pending_exclusions: Vec<LocalCircleExclusion>,
+    ) -> Self {
+        Self {
+            circles,
+            stream_activations,
+            bootstraps,
+            local_exclusions,
+            bootstrap_pending_exclusions,
+        }
+    }
+
     pub(crate) fn none(
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -920,8 +933,18 @@ impl CircleCurrentControl {
         &self.control.coord
     }
 
+    #[cfg(test)]
+    pub(crate) fn control_mut_for_test(&mut self) -> &mut PreparedCircleControl {
+        &mut self.control
+    }
+
     pub(super) fn control_hash(&self) -> ObjectHash {
         self.control.coord.control_hash()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_hash_for_test(&self) -> ObjectHash {
+        self.control_hash()
     }
 
     fn causally_covers(&self, prior: &Self) -> bool {
@@ -1295,13 +1318,21 @@ impl CircleCurrentState {
         .map(Some)
     }
 
-    pub(super) fn resolved_control(&self) -> Option<&CircleCurrentControl> {
+    pub(crate) fn resolved_control(&self) -> Option<&CircleCurrentControl> {
         match self {
             Self::Active(active) => Some(&active.current),
             Self::Closing(closing) => Some(&closing.current),
             Self::Inactive(inactive) => Some(&inactive.current),
             Self::Deleted(deleted) => Some(deleted),
             Self::ControlConflict { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_current_mut_for_test(&mut self) -> Option<&mut CircleCurrentControl> {
+        match self {
+            Self::Active(active) => Some(&mut active.current),
+            _ => None,
         }
     }
 

@@ -1,72 +1,7 @@
-use crate::sync::circle::{PreparedCircleControl, StoreMembershipStateRef};
+use crate::sync::circle::PreparedCircleControl;
 use crate::sync::storage::{ExactObjectRef, ProtocolObjectContext, SyncStorage};
 use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store_commit::{CircleControlRef, VerifiedStoreBatchCommit};
-
-pub(super) async fn verify_control_membership(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
-    control: &PreparedCircleControl,
-) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.access_epoch().store_membership;
-    let chain =
-        Box::pin(history_verifier.load_membership_at_exact_heads(&state.heads, &state.resolutions))
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    verify_loaded_control_membership(control, chain)
-}
-
-pub(super) async fn verify_control_membership_with_verified_activations(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
-    control: &PreparedCircleControl,
-    verified_activations: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
-) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.access_epoch().store_membership;
-    let chain = Box::pin(commit_verifier.load_membership_at_verified_prefix(
-        &state.heads,
-        &state.resolutions,
-        verified_activations,
-        None,
-    ))
-    .await
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    verify_loaded_control_membership(control, chain)
-}
-
-fn verify_loaded_control_membership(
-    control: &PreparedCircleControl,
-    chain: crate::sync::membership::MembershipChain,
-) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.access_epoch().store_membership;
-    if !chain.authorizes_write_authority(
-        &control.value.value.membership_authority,
-        &control.value.author_pubkey,
-    ) {
-        return Err(CircleOperationError::InvalidState(
-            "Store membership does not authorize circle control author".to_string(),
-        ));
-    }
-    let membership_state_hash = match chain.status() {
-        crate::sync::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
-        crate::sync::membership::MembershipStatus::Conflict(_) => {
-            return Err(CircleOperationError::InvalidState(
-                "Store membership state has an unresolved conflict".to_string(),
-            ));
-        }
-    };
-    let expected_state = StoreMembershipStateRef::from_parts(
-        state.heads.clone(),
-        state.resolutions.clone(),
-        state.recovery.clone(),
-        membership_state_hash,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    if expected_state != control.value.store_membership_state_ref() {
-        return Err(CircleOperationError::InvalidState(
-            "circle control Store membership state reference is invalid".to_string(),
-        ));
-    }
-    Ok(chain.current_members())
-}
 
 pub(crate) fn verify_control_context_for_verified_commit(
     reference: &CircleControlRef,

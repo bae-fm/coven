@@ -2,7 +2,7 @@ use super::*;
 
 mod membership;
 
-pub(super) async fn load_membership_at_exact_heads_with_verified_activations(
+pub(crate) async fn load_membership_at_exact_heads_with_verified_activations(
     commit_verifier: &StoreCommitVerifier<'_>,
     heads: &[super::membership::MembershipHeadRef],
     resolutions: &[super::membership::StoreMembershipConflictResolutionRef],

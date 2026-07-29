@@ -431,16 +431,16 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         device_id: &str,
         stream_id: AuthorStreamId,
     ) -> CircleCurrentState {
-        let CircleCurrentState::Active(active) = &mut state else {
-            panic!("branch source must be active")
-        };
-        let current = &mut active.current;
+        let current = state
+            .active_current_mut_for_test()
+            .expect("branch source must be active");
         let predecessor = current.clone();
+        let current = current.control_mut_for_test();
         let CircleControlValue {
             order,
             state: control_state,
             ..
-        } = &mut current.control.value.value;
+        } = &mut current.value.value;
         let active_epoch = control_state
             .active_epoch_mut()
             .expect("test branch has an active epoch");
@@ -450,11 +450,9 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         order.previous_control_hash = None;
         order.dependencies = vec![predecessor.coordinate().clone()];
         active_epoch.covered_control_heads = vec![control_head_ref(device_id, &predecessor)];
-        current.control.value.signature =
-            keys::sign_hex(owner, &current.control.value.canonical_bytes()).1;
-        current.control.coord = current.control.value.coord();
-        current.control.bytes =
-            serde_json::to_vec(&current.control.value).expect("serialize branch control");
+        current.value.signature = keys::sign_hex(owner, &current.value.canonical_bytes()).1;
+        current.coord = current.value.coord();
+        current.bytes = serde_json::to_vec(&current.value).expect("serialize branch control");
         assert!(state.verify(), "branch current state must verify");
         state
     }
@@ -464,17 +462,17 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         owner: &UserKeypair,
         observed: &[(&str, &CircleCurrentState)],
     ) -> CircleCurrentState {
-        let CircleCurrentState::Active(active) = &mut state else {
-            panic!("successor source must be active")
-        };
-        let current = &mut active.current;
+        let current = state
+            .active_current_mut_for_test()
+            .expect("successor source must be active");
         let predecessor = current.clone();
         let predecessor_stream = predecessor.coordinate().stream_key();
+        let current = current.control_mut_for_test();
         let CircleControlValue {
             order,
             state: control_state,
             ..
-        } = &mut current.control.value.value;
+        } = &mut current.value.value;
         let active_epoch = control_state
             .active_epoch_mut()
             .expect("test successor has an active epoch");
@@ -491,18 +489,16 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         }
         frontier.sort_by_key(|head| head.coord.stream_key());
         order.seq = order.seq.checked_add(1).expect("control sequence fits u64");
-        order.previous_control_hash = Some(predecessor.control_hash());
+        order.previous_control_hash = Some(predecessor.control_hash_for_test());
         order.dependencies = frontier
             .iter()
             .filter(|head| head.coord.stream_key() != predecessor_stream)
             .map(|head| head.coord.clone())
             .collect();
         active_epoch.covered_control_heads = frontier;
-        current.control.value.signature =
-            keys::sign_hex(owner, &current.control.value.canonical_bytes()).1;
-        current.control.coord = current.control.value.coord();
-        current.control.bytes =
-            serde_json::to_vec(&current.control.value).expect("serialize successor control");
+        current.value.signature = keys::sign_hex(owner, &current.value.canonical_bytes()).1;
+        current.coord = current.value.coord();
+        current.bytes = serde_json::to_vec(&current.value).expect("serialize successor control");
         assert!(state.verify(), "successor current state must verify");
         state
     }

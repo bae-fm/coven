@@ -1389,7 +1389,7 @@ pub(crate) fn retained_membership_floor_is_included(
 }
 
 async fn retained_merge_device_state(
-    verifier: &pull::StoreCommitVerifier<'_>,
+    verifier: &StoreCommitVerifier<'_>,
     frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
     checkpoints: &[OpenedRetainedMergeHistorySummary],
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {

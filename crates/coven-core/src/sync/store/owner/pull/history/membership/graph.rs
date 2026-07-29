@@ -37,7 +37,7 @@ type LoadedMembershipHeadFuture<'a> = Pin<
 >;
 
 fn load_exact_membership_head_node<'a>(
-    commit_verifier: &'a crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &'a crate::sync::store::owner::StoreCommitVerifier<'_>,
     reference: &'a MembershipHeadRef,
 ) -> LoadedMembershipHeadFuture<'a> {
     Box::pin(async move {
@@ -410,7 +410,7 @@ fn project_membership_cut_to_store_prefix(
 }
 
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
@@ -473,7 +473,7 @@ fn load_exact_membership_graph<'a>(
 }
 
 pub(super) fn load_exact_membership_graph_objects<'a>(
-    commit_verifier: &'a crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &'a crate::sync::store::owner::StoreCommitVerifier<'_>,
     exact_heads: &'a [MembershipHeadRef],
 ) -> LoadedMembershipGraphFuture<'a> {
     Box::pin(async move {
@@ -537,7 +537,7 @@ pub(super) fn load_exact_membership_graph_objects<'a>(
 
 #[cfg(test)]
 pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     heads: &[MembershipHeadRef],
 ) {
     let seed = load_exact_membership_graph_objects(commit_verifier, heads)
@@ -865,7 +865,7 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
 }
 
 async fn validate_provider_admin_records(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     entries: &[MembershipEntry],
 ) -> Result<(), AnchoredChainError> {
     for entry in entries {

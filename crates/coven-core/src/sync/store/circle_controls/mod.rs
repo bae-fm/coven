@@ -5,10 +5,10 @@ mod error;
 mod journal;
 
 pub(crate) use activation::{
-    load_circle_activations, read_exact_circle_object, verify_control_context_for_verified_commit,
-    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, LocalCircleExclusion,
-    VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage,
-    VerifiedCircleReference, VerifiedStreamActivations,
+    read_exact_circle_object, verify_control_context_for_verified_commit, CircleAuthoringState,
+    CircleCurrentState, CirclePackageAccess, LocalCircleExclusion, VerifiedCircleAccess,
+    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
+    VerifiedStreamActivations,
 };
 pub use error::CircleOperationError;
 pub(crate) use journal::{

@@ -7,9 +7,9 @@ use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use crate::sync::store::circle_controls::{
-    load_circle_activations, read_exact_circle_object, verify_control_context_for_verified_commit,
-    CircleOperationError, CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess,
-    VerifiedCircleActive, VerifiedCircleReference,
+    read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
+    CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
+    VerifiedCircleReference,
 };
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::store_commit::{
@@ -18,6 +18,8 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 use std::collections::BTreeSet;
+
+use super::circles::activation::load_circle_activations;
 
 pub(super) struct AuthorizedCircleOperation<'operation, 'storage> {
     store: &'operation mut super::AuthorizedStore<'storage>,

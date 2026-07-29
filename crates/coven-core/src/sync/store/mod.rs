@@ -107,7 +107,6 @@ pub(crate) use owner::pull::install_circle_bootstrap_image_on;
 #[cfg(test)]
 pub(crate) use owner::pull::prepare_merge_abandonment_history_summary;
 #[doc(hidden)]
-pub use owner::pull::StoreCommitVerifier;
 #[doc(hidden)]
 pub use owner::pull::StorePullExecution;
 pub(crate) use owner::pull::VerifiedStoreSnapshotStability;

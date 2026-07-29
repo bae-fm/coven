@@ -15,7 +15,7 @@ use crate::sync::storage::{
 };
 use crate::sync::store::database::reclaim::journal;
 use crate::sync::store::database::StoreDatabase;
-use crate::sync::store::owner::{pull::StoreCommitVerifier, AuthorizedStoreHistory};
+use crate::sync::store::owner::{AuthorizedStoreHistory, StoreCommitVerifier};
 use crate::sync::store::AuthorizedWriterOperation;
 use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, CircleAckRef, CirclePackageRef, CircleSnapshotRef,
@@ -2675,7 +2675,7 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
 }
 
 async fn snapshot_covers_target(
-    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     coverage: &CommitFrontier,
     target: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
@@ -3136,7 +3136,7 @@ fn frontier_refs(frontier: &CommitFrontier) -> Vec<&StoreBatchCommitRef> {
 }
 
 async fn position_covers(
-    commit_verifier: &mut super::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut StoreCommitVerifier<'_>,
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {

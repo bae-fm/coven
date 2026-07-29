@@ -309,7 +309,7 @@ async fn prepare_or_load_owner_recovery_node(
 #[allow(clippy::too_many_arguments)]
 async fn install_activated_owner_recovery(
     database: &StoreDatabase,
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &super::StoreCommitVerifier<'_>,
     origin: &StoreDeviceRegistrationOrigin,
     device_id: crate::sync::store_commit::StoreDeviceId,
     recovery_id: DeviceRecoveryId,

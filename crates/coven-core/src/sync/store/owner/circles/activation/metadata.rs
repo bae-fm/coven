@@ -20,7 +20,7 @@ use crate::sync::store_commit::{
 
 async fn load_metadata_author_roster(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -47,7 +47,7 @@ async fn load_metadata_author_roster(
 
 pub(super) async fn load_circle_metadata_state(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,

@@ -37,7 +37,7 @@ pub enum StoreRegistrationError {
 
 pub(crate) async fn install_existing_founder_device(
     database: &StoreDatabase,
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &super::StoreCommitVerifier<'_>,
     signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
     let storage = commit_verifier.storage();

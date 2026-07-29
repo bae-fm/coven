@@ -19,14 +19,14 @@ use graph::load_anchored_chain_at_exact_heads_with_root_impl;
 
 #[cfg(test)]
 pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     heads: &[MembershipHeadRef],
 ) {
     graph::assert_deep_valid_predecessor_path_is_iterative(commit_verifier, heads).await;
 }
 
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
@@ -43,7 +43,7 @@ struct ExactMembershipStream {
 pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
     History(&'operation mut crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>),
     VerifiedPrefix {
-        commit_verifier: &'operation crate::sync::store::owner::pull::StoreCommitVerifier<'storage>,
+        commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
         activations: &'operation crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
     },
 }
@@ -51,7 +51,7 @@ pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     pub(super) fn commit_verifier(
         &self,
-    ) -> &crate::sync::store::owner::pull::StoreCommitVerifier<'storage> {
+    ) -> &crate::sync::store::owner::StoreCommitVerifier<'storage> {
         match self {
             Self::History(history) => history.commit_verifier_ref(),
             Self::VerifiedPrefix {
@@ -438,7 +438,7 @@ type ExactMembershipHeadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<AuthorHead, AnchoredChainError>> + Send + 'a>>;
 
 fn load_exact_membership_head_with_root<'a>(
-    commit_verifier: &'a crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &'a crate::sync::store::owner::StoreCommitVerifier<'_>,
     reference: &'a MembershipHeadRef,
 ) -> ExactMembershipHeadFuture<'a> {
     Box::pin(async move {
@@ -511,7 +511,7 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
 }
 
 pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
     verified_activations: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,

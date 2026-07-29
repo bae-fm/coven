@@ -21,7 +21,7 @@ pub(crate) async fn load_circle_payload_activations(
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()));
     }
     Box::pin(
-        crate::sync::store::circle_controls::activation::load_circle_activations_with_prefix(
+        super::super::circles::activation::load_circle_activations_with_prefix(
             database,
             commit_verifier,
             verified,
@@ -164,17 +164,16 @@ pub(crate) async fn load_applicable_circle_packages(
                         reference.circle_id
                     ))
                 })?;
-            let roster_chain =
-                crate::sync::store::circle_controls::activation::load_circle_control_roster_chain(
-                    database,
-                    commit_verifier,
-                    &historical_commit,
-                    &historical.reference,
-                    &historical.control,
-                    &keyring,
-                )
-                .await
-                .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
+            let roster_chain = super::super::circles::activation::load_circle_control_roster_chain(
+                database,
+                commit_verifier,
+                &historical_commit,
+                &historical.reference,
+                &historical.control,
+                &keyring,
+            )
+            .await
+            .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
             let roster = roster_chain.try_resolved().map_err(|error| {
                 PullCircleActivationError::Invalid(format!(
                     "resolve Circle {} historical package roster: {error}",
@@ -190,7 +189,7 @@ pub(crate) async fn load_applicable_circle_packages(
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?
         };
         let package = access
-            .open_package(commit_verifier, commit_ref, reference, author)
+            .open_package(commit_verifier.storage(), verified, reference, author)
             .await
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
         loaded.push(LoadedCirclePackage {

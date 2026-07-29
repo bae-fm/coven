@@ -14,12 +14,14 @@ pub(super) mod pull;
 mod registration;
 mod registration_outbox;
 mod restore;
+mod verification;
 pub(super) mod writer;
 
 pub use host_write::HostWriteBlobStaging;
 pub use registration::StoreRegistrationError;
 pub(crate) use registration::{bootstrap_pending_device, prepare_registration_for_origin};
 pub use restore::RestoringStore;
+use verification::StoreCommitVerifier;
 pub(super) use writer::{operations, reclaim, snapshot};
 pub(crate) use writer::{AuthorizedWriterOperation, StoreAckError};
 
@@ -195,15 +197,13 @@ impl Store {
                     )
                 })?;
         }
-        let protocol_root = match Box::pin(
-            crate::sync::store::protocol_root::publish_store_founder_graph(
-                &database,
-                &*storage,
-                founder_timestamp,
-                identity,
-                &graph,
-            ),
-        )
+        let protocol_root = match Box::pin(Self::publish_founder_graph(
+            &database,
+            &*storage,
+            founder_timestamp,
+            identity,
+            &graph,
+        ))
         .await
         {
             Ok(root) => root,
@@ -243,6 +243,157 @@ impl Store {
                 )
             })?;
         Self::finish_initialization(database, storage, store_root, protocol_root, identity).await
+    }
+
+    async fn publish_founder_graph(
+        database: &StoreDatabase,
+        storage: &dyn SyncStorage,
+        founder_timestamp: &str,
+        identity: &UserKeypair,
+        graph: &crate::database::DurableFounderGraph,
+    ) -> Result<
+        crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
+        protocol_root::StoreProtocolRootError,
+    > {
+        let root = StoreRootRef {
+            store_root_id: graph.root.value.descriptor.store_root_id(),
+            store_root_hash: graph.root.value.object_hash(),
+            object: graph.root.object.clone(),
+        };
+        if graph.initial_ack.value.last_sync != founder_timestamp {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "durable Store founder timestamp differs from this creation request".to_string(),
+            ));
+        }
+        let protocol_root = StoreProtocolRoot::parse_expected(
+            &graph.root.bytes,
+            &root,
+            database.sqlite().sync_routing_hash(),
+        )
+        .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
+        if protocol_root.descriptor.founder_pubkey != crate::keys::public_key_hex(identity) {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "durable Store founder differs from the creation signer".to_string(),
+            ));
+        }
+        if protocol_root.descriptor.schema_version > database.sqlite().schema_version() {
+            return Err(protocol_root::StoreProtocolRootError::SchemaTooNew {
+                root_schema: protocol_root.descriptor.schema_version,
+                local: database.sqlite().schema_version(),
+            });
+        }
+        let registration_ref =
+            crate::sync::store_commit::StoreDeviceRegistrationRef::from_registration(
+                &graph.registration.value,
+                graph.registration.object.clone(),
+            );
+        storage
+            .create_protocol_object(&graph.root.prepared)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let opened_root = protocol_root::load_exact_store_protocol_root(
+            storage,
+            &root,
+            database.sqlite().sync_routing_hash(),
+        )
+        .await?;
+        if opened_root.value != protocol_root {
+            return Err(protocol_root::StoreProtocolRootError::Missing(
+                root.store_root_hash,
+            ));
+        }
+        let commit_verifier =
+            StoreCommitVerifier::from_verified_root(storage, &root, opened_root.clone()).map_err(
+                |error| protocol_root::StoreProtocolRootError::Database(error.to_string()),
+            )?;
+        storage
+            .create_protocol_object(&graph.registration.prepared)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let registration = commit_verifier
+            .load_registration(&registration_ref)
+            .await?
+            .value;
+        if registration != graph.registration.value {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "founder registration readback differs from durable bytes".to_string(),
+            ));
+        }
+        storage
+            .create_protocol_object(&graph.initial_ack.prepared)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let initial_ack = commit_verifier
+            .load_store_ack(&graph.initial_ack_ref, &registration)
+            .await?
+            .value;
+        if initial_ack != graph.initial_ack.value {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "founder initial acknowledgement readback differs from durable bytes".to_string(),
+            ));
+        }
+        if !matches!(
+            &graph.registration_state,
+            crate::database::LocalDeviceRegistrationState::Activated { .. }
+        ) {
+            database
+                .mark_local_store_device_registration_created(
+                    graph.registration.clone(),
+                    graph.initial_ack_ref.clone(),
+                    graph.initial_ack.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    protocol_root::StoreProtocolRootError::Database(error.to_string())
+                })?;
+        }
+        let membership = &graph.membership;
+        storage
+            .create_protocol_object(&membership.entry.prepared)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let loaded_entry = crate::sync::store_objects::load_membership_entry_ref(
+            storage,
+            root.store_root_hash,
+            &membership.entry_ref,
+        )
+        .await?
+        .value;
+        if loaded_entry != membership.entry.value {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "founder membership entry readback differs from durable bytes".to_string(),
+            ));
+        }
+        storage
+            .create_protocol_object(&membership.head.prepared)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let loaded_head = crate::sync::store_objects::load_membership_head_ref(
+            storage,
+            root.store_root_hash,
+            &membership.head_ref,
+            &registration,
+        )
+        .await?
+        .value;
+        if loaded_head != membership.head.value {
+            return Err(protocol_root::StoreProtocolRootError::Database(
+                "founder membership head readback differs from durable bytes".to_string(),
+            ));
+        }
+        database
+            .complete_store_founder_graph(
+                root,
+                registration_ref,
+                graph.initial_ack_ref.clone(),
+                crate::database::FounderMembershipRefs {
+                    entry: membership.entry_ref.clone(),
+                    head: membership.head_ref.clone(),
+                },
+            )
+            .await
+            .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
+        Ok(opened_root)
     }
 
     pub(crate) async fn open(
@@ -348,12 +499,8 @@ impl Store {
             ));
         }
         let commit_verifier =
-            crate::sync::store::owner::pull::StoreCommitVerifier::from_verified_root(
-                &*storage,
-                &store_root,
-                protocol_root,
-            )
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            StoreCommitVerifier::from_verified_root(&*storage, &store_root, protocol_root)
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         let history_verifier =
             crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
                 commit_verifier,
@@ -632,13 +779,12 @@ impl Store {
     }
 
     async fn authorize_history(&self) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
-        let commit_verifier =
-            crate::sync::store::owner::pull::StoreCommitVerifier::from_verified_root(
-                &*self.storage,
-                &self.store_root,
-                self.protocol_root.clone(),
-            )
-            .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
+        let commit_verifier = StoreCommitVerifier::from_verified_root(
+            &*self.storage,
+            &self.store_root,
+            self.protocol_root.clone(),
+        )
+        .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
         let history_verifier =
             crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
                 commit_verifier,
@@ -1290,17 +1436,12 @@ impl Store {
         commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
         reference: &crate::sync::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut history = self
+        let history = self
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let opened = access
-            .open_package(
-                history.history_verifier_mut().commit_verifier(),
-                commit.reference(),
-                reference,
-                commit.author(),
-            )
+            .open_package(history.storage(), commit, reference, commit.author())
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(opened.object.value)
@@ -1431,7 +1572,7 @@ impl Store {
         let mut history = self.authorize_history().await.map_err(|error| {
             crate::sync::store::CircleOperationError::InvalidState(error.to_string())
         })?;
-        crate::sync::store::circle_controls::activation::load_circle_activations(
+        circles::activation::load_circle_activations(
             &self.database,
             history.history_verifier_mut(),
             &verified,

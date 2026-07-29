@@ -317,12 +317,11 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, store_root)
                 .await
                 .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        let commit_verifier =
-            crate::sync::store::owner::pull::StoreCommitVerifier::from_verified_root(
-                storage,
-                store_root,
-                verified_root,
-            )?;
+        let commit_verifier = super::super::StoreCommitVerifier::from_verified_root(
+            storage,
+            store_root,
+            verified_root,
+        )?;
         let history_verifier =
             crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
                 commit_verifier,

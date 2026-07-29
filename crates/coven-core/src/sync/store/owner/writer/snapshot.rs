@@ -1659,11 +1659,11 @@ pub(crate) async fn select_staged_circle_decisions(
             // The restoring identity cannot decrypt this Circle — delete any
             // preserved coverage row so replay never reconstructs an image it has
             // no access to.
-            crate::sync::store::circle_controls::activation::LocalCircleAccess::NoAccess => {
+            super::super::circles::activation::LocalCircleAccess::NoAccess => {
                 decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
                 continue;
             }
-            crate::sync::store::circle_controls::activation::LocalCircleAccess::Active {
+            super::super::circles::activation::LocalCircleAccess::Active {
                 epoch_encryption,
                 leaf_bootstrap,
             } => (epoch_encryption, leaf_bootstrap),
@@ -1736,7 +1736,7 @@ async fn resolve_restorer_circle_access(
     circle_id: CircleId,
     head_control: &CircleControlCoord,
     head_commit: &crate::sync::store_commit::StoreBatchCommitRef,
-) -> Result<crate::sync::store::circle_controls::activation::LocalCircleAccess, SnapshotError> {
+) -> Result<super::super::circles::activation::LocalCircleAccess, SnapshotError> {
     use crate::sync::store::StoreDatabase;
     let commit_lookup = head_commit.clone();
     let root = history_verifier.root().clone();
@@ -1765,7 +1765,7 @@ async fn resolve_restorer_circle_access(
                  activation"
             ))
         })?;
-    crate::sync::store::circle_controls::activation::resolve_local_circle_access(
+    super::super::circles::activation::resolve_local_circle_access(
         history_verifier,
         query_db,
         &commit,

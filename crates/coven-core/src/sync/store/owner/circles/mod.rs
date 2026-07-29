@@ -1,11 +1,12 @@
 #[cfg(test)]
 use crate::sync::store::circle_controls::VerifiedCircleActivations;
 use crate::sync::store::circle_controls::{
-    activation, read_exact_circle_object, CircleAuthoringState, CircleOperationError,
-    CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
+    read_exact_circle_object, CircleAuthoringState, CircleOperationError, CircleOperationIntent,
+    CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
     CircleTransitionHistory, PreparedCircleOperation,
 };
 
+pub(super) mod activation;
 mod close_responses;
 mod commands;
 mod preparation;
