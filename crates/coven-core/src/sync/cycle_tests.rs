@@ -2461,6 +2461,13 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None,
     );
+    assert_eq!(
+        crate::sync::store::StoreDatabase::new(&db)
+            .local_store_root_ref()
+            .await
+            .unwrap(),
+        None,
+    );
 }
 
 #[tokio::test]
@@ -2620,6 +2627,13 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     );
     assert_eq!(
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        None,
+    );
+    assert_eq!(
+        crate::sync::store::StoreDatabase::new(&db)
+            .local_store_root_ref()
+            .await
+            .unwrap(),
         None,
     );
     let watermark_count = db

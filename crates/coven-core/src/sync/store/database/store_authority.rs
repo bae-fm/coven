@@ -106,20 +106,6 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn install_store_root_authority(
-        &self,
-        reference: crate::sync::store_commit::StoreRootRef,
-        bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        self.sqlite()
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                install_store_root_authority_on(&tx, &reference, &bytes)?;
-                tx.commit().map_err(DbError::from)
-            })
-            .await
-    }
-
     pub(crate) async fn install_store_owner_anchor(
         &self,
         root: crate::sync::store_commit::StoreRootRef,

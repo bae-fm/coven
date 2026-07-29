@@ -233,7 +233,16 @@ impl Store {
                 ));
             }
         };
-        Self::finish_initialization(database, storage, protocol_root, identity).await
+        let store_root = database
+            .local_store_root_ref()
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
+            .ok_or_else(|| {
+                StoreInitializationError::ProtocolRoot(
+                    "published Store founder graph has no durable exact root".to_string(),
+                )
+            })?;
+        Self::finish_initialization(database, storage, store_root, protocol_root, identity).await
     }
 
     pub(crate) async fn open(
@@ -245,7 +254,14 @@ impl Store {
         let protocol_root = Self::open_protocol_root(&database, &*storage, expected_root)
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        Self::finish_initialization(database, storage, protocol_root, identity).await
+        Self::finish_initialization(
+            database,
+            storage,
+            expected_root.clone(),
+            protocol_root,
+            identity,
+        )
+        .await
     }
 
     async fn open_protocol_root(
@@ -309,32 +325,28 @@ impl Store {
                 },
             );
         }
-        database
-            .install_store_root_authority(expected.clone(), verified.bytes.clone())
-            .await
-            .map_err(|error| {
-                crate::sync::store::protocol_root::StoreProtocolRootError::Database(
-                    error.to_string(),
-                )
-            })?;
         Ok(verified)
     }
 
     async fn finish_initialization(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_root: StoreRootRef,
         protocol_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        let store_root = database
-            .local_store_root_ref()
+        let mut device_id = database
+            .sqlite()
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-            .ok_or_else(|| {
-                StoreInitializationError::ProtocolRoot(
-                    "opened Store root has no durable exact reference".to_string(),
-                )
-            })?;
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let identity_is_founder =
+            protocol_root.value.descriptor.founder_pubkey == crate::keys::public_key_hex(identity);
+        if device_id.is_none() && !identity_is_founder {
+            return Err(StoreInitializationError::ProtocolRoot(
+                "opening a Store for a non-founder requires an installed local device".to_string(),
+            ));
+        }
         let commit_verifier =
             crate::sync::store::owner::pull::StoreCommitVerifier::from_verified_root(
                 &*storage,
@@ -363,19 +375,7 @@ impl Store {
             .await
             .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
 
-        let mut device_id = database
-            .sqlite()
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        if device_id.is_none()
-            && history
-                .history_verifier
-                .verified_root()
-                .descriptor
-                .founder_pubkey
-                == crate::keys::public_key_hex(identity)
-        {
+        if device_id.is_none() && identity_is_founder {
             registration::install_existing_founder_device(
                 &database,
                 history.history_verifier.commit_verifier_ref(),

@@ -180,8 +180,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             ObjectHash::digest(&bytes),
         ),
     };
-    crate::sync::store::StoreDatabase::new(&db)
-        .install_store_root_authority(reference, bytes)
+    db.call(move |conn| install_store_root_authority_on(conn, &reference, &bytes))
         .await
         .expect("install exact Store root authority");
     assert_eq!(
