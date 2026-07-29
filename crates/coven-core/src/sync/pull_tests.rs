@@ -1925,7 +1925,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
 }
 
 #[tokio::test]
-async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_open() {
+async fn merge_materialization_retains_closed_input_and_rejects_corruption_after_reopen() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = capture_bytes(
@@ -2136,9 +2136,15 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_op
         verified_after_corruption, verified_before_corruption,
         "raw backing-byte changes cannot replace connection-owned verified history"
     );
+    drop(target_store);
     drop(target);
-    let error = match open_target() {
-        Ok(_) => panic!("corrupt retained Merge input must prevent database open"),
+    let reopened = open_target().expect("reopen retained-input target");
+    let reopened_store = storage
+        .bind_device(&reopened, &storage.signer)
+        .await
+        .expect("bind reopened retained materialization Store");
+    let error = match reopened_store.retained_merge_replay_inputs_for_test().await {
+        Ok(_) => panic!("corrupt retained Merge input must fail history verification after reopen"),
         Err(error) => error,
     };
     assert!(error
