@@ -154,6 +154,59 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
+    def test_source_discovery_follows_modules_and_reports_orphans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            crate = root / "crates" / "sample"
+            source = crate / "src"
+            tests = crate / "tests"
+            (source / "nested").mkdir(parents=True)
+            tests.mkdir()
+            (source / "lib.rs").write_text(
+                """
+mod direct;
+mod nested { mod child; }
+#[path = "alternate.rs"]
+mod renamed;
+"""
+            )
+            (source / "direct.rs").write_text("fn direct() {}")
+            (source / "nested" / "child.rs").write_text("fn child() {}")
+            (source / "alternate.rs").write_text("fn alternate() {}")
+            (source / "orphan.rs").write_text("fn orphan() {}")
+            (tests / "integration.rs").write_text("fn integration() {}")
+            metadata = {
+                "packages": [
+                    {
+                        "name": "sample",
+                        "manifest_path": str(crate / "Cargo.toml"),
+                        "targets": [
+                            {
+                                "name": "sample",
+                                "kind": ["lib"],
+                                "src_path": str(source / "lib.rs"),
+                            },
+                            {
+                                "name": "integration",
+                                "kind": ["test"],
+                                "src_path": str(tests / "integration.rs"),
+                            },
+                        ],
+                    }
+                ]
+            }
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root.resolve()
+            try:
+                discovery = ownership_audit.discover_workspace_sources(metadata)
+            finally:
+                ownership_audit.ROOT = original_root
+            self.assertEqual(
+                {path.relative_to(root.resolve()) for path in discovery.unreachable},
+                {Path("crates/sample/src/orphan.rs")},
+            )
+            self.assertEqual(len(discovery.reachable), 5)
+
     def test_rust_analyzer_does_not_inherit_compiler_wrappers(self):
         original_wrapper = ownership_audit.os.environ.get("RUSTC_WRAPPER")
         original_workspace_wrapper = ownership_audit.os.environ.get(

@@ -127,13 +127,11 @@ class SourceFile:
         return self.data[start:end].decode()
 
 
-def rust_sources() -> list[Path]:
-    paths: list[Path] = []
-    for crate in ("coven-core", "coven"):
-        root = ROOT / "crates" / crate
-        paths.extend(root.glob("src/**/*.rs"))
-        paths.extend(root.glob("tests/**/*.rs"))
-    return sorted(path.resolve() for path in paths)
+@dataclass(frozen=True)
+class SourceDiscovery:
+    reachable: tuple[Path, ...]
+    unreachable: tuple[Path, ...]
+    targets: tuple[dict[str, Any], ...]
 
 
 def rust_analyzer_environment() -> dict[str, str]:
@@ -141,6 +139,20 @@ def rust_analyzer_environment() -> dict[str, str]:
     environment.pop("RUSTC_WRAPPER", None)
     environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
     return environment
+
+
+def cargo_metadata(root: Path = ROOT) -> dict[str, Any]:
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=root,
+        env=rust_analyzer_environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"cargo metadata failed:\n{result.stderr}")
+    return json.loads(result.stdout)
 
 
 def run_parse(source: str) -> str:
@@ -217,6 +229,110 @@ def direct_name(source_file: SourceFile, index: int) -> tuple[str, int, int] | N
         return None
     start = name.start + match.start()
     return match.group(), start, name.start + match.end()
+
+
+def module_base(path: Path) -> Path:
+    if path.name in {"lib.rs", "main.rs", "mod.rs"}:
+        return path.parent
+    return path.parent / path.stem
+
+
+def path_attribute(source_file: SourceFile, index: int) -> str | None:
+    for child in source_file.nodes[index].children:
+        node = source_file.nodes[child]
+        if node.kind != "ATTR":
+            continue
+        match = re.fullmatch(
+            r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]',
+            source_file.text(node).strip(),
+        )
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def external_module_paths(source_file: SourceFile) -> list[Path]:
+    paths: list[Path] = []
+    for index, node in enumerate(source_file.nodes):
+        if node.kind != "MODULE" or direct_child(source_file, index, "ITEM_LIST"):
+            continue
+        name = direct_name(source_file, index)
+        if name is None:
+            raise RuntimeError(
+                f"module without a name in {source_file.path}:{node.start}"
+            )
+        explicit_path = path_attribute(source_file, index)
+        if explicit_path is not None:
+            paths.append((source_file.path.parent / explicit_path).resolve())
+            continue
+        inline_modules = [
+            ancestor_name[0]
+            for ancestor_index, ancestor in reversed(
+                list(ancestors(source_file, index))
+            )
+            if ancestor.kind == "MODULE"
+            and direct_child(source_file, ancestor_index, "ITEM_LIST")
+            and (ancestor_name := direct_name(source_file, ancestor_index))
+            is not None
+        ]
+        base = module_base(source_file.path).joinpath(*inline_modules)
+        candidates = [
+            base / f"{name[0]}.rs",
+            base / name[0] / "mod.rs",
+        ]
+        existing = [candidate.resolve() for candidate in candidates if candidate.is_file()]
+        if len(existing) != 1:
+            rendered = ", ".join(str(candidate) for candidate in candidates)
+            raise RuntimeError(
+                f"module {name[0]} in {source_file.path} resolves to "
+                f"{len(existing)} files; checked {rendered}"
+            )
+        paths.append(existing[0])
+    return paths
+
+
+def reachable_sources(roots: Iterable[Path]) -> tuple[Path, ...]:
+    pending = [path.resolve() for path in roots]
+    reachable: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in reachable:
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"Cargo source root or module is absent: {path}")
+        reachable.add(path)
+        pending.extend(external_module_paths(parse_source(path)))
+    return tuple(sorted(reachable))
+
+
+def discover_workspace_sources(
+    metadata: dict[str, Any] | None = None,
+) -> SourceDiscovery:
+    metadata = cargo_metadata() if metadata is None else metadata
+    targets: list[dict[str, Any]] = []
+    roots: list[Path] = []
+    all_sources: set[Path] = set()
+    for package in metadata["packages"]:
+        package_root = Path(package["manifest_path"]).resolve().parent
+        all_sources.update(path.resolve() for path in package_root.glob("**/*.rs"))
+        for target in package["targets"]:
+            source = Path(target["src_path"]).resolve()
+            roots.append(source)
+            targets.append(
+                {
+                    "package": package["name"],
+                    "name": target["name"],
+                    "kind": target["kind"],
+                    "source": str(source.relative_to(ROOT)),
+                    "required_features": target.get("required-features", []),
+                }
+            )
+    reachable = reachable_sources(roots)
+    return SourceDiscovery(
+        reachable=reachable,
+        unreachable=tuple(sorted(all_sources.difference(reachable))),
+        targets=tuple(targets),
+    )
 
 
 def crate_and_modules(path: Path) -> tuple[str, list[str]]:
@@ -687,9 +803,10 @@ def source_expression(
 
 
 def build_index() -> dict[str, Any]:
+    discovery = discover_workspace_sources()
     source_files: dict[Path, SourceFile] = {}
     records: list[dict[str, Any]] = []
-    for path in rust_sources():
+    for path in discovery.reachable:
         source_file = parse_source(path)
         source_files[path] = source_file
         records.extend(inventory_file(source_file))
@@ -772,6 +889,17 @@ def build_index() -> dict[str, Any]:
     return {
         "schema": 1,
         "root": str(ROOT),
+        "sources": {
+            "reachable": [
+                str(path.relative_to(ROOT))
+                for path in discovery.reachable
+            ],
+            "unreachable": [
+                str(path.relative_to(ROOT))
+                for path in discovery.unreachable
+            ],
+            "targets": discovery.targets,
+        },
         "callables": sorted(records, key=lambda value: value["symbol"]),
     }
 
@@ -934,6 +1062,11 @@ def command_unclassified(_: argparse.Namespace) -> None:
 
 def command_check(_: argparse.Namespace) -> None:
     index = read_index()
+    unreachable_sources = index.get("sources", {}).get("unreachable", [])
+    if unreachable_sources:
+        raise RuntimeError(
+            f"{len(unreachable_sources)} Rust source files are outside every Cargo target"
+        )
     decisions = read_decisions()
     missing = unclassified(index, decisions)
     if missing:

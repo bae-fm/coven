@@ -403,3 +403,7 @@ The work is verified when:
   dependencies, ambient access, effects, and semantic call edges. It waits for
   rust-analyzer to load the complete Cargo workspace and rejects degraded
   analyzer health instead of writing a partial graph.
+- Cargo-target and module traversal distinguishes executable sources from
+  orphan files. The traversal exposed and removed the undeclared
+  `sync/publish_blobs.rs` implementation; the audit rejects future orphan Rust
+  sources.
