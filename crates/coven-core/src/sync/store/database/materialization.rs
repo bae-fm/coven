@@ -815,6 +815,13 @@ impl StoreDatabaseTransaction<'_, '_> {
                 rusqlite::params![&circle_id, current_state_payload],
             )
             .map_err(DbError::from)?;
+            if StoreDatabase::circle_current_state_is_deleted_on(conn, activation.circle_id)? {
+                conn.execute(
+                    "DELETE FROM circle_access_cache WHERE circle_id = ?1",
+                    [&circle_id],
+                )
+                .map_err(DbError::from)?;
+            }
         }
         Ok(())
     }

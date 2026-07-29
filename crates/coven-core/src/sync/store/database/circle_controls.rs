@@ -490,13 +490,11 @@ impl StoreDatabase {
                     &commit,
                     &[activation],
                 )?;
-                // A deletion the local device authored prunes its own
-                // materialization in the same activation transaction — rows,
-                // routes, blob bindings, and access/roster/metadata caches — so
-                // no live state for a deleted Circle survives locally. The
-                // control activation spine recorded above is retained.
+                // A deletion the local device authored prunes its own rows,
+                // routes, and blob bindings in this activation transaction.
+                // Recording the verified activation above already removed its
+                // live access cache while retaining the control activation spine.
                 if StoreDatabase::circle_current_state_is_deleted_on(&tx, creation.circle_id)? {
-                    StoreDatabase::remove_deleted_circle_caches_on(&tx, creation.circle_id)?;
                     crate::sync::gate::prune_ineligible_scoped_rows(
                         &tx,
                         &gates,

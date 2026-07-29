@@ -533,3 +533,6 @@ The work is verified when:
   now accesses its retained sender map directly.
 - The circle-roster and Store-membership conflict and state hashes are verified
   transformations over explicit inputs; they remain private free functions.
+- `remove_deleted_circle_caches_on` is deleted. The transaction-owned verified
+  Circle activation records the deleted state and removes its live access cache
+  atomically.

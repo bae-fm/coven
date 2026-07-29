@@ -899,18 +899,15 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     store_transaction
         .record_verified_circle_activations(&verified_commit, circle_activations.circles())?;
     // A Circle whose winning control chain is now Deleted prunes its rows,
-    // routes, and blob bindings like an inactive recipient, and drops its live
-    // access/roster/metadata caches; the authority spine is retained above.
+    // routes, and blob bindings like an inactive recipient. Recording the
+    // verified activation above already removed its live access cache while
+    // retaining the authority spine.
     for activation in circle_activations.circles() {
         if crate::sync::store::database::StoreDatabase::circle_current_state_is_deleted_on(
             conn,
             activation.circle_id,
         )? {
             inactive_circles.insert(activation.circle_id);
-            crate::sync::store::database::StoreDatabase::remove_deleted_circle_caches_on(
-                conn,
-                activation.circle_id,
-            )?;
         }
     }
     let retained_packages = packages

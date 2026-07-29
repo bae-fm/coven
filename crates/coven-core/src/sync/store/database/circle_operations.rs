@@ -1261,22 +1261,6 @@ impl StoreDatabase {
         Ok(Self::circle_current_state_on(conn, circle_id)?.is_some_and(|state| state.is_deleted()))
     }
 
-    /// Remove a deleted Circle's live access, roster, and metadata caches. The
-    /// authority spine — control activations and retained-replay records —
-    /// stays; only derived materialization goes.
-    pub(crate) fn remove_deleted_circle_caches_on(
-        conn: &Connection,
-        circle_id: crate::sync::circle::CircleId,
-    ) -> Result<(), DbError> {
-        let circle_id = circle_id.to_string();
-        conn.execute(
-            "DELETE FROM circle_access_cache WHERE circle_id = ?1",
-            [&circle_id],
-        )
-        .map_err(DbError::from)?;
-        Ok(())
-    }
-
     pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
         let mut statement = conn
             .prepare(
