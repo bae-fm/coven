@@ -4228,7 +4228,7 @@ def write_graph(
 
 def read_decisions() -> dict[tuple[str, str], dict[str, Any]]:
     if not DECISIONS_PATH.exists():
-        raise RuntimeError(f"decision ledger is absent: {DECISIONS_PATH}")
+        return {}
     data = parse_decisions(DECISIONS_PATH.read_text())
     decisions: dict[tuple[str, str], dict[str, Any]] = {}
     for decision in data.get("decision", []):

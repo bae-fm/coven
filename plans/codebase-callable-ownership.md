@@ -147,9 +147,10 @@ callers.”
 
 ## Durable ledger
 
-The generated graph lives under `target/ownership-audit/`. Durable decisions
-live in `tools/ownership-audit/decisions.toml`, keyed by qualified symbol name
-and normalized signature.
+The generated graph lives under `target/ownership-audit/`. Decisions that must
+survive graph rebuilds live in the Git-ignored local file
+`tools/ownership-audit/decisions.toml`, keyed by qualified symbol name and
+normalized signature.
 
 Each decision contains:
 

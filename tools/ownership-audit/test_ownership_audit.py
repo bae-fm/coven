@@ -512,6 +512,15 @@ status = "verified"
             "transformation",
         )
 
+    def test_absent_local_decision_ledger_starts_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_path = ownership_audit.DECISIONS_PATH
+            ownership_audit.DECISIONS_PATH = Path(directory) / "decisions.toml"
+            try:
+                self.assertEqual(ownership_audit.read_decisions(), {})
+            finally:
+                ownership_audit.DECISIONS_PATH = original_path
+
 
 class SemanticIndexTests(unittest.TestCase):
     def graph_record(self, symbol, **overrides):

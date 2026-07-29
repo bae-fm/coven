@@ -1,4 +1,5 @@
 /target
+tools/ownership-audit/decisions.toml
 *.db
 *.db-wal
 *.db-shm
