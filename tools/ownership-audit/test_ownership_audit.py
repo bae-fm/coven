@@ -694,13 +694,93 @@ mod renamed;
         self.assertNotIn("RUSTC_WRAPPER", environment)
         self.assertNotIn("RUSTC_WORKSPACE_WRAPPER", environment)
 
-    def test_rust_analyzer_configuration_is_shared_by_every_lsp_path(self):
+    def test_ownership_analyzer_is_pinned_independently(self):
         self.assertEqual(
-            ownership_audit.RustAnalyzer.configuration(),
-            {
-                "cargo": {"allTargets": True, "features": "all"},
-                "procMacro": {"enable": True},
+            ownership_audit.rust_analyzer_command("parse"),
+            [
+                "rustup",
+                "run",
+                "1.97.1",
+                "rust-analyzer",
+                "parse",
+            ],
+        )
+
+    def test_rust_analyzer_internal_errors_are_rejected(self):
+        log = """
+2026-07-29T10:00:00Z WARN configuration file absent
+2026-07-29T10:00:01Z ERROR pattern has unexpected type
+"""
+        self.assertEqual(
+            ownership_audit.analyzer_error_lines(log),
+            ["2026-07-29T10:00:01Z ERROR pattern has unexpected type"],
+        )
+
+    def test_rust_analyzer_views_distinguish_features_and_tests(self):
+        self.assertEqual(
+            [
+                (view.name, view.configuration())
+                for view in ownership_audit.SEMANTIC_VIEWS
+            ],
+            [
+                (
+                    "library-default",
+                    {
+                        "cargo": {
+                            "allTargets": False,
+                            "features": [],
+                        },
+                        "cfg": {"setTest": False},
+                        "procMacro": {"enable": True},
+                    },
+                ),
+                (
+                    "library-all-features",
+                    {
+                        "cargo": {
+                            "allTargets": False,
+                            "features": "all",
+                        },
+                        "cfg": {"setTest": False},
+                        "procMacro": {"enable": True},
+                    },
+                ),
+                (
+                    "tests-all-features",
+                    {
+                        "cargo": {
+                            "allTargets": True,
+                            "features": "all",
+                        },
+                        "cfg": {"setTest": True},
+                        "procMacro": {"enable": True},
+                    },
+                ),
+            ],
+        )
+
+    def test_semantic_edge_merges_configuration_views_at_one_site(self):
+        record = {"callees": []}
+        site = {
+            "range": {
+                "start": {"line": 2, "character": 4},
+                "end": {"line": 2, "character": 10},
             },
+            "expression": "target()",
+            "views": ["library-default"],
+        }
+        ownership_audit.append_semantic_edge(record, "sample::target", site)
+        ownership_audit.append_semantic_edge(
+            record,
+            "sample::target",
+            {
+                **site,
+                "views": ["library-all-features"],
+            },
+        )
+        self.assertEqual(
+            record["callees"][0]["sites"][0]["views"],
+            ["library-all-features", "library-default"],
         )
 
     def test_resolved_name_inside_call_range_marks_the_call_resolved(self):

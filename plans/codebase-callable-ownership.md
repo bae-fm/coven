@@ -165,6 +165,7 @@ ownership-audit callers <symbol>
 ownership-audit callees <symbol>
 ownership-audit retained-dependencies <symbol>
 ownership-audit unclassified
+ownership-audit graph
 ownership-audit check
 ```
 
@@ -173,6 +174,12 @@ source argument expressions passed through that call. It records provenance
 when a parameter, local alias, or receiver field can be resolved and marks the
 rest unresolved. Recursive call groups are collapsed into one node so recursion
 does not produce a false ordering.
+
+`graph` writes a generated review artifact under `target/ownership-audit/`.
+It presents ownership groups and call direction first, then permits drilling
+into callables, retained dependencies, effects, configuration-specific edges,
+and unresolved candidate sets. The graph is reviewed before production
+ownership relocations begin.
 
 ## Dependency and effect classification
 
@@ -414,3 +421,10 @@ The work is verified when:
   bindings are recorded. Callback invocations trace their implementations
   through borrowed and forwarded parameters; trait-dispatched callbacks and
   named external function pointers remain explicit candidate sources.
+- Default-feature libraries, all-feature libraries, and all-feature test and
+  integration targets are indexed as separate semantic views, with each call
+  site retaining the views that resolve it. The audit pins rust-analyzer 1.97.1
+  independently after the compiler-pinned Rust 1.95 analyzer logged internal
+  type-analysis failures; analyzer error logs now fail the index build. The
+  three-view run resolved 14,856 callables into 72,473 edges and 102,038 call
+  sites without analyzer errors.

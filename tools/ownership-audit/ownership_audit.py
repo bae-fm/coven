@@ -82,6 +82,7 @@ EFFECT_PATTERNS = {
 CALL_NODE_KINDS = {"CALL_EXPR", "METHOD_CALL_EXPR", "MACRO_CALL"}
 CALLABLE_NODE_KINDS = {"FN", "CLOSURE_EXPR", "ASYNC_BLOCK_EXPR"}
 CONTENT_MODIFIED = -32801
+ANALYZER_TOOLCHAIN = "1.97.1"
 
 
 class RustAnalyzerRequestError(RuntimeError):
@@ -134,11 +135,59 @@ class SourceDiscovery:
     targets: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class SemanticView:
+    name: str
+    all_targets: bool
+    features: tuple[str, ...] | str
+    set_test: bool
+
+    def configuration(self) -> dict[str, Any]:
+        features: list[str] | str = (
+            list(self.features)
+            if isinstance(self.features, tuple)
+            else self.features
+        )
+        return {
+            "cargo": {
+                "allTargets": self.all_targets,
+                "features": features,
+            },
+            "cfg": {"setTest": self.set_test},
+            "procMacro": {"enable": True},
+        }
+
+
+SEMANTIC_VIEWS = (
+    SemanticView("library-default", False, (), False),
+    SemanticView("library-all-features", False, "all", False),
+    SemanticView("tests-all-features", True, "all", True),
+)
+
+
 def rust_analyzer_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("RUSTC_WRAPPER", None)
     environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
     return environment
+
+
+def rust_analyzer_command(*arguments: str) -> list[str]:
+    return [
+        "rustup",
+        "run",
+        ANALYZER_TOOLCHAIN,
+        "rust-analyzer",
+        *arguments,
+    ]
+
+
+def analyzer_error_lines(log: str) -> list[str]:
+    return [
+        line
+        for line in log.splitlines()
+        if " ERROR " in line
+    ]
 
 
 def cargo_metadata(root: Path = ROOT) -> dict[str, Any]:
@@ -157,7 +206,7 @@ def cargo_metadata(root: Path = ROOT) -> dict[str, Any]:
 
 def run_parse(source: str) -> str:
     result = subprocess.run(
-        ["rust-analyzer", "parse"],
+        rust_analyzer_command("parse"),
         input=source,
         text=True,
         capture_output=True,
@@ -703,13 +752,18 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
 
 
 class RustAnalyzer:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, view: SemanticView):
         self.root = root
+        self.view = view
         self.next_id = 1
         ANALYZER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self.stderr = ANALYZER_LOG_PATH.open("wb")
+        log_path = ANALYZER_LOG_PATH.with_name(
+            f"{ANALYZER_LOG_PATH.stem}-{view.name}{ANALYZER_LOG_PATH.suffix}"
+        )
+        self.log_path = log_path
+        self.stderr = log_path.open("wb")
         self.process = subprocess.Popen(
-            ["rust-analyzer"],
+            rust_analyzer_command(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
@@ -720,12 +774,8 @@ class RustAnalyzer:
         self.stdin = self.process.stdin
         self.stdout = self.process.stdout
 
-    @staticmethod
-    def configuration() -> dict[str, Any]:
-        return {
-            "cargo": {"allTargets": True, "features": "all"},
-            "procMacro": {"enable": True},
-        }
+    def configuration(self) -> dict[str, Any]:
+        return self.view.configuration()
 
     def send(self, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode()
@@ -894,6 +944,13 @@ class RustAnalyzer:
             self.process.wait(timeout=10)
         finally:
             self.stderr.close()
+        errors = analyzer_error_lines(self.log_path.read_text())
+        if errors:
+            examples = "\n".join(errors[:5])
+            raise RuntimeError(
+                f"rust-analyzer logged {len(errors)} internal errors "
+                f"for {self.view.name}:\n{examples}"
+            )
 
 
 def path_from_uri(uri: str) -> Path:
@@ -947,8 +1004,20 @@ def append_semantic_edge(
     if edge is None:
         edge = {"symbol": target, "sites": []}
         record["callees"].append(edge)
-    if site["range"] not in [existing["range"] for existing in edge["sites"]]:
+    existing_site = next(
+        (
+            existing
+            for existing in edge["sites"]
+            if existing["range"] == site["range"]
+        ),
+        None,
+    )
+    if existing_site is None:
         edge["sites"].append(site)
+        return
+    existing_site["views"] = sorted(
+        set(existing_site.get("views", [])).union(site.get("views", []))
+    )
 
 
 def call_name(callee: str) -> str | None:
@@ -1484,79 +1553,132 @@ def build_index() -> dict[str, Any]:
             raise RuntimeError(f"duplicate callable identity: {record['symbol']}")
         records_by_symbol[record["symbol"]] = record
 
-    analyzer = RustAnalyzer(ROOT)
-    analyzer.initialize()
-    try:
-        analyzer.wait_until_ready()
-        opened_paths: set[Path] = set()
-        matched_sites: dict[str, list[dict[str, int]]] = {
-            record["symbol"]: []
-            for record in records
-        }
-        named = [
-            record
-            for record in records
-            if record["kind"] not in {"closure", "async-block"}
-        ]
-        for number, record in enumerate(named, start=1):
-            path = (ROOT / record["path"]).resolve()
-            if path not in opened_paths:
-                analyzer.open_document(path, source_files[path].source)
-                opened_paths.add(path)
-            calls = analyzer.outgoing(path, record["name_range"]["start"])
-            if calls is None:
-                record["call_hierarchy"] = "unavailable"
-                continue
-            record["call_hierarchy"] = "resolved"
-            for call in calls:
-                target_item = call["to"]
-                target = internal_symbol(records_by_path, target_item)
-                if target is None:
-                    target = (
-                        f"external::{target_item.get('detail', '')}::"
-                        f"{target_item.get('name', '<unknown>')}"
-                    )
-                for range_value in call.get("fromRanges", []):
-                    source_record = record_containing_position(
-                        records_by_path[path],
-                        range_value["start"],
-                    )
-                    if source_record is None:
-                        raise RuntimeError(
-                            f"semantic call site lies outside a callable: "
-                            f"{record['path']}:{range_value['start']}"
+    matched_sites: dict[str, list[dict[str, Any]]] = {
+        record["symbol"]: []
+        for record in records
+    }
+    named = [
+        record
+        for record in records
+        if record["kind"] not in {"closure", "async-block"}
+    ]
+    for view in SEMANTIC_VIEWS:
+        analyzer = RustAnalyzer(ROOT, view)
+        analyzer.initialize()
+        try:
+            analyzer.wait_until_ready()
+            opened_paths: set[Path] = set()
+            for number, record in enumerate(named, start=1):
+                path = (ROOT / record["path"]).resolve()
+                if path not in opened_paths:
+                    analyzer.open_document(path, source_files[path].source)
+                    opened_paths.add(path)
+                calls = analyzer.outgoing(path, record["name_range"]["start"])
+                if calls is None:
+                    status = "unavailable"
+                else:
+                    status = "resolved"
+                record.setdefault("call_hierarchy_views", {})[view.name] = status
+                if calls is None:
+                    continue
+                for call in calls:
+                    target_item = call["to"]
+                    target = internal_symbol(records_by_path, target_item)
+                    if target is None:
+                        target = (
+                            f"external::{target_item.get('detail', '')}::"
+                            f"{target_item.get('name', '<unknown>')}"
                         )
-                    matched_sites[source_record["symbol"]].append(
-                        range_value["start"]
+                    for range_value in call.get("fromRanges", []):
+                        source_record = record_containing_position(
+                            records_by_path[path],
+                            range_value["start"],
+                        )
+                        if source_record is None:
+                            raise RuntimeError(
+                                f"semantic call site lies outside a callable: "
+                                f"{record['path']}:{range_value['start']}"
+                            )
+                        matched_sites[source_record["symbol"]].append(
+                            {
+                                "position": range_value["start"],
+                                "view": view.name,
+                            }
+                        )
+                        append_semantic_edge(
+                            source_record,
+                            target,
+                            {
+                                "range": range_value,
+                                "views": [view.name],
+                                **source_call_site(
+                                    source_files, path, range_value
+                                ),
+                            },
+                        )
+                if number % 250 == 0:
+                    print(
+                        f"indexed {view.name} call hierarchy for "
+                        f"{number}/{len(named)} callables"
                     )
-                    append_semantic_edge(
-                        source_record,
-                        target,
-                        {
-                            "range": range_value,
-                            **source_call_site(
-                                source_files, path, range_value
-                            ),
-                        },
-                    )
-            if number % 250 == 0:
-                print(f"indexed call hierarchy for {number}/{len(named)} callables")
-    finally:
-        analyzer.close()
+        finally:
+            analyzer.close()
+
+    for record in records:
+        record["semantic_views"] = sorted(
+            view
+            for view, status in record.get(
+                "call_hierarchy_views", {}
+            ).items()
+            if status == "resolved"
+        )
+        record["call_hierarchy"] = (
+            "resolved"
+            if record["semantic_views"]
+            else "unavailable"
+        )
 
     for record in records:
         if record["kind"] in {"closure", "async-block"}:
             parent = records_by_symbol.get(record["semantic_parent"])
+            record["call_hierarchy_views"] = (
+                {
+                    view: (
+                        "enclosing-resolved"
+                        if status == "resolved"
+                        else "unavailable"
+                    )
+                    for view, status in parent.get(
+                        "call_hierarchy_views", {}
+                    ).items()
+                }
+                if parent is not None
+                else {}
+            )
+            record["semantic_views"] = sorted(
+                view
+                for view, status in record["call_hierarchy_views"].items()
+                if status == "enclosing-resolved"
+            )
             record["call_hierarchy"] = (
                 "enclosing-resolved"
-                if parent is not None
-                and parent.get("call_hierarchy") == "resolved"
+                if record["semantic_views"]
                 else "unavailable"
             )
         for call in record["calls"]:
-            resolved = any(
-                range_contains(call["range"], site)
+            matched = [
+                site
                 for site in matched_sites[record["symbol"]]
+                if range_contains(call["range"], site["position"])
+            ]
+            resolved = bool(matched)
+            call["semantic_views"] = sorted(
+                {site["view"] for site in matched}
+            )
+            call["unresolved_in_views"] = sorted(
+                set(record["semantic_views"]).difference(
+                    call["semantic_views"]
+                )
             )
             if call["kind"] == "MACRO_CALL" or resolved:
                 continue
@@ -1570,6 +1692,7 @@ def build_index() -> dict[str, Any]:
                     candidate["symbol"],
                     {
                         "range": call["range"],
+                        "views": record["semantic_views"],
                         "expression": call["text"],
                     },
                 )
@@ -1624,6 +1747,13 @@ def build_index() -> dict[str, Any]:
     return {
         "schema": 1,
         "root": str(ROOT),
+        "semantic_views": [
+            {
+                "name": view.name,
+                "configuration": view.configuration(),
+            }
+            for view in SEMANTIC_VIEWS
+        ],
         "sources": {
             "reachable": [
                 str(path.relative_to(ROOT))
