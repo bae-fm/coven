@@ -445,6 +445,14 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
             ),
             None,
         )
+        semantic_parent = next(
+            (
+                ancestor_index
+                for ancestor_index, ancestor in ancestors(source_file, index)
+                if ancestor.kind == "FN"
+            ),
+            None,
+        )
         owner = impl_name(source_file, index) if named else None
         modules = [*file_modules, *enclosing_modules(source_file, index)]
         if named and name_info is not None:
@@ -492,6 +500,8 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
                 "kind": kind,
                 "crate": crate,
                 "module": "::".join([crate, *modules]),
+                "enclosing_callable": index_to_symbol.get(parent_callable),
+                "semantic_parent": index_to_symbol.get(semantic_parent),
                 "path": str(source_file.path.relative_to(ROOT)),
                 "range": {
                     "start": source_file.position(node.start),
@@ -751,6 +761,185 @@ def range_contains(range_value: dict[str, Any], position: dict[str, int]) -> boo
     return start <= value <= end
 
 
+def record_containing_position(
+    records: list[dict[str, Any]],
+    position: dict[str, int],
+) -> dict[str, Any] | None:
+    candidates = [
+        record
+        for record in records
+        if range_contains(record["range"], position)
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda record: (
+            record["range"]["end"]["line"] - record["range"]["start"]["line"],
+            record["range"]["end"]["character"]
+            - record["range"]["start"]["character"],
+        ),
+    )
+
+
+def append_semantic_edge(
+    record: dict[str, Any],
+    target: str,
+    site: dict[str, Any],
+) -> None:
+    edge = next(
+        (
+            candidate
+            for candidate in record["callees"]
+            if candidate["symbol"] == target
+        ),
+        None,
+    )
+    if edge is None:
+        edge = {"symbol": target, "sites": []}
+        record["callees"].append(edge)
+    if site["range"] not in [existing["range"] for existing in edge["sites"]]:
+        edge["sites"].append(site)
+
+
+def call_components(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    symbols = {record["symbol"] for record in records}
+    graph = {
+        record["symbol"]: sorted(
+            {
+                edge["symbol"]
+                for edge in record["callees"]
+                if edge["symbol"] in symbols
+            }
+        )
+        for record in records
+    }
+    reversed_graph = {
+        symbol: []
+        for symbol in graph
+    }
+    for caller, callees in graph.items():
+        for callee in callees:
+            reversed_graph[callee].append(caller)
+
+    visited: set[str] = set()
+    finish_order: list[str] = []
+    for root in sorted(graph):
+        if root in visited:
+            continue
+        pending = [(root, False)]
+        while pending:
+            symbol, expanded = pending.pop()
+            if expanded:
+                finish_order.append(symbol)
+                continue
+            if symbol in visited:
+                continue
+            visited.add(symbol)
+            pending.append((symbol, True))
+            pending.extend(
+                (callee, False)
+                for callee in reversed(graph[symbol])
+                if callee not in visited
+            )
+
+    assigned: set[str] = set()
+    member_groups: list[list[str]] = []
+    for root in reversed(finish_order):
+        if root in assigned:
+            continue
+        members: list[str] = []
+        pending = [root]
+        assigned.add(root)
+        while pending:
+            symbol = pending.pop()
+            members.append(symbol)
+            for caller in reversed_graph[symbol]:
+                if caller not in assigned:
+                    assigned.add(caller)
+                    pending.append(caller)
+        member_groups.append(sorted(members))
+
+    symbol_to_component: dict[str, str] = {}
+    for members in member_groups:
+        component = members[0]
+        for member in members:
+            symbol_to_component[member] = component
+
+    outgoing: dict[str, set[str]] = {
+        members[0]: set()
+        for members in member_groups
+    }
+    incoming: dict[str, set[str]] = {
+        members[0]: set()
+        for members in member_groups
+    }
+    for caller, callees in graph.items():
+        caller_component = symbol_to_component[caller]
+        for callee in callees:
+            callee_component = symbol_to_component[callee]
+            if caller_component == callee_component:
+                continue
+            outgoing[caller_component].add(callee_component)
+            incoming[callee_component].add(caller_component)
+
+    ranks = {
+        component: 0
+        for component in outgoing
+    }
+    remaining_callees = {
+        component: len(callees)
+        for component, callees in outgoing.items()
+    }
+    pending_components = sorted(
+        component
+        for component, count in remaining_callees.items()
+        if count == 0
+    )
+    processed = 0
+    while pending_components:
+        component = pending_components.pop()
+        processed += 1
+        for caller in incoming[component]:
+            ranks[caller] = max(ranks[caller], ranks[component] + 1)
+            remaining_callees[caller] -= 1
+            if remaining_callees[caller] == 0:
+                pending_components.append(caller)
+    if processed != len(outgoing):
+        raise RuntimeError("collapsed call graph still contains a cycle")
+
+    records_by_symbol = {
+        record["symbol"]: record
+        for record in records
+    }
+    components = []
+    for members in member_groups:
+        component = members[0]
+        recursive = len(members) > 1 or component in graph[component]
+        for member in members:
+            records_by_symbol[member]["component"] = component
+            records_by_symbol[member]["bottom_up_rank"] = ranks[component]
+        components.append(
+            {
+                "id": component,
+                "members": members,
+                "recursive": recursive,
+                "callees": sorted(outgoing[component]),
+                "callers": sorted(incoming[component]),
+                "bottom_up_rank": ranks[component],
+            }
+        )
+    return sorted(
+        components,
+        key=lambda component: (
+            component["bottom_up_rank"],
+            component["id"],
+        ),
+    )
+
+
 def internal_symbol(
     records_by_path: dict[Path, list[dict[str, Any]]],
     item: dict[str, Any],
@@ -825,6 +1014,10 @@ def build_index() -> dict[str, Any]:
     try:
         analyzer.wait_until_ready()
         opened_paths: set[Path] = set()
+        matched_sites: dict[str, list[dict[str, int]]] = {
+            record["symbol"]: []
+            for record in records
+        }
         named = [
             record
             for record in records
@@ -840,7 +1033,6 @@ def build_index() -> dict[str, Any]:
                 record["call_hierarchy"] = "unavailable"
                 continue
             record["call_hierarchy"] = "resolved"
-            matched_sites: list[dict[str, int]] = []
             for call in calls:
                 target_item = call["to"]
                 target = internal_symbol(records_by_path, target_item)
@@ -849,10 +1041,22 @@ def build_index() -> dict[str, Any]:
                         f"external::{target_item.get('detail', '')}::"
                         f"{target_item.get('name', '<unknown>')}"
                     )
-                sites = []
                 for range_value in call.get("fromRanges", []):
-                    matched_sites.append(range_value["start"])
-                    sites.append(
+                    source_record = record_containing_position(
+                        records_by_path[path],
+                        range_value["start"],
+                    )
+                    if source_record is None:
+                        raise RuntimeError(
+                            f"semantic call site lies outside a callable: "
+                            f"{record['path']}:{range_value['start']}"
+                        )
+                    matched_sites[source_record["symbol"]].append(
+                        range_value["start"]
+                    )
+                    append_semantic_edge(
+                        source_record,
+                        target,
                         {
                             "range": range_value,
                             "expression": source_expression(
@@ -860,20 +1064,29 @@ def build_index() -> dict[str, Any]:
                                 path,
                                 range_value,
                             ),
-                        }
+                        },
                     )
-                record["callees"].append({"symbol": target, "sites": sites})
-            for call in record["calls"]:
-                resolved = any(
-                    range_contains(call["range"], site)
-                    for site in matched_sites
-                )
-                if call["kind"] != "MACRO_CALL" and not resolved:
-                    record["unresolved_calls"].append(call)
             if number % 250 == 0:
                 print(f"indexed call hierarchy for {number}/{len(named)} callables")
     finally:
         analyzer.close()
+
+    for record in records:
+        if record["kind"] in {"closure", "async-block"}:
+            parent = records_by_symbol.get(record["semantic_parent"])
+            record["call_hierarchy"] = (
+                "enclosing-resolved"
+                if parent is not None
+                and parent.get("call_hierarchy") == "resolved"
+                else "unavailable"
+            )
+        for call in record["calls"]:
+            resolved = any(
+                range_contains(call["range"], site)
+                for site in matched_sites[record["symbol"]]
+            )
+            if call["kind"] != "MACRO_CALL" and not resolved:
+                record["unresolved_calls"].append(call)
 
     for record in records:
         for edge in record["callees"]:
@@ -886,6 +1099,7 @@ def build_index() -> dict[str, Any]:
                     }
                 )
 
+    components = call_components(records)
     return {
         "schema": 1,
         "root": str(ROOT),
@@ -900,6 +1114,7 @@ def build_index() -> dict[str, Any]:
             ],
             "targets": discovery.targets,
         },
+        "components": components,
         "callables": sorted(records, key=lambda value: value["symbol"]),
     }
 
@@ -992,6 +1207,10 @@ def print_record(record: dict[str, Any]) -> None:
     print(f"  callers: {len(record['callers'])}")
     print(f"  callees: {len(record['callees'])}")
     print(f"  unresolved calls: {len(record['unresolved_calls'])}")
+    print(
+        f"  call group: {record['component']} "
+        f"(bottom-up rank {record['bottom_up_rank']})"
+    )
 
 
 def command_inventory(_: argparse.Namespace) -> None:
@@ -1040,6 +1259,16 @@ def command_retained(args: argparse.Namespace) -> None:
             or record["effects"]
         ):
             print_record(record)
+
+
+def command_stack(_: argparse.Namespace) -> None:
+    index = read_index()
+    for component in index["components"]:
+        marker = "recursive" if component["recursive"] else "single"
+        print(
+            f"{component['bottom_up_rank']}\t{marker}\t"
+            f"{component['id']}\t{len(component['members'])}"
+        )
 
 
 def unclassified(
@@ -1112,6 +1341,7 @@ def parser() -> argparse.ArgumentParser:
     retained = subcommands.add_parser("retained-dependencies")
     retained.add_argument("symbol", nargs="?")
     retained.set_defaults(run=command_retained)
+    subcommands.add_parser("stack").set_defaults(run=command_stack)
     subcommands.add_parser("unclassified").set_defaults(run=command_unclassified)
     subcommands.add_parser("check").set_defaults(run=command_check)
     return value
@@ -1121,6 +1351,11 @@ def main() -> int:
     try:
         args = parser().parse_args()
         args.run(args)
+        return 0
+    except BrokenPipeError:
+        descriptor = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(descriptor, sys.stdout.fileno())
+        os.close(descriptor)
         return 0
     except (OSError, RuntimeError, ValueError) as error:
         print(f"ownership audit failed: {error}", file=sys.stderr)

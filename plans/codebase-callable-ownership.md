@@ -407,3 +407,6 @@ The work is verified when:
   orphan files. The traversal exposed and removed the undeclared
   `sync/publish_blobs.rs` implementation; the audit rejects future orphan Rust
   sources.
+- Semantic call sites inside closures are attributed to the closure rather than
+  its enclosing function. The graph collapses recursive call groups and assigns
+  every group a callee-first rank for ownership review.

@@ -154,6 +154,47 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
+    def test_recursive_call_groups_are_one_bottom_up_component(self):
+        records = [
+            {
+                "symbol": "entry",
+                "callees": [{"symbol": "left", "sites": []}],
+            },
+            {
+                "symbol": "left",
+                "callees": [{"symbol": "right", "sites": []}],
+            },
+            {
+                "symbol": "right",
+                "callees": [{"symbol": "left", "sites": []}],
+            },
+            {
+                "symbol": "leaf",
+                "callees": [],
+            },
+        ]
+        components = ownership_audit.call_components(records)
+        recursive = next(component for component in components if component["recursive"])
+        self.assertEqual(recursive["members"], ["left", "right"])
+        self.assertEqual(records[0]["bottom_up_rank"], 1)
+        self.assertEqual(records[3]["bottom_up_rank"], 0)
+
+    def test_bottom_up_order_handles_deep_call_graphs_iteratively(self):
+        records = [
+            {
+                "symbol": f"callable_{index:04}",
+                "callees": (
+                    [{"symbol": f"callable_{index + 1:04}", "sites": []}]
+                    if index < 1999
+                    else []
+                ),
+            }
+            for index in range(2000)
+        ]
+        ownership_audit.call_components(records)
+        self.assertEqual(records[0]["bottom_up_rank"], 1999)
+        self.assertEqual(records[-1]["bottom_up_rank"], 0)
+
     def test_source_discovery_follows_modules_and_reports_orphans(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -246,6 +287,27 @@ mod renamed;
         }
         callee_name = {"line": 4, "character": 17}
         self.assertTrue(ownership_audit.range_contains(call_range, callee_name))
+
+    def test_semantic_call_site_belongs_to_innermost_callable(self):
+        outer = {
+            "symbol": "outer",
+            "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 8, "character": 1},
+            },
+        }
+        closure = {
+            "symbol": "closure",
+            "range": {
+                "start": {"line": 3, "character": 12},
+                "end": {"line": 5, "character": 5},
+            },
+        }
+        selected = ownership_audit.record_containing_position(
+            [outer, closure],
+            {"line": 4, "character": 2},
+        )
+        self.assertEqual(selected["symbol"], "closure")
 
 
 if __name__ == "__main__":
