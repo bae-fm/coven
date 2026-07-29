@@ -55,7 +55,7 @@ struct VerifiedAccessPair {
 }
 
 async fn verify_control_membership(
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     control: &PreparedCircleControl,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.access_epoch().store_membership;
@@ -67,9 +67,9 @@ async fn verify_control_membership(
 }
 
 async fn verify_control_membership_with_verified_activations(
-    history_verifier: &super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     control: &PreparedCircleControl,
-    verified_activations: &super::super::pull::VerifiedMergeMembershipPrefix,
+    verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.access_epoch().store_membership;
     let chain = Box::pin(history_verifier.load_membership_at_verified_prefix(
@@ -122,7 +122,7 @@ fn verify_loaded_control_membership(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_circle_control_roster_chain(
     database: &StoreDatabase,
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     reference: &crate::sync::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
@@ -1044,7 +1044,7 @@ async fn verify_circle_head_chain(
 
 async fn verify_covered_control_heads(
     database: &StoreDatabase,
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -1113,7 +1113,7 @@ async fn verify_covered_control_heads(
 
 async fn resolve_circle_stream_authority(
     database: &StoreDatabase,
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -1179,7 +1179,7 @@ async fn resolve_circle_stream_authority(
             ));
         }
     } else {
-        let reached = crate::sync::store::owner::pull::predecessor_commit_matching(
+        let reached = crate::sync::store::owner::verified_history::join_validation::predecessor_commit_matching(
             history_verifier,
             &commit.order,
             Box::new(|predecessor| {
@@ -1193,10 +1193,10 @@ async fn resolve_circle_stream_authority(
         )
         .await
         .map_err(|error| match error {
-            crate::sync::store::owner::pull::RegistrationLoadError::Object(error) => {
+            crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
                 CircleOperationError::Object(error)
             }
-            crate::sync::store::owner::pull::RegistrationLoadError::Invalid(error) => {
+            crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(error) => {
                 CircleOperationError::InvalidState(error)
             }
         })?
@@ -1443,7 +1443,7 @@ pub(crate) enum LocalCircleAccess {
 /// identity can decrypt it and what baseline image it can stage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_local_circle_access(
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     database: &StoreDatabase,
     commit: &StoreBatchCommit,
     reference: &crate::sync::store_commit::CircleControlRef,
@@ -1507,7 +1507,7 @@ pub(crate) async fn resolve_local_circle_access(
 
 pub(crate) async fn load_circle_activations(
     database: &StoreDatabase,
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
@@ -1518,7 +1518,7 @@ pub(crate) async fn load_circle_activations(
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     let verified_membership_prefix =
-        crate::sync::store::owner::pull::verified_merge_membership_prefix(
+        crate::sync::store::owner::verified_history::verified_merge_membership_prefix(
             &history_verifier.history().commits,
             crate::sync::store::owner::pull::commit_predecessor_references(commit),
         )
@@ -1538,12 +1538,12 @@ pub(crate) async fn load_circle_activations(
 
 pub(crate) async fn load_circle_activations_with_prefix(
     database: &StoreDatabase,
-    history_verifier: &mut super::super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     identity: Option<&UserKeypair>,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
     verified_prefix: &VerifiedStreamActivationPrefix,
-    verified_membership_prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let root = history_verifier.root().clone();
     let storage = history_verifier.storage();

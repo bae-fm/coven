@@ -1,4 +1,3 @@
-use super::registration_authority::verify_merge_owner;
 use super::*;
 
 pub(crate) struct MergeStreamDiscovery {

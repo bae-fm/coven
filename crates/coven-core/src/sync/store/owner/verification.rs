@@ -1,4 +1,8 @@
 use super::pull::*;
+use super::verified_history::{
+    load_membership_at_exact_heads_with_verified_activations, MergeHistoryVerifier,
+    VerifiedMergeConflictResolutionActivation, VerifiedMergeMembershipPrefix,
+};
 use crate::sync::membership::MembershipChain;
 use crate::sync::storage::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
@@ -398,7 +402,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 .contains(&StoreDeviceExclusionOutcomeRef::Excluded(
                     locator.exclusion().clone(),
                 ))
-            || !device_state_has_active_registration(
+            || !super::verified_history::registration::device_state_has_active_registration(
                 activation_predecessor_state,
                 &locator.exclusion().proposal.target,
             )

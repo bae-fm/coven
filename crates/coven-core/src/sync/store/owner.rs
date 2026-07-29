@@ -15,8 +15,10 @@ mod registration;
 mod registration_outbox;
 mod restore;
 mod verification;
+mod verified_history;
 pub(super) mod writer;
 
+use history::AuthorizedStoreHistory;
 pub use host_write::HostWriteBlobStaging;
 pub use registration::StoreRegistrationError;
 pub(crate) use registration::{bootstrap_pending_device, prepare_registration_for_origin};
@@ -53,11 +55,6 @@ pub(crate) enum StoreInitializationError {
     ProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
-}
-
-pub(super) struct AuthorizedStoreHistory<'a> {
-    database: StoreDatabase,
-    history_verifier: crate::sync::store::owner::pull::MergeHistoryVerifier<'a>,
 }
 
 struct BootstrappedStore<'storage> {
@@ -498,19 +495,14 @@ impl Store {
                 "opening a Store for a non-founder requires an installed local device".to_string(),
             ));
         }
-        let commit_verifier =
-            StoreCommitVerifier::from_verified_root(&*storage, &store_root, protocol_root)
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let history_verifier =
-            crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
-                commit_verifier,
-            )
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let mut history = AuthorizedStoreHistory {
-            database: database.clone(),
-            history_verifier,
-        };
+        let mut history = AuthorizedStoreHistory::from_verified_root(
+            database.clone(),
+            &*storage,
+            &store_root,
+            protocol_root,
+        )
+        .await
+        .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         let founder_pubkey = history
             .history_verifier
             .verified_root()
@@ -777,22 +769,14 @@ impl Store {
     }
 
     async fn authorize_history(&self) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
-        let commit_verifier = StoreCommitVerifier::from_verified_root(
+        AuthorizedStoreHistory::from_verified_root(
+            self.database.clone(),
             &*self.storage,
             &self.store_root,
             self.protocol_root.clone(),
         )
-        .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
-        let history_verifier =
-            crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
-                commit_verifier,
-            )
-            .await
-            .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
-        Ok(AuthorizedStoreHistory {
-            database: self.database.clone(),
-            history_verifier,
-        })
+        .await
+        .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))
     }
 
     pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
@@ -1106,7 +1090,7 @@ impl Store {
         &self,
         order: &crate::sync::store_commit::StoreCommitOrder,
         candidate_membership_heads: &[crate::sync::membership::MembershipHeadRef],
-    ) -> Result<pull::MergeOutboundAuthorization, StoreError> {
+    ) -> Result<verified_history::MergeOutboundAuthorization, StoreError> {
         let authorization = self
             .authorize()
             .await
@@ -1265,14 +1249,16 @@ impl Store {
     pub(crate) async fn project_membership_for_test(
         &self,
         candidate_heads: &[crate::sync::membership::MembershipHeadRef],
-        prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
     ) -> Result<crate::sync::membership::MembershipChain, StoreError> {
         let history = self
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         history
-            .project_membership_to_verified_prefix(candidate_heads, prefix)
+            .project_membership_to_verified_prefix(
+                candidate_heads,
+                &verified_history::VerifiedMergeMembershipPrefix::default(),
+            )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
@@ -1479,7 +1465,7 @@ impl Store {
         &self,
         references: impl IntoIterator<Item = crate::sync::store_commit::StoreBatchCommitRef>,
         predecessors: impl IntoIterator<Item = crate::sync::store_commit::StoreBatchCommitRef>,
-    ) -> Result<pull::VerifiedMergeMembershipPrefix, pull::StorePullError> {
+    ) -> Result<verified_history::VerifiedMergeMembershipPrefix, pull::StorePullError> {
         let mut history = self
             .authorize_history()
             .await
@@ -1488,7 +1474,7 @@ impl Store {
             .history_verifier_mut()
             .verify_refs(references)
             .await?;
-        pull::verified_merge_membership_prefix(
+        verified_history::verified_merge_membership_prefix(
             &history.history_verifier_mut().history().commits,
             predecessors,
         )
@@ -1707,8 +1693,8 @@ impl Store {
         &self,
         verified_commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
         recovery_author: Option<&crate::sync::store_commit::StoreDeviceRegistrationRef>,
-        evidence: pull::MergeHistorySuccessorEvidence,
-    ) -> Result<pull::PreparedMergeHistorySuccessor, StoreError> {
+        evidence: verified_history::MergeHistorySuccessorEvidence,
+    ) -> Result<verified_history::PreparedMergeHistorySuccessor, StoreError> {
         let mut authorized = self
             .authorize()
             .await
@@ -1884,92 +1870,6 @@ impl Store {
     }
 }
 
-impl<'storage> AuthorizedStoreHistory<'storage> {
-    fn database(&self) -> &StoreDatabase {
-        &self.database
-    }
-
-    fn history_verifier_mut(
-        &mut self,
-    ) -> &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'storage> {
-        &mut self.history_verifier
-    }
-
-    fn storage(&self) -> &'storage dyn SyncStorage {
-        self.history_verifier.storage()
-    }
-
-    fn root(&self) -> &StoreRootRef {
-        self.history_verifier.root()
-    }
-
-    fn verified_root_object(
-        &self,
-    ) -> &crate::sync::store_objects::VerifiedObject<StoreProtocolRoot> {
-        self.history_verifier.verified_root_object()
-    }
-
-    async fn verify_snapshots_for_acknowledgement(
-        &mut self,
-        snapshots: &[crate::database::PublishedStoreSnapshot],
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.history_verifier
-            .verify_snapshots_for_acknowledgement(snapshots)
-            .await
-    }
-
-    async fn select_acknowledgement_snapshot(
-        &mut self,
-        frontier: &crate::sync::store_commit::CommitFrontier,
-        device_state: &crate::sync::store_commit::StoreDeviceStateRef,
-    ) -> Result<
-        Option<crate::sync::store_commit::StoreSnapshotLocator>,
-        crate::sync::store::owner::writer::StoreAckError,
-    > {
-        let registrations = self
-            .database
-            .activated_store_device_registration_records()
-            .await?;
-        let storage = self.history_verifier.storage();
-        let root = self.history_verifier.root().clone();
-        let mut candidates = Vec::new();
-        for (registration_ref, registration) in registrations {
-            for snapshot in crate::sync::store::snapshot::load_store_snapshot_stream(
-                storage,
-                &root,
-                &registration_ref,
-                &registration,
-            )
-            .await?
-            {
-                if !frontier.covers(&snapshot.meta.coverage)
-                    || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
-                    || snapshot.meta.state.devices.recovery() != device_state.recovery()
-                {
-                    continue;
-                }
-                candidates.push(snapshot);
-            }
-        }
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-        self.verify_snapshots_for_acknowledgement(&candidates)
-            .await
-            .map_err(|error| {
-                crate::sync::store::snapshot::SnapshotError::UnauthorizedAuthor(error.to_string())
-            })?;
-        Ok(
-            crate::sync::store::snapshot::select_maximal_store_snapshot(candidates).map(
-                |snapshot| crate::sync::store_commit::StoreSnapshotLocator {
-                    author_registration: snapshot.meta.author_registration,
-                    snapshot: snapshot.reference,
-                },
-            ),
-        )
-    }
-}
-
 impl<'storage> AuthorizedStore<'storage> {
     fn keyring<'operation>(
         &'operation self,
@@ -1982,7 +1882,7 @@ impl<'storage> AuthorizedStore<'storage> {
         )
     }
 
-    pub(super) fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
+    fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
         &mut self.history
     }
 

@@ -1,6 +1,7 @@
+use super::registration::*;
 use super::*;
 
-pub(super) async fn validate_commit_join_abandonments(
+pub(crate) async fn validate_commit_join_abandonments(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     commit: &StoreBatchCommit,
@@ -253,11 +254,11 @@ pub(crate) async fn load_commit_join_evidence(
     })
 }
 
-pub(super) fn validate_commit_join_cleanup_receipts(
+pub(crate) fn validate_commit_join_cleanup_receipts(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -297,13 +298,13 @@ pub(super) fn validate_commit_join_cleanup_receipts(
     Ok(())
 }
 
-pub(super) async fn validate_commit_join_outcomes(
+pub(crate) async fn validate_commit_join_outcomes(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<
     BTreeMap<super::store_commit::DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
     RegistrationLoadError,
@@ -387,7 +388,7 @@ pub(super) async fn validate_commit_join_outcomes(
     Ok(verified)
 }
 
-pub(super) fn validate_commit_join_attempts(
+pub(crate) fn validate_commit_join_attempts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
@@ -599,7 +600,7 @@ pub(crate) async fn registration_activation(
 }
 
 fn predecessor_contains_join_attempt(
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
     expected: &super::store_commit::DeviceJoinAttemptRef,
 ) -> Result<bool, RegistrationLoadError> {
     accepted
@@ -645,7 +646,7 @@ pub(crate) async fn predecessor_commit_matching(
 }
 
 fn predecessor_contains_join_outcome(
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
     expected: &super::store_commit::DeviceJoinOutcomeRef,
 ) -> Result<bool, RegistrationLoadError> {
     accepted

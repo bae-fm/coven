@@ -19,7 +19,7 @@ use graph::load_anchored_chain_at_exact_heads_with_root_impl;
 
 #[cfg(test)]
 pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
-    history: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     heads: &[MembershipHeadRef],
 ) {
     let mut authority = MembershipActivationAuthority::History(history);
@@ -29,7 +29,7 @@ pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
-    prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
     graph::project_anchored_chain_to_verified_store_prefix(commit_verifier, candidate_heads, prefix)
         .await
@@ -42,10 +42,13 @@ struct ExactMembershipStream {
 }
 
 pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
-    History(&'operation mut crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>),
+    History(
+        &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    ),
     VerifiedPrefix {
         commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
-        activations: &'operation crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+        activations:
+            &'operation crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     },
 }
 
@@ -400,7 +403,7 @@ async fn traverse_exact_membership_stream(
 }
 
 pub(super) async fn load_exact_anchored_chain_with_history(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     cursors: &[MembershipHeadRef],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
@@ -525,7 +528,7 @@ pub(super) async fn load_exact_anchored_chain_with_history(
 }
 
 pub(super) async fn load_exact_membership_head_with_history(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     reference: &MembershipHeadRef,
 ) -> Result<AuthorHead, AnchoredChainError> {
     MembershipActivationAuthority::History(history_verifier)
@@ -534,7 +537,7 @@ pub(super) async fn load_exact_membership_head_with_history(
 }
 
 pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
@@ -560,9 +563,9 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     pending_resolution: Option<
-        &crate::sync::store::owner::pull::VerifiedMergeConflictResolutionActivation,
+        &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let owner_pubkey = commit_verifier

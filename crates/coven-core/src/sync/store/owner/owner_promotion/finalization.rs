@@ -644,7 +644,7 @@ async fn resume_owner_promotion_finalization(
 }
 
 fn finalized_merge_membership_ref<'a>(
-    history_verifier: &'a mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &'a mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     candidate_ref: &'a crate::sync::store_commit::StoreBatchCommitRef,
     candidate: &'a crate::sync::store_commit::StoreBatchCommit,
     transition: &'a PreparedMembershipTransition,

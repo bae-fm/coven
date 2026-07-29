@@ -309,7 +309,7 @@ async fn prepare_or_load_owner_recovery_node(
 #[allow(clippy::too_many_arguments)]
 async fn install_activated_owner_recovery(
     database: &StoreDatabase,
-    history_verifier: &pull::MergeHistoryVerifier<'_>,
+    history_verifier: &verified_history::MergeHistoryVerifier<'_>,
     origin: &StoreDeviceRegistrationOrigin,
     device_id: crate::sync::store_commit::StoreDeviceId,
     recovery_id: DeviceRecoveryId,
@@ -944,7 +944,7 @@ impl RestoringStore<'_> {
                 membership,
                 Some(&registration_ref),
                 state_after,
-                crate::sync::store::owner::pull::MergeHistorySuccessorEvidence {
+                crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence {
                     registrations: vec![crate::sync::store_commit::RetainedVerifiedRegistration {
                         reference: registration_ref.clone(),
                         value: registration.clone(),
@@ -1024,7 +1024,7 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(super) fn from_bootstrap(
         database: Database,
-        history_verifier: pull::MergeHistoryVerifier<'storage>,
+        history_verifier: verified_history::MergeHistoryVerifier<'storage>,
         membership: crate::sync::membership::MembershipChain,
         identity: UserKeypair,
         target_path: PathBuf,
@@ -1107,8 +1107,10 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(|error| match error {
-                pull::RegistrationLoadError::Object(error) => StoreRegistrationError::Object(error),
-                pull::RegistrationLoadError::Invalid(error) => {
+                super::verified_history::registration::RegistrationLoadError::Object(error) => {
+                    StoreRegistrationError::Object(error)
+                }
+                super::verified_history::registration::RegistrationLoadError::Invalid(error) => {
                     StoreRegistrationError::Invalid(error)
                 }
             })?

@@ -535,10 +535,7 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
     let current = load_fixture(&fixture).await;
     let projected = fixture
         .device
-        .project_membership_for_test(
-            current.head_refs(),
-            &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix::default(),
-        )
+        .project_membership_for_test(current.head_refs())
         .await
         .expect("project direct membership to the empty Store prefix");
 
@@ -580,10 +577,7 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
     let projected = fixture
         .device
-        .project_membership_for_test(
-            candidate.head_refs(),
-            &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix::default(),
-        )
+        .project_membership_for_test(candidate.head_refs())
         .await
         .expect("project membership before the Owner promotion Store control");
 

@@ -92,7 +92,7 @@ pub(crate) async fn prepare_merge_candidate_abandonment(
     )
     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let commit_ref = commit.reference().clone();
-    let history_summary = super::super::pull::prepare_merge_abandonment_history_summary(
+    let history_summary = super::super::history::prepare_merge_abandonment_history_summary(
         &candidate_summary,
         &candidate.commit.value,
         &commit,

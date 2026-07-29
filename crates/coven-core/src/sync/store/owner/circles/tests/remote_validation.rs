@@ -172,7 +172,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .prepare_merge_history_successor_for_test(
             &verified_commit,
             None,
-            crate::sync::store::owner::pull::MergeHistorySuccessorEvidence::none(),
+            crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence::none(),
         )
         .await
         .expect("prepare matching retained history for the forged Circle commit");

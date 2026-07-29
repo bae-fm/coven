@@ -1,4 +1,7 @@
+use super::join_validation::*;
 use super::*;
+use std::future::Future;
+use std::pin::Pin;
 
 pub(crate) enum RegistrationLoadError {
     Object(StoreObjectError),
@@ -27,7 +30,7 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
 fn predecessor_provider_admin_state(
     predecessor: &MembershipChain,
 ) -> Option<&super::provider::ProviderAdminState> {
-    let super::membership::MembershipStatus::Resolved(resolved) = predecessor.status() else {
+    let crate::sync::membership::MembershipStatus::Resolved(resolved) = predecessor.status() else {
         return None;
     };
     Some(resolved.provider_admin.combined_state())
@@ -37,7 +40,7 @@ pub(crate) fn predecessor_verifies_owner(
     predecessor: &MembershipChain,
     membership: &StoreMembershipStateRef,
     owner_pubkey: &str,
-    owner_grant: &super::membership::MembershipGrantId,
+    owner_grant: &crate::sync::membership::MembershipGrantId,
 ) -> bool {
     let MembershipStatus::Resolved(resolved) = predecessor.status() else {
         return false;
@@ -214,7 +217,7 @@ async fn validate_commit_reclaim_authorization(
     reference: &super::store_reclaim::ReclaimAuthorizationRef,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -268,7 +271,7 @@ async fn validate_commit_reclaim_authorization(
 fn validate_package_bound_reclaim_target(
     target: &super::store_reclaim::ReclaimTarget,
     activation: &super::store_reclaim::PackageBlobBindingActivation<'_>,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let super::store_reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
         return Err(RegistrationLoadError::Invalid(
@@ -313,7 +316,7 @@ fn validate_package_bound_reclaim_target(
 fn validate_commit_activated_reclaim_target(
     target: &super::store_reclaim::ReclaimTarget,
     activating_commit: &StoreBatchCommitRef,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let expected = activating_commit.clone();
     let activation = accepted
@@ -407,7 +410,7 @@ async fn validate_commit_reclaim_receipt(
     reference: &super::store_reclaim::ReclaimReceiptRef,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<(), RegistrationLoadError> {
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -452,13 +455,13 @@ async fn validate_commit_reclaim_receipt(
     Ok(())
 }
 
-pub(super) async fn load_commit_registrations(
+pub(crate) async fn load_commit_registrations(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
     join_evidence: &VerifiedCommitJoinEvidence,
-    accepted: super::device_join_attempt::VerifiedMergePredecessorHistory<'_>,
+    accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
     let storage = history_verifier.storage();
@@ -599,7 +602,7 @@ pub(crate) async fn verify_canonical_owner_registration(
     Ok(())
 }
 
-pub(super) fn device_state_has_pending_proposal(
+pub(crate) fn device_state_has_pending_proposal(
     state: &ResolvedStoreDeviceState,
     proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
 ) -> bool {

@@ -98,14 +98,14 @@ pub use owner::device_join::{
     ProvisionalDeviceBootstrap, SlotDisposition,
 };
 #[cfg(test)]
+pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
+#[cfg(test)]
 pub(crate) use owner::history::retained_membership_floor_is_included;
 pub(crate) use owner::operations::CircleAckActivation;
 pub(crate) use owner::operations::PreparedStoreOperationCommit;
 #[doc(hidden)]
 pub use owner::owner_promotion::OwnerPromotionError;
 pub(crate) use owner::pull::install_circle_bootstrap_image_on;
-#[cfg(test)]
-pub(crate) use owner::pull::prepare_merge_abandonment_history_summary;
 #[doc(hidden)]
 #[doc(hidden)]
 pub use owner::pull::StorePullExecution;

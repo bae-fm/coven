@@ -196,7 +196,7 @@ fn membership_resolution_activations(
 
 fn membership_projection_activation_status(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     coord: &MembershipCoord,
 ) -> Result<MembershipProjectionStatus, AnchoredChainError> {
     let node = graph.path_heads.get(coord).ok_or_else(|| {
@@ -214,10 +214,10 @@ fn membership_projection_activation_status(
         (true, crate::sync::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
             .classify_head(&node.reference, &node.head, commit)
             .map(|status| match status {
-                crate::sync::store::owner::pull::VerifiedMergePrefixHeadStatus::Included => {
+                crate::sync::store::owner::verified_history::VerifiedMergePrefixHeadStatus::Included => {
                     MembershipProjectionStatus::Included
                 }
-                crate::sync::store::owner::pull::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
+                crate::sync::store::owner::verified_history::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
                     MembershipProjectionStatus::OutsidePrefix
                 }
             })
@@ -277,7 +277,7 @@ fn membership_projection_dependencies(
 
 pub(super) fn membership_projection_statuses(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
 ) -> Result<BTreeMap<MembershipCoord, MembershipProjectionStatus>, AnchoredChainError> {
     let mut statuses = BTreeMap::new();
@@ -345,7 +345,7 @@ pub(super) fn membership_projection_statuses(
 
 fn project_membership_cut_to_store_prefix(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<
     (
         Vec<MembershipHeadRef>,
@@ -412,7 +412,7 @@ fn project_membership_cut_to_store_prefix(
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
-    prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let mut authority = MembershipActivationAuthority::VerifiedPrefix {
         commit_verifier,
@@ -577,7 +577,7 @@ pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
     };
     let statuses = membership_projection_statuses(
         &graph,
-        &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix::default(),
+        &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix::default(),
         &BTreeMap::new(),
     )
     .expect("project deep predecessor path");
@@ -666,7 +666,7 @@ fn load_layered_membership_chain<'a>(
     exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
     provider_admin: &'a crate::sync::provider::ProviderAdminState,
     pending_resolution: Option<
-        &'a crate::sync::store::owner::pull::VerifiedMergeConflictResolutionActivation,
+        &'a crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> LayeredMembershipFuture<'a> {
     Box::pin(async move {
@@ -819,7 +819,7 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
     pending_resolution: Option<
-        &crate::sync::store::owner::pull::VerifiedMergeConflictResolutionActivation,
+        &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> Result<MembershipChain, AnchoredChainError> {
     validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;

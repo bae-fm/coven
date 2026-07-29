@@ -155,7 +155,7 @@ pub struct BootstrapResult<'storage> {
     store_id: String,
     target_path: PathBuf,
     db_hash: String,
-    history_verifier: crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>,
+    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     founder_registration: crate::sync::store_objects::VerifiedObject<
         crate::sync::store_commit::StoreDeviceRegistration,
     >,
@@ -331,7 +331,7 @@ async fn stage_restore_circle_decisions(
     transfer_limits: crate::blob::TransferLimits,
     device_id: &str,
     migrations: &[Migration],
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     store_frontier: &crate::sync::store_commit::CommitFrontier,
     restorer_identity: &crate::keys::UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,

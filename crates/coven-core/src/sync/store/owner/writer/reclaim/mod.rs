@@ -15,7 +15,7 @@ use crate::sync::storage::{
 };
 use crate::sync::store::database::reclaim::journal;
 use crate::sync::store::database::StoreDatabase;
-use crate::sync::store::owner::pull::MergeHistoryVerifier;
+use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
 use crate::sync::store::owner::AuthorizedStoreHistory;
 use crate::sync::store::AuthorizedWriterOperation;
 use crate::sync::store_commit::{
@@ -2287,7 +2287,7 @@ async fn verify_circle_snapshot_image_reclaim_claim(
 }
 
 async fn verify_store_package_reclaim_claim(
-    history_verifier: &mut super::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &StorePackageReclaimClaim,
 ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {

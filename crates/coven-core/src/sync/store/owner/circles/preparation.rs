@@ -1864,7 +1864,7 @@ pub(super) async fn prepare_circle_operation_request(
                 current,
                 None,
                 resolved_devices,
-                crate::sync::store::owner::pull::MergeHistorySuccessorEvidence::none(),
+                crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence::none(),
             )
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

@@ -2,6 +2,14 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub(super) mod abandonment;
+#[cfg(test)]
+pub(crate) use super::verified_history::prepare_merge_abandonment_history_summary as prepare_merge_abandonment_history_summary_for_test;
+use super::verified_history::*;
+
+pub(super) struct AuthorizedStoreHistory<'storage> {
+    pub(super) database: StoreDatabase,
+    pub(super) history_verifier: MergeHistoryVerifier<'storage>,
+}
 
 use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::membership::{
@@ -33,7 +41,7 @@ fn invitation_history_error(
 }
 
 pub(super) struct InvitationHistory<'storage> {
-    verifier: pull::MergeHistoryVerifier<'storage>,
+    verifier: MergeHistoryVerifier<'storage>,
     identity: &'storage crate::keys::UserKeypair,
 }
 
@@ -43,7 +51,7 @@ impl<'storage> InvitationHistory<'storage> {
         identity: &'storage crate::keys::UserKeypair,
         root: &StoreRootRef,
     ) -> Result<Self, crate::sync::store::membership::InviteError> {
-        let verifier = pull::MergeHistoryVerifier::new(storage, root)
+        let verifier = MergeHistoryVerifier::new(storage, root)
             .await
             .map_err(invitation_history_error)
             .map_err(|error| {
@@ -96,6 +104,101 @@ enum TerminalNonactivationCandidate {
         reference: crate::sync::store_commit::StoreBatchCommitRef,
         verification: crate::database::TerminalCandidateCleanupVerification,
     },
+}
+
+impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(super) async fn from_verified_root(
+        database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: &StoreRootRef,
+        verified_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
+    ) -> Result<Self, pull::StorePullError> {
+        let commit_verifier = StoreCommitVerifier::from_verified_root(storage, root, verified_root)
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+        let history_verifier = MergeHistoryVerifier::from_commit_verifier(commit_verifier).await?;
+        Ok(Self {
+            database,
+            history_verifier,
+        })
+    }
+
+    pub(super) fn database(&self) -> &StoreDatabase {
+        &self.database
+    }
+
+    pub(super) fn history_verifier_mut(&mut self) -> &mut MergeHistoryVerifier<'storage> {
+        &mut self.history_verifier
+    }
+
+    pub(super) fn storage(&self) -> &'storage dyn SyncStorage {
+        self.history_verifier.storage()
+    }
+
+    pub(super) fn root(&self) -> &StoreRootRef {
+        self.history_verifier.root()
+    }
+
+    pub(super) fn verified_root_object(
+        &self,
+    ) -> &crate::sync::store_objects::VerifiedObject<StoreProtocolRoot> {
+        self.history_verifier.verified_root_object()
+    }
+
+    pub(super) async fn verify_snapshots_for_acknowledgement(
+        &mut self,
+        snapshots: &[crate::database::PublishedStoreSnapshot],
+    ) -> Result<(), pull::StorePullError> {
+        self.history_verifier
+            .verify_snapshots_for_acknowledgement(snapshots)
+            .await
+    }
+
+    pub(super) async fn select_acknowledgement_snapshot(
+        &mut self,
+        frontier: &CommitFrontier,
+        device_state: &StoreDeviceStateRef,
+    ) -> Result<Option<crate::sync::store_commit::StoreSnapshotLocator>, writer::StoreAckError>
+    {
+        let registrations = self
+            .database
+            .activated_store_device_registration_records()
+            .await?;
+        let storage = self.history_verifier.storage();
+        let root = self.history_verifier.root().clone();
+        let mut candidates = Vec::new();
+        for (registration_ref, registration) in registrations {
+            for snapshot in snapshot::load_store_snapshot_stream(
+                storage,
+                &root,
+                &registration_ref,
+                &registration,
+            )
+            .await?
+            {
+                if !frontier.covers(&snapshot.meta.coverage)
+                    || snapshot.meta.state.devices.state_hash() != device_state.state_hash()
+                    || snapshot.meta.state.devices.recovery() != device_state.recovery()
+                {
+                    continue;
+                }
+                candidates.push(snapshot);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        self.verify_snapshots_for_acknowledgement(&candidates)
+            .await
+            .map_err(|error| snapshot::SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+        Ok(
+            snapshot::select_maximal_store_snapshot(candidates).map(|snapshot| {
+                crate::sync::store_commit::StoreSnapshotLocator {
+                    author_registration: snapshot.meta.author_registration,
+                    snapshot: snapshot.reference,
+                }
+            }),
+        )
+    }
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
@@ -226,7 +329,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) async fn project_membership_to_verified_prefix(
         &self,
         candidate_heads: &[MembershipHeadRef],
-        prefix: &pull::VerifiedMergeMembershipPrefix,
+        prefix: &VerifiedMergeMembershipPrefix,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         self.history_verifier
             .project_membership_to_verified_prefix(candidate_heads, prefix)
@@ -655,7 +758,7 @@ impl AuthorizedStoreHistory<'_> {
                 &membership,
                 recovery_author.as_ref(),
                 state_after.clone(),
-                pull::MergeHistorySuccessorEvidence {
+                MergeHistorySuccessorEvidence {
                     registrations: commit
                         .device_registrations()
                         .iter()
@@ -765,7 +868,7 @@ impl AuthorizedStoreHistory<'_> {
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         require_complete_retained_frontier(root, &frontier, &checkpoints)?;
-        let prefix = pull::VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
+        let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
@@ -776,7 +879,10 @@ impl AuthorizedStoreHistory<'_> {
             .map_err(pull::StorePullError::Database)?;
         let (device_state_ref, device_state) =
             retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
-        if !pull::device_state_has_active_registration(&device_state, author_registration) {
+        if !super::verified_history::registration::device_state_has_active_registration(
+            &device_state,
+            author_registration,
+        ) {
             return Err(pull::StorePullError::Database(
                 "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),
             ));
@@ -800,7 +906,7 @@ impl AuthorizedStoreHistory<'_> {
         order: &crate::sync::store_commit::StoreCommitOrder,
         candidate_membership_heads: &[MembershipHeadRef],
         author_registration: &StoreDeviceRegistrationRef,
-    ) -> Result<pull::MergeOutboundAuthorization, pull::StorePullError> {
+    ) -> Result<MergeOutboundAuthorization, pull::StorePullError> {
         let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
@@ -812,7 +918,7 @@ impl AuthorizedStoreHistory<'_> {
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         require_complete_retained_frontier(root, &frontier, &checkpoints)?;
-        let prefix = pull::VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
+        let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
@@ -823,7 +929,10 @@ impl AuthorizedStoreHistory<'_> {
             .map_err(pull::StorePullError::Database)?;
         let (device_state_ref, device_state) =
             retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
-        if !pull::device_state_has_active_registration(&device_state, author_registration) {
+        if !super::verified_history::registration::device_state_has_active_registration(
+            &device_state,
+            author_registration,
+        ) {
             return Err(pull::StorePullError::Database(
                 "Merge outbound author is inactive at its exact predecessor cut".to_string(),
             ));
@@ -840,7 +949,7 @@ impl AuthorizedStoreHistory<'_> {
             resolved.state_hash,
         )
         .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        Ok(pull::MergeOutboundAuthorization {
+        Ok(MergeOutboundAuthorization {
             membership,
             membership_state,
             device_state_ref,
@@ -854,9 +963,9 @@ impl AuthorizedStoreHistory<'_> {
         membership: &crate::sync::membership::MembershipChain,
         recovery_author: Option<&crate::sync::store_commit::StoreDeviceRegistrationRef>,
         state_after: crate::sync::store_commit::ResolvedStoreDeviceState,
-        evidence: crate::sync::store::owner::pull::MergeHistorySuccessorEvidence,
+        evidence: crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence,
     ) -> Result<
-        crate::sync::store::owner::pull::PreparedMergeHistorySuccessor,
+        crate::sync::store::owner::verified_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::pull::StorePullError,
     > {
         let root = self.history_verifier.root();
@@ -930,7 +1039,7 @@ impl AuthorizedStoreHistory<'_> {
                 ));
             }
         }
-        if !crate::sync::store::owner::pull::device_state_has_active_registration(
+        if !super::verified_history::registration::device_state_has_active_registration(
             &predecessor_state,
             &commit.author_registration,
         ) && recovery_author != Some(&commit.author_registration)
@@ -939,13 +1048,13 @@ impl AuthorizedStoreHistory<'_> {
                 "Merge successor author is inactive at its exact predecessor cut".to_string(),
             ));
         }
-        crate::sync::store::owner::pull::verify_merge_membership_state_ref(
+        super::verified_history::verify_merge_membership_state_ref(
             &commit.membership_state,
             membership,
             &predecessor_state,
         )?;
 
-        crate::sync::store::owner::pull::compose_merge_history_successor(
+        compose_merge_history_successor(
             root,
             commit,
             commit_ref,
@@ -983,7 +1092,7 @@ impl AuthorizedStoreHistory<'_> {
                     .to_string(),
             ));
         }
-        crate::sync::store::owner::pull::compose_merge_snapshot_history_summary(
+        compose_merge_snapshot_history_summary(
             root,
             coverage,
             membership,
@@ -1195,18 +1304,18 @@ impl AuthorizedStoreHistory<'_> {
                 continue;
             }
             let membership =
-                crate::sync::store::owner::pull::load_merge_predecessor_membership_with_history(
+                super::verified_history::load_merge_predecessor_membership_with_history(
                     &mut self.history_verifier,
                     &witness.commit().membership_state,
                 )
                 .await
                 .map_err(|error| match error {
-                    crate::sync::store::owner::pull::RegistrationLoadError::Object(error) => {
+                    super::verified_history::registration::RegistrationLoadError::Object(error) => {
                         StoreError::Object(error)
                     }
-                    crate::sync::store::owner::pull::RegistrationLoadError::Invalid(error) => {
-                        StoreError::Database(error)
-                    }
+                    super::verified_history::registration::RegistrationLoadError::Invalid(
+                        error,
+                    ) => StoreError::Database(error),
                 })?;
             let crate::sync::membership::MembershipStatus::Resolved(resolved) = membership.status()
             else {
@@ -1379,7 +1488,7 @@ pub(crate) fn retained_membership_floor_is_included(
 }
 
 async fn retained_merge_device_state(
-    history_verifier: &pull::MergeHistoryVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
     checkpoints: &[OpenedRetainedMergeHistorySummary],
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {

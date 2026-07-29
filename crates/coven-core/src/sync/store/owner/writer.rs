@@ -1103,7 +1103,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             ),
             None => None,
         };
-        let merge_history_evidence = super::pull::MergeHistorySuccessorEvidence {
+        let merge_history_evidence = super::verified_history::MergeHistorySuccessorEvidence {
             registrations: retained_registration_evidence,
             acknowledgement,
             membership_proof: None,
@@ -1312,7 +1312,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) fn history_verifier_mut(
         &mut self,
-    ) -> &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'storage> {
+    ) -> &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage> {
         &mut self.store.history.history_verifier
     }
 

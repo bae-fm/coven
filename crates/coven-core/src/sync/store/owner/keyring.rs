@@ -6,7 +6,7 @@ use crate::sync::wrapped_store_key::{
     load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
 };
 
-use super::pull::MergeHistoryVerifier;
+use super::verified_history::MergeHistoryVerifier;
 
 use crate::sync::store::membership::InviteError;
 

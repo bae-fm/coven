@@ -12,7 +12,7 @@ pub struct PendingDeviceJoinAuthority<'storage> {
 #[doc(hidden)]
 pub struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
-    history_verifier: crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>,
+    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
 
 #[doc(hidden)]
@@ -113,7 +113,7 @@ fn progress_offer(progress: &JoinerJoinProgress) -> Option<&DeviceJoinOffer> {
 }
 
 async fn verify_offer(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     identity: &UserKeypair,
     offer: &DeviceJoinOffer,
 ) -> Result<(), DeviceJoinError> {
@@ -321,7 +321,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             verified_root,
         )?;
         let history_verifier =
-            crate::sync::store::owner::pull::MergeHistoryVerifier::from_commit_verifier(
+            crate::sync::store::owner::verified_history::MergeHistoryVerifier::from_commit_verifier(
                 commit_verifier,
             )
             .await?;
@@ -1151,7 +1151,7 @@ impl PendingDeviceJoinObservation<'_> {
             ) => None,
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        let evidence = crate::sync::store::owner::pull::load_device_join_cleanup_activation(
+        let evidence = crate::sync::store::owner::verified_history::registration::load_device_join_cleanup_activation(
             &mut self.history_verifier,
             &activation,
         )

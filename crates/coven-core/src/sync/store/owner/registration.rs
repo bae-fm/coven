@@ -466,10 +466,12 @@ mod tests {
         db: &Database,
         membership: crate::sync::membership::MembershipChain,
     ) -> super::super::restore::RestoringStore<'storage> {
-        let history =
-            crate::sync::store::owner::pull::MergeHistoryVerifier::new(&store.storage, &store.root)
-                .await
-                .expect("open Owner recovery history");
+        let history = crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(
+            &store.storage,
+            &store.root,
+        )
+        .await
+        .expect("open Owner recovery history");
         super::super::restore::RestoringStore::from_bootstrap(
             db.clone(),
             history,

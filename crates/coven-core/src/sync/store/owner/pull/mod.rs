@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 use tracing::debug;
 
-use super::device_join;
-use super::reclaim as store_reclaim;
 use super::*;
 use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup;
@@ -17,7 +15,6 @@ use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterializ
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::audience_package::{AudiencePackage, PackageAudience};
-use crate::sync::circle_control::StoreMembershipStateRef;
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
 use crate::sync::membership::{MembershipChain, MembershipStatus};
 use crate::sync::session::SyncedTable;
@@ -31,42 +28,33 @@ use crate::sync::store::circle_controls::activation::{
 use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 use crate::sync::store_commit::{
-    head_slot_prefix, ActivatedStoreDeviceRegistrationRef, CirclePackageRef, CommitFrontier,
-    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, DeviceStreamAnchor,
-    ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryCursor, OwnerRecoveryNode,
-    OwnerRecoveryNodeRef, OwnerRecoveryPosition, ResolvedStoreDeviceState,
-    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
-    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
-    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
-    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    head_slot_prefix, CirclePackageRef, CommitFrontier, DeviceStreamAnchor, ObjectHash,
+    OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
+    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
+    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
+    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
+    StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+    StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
+    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::sync::store_objects::{StoreObjectError, VerifiedObject};
+use crate::sync::store_objects::StoreObjectError;
 use crate::sync::{
-    causal_grants, circle, gate, hlc, membership, provider, remote_object, session, store_commit,
+    causal_grants, circle, gate, hlc, membership, remote_object, session, store_commit,
     store_objects,
 };
 
 mod circle_packages;
-mod device_join_attempt;
 mod device_lifecycle_state;
 mod device_operations;
 mod discovery;
-mod history;
 mod join_activation;
-mod join_validation;
 mod local_device_operations;
 mod materialization;
 mod membership_control;
 mod model;
 mod owner_promotion;
-mod registration;
-mod registration_authority;
-mod registration_validation;
 mod replay;
 mod root_validation;
 mod snapshot_evidence;
@@ -80,7 +68,6 @@ pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
 pub(crate) use join_activation::*;
-pub(crate) use join_validation::*;
 pub(crate) use model::{
     commit_stream_id, held_commit, held_dependency, held_package, parse_candidate_circle_package,
     parse_candidate_store_package, Candidate, LoadedCirclePackage, LocalStoreMembership,
@@ -90,7 +77,6 @@ pub use model::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
     StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
 };
-pub(crate) use registration::*;
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
 use support::{
@@ -98,20 +84,15 @@ use support::{
 };
 pub use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};
 
+use super::verified_history::registration::*;
+use super::verified_history::*;
 pub(crate) use discovery::*;
-pub(crate) use history::*;
 pub(crate) use local_device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,
 };
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
-pub(crate) use registration::RegistrationLoadError;
-pub(crate) use registration_authority::{
-    load_merge_predecessor_membership_with_history,
-    load_merge_predecessor_membership_with_retained_history,
-    load_merge_predecessor_membership_with_verified_activations, verify_merge_membership_state_ref,
-};
-use registration_validation::load_merge_commit_registrations;
+pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_history;
 use replay::verified_terminal_merge_retractions;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
 #[cfg(test)]

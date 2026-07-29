@@ -1583,7 +1583,7 @@ impl StagedCircleImageCandidate {
 /// an inaccessible Circle could replay from survives the restore.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn select_staged_circle_decisions(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     query_db: &crate::sync::store::StoreDatabase,
     store_frontier: &CommitFrontier,
     restorer_identity: &UserKeypair,
@@ -1728,7 +1728,7 @@ pub(crate) async fn select_staged_circle_decisions(
 /// lineage, which a reclaimed restore may no longer retain.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_restorer_circle_access(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     query_db: &crate::sync::store::StoreDatabase,
     restorer_identity: &UserKeypair,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
@@ -1984,7 +1984,7 @@ pub(crate) struct SelectedStableStoreSnapshot {
 }
 
 pub(crate) async fn select_maximal_stable_store_snapshot_with_history(
-    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     candidates: Vec<crate::database::PublishedStoreSnapshot>,
 ) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::owner::pull::StorePullError> {
     let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
@@ -2040,11 +2040,11 @@ fn publication_error(error: crate::database::DbError) -> SnapshotError {
 }
 
 struct SnapshotBootstrapAuthority<'storage> {
-    history_verifier: crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>,
+    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
 
 struct VerifiedSnapshotBootstrap<'storage> {
-    history_verifier: crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>,
+    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     snapshot: crate::database::PublishedStoreSnapshot,
     image: Vec<u8>,
     stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
@@ -2057,7 +2057,7 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
         root: &StoreRootRef,
     ) -> Result<Self, SnapshotError> {
         let history_verifier =
-            crate::sync::store::owner::pull::MergeHistoryVerifier::new(storage, root)
+            crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(storage, root)
                 .await
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?;
         Ok(Self { history_verifier })
@@ -2183,7 +2183,7 @@ impl<'storage> VerifiedSnapshotBootstrap<'storage> {
     fn into_parts(
         self,
     ) -> (
-        crate::sync::store::owner::pull::MergeHistoryVerifier<'storage>,
+        crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
         crate::database::PublishedStoreSnapshot,
         Vec<u8>,
         crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,

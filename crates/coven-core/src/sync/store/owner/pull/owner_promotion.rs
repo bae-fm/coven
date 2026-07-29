@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn verify_merge_owner_promotion_acceptance_with_history(
+pub(crate) async fn verify_merge_owner_promotion_acceptance_with_history(
     commit_verifier: &mut StoreCommitVerifier<'_>,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
     verified_commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
