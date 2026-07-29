@@ -1,0 +1,2 @@
+# Every callable in crates/coven-core and crates/coven receives one reviewed
+# ownership disposition. `ownership_audit.py check` rejects omissions.

@@ -391,3 +391,15 @@ The work is verified when:
   or documentation for relocated paths; and
 - formatting, strict Clippy, every feature/target build, focused tests, and the
   repository test gate pass.
+
+## Progress journal
+
+- `b67c06d6` defined the codebase-wide callable ownership audit and its
+  acceptance evidence.
+- `2652f103` restricted verified history construction to founder, join, and
+  snapshot boundaries.
+- The callable-index command inventories named functions, methods, associated
+  functions, trait callables, closures, configuration variants, retained
+  dependencies, ambient access, effects, and semantic call edges. It waits for
+  rust-analyzer to load the complete Cargo workspace and rejects degraded
+  analyzer health instead of writing a partial graph.
