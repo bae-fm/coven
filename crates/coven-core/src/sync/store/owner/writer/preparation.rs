@@ -279,6 +279,7 @@ pub(super) async fn prepare_store_write(
         let local_cleanup = bind_local_cleanup(payload.local_cleanup, &audience_objects.blobs)
             .map_err(StoreError::Preparation)?;
         Ok::<_, StoreError>(StoreWritePreparation {
+            root,
             write_id: write_id.clone(),
             remote_objects,
             audiences: audience_objects,

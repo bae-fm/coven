@@ -13,8 +13,7 @@ use crate::database::{
 };
 use crate::sync::remote_object::RemoteObjectRecord;
 use crate::sync::store_commit::{
-    CommitFrontier, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef,
+    CommitFrontier, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
 use crate::write::WriteStatus;
 use rusqlite::OptionalExtension;
@@ -69,7 +68,6 @@ impl StoreDatabase {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id =
                 crate::database::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
-            let root = required_store_root_authority_on(&tx)?;
             let (registration_bytes, registration_object): (Vec<u8>, String) = tx.query_row(
                 "SELECT registration_bytes, registration_object \
                  FROM store_device_registration_activations WHERE device_id = ?1",
@@ -88,17 +86,17 @@ impl StoreDatabase {
                         .to_string(),
                 ));
             }
-            let registration = StoreDeviceRegistration::parse_at(
-                &registration_bytes,
-                &root,
-                registration_ref.device_id,
-            ).map_err(|error| DbError::Message(format!(
-                "prepared write author registration: {error}"
-            )))?;
-            registration_ref.verify_registration(&registration)
+            let registration = stage.commit.value.author();
+            if registration_bytes != registration.to_bytes() {
+                return Err(DbError::Message(
+                    "prepared write author registration differs from its activated bytes"
+                        .to_string(),
+                ));
+            }
+            registration_ref.verify_registration(registration)
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-                root.store_root_hash,
+                stage.root.store_root_hash,
                 &registration_ref,
                 crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
@@ -106,8 +104,7 @@ impl StoreDatabase {
                 stream_id,
                 sequence: stage.commit.value.seq(),
             };
-            if stage.commit.value.store_root_hash() != root.store_root_hash
-                || stage.commit.value.author() != &registration
+            if stage.commit.value.store_root_hash() != stage.root.store_root_hash
                 || stage.commit.value.reference().coord != expected_coord
                 || stage.commit.value.reference().object
                     != *stage.commit.prepared.reference()
@@ -137,8 +134,8 @@ impl StoreDatabase {
             }
             StoreDeviceHead::parse_at(
                 &stage.head.value.to_bytes(),
-                root.store_root_hash,
-                &registration,
+                stage.root.store_root_hash,
+                registration,
                 &commit_ref,
             ).map_err(|error| DbError::Message(format!(
                 "verify prepared Store head: {error}"
@@ -212,7 +209,7 @@ impl StoreDatabase {
             Self::persist_closed_write_objects_on(
                 &tx,
                 &stage.write_id,
-                root.store_root_hash,
+                stage.root.store_root_hash,
                 &commit_ref,
                 stage.commit.value.value(),
                 stage.commit.prepared.stored_bytes(),

@@ -23,7 +23,6 @@ use crate::sync::{
     wrapped_store_key,
 };
 mod candidate;
-mod local_authority;
 mod plan;
 mod prepared;
 mod publication;
@@ -33,7 +32,6 @@ mod support;
 mod tests;
 
 pub(crate) use candidate::*;
-pub(crate) use local_authority::*;
 pub(crate) use plan::*;
 pub(crate) use prepared::*;
 pub(crate) use publication::*;

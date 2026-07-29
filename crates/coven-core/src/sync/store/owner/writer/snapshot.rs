@@ -49,7 +49,6 @@ impl super::AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
-        let device_id = self.local_device_id().to_string();
         let keypair = self.identity();
         let resumed = drain_outbound_store_snapshot(self.storage(), self.database())
             .await
@@ -83,13 +82,9 @@ impl super::AuthorizedWriterOperation<'_> {
                     error,
                 )
             })?;
-        let last_snapshot_position = match last_snapshot.as_ref() {
-            None => None,
-            Some(snapshot) => Some(
-                self.snapshot_position(snapshot, &device_id, keypair)
-                    .await?,
-            ),
-        };
+        let last_snapshot_position = last_snapshot
+            .as_ref()
+            .map(|snapshot| self.snapshot_position(snapshot));
         let hours_since = match last_snapshot.as_ref() {
             None => None,
             Some(snapshot) => {
@@ -183,38 +178,15 @@ impl super::AuthorizedWriterOperation<'_> {
         Ok(())
     }
 
-    async fn snapshot_position(
-        &self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
-        device_id: &str,
-        identity: &UserKeypair,
-    ) -> Result<u64, crate::sync::cycle::SyncCycleFailure> {
-        let (root, registration, _, _) =
-            crate::sync::store::operations::load_local_store_authority(
-                self.database(),
-                device_id,
-                identity,
-            )
-            .await
-            .map_err(|error| {
-                crate::sync::cycle::SyncCycleFailure::from(format!(
-                    "load local Store snapshot cadence authority: {error}"
-                ))
-            })?;
-        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-            root.store_root_hash,
-            &registration,
-            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        )
-        .to_string();
-        Ok(snapshot
+    fn snapshot_position(&self, snapshot: &crate::database::PublishedStoreSnapshot) -> u64 {
+        snapshot
             .meta
             .coverage
             .clone()
             .into_refs()
-            .remove(&stream_id)
+            .remove(&self.announcement_stream_id().to_string())
             .map(|reference| reference.coord.sequence())
-            .unwrap_or(0))
+            .unwrap_or(0)
     }
 
     pub(crate) async fn capture_snapshot_cut(
@@ -895,7 +867,6 @@ impl super::AuthorizedWriterOperation<'_> {
         created_at: &str,
         store_routing: Option<&crate::encryption::EncryptionService>,
     ) -> Result<(), SnapshotError> {
-        let keypair = self.identity();
         let inputs = self
             .database()
             .circle_acknowledgement_publication_inputs()
@@ -972,21 +943,19 @@ impl super::AuthorizedWriterOperation<'_> {
                     continue;
                 }
             };
-            match push_circle_snapshot(
-                self.storage(),
-                self.database(),
-                input.circle_id,
-                input.control,
-                input.epoch_id,
-                input.key_fingerprint,
-                input.epoch_encryption,
-                cut.snapshot,
-                cut.coverage,
-                schema_version,
-                keypair,
-                created_at.to_string(),
-            )
-            .await
+            match self
+                .push_circle_snapshot(
+                    input.circle_id,
+                    input.control,
+                    input.epoch_id,
+                    input.key_fingerprint,
+                    input.epoch_encryption,
+                    cut.snapshot,
+                    cut.coverage,
+                    schema_version,
+                    created_at.to_string(),
+                )
+                .await
             {
                 Ok(meta) => tracing::info!(
                     circle_id = %input.circle_id,
@@ -1028,6 +997,95 @@ impl super::AuthorizedWriterOperation<'_> {
 
 #[cfg(test)]
 impl super::AuthorizedWriterOperation<'_> {
+    pub(crate) async fn load_circle_snapshot_metas_for_test(
+        &self,
+        circle_id: CircleId,
+        encryption: EncryptionService,
+    ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
+        load_circle_snapshot_stream(
+            self.storage(),
+            self.store_root(),
+            circle_id,
+            encryption,
+            &self.writer.registration_ref,
+            &self.writer.registration,
+        )
+        .await
+    }
+
+    pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
+        &self,
+        circle_id: CircleId,
+        epoch_encryption: EncryptionService,
+        store_routing: &EncryptionService,
+    ) -> Result<(), SnapshotError> {
+        let stream = self
+            .load_circle_snapshot_metas_for_test(circle_id, epoch_encryption.clone())
+            .await?;
+        let selected = select_maximal_circle_snapshot(stream).ok_or_else(|| {
+            SnapshotError::PublicationState("no standalone Circle snapshot to verify".to_string())
+        })?;
+        let author_device = selected.author_registration.device_id.to_string();
+        let image_context = ProtocolObjectContext::circle(
+            self.store_root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotImage,
+            epoch_encryption,
+        );
+        let image = self
+            .storage()
+            .read_protocol_object(
+                &image_context,
+                &selected.bootstrap.image.object,
+                &circle_snapshot_image_semantic_prefix(
+                    circle_id,
+                    &author_device,
+                    selected.bootstrap.image.image_hash,
+                ),
+            )
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        let routing_key = crate::sync::circle::derive_row_routing_key(
+            store_routing,
+            self.store_root().store_root_hash,
+        )
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        verify_circle_bootstrap_image(
+            &image,
+            &selected.bootstrap,
+            circle_id,
+            self.db().synced_tables(),
+            Some(&routing_key),
+        )
+    }
+
+    async fn load_own_snapshot_for_test(
+        &mut self,
+        reference: &StoreSnapshotRef,
+    ) -> Result<SnapshotMeta, SnapshotError> {
+        let registration_ref = self.writer.registration_ref.clone();
+        let registration = self.writer.registration.clone();
+        self.history_verifier_mut()
+            .commit_verifier()
+            .load_store_snapshot(&registration_ref, &registration, reference)
+            .await
+            .map(|(_, meta)| meta)
+            .map_err(SnapshotError::StoreObject)
+    }
+
+    fn verify_own_snapshot_bytes_for_test(
+        &self,
+        reference: &StoreSnapshotRef,
+        bytes: &[u8],
+    ) -> Result<SnapshotMeta, SnapshotError> {
+        verify_store_snapshot_bytes(
+            self.store_root(),
+            &self.writer.registration_ref,
+            &self.writer.registration,
+            reference,
+            bytes,
+        )
+    }
+
     pub(crate) async fn author_one_circle_snapshot_for_test(
         &self,
         temp_dir: std::path::PathBuf,
@@ -1035,7 +1093,6 @@ impl super::AuthorizedWriterOperation<'_> {
         created_at: &str,
         store_routing: &crate::encryption::EncryptionService,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
-        let keypair = self.identity();
         let input = self
             .database()
             .circle_acknowledgement_publication_inputs()
@@ -1051,9 +1108,7 @@ impl super::AuthorizedWriterOperation<'_> {
             .capture_circle_snapshot_cut(temp_dir, store_routing, input.circle_id)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-        push_circle_snapshot(
-            self.storage(),
-            self.database(),
+        self.push_circle_snapshot(
             input.circle_id,
             input.control,
             input.epoch_id,
@@ -1062,181 +1117,175 @@ impl super::AuthorizedWriterOperation<'_> {
             cut.snapshot,
             cut.coverage,
             schema_version,
-            keypair,
             created_at.to_string(),
         )
         .await
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn push_circle_snapshot(
-    storage: &dyn SyncStorage,
-    database: &crate::sync::store::StoreDatabase,
-    circle_id: CircleId,
-    control: CircleControlCoord,
-    epoch_id: CircleEpochId,
-    key_fingerprint: KeyFingerprint,
-    encryption: EncryptionService,
-    snapshot: CreatedSnapshot,
-    coverage: CommitFrontier,
-    schema_version: u32,
-    keypair: &UserKeypair,
-    created_at: String,
-) -> Result<CircleSnapshotMeta, SnapshotError> {
-    let db = database.sqlite();
-    let _publication = database.lock_snapshot_publication().await;
-    drain_snapshot_spool_cleanup(database).await?;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(publication_error)?
-        .ok_or_else(|| {
-            SnapshotError::PublicationState("local Store device registration is absent".to_string())
-        })?;
-    let (root, registration_ref, _registration, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(database, &device_id, keypair)
+impl super::AuthorizedWriterOperation<'_> {
+    #[allow(clippy::too_many_arguments)]
+    async fn push_circle_snapshot(
+        &self,
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        epoch_id: CircleEpochId,
+        key_fingerprint: KeyFingerprint,
+        encryption: EncryptionService,
+        snapshot: CreatedSnapshot,
+        coverage: CommitFrontier,
+        schema_version: u32,
+        created_at: String,
+    ) -> Result<CircleSnapshotMeta, SnapshotError> {
+        let storage = self.storage();
+        let database = self.database();
+        let db = database.sqlite();
+        let device_id = self.local_device_id().to_string();
+        let root = self.store_root();
+        let registration_ref = self.writer.registration_ref.clone();
+        let device_signer = &self.writer.device_signer;
+        let _publication = database.lock_snapshot_publication().await;
+        drain_snapshot_spool_cleanup(database).await?;
+        // The image references only already-published Circle blobs, verified exact —
+        // the same closure a member-addition bootstrap image carries.
+        let blobs =
+            super::super::circles::verified_circle_bootstrap_blobs(storage, circle_id, &snapshot)
+                .await
+                .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
+        let image_bytes = snapshot.db_image;
+        let image_hash = ObjectHash::digest(&image_bytes);
+        let image_context = ProtocolObjectContext::circle(
+            root.store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotImage,
+            encryption.clone(),
+        );
+        let image_prefix = circle_snapshot_image_semantic_prefix(circle_id, &device_id, image_hash);
+        let image_slot = storage
+            .allocate_protocol_slot(&image_context, &image_prefix, ".db")
             .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-    // The image references only already-published Circle blobs, verified exact —
-    // the same closure a member-addition bootstrap image carries.
-    let blobs =
-        super::super::circles::verified_circle_bootstrap_blobs(storage, circle_id, &snapshot)
-            .await
-            .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
-    let image_bytes = snapshot.db_image;
-    let image_hash = ObjectHash::digest(&image_bytes);
-    let image_context = ProtocolObjectContext::circle(
-        root.store_root_hash,
-        ProtocolObjectDomain::CircleSnapshotImage,
-        encryption.clone(),
-    );
-    let image_prefix = circle_snapshot_image_semantic_prefix(circle_id, &device_id, image_hash);
-    let image_slot = storage
-        .allocate_protocol_slot(&image_context, &image_prefix, ".db")
-        .await
-        .map_err(SnapshotError::Bucket)?;
-    let image_prepared = storage
-        .prepare_protocol_object(
-            &image_context,
-            image_slot,
-            &image_prefix,
-            image_bytes.clone(),
-        )
-        .map_err(SnapshotError::Bucket)?;
-    let bootstrap = CircleBootstrapRef {
-        coverage,
-        schema_version,
-        sync_routing_hash: db.sync_routing_hash(),
-        image: SnapshotImageRef {
-            image_hash,
-            object: image_prepared.reference().clone(),
-        },
-        blobs,
-    };
-    let previous = database
-        .latest_local_circle_snapshot(circle_id)
-        .await
-        .map_err(publication_error)?;
-    // Generation zero occupies a deterministic slot a reader can compute (there
-    // is no registration snapshot anchor for a per-Circle stream); later
-    // generations occupy the predecessor's create-once successor slot.
-    let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
-        "{}.json",
-        circle_snapshot_slot_prefix(circle_id, &device_id, 0)
-    ))
-    .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-    let (generation, predecessor, current_slot) = match previous {
-        Some(previous) => (
-            previous
-                .reference
-                .generation
-                .checked_add(1)
-                .ok_or_else(|| {
-                    SnapshotError::PublicationState(
-                        "Circle snapshot generation overflow".to_string(),
-                    )
-                })?,
-            Some(previous.reference),
-            previous.successor_slot,
-        ),
-        None => (0, None, stream_first_slot),
-    };
-    let meta_context = ProtocolObjectContext::circle(
-        root.store_root_hash,
-        ProtocolObjectDomain::CircleSnapshotMeta,
-        encryption,
-    );
-    let semantic_prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
-    let next_slot = storage
-        .allocate_protocol_slot(
-            &meta_context,
-            &circle_snapshot_slot_prefix(
-                circle_id,
-                &device_id,
-                generation.checked_add(1).ok_or_else(|| {
-                    SnapshotError::PublicationState(
-                        "Circle snapshot generation overflow".to_string(),
-                    )
-                })?,
-            ),
-            ".json",
-        )
-        .await
-        .map_err(SnapshotError::Bucket)?;
-    let activation = crate::sync::store_commit::circle_snapshot_stream_activation(
-        root.store_root_hash,
-        &registration_ref,
-        circle_id,
-        &device_id,
-    )
-    .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-    let meta = CircleSnapshotMeta::signed(
-        root.store_root_hash,
-        circle_id,
-        registration_ref,
-        control,
-        epoch_id,
-        key_fingerprint,
-        generation,
-        bootstrap,
-        created_at,
-        CircleSnapshotSuccessorLink {
-            activation,
-            predecessor,
-            next_slot,
-        },
-        &device_signer,
-    )
-    .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-    let meta_prepared = storage
-        .prepare_protocol_object(
-            &meta_context,
-            current_slot,
-            &semantic_prefix,
-            meta.to_bytes(),
-        )
-        .map_err(SnapshotError::Bucket)?;
-    database
-        .stage_circle_snapshot_publication(
-            meta.clone(),
-            meta_prepared,
-            image_bytes,
-            image_prepared,
-            Vec::new(),
-        )
-        .await
-        .map_err(publication_error)?;
-    let pending = database
-        .outbound_circle_snapshot_publication(circle_id)
-        .await
-        .map_err(publication_error)?
-        .ok_or_else(|| {
-            SnapshotError::PublicationState(
-                "staged Circle snapshot publication row is absent".to_string(),
+            .map_err(SnapshotError::Bucket)?;
+        let image_prepared = storage
+            .prepare_protocol_object(
+                &image_context,
+                image_slot,
+                &image_prefix,
+                image_bytes.clone(),
             )
-        })?;
-    publish_durable_circle_snapshot(storage, database, pending).await
+            .map_err(SnapshotError::Bucket)?;
+        let bootstrap = CircleBootstrapRef {
+            coverage,
+            schema_version,
+            sync_routing_hash: db.sync_routing_hash(),
+            image: SnapshotImageRef {
+                image_hash,
+                object: image_prepared.reference().clone(),
+            },
+            blobs,
+        };
+        let previous = database
+            .latest_local_circle_snapshot(circle_id)
+            .await
+            .map_err(publication_error)?;
+        // Generation zero occupies a deterministic slot a reader can compute (there
+        // is no registration snapshot anchor for a per-Circle stream); later
+        // generations occupy the predecessor's create-once successor slot.
+        let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            "{}.json",
+            circle_snapshot_slot_prefix(circle_id, &device_id, 0)
+        ))
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        let (generation, predecessor, current_slot) = match previous {
+            Some(previous) => (
+                previous
+                    .reference
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        SnapshotError::PublicationState(
+                            "Circle snapshot generation overflow".to_string(),
+                        )
+                    })?,
+                Some(previous.reference),
+                previous.successor_slot,
+            ),
+            None => (0, None, stream_first_slot),
+        };
+        let meta_context = ProtocolObjectContext::circle(
+            root.store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+            encryption,
+        );
+        let semantic_prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
+        let next_slot = storage
+            .allocate_protocol_slot(
+                &meta_context,
+                &circle_snapshot_slot_prefix(
+                    circle_id,
+                    &device_id,
+                    generation.checked_add(1).ok_or_else(|| {
+                        SnapshotError::PublicationState(
+                            "Circle snapshot generation overflow".to_string(),
+                        )
+                    })?,
+                ),
+                ".json",
+            )
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        let activation = crate::sync::store_commit::circle_snapshot_stream_activation(
+            root.store_root_hash,
+            &registration_ref,
+            circle_id,
+            &device_id,
+        )
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let meta = CircleSnapshotMeta::signed(
+            root.store_root_hash,
+            circle_id,
+            registration_ref,
+            control,
+            epoch_id,
+            key_fingerprint,
+            generation,
+            bootstrap,
+            created_at,
+            CircleSnapshotSuccessorLink {
+                activation,
+                predecessor,
+                next_slot,
+            },
+            device_signer,
+        )
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let meta_prepared = storage
+            .prepare_protocol_object(
+                &meta_context,
+                current_slot,
+                &semantic_prefix,
+                meta.to_bytes(),
+            )
+            .map_err(SnapshotError::Bucket)?;
+        database
+            .stage_circle_snapshot_publication(
+                meta.clone(),
+                meta_prepared,
+                image_bytes,
+                image_prepared,
+                Vec::new(),
+            )
+            .await
+            .map_err(publication_error)?;
+        let pending = database
+            .outbound_circle_snapshot_publication(circle_id)
+            .await
+            .map_err(publication_error)?
+            .ok_or_else(|| {
+                SnapshotError::PublicationState(
+                    "staged Circle snapshot publication row is absent".to_string(),
+                )
+            })?;
+        publish_durable_circle_snapshot(storage, database, pending).await
+    }
 }
 
 async fn publish_durable_circle_snapshot(
@@ -2384,7 +2433,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, device_id) = initialize(&db, &storage, &signer).await;
+        let (_root, _) = initialize(&db, &storage, &signer).await;
         assert!(StoreDatabase::new(&db)
             .export_activated_device_continuation(&signer)
             .await
@@ -2400,19 +2449,6 @@ mod tests {
         )
         .await
         .expect("publish continued snapshot");
-        let root = store_database(&db)
-            .local_store_root_ref()
-            .await
-            .expect("load continued Store root")
-            .expect("continued Store root exists");
-        let (_, registration_ref, registration, _) =
-            crate::sync::store::operations::load_local_store_authority(
-                &StoreDatabase::new(&db),
-                &device_id,
-                &signer,
-            )
-            .await
-            .expect("load continued snapshot authority");
         let published = store_database(&db)
             .latest_local_store_snapshot()
             .await
@@ -2426,54 +2462,49 @@ mod tests {
                 .latest_snapshot,
             Some(published.reference.clone()),
         );
-        let history = crate::sync::store::owner::pull::MergeHistoryVerifier::new(&storage, &root)
+        let store = crate::sync::store::Store::load(
+            StoreDatabase::new(&db),
+            storage.clone(),
+            signer.clone(),
+        )
+        .await
+        .expect("load continued snapshot Store");
+        let mut writer = store
+            .authorize_writer()
             .await
-            .expect("open continued snapshot verifier");
-        history
-            .commit_verifier_ref()
-            .load_store_snapshot(&registration_ref, &registration, &published.reference)
+            .expect("authorize continued snapshot writer");
+        writer
+            .load_own_snapshot_for_test(&published.reference)
             .await
             .expect("load exact continued snapshot");
 
         let mut wrong_reference = published.reference.clone();
         wrong_reference.generation += 1;
-        assert!(history
-            .commit_verifier_ref()
-            .load_store_snapshot(&registration_ref, &registration, &wrong_reference)
+        assert!(writer
+            .load_own_snapshot_for_test(&wrong_reference)
             .await
             .is_err());
 
         let mut wrong_hash = published.reference.clone();
         wrong_hash.snapshot_hash = ObjectHash::digest(b"another snapshot");
-        assert!(history
-            .commit_verifier_ref()
-            .load_store_snapshot(&registration_ref, &registration, &wrong_hash)
+        assert!(writer
+            .load_own_snapshot_for_test(&wrong_hash)
             .await
             .is_err());
 
         let mut wrong_author = published.meta.clone();
         wrong_author.author_registration.registration_hash = ObjectHash::digest(b"another author");
-        assert!(verify_store_snapshot_bytes(
-            &root,
-            &registration_ref,
-            &registration,
-            &published.reference,
-            &wrong_author.to_bytes(),
-        )
-        .is_err());
+        assert!(writer
+            .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_author.to_bytes())
+            .is_err());
 
         let mut wrong_successor = published.meta;
         wrong_successor.successor.next_slot =
             crate::storage::cloud::ObjectSlot::logical("wrong-successor.json".to_string())
                 .expect("valid wrong successor slot");
-        assert!(verify_store_snapshot_bytes(
-            &root,
-            &registration_ref,
-            &registration,
-            &published.reference,
-            &wrong_successor.to_bytes(),
-        )
-        .is_err());
+        assert!(writer
+            .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_successor.to_bytes())
+            .is_err());
     }
 
     #[tokio::test]
@@ -2690,7 +2721,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(&path, "circle-snapshot-device");
-        initialize(&db, &storage, &signer).await;
+        let (root_ref, _) = initialize(&db, &storage, &signer).await;
         db.call(|conn| {
             crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
         })
@@ -2721,27 +2752,12 @@ mod tests {
         .await
         .expect("author Circle snapshots");
 
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap()
-            .expect("local device id");
-        let (root_ref, registration_ref, registration, _) =
-            crate::sync::store::operations::load_local_store_authority(
-                &store_database(&db),
-                &device_id,
-                &signer,
-            )
-            .await
-            .expect("load local Store authority");
-
-        let stream = load_circle_snapshot_stream(
+        let stream = crate::sync::store::load_circle_snapshot_metas_for_test(
+            &db,
             &storage,
-            &root_ref,
             circle_id,
             encryption.clone(),
-            &registration_ref,
-            &registration,
+            &signer,
         )
         .await
         .expect("load Circle snapshot stream");
@@ -2765,7 +2781,7 @@ mod tests {
                 &selected.bootstrap.image.object,
                 &circle_snapshot_image_semantic_prefix(
                     circle_id,
-                    &registration.device_id.to_string(),
+                    &selected.author_registration.device_id.to_string(),
                     selected.bootstrap.image.image_hash,
                 ),
             )
@@ -2792,7 +2808,7 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(&path, "circle-snapshot-outsider");
-        initialize(&db, &storage, &signer).await;
+        let (root_ref, device_id) = initialize(&db, &storage, &signer).await;
         db.call(|conn| {
             crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
         })
@@ -2817,19 +2833,6 @@ mod tests {
         )
         .await
         .expect("author Circle snapshots");
-
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .unwrap()
-            .expect("local device id");
-        let (root_ref, _, _, _) = crate::sync::store::operations::load_local_store_authority(
-            &store_database(&db),
-            &device_id,
-            &signer,
-        )
-        .await
-        .expect("load local Store authority");
 
         // A Store member outside the Circle resolves an unrelated key and cannot
         // open the Circle-sealed snapshot metadata.

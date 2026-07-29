@@ -142,19 +142,13 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     )
     .await
     .expect("activate Member device");
-    let member_device_id = member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let member_registration = store
+        .bind_device(&member_db, &member)
         .await
-        .expect("read Member device id")
-        .expect("Member device id");
-    let (_, member_registration, _, _) =
-        crate::sync::store::operations::load_local_store_authority(
-            &StoreDatabase::new(&member_db),
-            &member_device_id,
-            &member,
-        )
+        .expect("bind Member Store")
+        .owner_promotion_target_for_test()
         .await
-        .expect("load Member registration");
+        .expect("load Member promotion target");
 
     Box::pin(crate::sync::test_helpers::promote_active_member_fixture(
         &store,
@@ -273,18 +267,13 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     )
     .await
     .expect("activate Member device");
-    let (_, member_registration, _, _) =
-        crate::sync::store::operations::load_local_store_authority(
-            &StoreDatabase::new(&member_db),
-            &member_db
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                .await
-                .expect("read Member device id")
-                .expect("Member device id"),
-            &member,
-        )
+    let member_registration = store
+        .bind_device(&member_db, &member)
         .await
-        .expect("load Member registration");
+        .expect("bind Member Store")
+        .owner_promotion_target_for_test()
+        .await
+        .expect("load Member promotion target");
     store.home.fail_exact_create_before_call(1);
     store
         .bind_device(&owner_db, &owner)
@@ -404,19 +393,13 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     )
     .await
     .expect("activate Member device");
-    let member_device_id = member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let member_registration = store
+        .bind_device(&member_db, &member)
         .await
-        .expect("read Member device id")
-        .expect("Member device id");
-    let (_, member_registration, _, _) =
-        crate::sync::store::operations::load_local_store_authority(
-            &StoreDatabase::new(&member_db),
-            &member_device_id,
-            &member,
-        )
+        .expect("bind Member Store")
+        .owner_promotion_target_for_test()
         .await
-        .expect("load Member registration");
+        .expect("load Member promotion target");
 
     let request = store
         .bind_device(&owner_db, &owner)

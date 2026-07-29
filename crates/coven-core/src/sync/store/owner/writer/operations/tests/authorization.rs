@@ -180,10 +180,6 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         1
     );
 
-    let (_, registration_ref, _, _) =
-        load_local_store_authority(&writer_db, &local_device_id(&writer_db).await, &writer)
-            .await
-            .expect("load removed writer registration");
     let writer_device = store
         .bind_device(&writer_db, &writer)
         .await
@@ -195,7 +191,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let result = writer_device
-        .authorize_retained_outbound_for_test(&order, before_removal.head_refs(), &registration_ref)
+        .authorize_retained_outbound_for_test(&order, before_removal.head_refs())
         .await;
 
     assert!(
@@ -269,10 +265,6 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .expect("load candidate with new Direct membership");
     assert!(candidate.can_write_now(&new_member_pubkey));
 
-    let (_, registration_ref, _, _) =
-        load_local_store_authority(&owner_db, &local_device_id(&owner_db).await, &owner)
-            .await
-            .expect("load owner registration");
     let crate::sync::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
     let order = crate::sync::store_commit::StoreCommitOrder {
         seq: predecessor.coord.sequence() + 1,
@@ -280,7 +272,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
     };
     let authorization = owner_device
-        .authorize_retained_outbound_for_test(&order, candidate.head_refs(), &registration_ref)
+        .authorize_retained_outbound_for_test(&order, candidate.head_refs())
         .await
         .expect("authorize membership that causally extends the predecessor");
 
@@ -320,12 +312,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
         .await
         .expect("publish exact predecessor commit");
-    let device_id = local_device_id(&owner_db).await;
-    let (_, mut forged_registration, _, _) =
-        load_local_store_authority(&owner_db, &device_id, &owner)
-            .await
-            .expect("load exact local authority");
-    forged_registration.device_id = crate::sync::store_commit::StoreDeviceId::derive(
+    let forged_device_id = crate::sync::store_commit::StoreDeviceId::derive(
         &store.root,
         &crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder {
             creation_id: crate::sync::store_commit::StoreCreationId::from_nonce(
@@ -355,6 +342,18 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
                             "parse test Store device snapshot: {error}"
                         ))
                     })?;
+                let mut forged_registration = state
+                    .devices
+                    .values()
+                    .next()
+                    .ok_or_else(|| {
+                        crate::database::DbError::Message(
+                            "test Store device snapshot has no registration".to_string(),
+                        )
+                    })?
+                    .registration
+                    .clone();
+                forged_registration.device_id = forged_device_id;
                 let forged = state
                     .activate_registration(forged_registration.clone(), None)
                     .map_err(|error| crate::database::DbError::Message(error.to_string()))?;

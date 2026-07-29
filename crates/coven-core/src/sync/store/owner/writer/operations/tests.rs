@@ -59,23 +59,6 @@ async fn drain_store_writes(
     writer.drain_store_writes().await
 }
 
-async fn load_local_store_authority(
-    db: &Database,
-    expected_device_id: &str,
-    identity_signer: &UserKeypair,
-) -> Result<
-    (
-        StoreRootRef,
-        StoreDeviceRegistrationRef,
-        StoreDeviceRegistration,
-        UserKeypair,
-    ),
-    StoreError,
-> {
-    super::load_local_store_authority(&StoreDatabase::new(db), expected_device_id, identity_signer)
-        .await
-}
-
 async fn prepare_merge_conflict_resolution_commit(
     db: &Database,
     storage: &Arc<CloudSyncStorage>,

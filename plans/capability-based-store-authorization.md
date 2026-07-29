@@ -320,6 +320,17 @@ not recreate their free forms:
   retains the same verified history session through founder-registration
   loading and image installation, so restore does not reconstruct a commit
   verifier from a verified root.
+- `load_local_store_authority` and its tuple of root, registration reference,
+  registration, and device signer are deleted. Store tests use closed
+  Store-owned operations for retained-outbound authorization, promotion
+  targets, head signing, and snapshot verification.
+- Circle snapshot publication is an `AuthorizedWriterOperation` method. It
+  uses the retained root, activated registration, device signer, database, and
+  storage rather than reloading writer authority during publication.
+- Store-write preparation carries the writer capability's retained exact root
+  into the database transaction. The transaction verifies the activated
+  registration bytes against the already-verified commit author instead of
+  reloading the Store root and reconstructing registration authority.
 
 ## The distinction this design preserves
 

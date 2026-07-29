@@ -795,34 +795,25 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let candidate = persist_candidate(&device, &outbound).await;
     let expected_head = candidate.head.clone();
     let expected_prepared = candidate.prepared_head.clone();
-    let (root, registration_ref, _, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(
-            &StoreDatabase::new(&db),
-            &outbound.reference.registration.device_id.to_string(),
-            &signer,
-        )
-        .await
-        .expect("load local device signing authority");
     let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
         expected_head.successor.next_slot.logical_key().to_string(),
         "alternate-next-slot".to_string(),
     )
     .expect("valid alternate successor slot");
-    let alternate_head = crate::sync::store_commit::StoreDeviceHead::signed(
-        root.store_root_hash,
-        registration_ref,
-        candidate.reference.clone(),
-        expected_head.history_summary,
-        crate::sync::store_commit::SuccessorLink {
-            activation: expected_head.successor.activation,
-            predecessor: expected_head.successor.predecessor.clone(),
-            next_slot: alternate_next,
-        },
-        &device_signer,
-    )
-    .expect("sign alternate head");
+    let alternate_head = device
+        .sign_device_head_for_test(
+            candidate.reference.clone(),
+            expected_head.history_summary,
+            crate::sync::store_commit::SuccessorLink {
+                activation: expected_head.successor.activation,
+                predecessor: expected_head.successor.predecessor.clone(),
+                next_slot: alternate_next,
+            },
+        )
+        .await
+        .expect("sign alternate head");
     let head_context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
+        device.store_root().store_root_hash,
         ProtocolObjectDomain::StoreHead,
     );
     let head_prefix = crate::sync::store_commit::head_slot_prefix(

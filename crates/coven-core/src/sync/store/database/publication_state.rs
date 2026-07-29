@@ -3,10 +3,13 @@ use crate::database::{
     StoreBatchCompletion, StoreBatchLocalCleanup,
 };
 use crate::sync::remote_object::RemoteObjectRecord;
-use crate::sync::store_commit::{StoreBatchCommitRef, StoreDeviceHead, VerifiedStoreBatchCommit};
+use crate::sync::store_commit::{
+    StoreBatchCommitRef, StoreDeviceHead, StoreRootRef, VerifiedStoreBatchCommit,
+};
 use crate::write::WriteId;
 
 pub(crate) struct StoreWritePreparation {
+    pub root: StoreRootRef,
     pub write_id: WriteId,
     pub remote_objects: Vec<RemoteObjectRecord>,
     pub audiences: PreparedAudienceObjects,

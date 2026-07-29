@@ -962,16 +962,37 @@ impl Store {
         &self,
         order: &crate::sync::store_commit::StoreCommitOrder,
         candidate_membership_heads: &[crate::sync::membership::MembershipHeadRef],
-        author_registration: &crate::sync::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<pull::MergeOutboundAuthorization, StoreError> {
-        let history = self
-            .authorize_history()
+        let authorization = self
+            .authorize()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        history
-            .authorize_retained_outbound(order, candidate_membership_heads, author_registration)
+        let author_registration = authorization
+            .local_device
+            .as_ref()
+            .ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "retained outbound test Store has no local device".to_string(),
+                )
+            })?
+            .registration_ref
+            .clone();
+        authorization
+            .history
+            .authorize_retained_outbound(order, candidate_membership_heads, &author_registration)
             .await
             .map_err(StoreError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn owner_promotion_target_for_test(
+        &self,
+    ) -> Result<crate::sync::store_commit::StoreDeviceRegistrationRef, StoreError> {
+        let writer = self
+            .authorize_writer()
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        Ok(writer.writer.registration_ref.clone())
     }
 
     #[cfg(test)]

@@ -25,13 +25,6 @@ pub(super) async fn initialize_exact_store(
     (root, device_id)
 }
 
-pub(super) async fn local_device_id(db: &Database) -> String {
-    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local device id")
-        .expect("local device id exists")
-}
-
 pub(super) async fn remove_exact_store_root(db: &Database) {
     db.call(|connection| {
         connection
