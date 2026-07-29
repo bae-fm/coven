@@ -16,7 +16,6 @@ pub(super) async fn verified_terminal_merge_retractions(
     let mut verified_retained = BTreeMap::new();
     for materialization in &retained {
         let verified = history_verifier
-            .commit_verifier()
             .authenticate_bytes(
                 materialization.commit_ref(),
                 &materialization.commit().to_bytes(),
@@ -126,7 +125,6 @@ pub(super) async fn verified_terminal_merge_retractions(
             continue;
         };
         let nonactivation = history_verifier
-            .commit_verifier()
             .verify_author_exclusion_nonactivation(
                 &locator,
                 activation_head,

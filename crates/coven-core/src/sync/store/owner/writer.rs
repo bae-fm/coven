@@ -842,7 +842,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .store
             .history
             .history_verifier
-            .commit_verifier()
             .authenticate_bytes(&reference, &activation.candidate.commit.to_bytes())
             .await?;
         let commit = verified_commit.value().clone();
@@ -870,16 +869,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let device_operations = super::pull::load_local_commit_device_operations(
-            &database,
-            self.store.history.history_verifier.commit_verifier(),
-            &verified_commit,
-            &authorization.membership,
-            &authorization.device_state_ref,
-            authorization.device_state,
-        )
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let device_operations = self
+            .store
+            .history
+            .history_verifier
+            .load_local_device_operations(
+                &database,
+                &verified_commit,
+                &authorization.membership,
+                &authorization.device_state_ref,
+                authorization.device_state,
+            )
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let has_tracked_remote_objects =
             !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
         if has_tracked_remote_objects {
@@ -1086,16 +1088,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         .await?;
         let acknowledgement = match acknowledgement_evidence {
             Some((reference, value)) => Some(
-                super::pull::retain_activated_acknowledgement(
-                    self.store.history.history_verifier.commit_verifier_ref(),
-                    &common.reference,
-                    &common.commit,
-                    plan.registration(),
-                    reference,
-                    value,
-                )
-                .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                self.store
+                    .history
+                    .history_verifier
+                    .retain_acknowledgement(
+                        &common.reference,
+                        &common.commit,
+                        plan.registration(),
+                        reference,
+                        value,
+                    )
+                    .await
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
             None => None,
         };
@@ -1123,13 +1127,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
         };
-        let state_after = Box::pin(super::pull::derive_local_post_device_state(
-            self.store.history.history_verifier.commit_verifier_ref(),
-            &common.commit,
-            plan.predecessor_state().clone(),
-            &registrations,
-            device_operations,
-        ))
+        let state_after = Box::pin(
+            self.store
+                .history
+                .history_verifier
+                .derive_local_post_device_state(
+                    &common.commit,
+                    plan.predecessor_state().clone(),
+                    &registrations,
+                    device_operations,
+                ),
+        )
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(

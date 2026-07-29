@@ -800,7 +800,6 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         let proposal = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_exclusion_proposal(proposal_ref)
             .await?;
         let state = database
@@ -1127,7 +1126,6 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         let proposal = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_exclusion_proposal(reference.proposal())
             .await?;
         let retained = crate::sync::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
@@ -1182,7 +1180,6 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         let proposal = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_exclusion_proposal(intended_ref.proposal())
             .await?;
         let unverified: StoreDeviceExclusionOutcome =
@@ -1199,7 +1196,6 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         let winner = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_exclusion_outcome(&winner_ref, &proposal)
             .await?;
         if winner.object.value != unverified || winner.object.bytes != bytes {
@@ -1251,7 +1247,6 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             let acknowledgement = self
                 .writer
                 .history_verifier_mut()
-                .commit_verifier()
                 .load_store_ack(&reference, &registration)
                 .await?;
             let proposal_freezes = &acknowledgement.value.exclusions.proposal_freezes;

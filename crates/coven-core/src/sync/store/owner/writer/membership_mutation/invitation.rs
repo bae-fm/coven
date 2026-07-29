@@ -129,7 +129,6 @@ async fn execute_invite_mutation(
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let author = operation
         .history_verifier_mut()
-        .commit_verifier_ref()
         .load_registration(&plan.publication.head.body.author_registration)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?

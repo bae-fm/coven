@@ -66,7 +66,6 @@ impl<'operation, 'storage> AuthorizedCircleOperation<'operation, 'storage> {
             )?);
         let verified_commit = history
             .history_verifier
-            .commit_verifier()
             .authenticate_bytes(
                 &journal.operation().commit_ref,
                 &journal.operation().commit_bytes,

@@ -169,7 +169,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let founder_registration_ref = founder_head.body.author_registration.clone();
         let founder_registration = self
             .history_verifier
-            .commit_verifier_ref()
             .load_registration(&founder_registration_ref)
             .await
             .map_err(crate::sync::store::membership::AnchoredChainError::from_store_object)?;
@@ -236,7 +235,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     #[cfg(test)]
     pub(super) async fn load_exact_membership_head_for_test(
-        &self,
+        &mut self,
         reference: &MembershipHeadRef,
     ) -> Result<
         crate::sync::membership::AuthorHead,
@@ -734,8 +733,7 @@ impl AuthorizedStoreHistory<'_> {
         &self,
         order: &crate::sync::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
-        let verifier = self.history_verifier.commit_verifier_ref();
-        let root = verifier.root();
+        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
@@ -746,7 +744,7 @@ impl AuthorizedStoreHistory<'_> {
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         require_complete_retained_frontier(root, &frontier, &checkpoints)?;
-        retained_merge_device_state(verifier, &frontier, &checkpoints).await
+        retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await
     }
 
     pub(super) async fn authorize_retained_conflict_resolution(
@@ -756,8 +754,7 @@ impl AuthorizedStoreHistory<'_> {
         author_registration: &StoreDeviceRegistrationRef,
         resolver_pubkey: &str,
     ) -> Result<MergeConflictResolutionAuthorization, pull::StorePullError> {
-        let verifier = self.history_verifier.commit_verifier_ref();
-        let root = verifier.root();
+        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
@@ -778,19 +775,19 @@ impl AuthorizedStoreHistory<'_> {
             .validate_complete_membership(&membership)
             .map_err(pull::StorePullError::Database)?;
         let (device_state_ref, device_state) =
-            retained_merge_device_state(verifier, &frontier, &checkpoints).await?;
+            retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
         if !pull::device_state_has_active_registration(&device_state, author_registration) {
             return Err(pull::StorePullError::Database(
                 "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),
             ));
         }
-        pull::verify_canonical_owner_registration(
-            verifier,
-            &device_state,
-            resolver_pubkey,
-            author_registration,
-        )
-        .await?;
+        self.history_verifier
+            .verify_canonical_owner_registration(
+                &device_state,
+                resolver_pubkey,
+                author_registration,
+            )
+            .await?;
         Ok(MergeConflictResolutionAuthorization {
             membership,
             device_state_ref,
@@ -804,8 +801,7 @@ impl AuthorizedStoreHistory<'_> {
         candidate_membership_heads: &[MembershipHeadRef],
         author_registration: &StoreDeviceRegistrationRef,
     ) -> Result<pull::MergeOutboundAuthorization, pull::StorePullError> {
-        let verifier = self.history_verifier.commit_verifier_ref();
-        let root = verifier.root();
+        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
@@ -826,7 +822,7 @@ impl AuthorizedStoreHistory<'_> {
             .validate_complete_membership(&membership)
             .map_err(pull::StorePullError::Database)?;
         let (device_state_ref, device_state) =
-            retained_merge_device_state(verifier, &frontier, &checkpoints).await?;
+            retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
         if !pull::device_state_has_active_registration(&device_state, author_registration) {
             return Err(pull::StorePullError::Database(
                 "Merge outbound author is inactive at its exact predecessor cut".to_string(),
@@ -1048,11 +1044,7 @@ impl AuthorizedStoreHistory<'_> {
             &expected.commit,
         )
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let winner_commit = self
-            .history_verifier
-            .commit_verifier()
-            .load_ref(&unverified.commit)
-            .await?;
+        let winner_commit = self.history_verifier.load_ref(&unverified.commit).await?;
         if winner_commit.author() != &registration {
             return Err(StoreError::InvalidOutbound(
                 "occupied Merge head commit has a different authenticated author".to_string(),
@@ -1316,7 +1308,6 @@ impl AuthorizedStoreHistory<'_> {
             .await?;
         let activation_commit = self
             .history_verifier
-            .commit_verifier()
             .load_ref(retained.commit_ref())
             .await?;
         if activation_commit.value() != retained.commit() {
@@ -1325,7 +1316,6 @@ impl AuthorizedStoreHistory<'_> {
             ));
         }
         self.history_verifier
-            .commit_verifier()
             .verify_author_exclusion_nonactivation(
                 locator,
                 retained.activation_head(),
@@ -1389,14 +1379,14 @@ pub(crate) fn retained_membership_floor_is_included(
 }
 
 async fn retained_merge_device_state(
-    verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &pull::MergeHistoryVerifier<'_>,
     frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
     checkpoints: &[OpenedRetainedMergeHistorySummary],
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
-    let root = verifier.root();
-    let root_value = verifier.verified_root();
+    let root = history_verifier.root();
+    let root_value = history_verifier.verified_root();
     let state = if checkpoints.is_empty() {
-        let founder = verifier.load_founder_registration().await?;
+        let founder = history_verifier.load_founder_registration().await?;
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
         ResolvedStoreDeviceState::founder(
@@ -1462,7 +1452,6 @@ impl AuthorizedStoreHistory<'_> {
         let reference = &verification.candidate.head.value.commit;
         let candidate = self
             .history_verifier
-            .commit_verifier()
             .authenticate_bytes(reference, &verification.candidate.commit.bytes)
             .await?;
         if candidate.value() != verification.candidate.commit.value.value() {

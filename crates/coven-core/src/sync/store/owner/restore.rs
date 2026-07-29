@@ -309,7 +309,7 @@ async fn prepare_or_load_owner_recovery_node(
 #[allow(clippy::too_many_arguments)]
 async fn install_activated_owner_recovery(
     database: &StoreDatabase,
-    commit_verifier: &super::StoreCommitVerifier<'_>,
+    history_verifier: &pull::MergeHistoryVerifier<'_>,
     origin: &StoreDeviceRegistrationOrigin,
     device_id: crate::sync::store_commit::StoreDeviceId,
     recovery_id: DeviceRecoveryId,
@@ -319,8 +319,8 @@ async fn install_activated_owner_recovery(
     sequence: u64,
     predecessor: &Option<OwnerRecoveryNodeRef>,
 ) -> Result<Option<StoreDeviceRegistrationRef>, StoreRegistrationError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let Some((registration_ref, registration, activation)) = database
         .activated_store_device_registration_for_device(device_id)
         .await
@@ -359,7 +359,7 @@ async fn install_activated_owner_recovery(
             "activated Owner recovery registration belongs to another provider principal".into(),
         ));
     }
-    let node = commit_verifier.load_owner_recovery_node(&node_ref).await?;
+    let node = history_verifier.load_owner_recovery_node(&node_ref).await?;
     if node.value.recovery_id != recovery_id
         || node.value.predecessor != *predecessor
         || node.value.readiness.registration != registration_ref
@@ -369,7 +369,7 @@ async fn install_activated_owner_recovery(
         ));
     }
     let initial_ack_ref = node.value.readiness.initial_ack;
-    let initial_ack = commit_verifier
+    let initial_ack = history_verifier
         .load_store_ack(&initial_ack_ref, &registration)
         .await?;
     if initial_ack.value.store_cut != node.value.readiness.bootstrap_cut {
@@ -500,7 +500,6 @@ impl RestoringStore<'_> {
             OwnerRecoveryPosition::At { node } => {
                 let loaded = history
                     .history_verifier
-                    .commit_verifier_ref()
                     .load_owner_recovery_node(node)
                     .await?;
                 if loaded.value.owner_pubkey != owner_pubkey
@@ -535,7 +534,7 @@ impl RestoringStore<'_> {
         let device_id = crate::sync::store_commit::StoreDeviceId::derive(&root, &origin);
         if let Some(registration) = install_activated_owner_recovery(
             &database,
-            history.history_verifier.commit_verifier_ref(),
+            &history.history_verifier,
             &origin,
             device_id,
             recovery_id,
@@ -1095,33 +1094,33 @@ impl<'storage> RestoringStore<'storage> {
             .bootstrap
             .history
             .history_verifier
-            .commit_verifier_ref()
             .load_store_ack(&continuation.latest_ack, &registration)
             .await?;
-        let chain = pull::load_acknowledgement_proof_chain(
-            self.bootstrap
-                .history
-                .history_verifier
-                .commit_verifier_ref(),
-            continuation.latest_ack.clone(),
-            latest.value,
-            &registration,
-        )
-        .await
-        .map_err(|error| match error {
-            pull::RegistrationLoadError::Object(error) => StoreRegistrationError::Object(error),
-            pull::RegistrationLoadError::Invalid(error) => StoreRegistrationError::Invalid(error),
-        })?
-        .into_iter()
-        .rev()
-        .map(|(_, value)| value)
-        .collect();
+        let chain = self
+            .bootstrap
+            .history
+            .history_verifier
+            .load_acknowledgement_proof_chain(
+                continuation.latest_ack.clone(),
+                latest.value,
+                &registration,
+            )
+            .await
+            .map_err(|error| match error {
+                pull::RegistrationLoadError::Object(error) => StoreRegistrationError::Object(error),
+                pull::RegistrationLoadError::Invalid(error) => {
+                    StoreRegistrationError::Invalid(error)
+                }
+            })?
+            .into_iter()
+            .rev()
+            .map(|(_, value)| value)
+            .collect();
         let latest_snapshot = match &continuation.latest_snapshot {
             Some(reference) => Some(
                 self.bootstrap
                     .history
                     .history_verifier
-                    .commit_verifier_ref()
                     .load_store_snapshot(&continuation.registration, &registration, reference)
                     .await?,
             ),

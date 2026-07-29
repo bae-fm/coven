@@ -147,9 +147,9 @@ impl Store {
         let database = authority.database().clone();
         let activation_commit = authority
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(&activation_commit_ref)
-            .await?;
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -212,9 +212,9 @@ impl Store {
         let database = authority.database().clone();
         let activation_commit = authority
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(&activation_commit_ref)
-            .await?;
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -242,7 +242,7 @@ impl Store {
         };
         let roster_chain = super::activation::load_circle_control_roster_chain(
             &database,
-            authority.history_verifier_mut().commit_verifier(),
+            authority.history_verifier_mut(),
             &activation_commit,
             reference,
             &current.control,
@@ -722,9 +722,9 @@ impl Store {
             .await?;
         let activation_commit = authority
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(&activation_commit_ref)
-            .await?;
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -800,9 +800,9 @@ impl AuthorizedWriterOperation<'_> {
             .await?;
         let activation_commit = self
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(&activation_commit_ref)
-            .await?;
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"
@@ -830,7 +830,7 @@ impl AuthorizedWriterOperation<'_> {
         };
         let roster_chain = super::activation::load_circle_control_roster_chain(
             &database,
-            self.history_verifier_mut().commit_verifier(),
+            self.history_verifier_mut(),
             &activation_commit,
             reference,
             &current.control,

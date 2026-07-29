@@ -237,7 +237,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let administrator = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
@@ -285,12 +284,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .reach_test_point(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
             .await;
         let cut = plan.predecessor_cut()?;
-        if !crate::sync::store::owner::pull::history_cut_covers(
-            self.writer.history_verifier_mut().commit_verifier(),
-            &cut,
-            &request.approval.access_grant.activation,
-        )
-        .await?
+        if !self
+            .writer
+            .history_verifier_mut()
+            .history_cut_covers(&cut, &request.approval.access_grant.activation)
+            .await?
         {
             return Err(DeviceJoinError::ApprovalActivationMissing);
         }
@@ -488,7 +486,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let verified_outcome = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_outcome(&outcome_ref, &owner)
             .await?;
         if verified_outcome.value != outcome {
@@ -576,14 +573,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let registration = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&completion.readiness.proof.registration)
             .await?
             .value;
         let ack = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_store_ack(&completion.readiness.proof.initial_ack, &registration)
             .await?
             .value;
@@ -610,7 +605,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 let administrator = self
                     .writer
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_registration(&provider_admin.administrator)
                     .await?
                     .value;
@@ -838,13 +832,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let (attempt, owner) = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;

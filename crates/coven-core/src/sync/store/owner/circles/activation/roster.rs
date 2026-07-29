@@ -20,7 +20,7 @@ use crate::sync::store_commit::{
 
 pub(super) async fn load_circle_roster_state(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -32,7 +32,7 @@ pub(super) async fn load_circle_roster_state(
 ) -> Result<ResolvedCircleRoster, CircleOperationError> {
     load_circle_roster_chain(
         database,
-        commit_verifier,
+        history_verifier,
         verified_prefix,
         commit_ref,
         commit,
@@ -50,7 +50,7 @@ pub(super) async fn load_circle_roster_state(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn load_circle_roster_chain(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -60,7 +60,7 @@ pub(super) async fn load_circle_roster_chain(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
-    let storage = commit_verifier.storage();
+    let storage = history_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     if state.heads.is_empty()
         || !state
@@ -84,7 +84,7 @@ pub(super) async fn load_circle_roster_chain(
     }
     let loaded_heads = load_exact_circle_roster_heads(
         database,
-        commit_verifier,
+        history_verifier,
         verified_prefix,
         commit_ref,
         commit,
@@ -133,7 +133,7 @@ pub(super) async fn load_circle_roster_chain(
     } else {
         replay_circle_roster_resolutions(
             database,
-            commit_verifier,
+            history_verifier,
             verified_prefix,
             commit_ref,
             commit,
@@ -275,7 +275,7 @@ async fn load_circle_roster_resolutions(
 
 async fn load_exact_circle_roster_heads(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -285,7 +285,7 @@ async fn load_exact_circle_roster_heads(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<Vec<crate::sync::circle::ExactCircleRosterHead>, CircleOperationError> {
-    let storage = commit_verifier.storage();
+    let storage = history_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     let mut loaded_heads = Vec::with_capacity(references.len());
     for reference in references {
@@ -311,7 +311,7 @@ async fn load_exact_circle_roster_heads(
         let declared_ref = CircleRosterHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
             database,
-            commit_verifier,
+            history_verifier,
             verified_prefix,
             commit_ref,
             commit,
@@ -381,7 +381,7 @@ async fn load_exact_circle_roster_heads(
 
 async fn replay_circle_roster_resolutions(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -393,7 +393,7 @@ async fn replay_circle_roster_resolutions(
     objects: &CircleActivationObjects,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<crate::sync::circle::CircleRosterChain, CircleOperationError> {
-    let storage = commit_verifier.storage();
+    let storage = history_verifier.storage();
     let store_root_hash = commit.store_root_hash;
     let known_resolution_refs = resolutions
         .iter()
@@ -440,7 +440,7 @@ async fn replay_circle_roster_resolutions(
         }
         let heads = load_exact_circle_roster_heads(
             database,
-            commit_verifier,
+            history_verifier,
             verified_prefix,
             commit_ref,
             commit,
@@ -681,7 +681,7 @@ async fn replay_circle_roster_resolutions(
 
 pub(super) async fn load_circle_authority_roster(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -702,7 +702,7 @@ pub(super) async fn load_circle_authority_roster(
     };
     load_circle_roster_state(
         database,
-        commit_verifier,
+        history_verifier,
         verified_prefix,
         commit_ref,
         commit,

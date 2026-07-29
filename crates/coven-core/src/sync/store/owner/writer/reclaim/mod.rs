@@ -15,7 +15,8 @@ use crate::sync::storage::{
 };
 use crate::sync::store::database::reclaim::journal;
 use crate::sync::store::database::StoreDatabase;
-use crate::sync::store::owner::{AuthorizedStoreHistory, StoreCommitVerifier};
+use crate::sync::store::owner::pull::MergeHistoryVerifier;
+use crate::sync::store::owner::AuthorizedStoreHistory;
 use crate::sync::store::AuthorizedWriterOperation;
 use crate::sync::store_commit::{
     snapshot_image_semantic_prefix, CircleAckRef, CirclePackageRef, CircleSnapshotRef,
@@ -1031,6 +1032,14 @@ pub enum StoreReclaimError {
     },
 }
 
+fn reclaim_pull_error(error: super::pull::StorePullError) -> StoreReclaimError {
+    match error {
+        super::pull::StorePullError::Object(error) => StoreReclaimError::Object(error),
+        super::pull::StorePullError::Storage(error) => StoreReclaimError::Storage(error),
+        error => StoreReclaimError::Authorization(error.to_string()),
+    }
+}
+
 pub(super) struct AuthorizedReclaim<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
 }
@@ -1058,7 +1067,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         // not block Circle package reclamation, which carries its own Circle coverage.
         let store_targets = match Box::pin(self.choose_snapshot(&registrations)).await {
             Ok(snapshot) => exact_package_targets(
-                self.writer.history_verifier_mut().commit_verifier(),
+                self.writer.history_verifier_mut(),
                 &snapshot.snapshot.meta.coverage,
             )
             .await?
@@ -1149,12 +1158,9 @@ impl AuthorizedReclaim<'_, '_> {
         let frontier = CommitFrontier::from_refs(database.materialized_frontier().await?)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         let epochs = database.circle_replay_epoch_index(root.clone()).await?;
-        for (commit, package) in exact_circle_package_targets(
-            self.writer.history_verifier_mut().commit_verifier(),
-            circle_id,
-            &frontier,
-        )
-        .await?
+        for (commit, package) in
+            exact_circle_package_targets(self.writer.history_verifier_mut(), circle_id, &frontier)
+                .await?
         {
             // `permits` is the same predicate the pull path applies; a package it
             // accepts is live history. A package whose control it cannot resolve, or
@@ -1237,10 +1243,9 @@ impl AuthorizedReclaim<'_, '_> {
                 let commit = self
                     .writer
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_ref(owner)
                     .await
-                    .map_err(StoreReclaimError::Object)?;
+                    .map_err(reclaim_pull_error)?;
                 if let Some(package) =
                     audience_blob_binding_package(commit.value(), blob.locator().audience())
                 {
@@ -1347,7 +1352,7 @@ impl AuthorizedReclaim<'_, '_> {
             // acknowledged. Read it once.
             let streams = Box::pin(load_circle_snapshot_streams(
                 &database,
-                self.writer.history_verifier_mut().commit_verifier(),
+                self.writer.history_verifier_mut(),
                 circle_id,
                 &control,
                 registrations,
@@ -1373,7 +1378,7 @@ impl AuthorizedReclaim<'_, '_> {
                 continue;
             };
             let targets = exact_circle_package_targets(
-                self.writer.history_verifier_mut().commit_verifier(),
+                self.writer.history_verifier_mut(),
                 circle_id,
                 &selected.meta.bootstrap.coverage,
             )
@@ -1436,13 +1441,13 @@ struct CircleSnapshotStream {
 /// cannot decrypt the older ones.
 async fn load_circle_snapshot_streams(
     database: &StoreDatabase,
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Vec<CircleSnapshotStream>, StoreReclaimError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let encryption = database
         .circle_package_access(root.clone(), circle_id, current_control.clone())
         .await?
@@ -1551,7 +1556,7 @@ async fn choose_circle_snapshot(
     let database = history.database().clone();
     let streams = Box::pin(load_circle_snapshot_streams(
         &database,
-        history.history_verifier_mut().commit_verifier_ref(),
+        history.history_verifier_mut(),
         circle_id,
         current_control,
         registrations,
@@ -1571,30 +1576,23 @@ async fn choose_circle_snapshot(
 /// or before `coverage`, paired with its exact activation. Walks the covered
 /// commit history exactly like the Store package enumeration.
 async fn exact_circle_package_targets(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     circle_id: CircleId,
     coverage: &CommitFrontier,
 ) -> Result<Vec<(StoreBatchCommitRef, CirclePackageRef)>, StoreReclaimError> {
     let mut targets = BTreeMap::new();
-    for tip in frontier_refs(coverage) {
-        let mut cursor = Some(tip.clone());
-        while let Some(reference) = cursor {
-            if targets.contains_key(&reference) {
-                break;
-            }
-            let commit = commit_verifier
-                .load_ref(&reference)
-                .await
-                .map_err(StoreReclaimError::Object)?;
-            if let Some(package) = commit
-                .value()
-                .circle_packages()
-                .iter()
-                .find(|package| package.circle_id == circle_id)
-            {
-                targets.insert(reference.clone(), package.clone());
-            }
-            cursor = commit.value().order.predecessor().cloned();
+    for (reference, commit) in history_verifier
+        .load_covered_commits(coverage)
+        .await
+        .map_err(reclaim_pull_error)?
+    {
+        if let Some(package) = commit
+            .value()
+            .circle_packages()
+            .iter()
+            .find(|package| package.circle_id == circle_id)
+        {
+            targets.insert(reference, package.clone());
         }
     }
     Ok(targets.into_iter().collect())
@@ -1893,12 +1891,7 @@ impl AuthorizedReclaim<'_, '_> {
             activation: target.activation().object().stored_hash(),
             source,
         })?;
-        verify_reclaim_target_absent(
-            &database,
-            self.writer.history_verifier_mut().commit_verifier_ref(),
-            &target,
-        )
-        .await?;
+        self.verify_target_absent(&target).await?;
         database
             .mark_store_reclaim_target_absent(operation, target)
             .await?;
@@ -1949,7 +1942,6 @@ impl AuthorizedReclaim<'_, '_> {
         let opened = self
             .writer
             .history_verifier_mut()
-            .commit_verifier_ref()
             .load_reclaim_authorization(authorization_ref)
             .await?;
         self.verify_authorization_activation(authorization_ref, activation)
@@ -1968,12 +1960,13 @@ impl AuthorizedReclaim<'_, '_> {
             .validate()
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         let database = self.writer.database().clone();
-        let commit_verifier = self.writer.history_verifier_mut().commit_verifier();
         let commit_ref = activation.commit();
-        let verified_commit = commit_verifier
+        let verified_commit = self
+            .writer
+            .history_verifier_mut()
             .load_ref(commit_ref)
             .await
-            .map_err(StoreReclaimError::Object)?;
+            .map_err(reclaim_pull_error)?;
         let commit_value = verified_commit.value();
         let author = verified_commit.author();
         if commit_value.reclaim_authorization() != Some(authorization) {
@@ -1983,13 +1976,19 @@ impl AuthorizedReclaim<'_, '_> {
         }
         let commit = &activation.commit;
         let head = &activation.head;
-        let opened = commit_verifier.load_head(head, author, commit).await?;
+        let opened = self
+            .writer
+            .history_verifier_mut()
+            .load_head(head, author, commit)
+            .await?;
         if opened.value.commit != *commit {
             return Err(StoreReclaimError::Authorization(
                 "reclaim head activates another commit".to_string(),
             ));
         }
-        let (_, accepted_head) = commit_verifier
+        let (_, accepted_head) = self
+            .writer
+            .history_verifier_mut()
             .exact_next_announcement_slot(
                 &commit_value.author_registration,
                 author,
@@ -2001,9 +2000,11 @@ impl AuthorizedReclaim<'_, '_> {
                 "reclaim activation head is not the exact accepted stream position".to_string(),
             ));
         }
-        super::pull::verify_merge_commit_currently_materialized(&database, commit_verifier, commit)
+        self.writer
+            .history_verifier_mut()
+            .verify_currently_materialized(&database, commit)
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+            .map_err(reclaim_pull_error)
     }
 }
 
@@ -2031,9 +2032,9 @@ impl AuthorizedReclaim<'_, '_> {
                 let activation = self
                     .writer
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_ref(&claim.target.activation)
-                    .await?;
+                    .await
+                    .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::StorePackage(
                     verify_store_package_reclaim_claim(
                         self.writer.history_verifier_mut(),
@@ -2047,9 +2048,9 @@ impl AuthorizedReclaim<'_, '_> {
                 let history = self.writer.history();
                 let activation = history
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_ref(&claim.target().activation)
-                    .await?;
+                    .await
+                    .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::CirclePackage(
                     verify_circle_package_reclaim_claim(history, &activation, claim).await?,
                 ))
@@ -2058,9 +2059,9 @@ impl AuthorizedReclaim<'_, '_> {
                 let history = self.writer.history();
                 let activation = history
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_ref(&claim.target.coverage.activation_commit)
-                    .await?;
+                    .await
+                    .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::CircleBootstrapImage(
                     verify_circle_bootstrap_image_reclaim_claim(history, &activation, claim)
                         .await?,
@@ -2070,12 +2071,16 @@ impl AuthorizedReclaim<'_, '_> {
                 verify_circle_snapshot_image_reclaim_claim(self.writer.history(), claim).await?,
             )),
             ReclaimClaim::AudienceBlob(claim) => {
-                let commit_verifier = self.writer.history_verifier_mut().commit_verifier();
-                let activation = commit_verifier.load_ref(&claim.target.activation).await?;
+                let activation = self
+                    .writer
+                    .history_verifier_mut()
+                    .load_ref(&claim.target.activation)
+                    .await
+                    .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::AudienceBlob(
                     verify_audience_blob_reclaim_claim(
                         &database,
-                        commit_verifier,
+                        self.writer.history_verifier_mut(),
                         &activation,
                         claim,
                     )
@@ -2092,7 +2097,7 @@ impl AuthorizedReclaim<'_, '_> {
 /// materialized rows rather than taken from the claim.
 async fn verify_audience_blob_reclaim_claim(
     database: &StoreDatabase,
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     activation: &VerifiedStoreBatchCommit,
     claim: &AudienceBlobReclaimClaim,
 ) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
@@ -2106,7 +2111,7 @@ async fn verify_audience_blob_reclaim_claim(
     }
     let package = read_audience_blob_binding_package(
         database,
-        commit_verifier,
+        history_verifier,
         &claim.target.package,
         &claim.target.activation,
     )
@@ -2136,12 +2141,12 @@ async fn verify_audience_blob_reclaim_claim(
 /// both the read context and the semantic prefix.
 async fn read_audience_blob_binding_package(
     database: &StoreDatabase,
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     package: &AudienceBlobBindingPackage,
     activation: &StoreBatchCommitRef,
 ) -> Result<crate::sync::audience_package::AudiencePackage, StoreReclaimError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root();
     let (context, prefix, object) = match package {
         AudienceBlobBindingPackage::Store(package) => (
             ProtocolObjectContext::store_encrypted(
@@ -2216,7 +2221,7 @@ async fn verify_circle_snapshot_image_reclaim_claim(
     let author_stream = [(claim.target.snapshot_author.clone(), author)];
     let streams = Box::pin(load_circle_snapshot_streams(
         &database,
-        history.history_verifier_mut().commit_verifier_ref(),
+        history.history_verifier_mut(),
         circle_id,
         &current_control,
         &author_stream,
@@ -2287,11 +2292,9 @@ async fn verify_store_package_reclaim_claim(
     claim: &StorePackageReclaimClaim,
 ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
     let author = history_verifier
-        .commit_verifier_ref()
         .load_registration(&claim.covering_snapshot.author_registration)
         .await?;
     let (reference, metadata) = history_verifier
-        .commit_verifier_ref()
         .load_store_snapshot(
             &claim.covering_snapshot.author_registration,
             &author.value,
@@ -2338,7 +2341,7 @@ async fn verify_store_package_reclaim_claim(
     }
     if activation.value().store_package() != Some(&claim.target.package)
         || !snapshot_covers_target(
-            history_verifier.commit_verifier(),
+            history_verifier,
             &snapshot.meta.coverage,
             &claim.target.activation,
         )
@@ -2491,7 +2494,6 @@ async fn verify_circle_package_snapshot_coverage_claim(
         })?;
     let author = history
         .history_verifier_mut()
-        .commit_verifier()
         .load_registration(&claim.covering_snapshot.author_registration)
         .await?;
     let stream = super::snapshot::load_circle_snapshot_stream_refs(
@@ -2538,7 +2540,7 @@ async fn verify_circle_package_snapshot_coverage_claim(
         .circle_packages()
         .contains(&claim.target.package)
         || !snapshot_covers_target(
-            history.history_verifier_mut().commit_verifier(),
+            history.history_verifier_mut(),
             cut,
             &claim.target.activation,
         )
@@ -2675,13 +2677,13 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
 }
 
 async fn snapshot_covers_target(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     coverage: &CommitFrontier,
     target: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
     let covering = coverage.0.get(&target.coord.stream_id);
     match covering {
-        Some(covering) => position_covers(commit_verifier, covering, target).await,
+        Some(covering) => position_covers(history_verifier, covering, target).await,
         None => Ok(false),
     }
 }
@@ -2830,7 +2832,6 @@ impl AuthorizedReclaim<'_, '_> {
         let opened = self
             .writer
             .history_verifier_mut()
-            .commit_verifier_ref()
             .load_reclaim_authorization(authorization)
             .await?;
         if &opened.authorization.value.target != target {
@@ -2906,141 +2907,144 @@ impl AuthorizedReclaim<'_, '_> {
     }
 }
 
-async fn verify_reclaim_target_absent(
-    database: &StoreDatabase,
-    commit_verifier: &StoreCommitVerifier<'_>,
-    target: &ReclaimTarget,
-) -> Result<(), StoreReclaimError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
-    // A row blob is addressed by its locator, not by a protocol domain prefix, so
-    // its absence is confirmed through the same exact-object verification the blob
-    // primitives use.
-    if let ReclaimTarget::AudienceBlob(blob) = target {
-        return match storage.verify_blob_object(&blob.blob).await {
+impl AuthorizedReclaim<'_, '_> {
+    async fn verify_target_absent(&self, target: &ReclaimTarget) -> Result<(), StoreReclaimError> {
+        let database = self.writer.database();
+        let storage = self.writer.storage();
+        let root = self.writer.store_root();
+        // A row blob is addressed by its locator, not by a protocol domain prefix, so
+        // its absence is confirmed through the same exact-object verification the blob
+        // primitives use.
+        if let ReclaimTarget::AudienceBlob(blob) = target {
+            return match storage.verify_blob_object(&blob.blob).await {
+                Err(StorageError::NotFound(_)) => Ok(()),
+                Ok(()) => Err(StoreReclaimError::Authorization(
+                    "reclaim target remains readable after exact deletion".to_string(),
+                )),
+                Err(error) => Err(StoreReclaimError::Storage(error)),
+            };
+        }
+        let (context, prefix) = match target {
+            ReclaimTarget::StorePackage(target) => (
+                ProtocolObjectContext::store_encrypted(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
+                crate::sync::store_commit::package_semantic_prefix(
+                    target.package.candidate_family,
+                    &target.activation.coord.stream_id.to_string(),
+                    target.activation.coord.sequence(),
+                    target.package.content_hash,
+                ),
+            ),
+            ReclaimTarget::CirclePackage(target) => {
+                // A Circle package is sealed under the Circle epoch key; resolving its
+                // access only builds the read context — a deleted object reads back
+                // absent before any decryption.
+                let access = database
+                    .circle_package_access(
+                        root.clone(),
+                        target.package.circle_id,
+                        target.package.control.clone(),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        StoreReclaimError::Authorization(
+                            "reclaim target Circle package key is not resolvable".to_string(),
+                        )
+                    })?;
+                (
+                    ProtocolObjectContext::circle(
+                        root.store_root_hash,
+                        ProtocolObjectDomain::CirclePackage,
+                        access.into_encryption(),
+                    ),
+                    crate::sync::store_commit::circle_package_semantic_prefix(
+                        target.package.circle_id,
+                        target.package.package.candidate_family,
+                        &target.activation.coord.stream_id.to_string(),
+                        target.activation.coord.sequence(),
+                        target.package.package.content_hash,
+                    ),
+                )
+            }
+            ReclaimTarget::CircleBootstrapImage(target) => {
+                // A Circle bootstrap image is sealed under the Circle epoch key of the
+                // control it activated under; resolving that access only builds the read
+                // context — a deleted object reads back absent before any decryption. Its
+                // readback prefix is the image object's own logical key without the domain
+                // extension, so no recipient-sealed leaf field is needed to confirm absence.
+                let access = database
+                    .circle_package_access(
+                        root.clone(),
+                        target.coverage.circle_id,
+                        target.coverage.control.clone(),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        StoreReclaimError::Authorization(
+                            "reclaim target Circle bootstrap image key is not resolvable"
+                                .to_string(),
+                        )
+                    })?;
+                (
+                    ProtocolObjectContext::circle(
+                        root.store_root_hash,
+                        ProtocolObjectDomain::CircleBootstrapImage,
+                        access.into_encryption(),
+                    ),
+                    crate::sync::store_commit::semantic_prefix_from_exact_object(
+                        &target.coverage.bootstrap.image.object,
+                        crate::sync::storage::ProtectedObjectDomain::CircleBootstrapImage
+                            .extension(),
+                    )
+                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
+                )
+            }
+            ReclaimTarget::CircleSnapshotImage(target) => {
+                // A standalone Circle snapshot image is sealed under the epoch key of the
+                // control its generation was authored under; resolving that access only
+                // builds the read context — a deleted object reads back absent before any
+                // decryption.
+                let access = database
+                    .circle_package_access(root.clone(), target.circle_id, target.control.clone())
+                    .await?
+                    .ok_or_else(|| {
+                        StoreReclaimError::Authorization(
+                            "reclaim target Circle snapshot image key is not resolvable"
+                                .to_string(),
+                        )
+                    })?;
+                (
+                    ProtocolObjectContext::circle(
+                        root.store_root_hash,
+                        ProtocolObjectDomain::CircleSnapshotImage,
+                        access.into_encryption(),
+                    ),
+                    crate::sync::store_commit::semantic_prefix_from_exact_object(
+                        &target.image.object,
+                        crate::sync::storage::ProtectedObjectDomain::CircleSnapshotImage
+                            .extension(),
+                    )
+                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
+                )
+            }
+            ReclaimTarget::AudienceBlob(_) => {
+                return Err(StoreReclaimError::Authorization(
+                    "audience blob reclaim target has no protocol object prefix".to_string(),
+                ));
+            }
+        };
+        match storage
+            .read_protocol_object(&context, target.object(), &prefix)
+            .await
+        {
             Err(StorageError::NotFound(_)) => Ok(()),
-            Ok(()) => Err(StoreReclaimError::Authorization(
+            Ok(_) => Err(StoreReclaimError::Authorization(
                 "reclaim target remains readable after exact deletion".to_string(),
             )),
             Err(error) => Err(StoreReclaimError::Storage(error)),
-        };
-    }
-    let (context, prefix) = match target {
-        ReclaimTarget::StorePackage(target) => (
-            ProtocolObjectContext::store_encrypted(
-                root.store_root_hash,
-                ProtocolObjectDomain::StorePackage,
-            ),
-            crate::sync::store_commit::package_semantic_prefix(
-                target.package.candidate_family,
-                &target.activation.coord.stream_id.to_string(),
-                target.activation.coord.sequence(),
-                target.package.content_hash,
-            ),
-        ),
-        ReclaimTarget::CirclePackage(target) => {
-            // A Circle package is sealed under the Circle epoch key; resolving its
-            // access only builds the read context — a deleted object reads back
-            // absent before any decryption.
-            let access = database
-                .circle_package_access(
-                    root.clone(),
-                    target.package.circle_id,
-                    target.package.control.clone(),
-                )
-                .await?
-                .ok_or_else(|| {
-                    StoreReclaimError::Authorization(
-                        "reclaim target Circle package key is not resolvable".to_string(),
-                    )
-                })?;
-            (
-                ProtocolObjectContext::circle(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::CirclePackage,
-                    access.into_encryption(),
-                ),
-                crate::sync::store_commit::circle_package_semantic_prefix(
-                    target.package.circle_id,
-                    target.package.package.candidate_family,
-                    &target.activation.coord.stream_id.to_string(),
-                    target.activation.coord.sequence(),
-                    target.package.package.content_hash,
-                ),
-            )
         }
-        ReclaimTarget::CircleBootstrapImage(target) => {
-            // A Circle bootstrap image is sealed under the Circle epoch key of the
-            // control it activated under; resolving that access only builds the read
-            // context — a deleted object reads back absent before any decryption. Its
-            // readback prefix is the image object's own logical key without the domain
-            // extension, so no recipient-sealed leaf field is needed to confirm absence.
-            let access = database
-                .circle_package_access(
-                    root.clone(),
-                    target.coverage.circle_id,
-                    target.coverage.control.clone(),
-                )
-                .await?
-                .ok_or_else(|| {
-                    StoreReclaimError::Authorization(
-                        "reclaim target Circle bootstrap image key is not resolvable".to_string(),
-                    )
-                })?;
-            (
-                ProtocolObjectContext::circle(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::CircleBootstrapImage,
-                    access.into_encryption(),
-                ),
-                crate::sync::store_commit::semantic_prefix_from_exact_object(
-                    &target.coverage.bootstrap.image.object,
-                    crate::sync::storage::ProtectedObjectDomain::CircleBootstrapImage.extension(),
-                )
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
-            )
-        }
-        ReclaimTarget::CircleSnapshotImage(target) => {
-            // A standalone Circle snapshot image is sealed under the epoch key of the
-            // control its generation was authored under; resolving that access only
-            // builds the read context — a deleted object reads back absent before any
-            // decryption.
-            let access = database
-                .circle_package_access(root.clone(), target.circle_id, target.control.clone())
-                .await?
-                .ok_or_else(|| {
-                    StoreReclaimError::Authorization(
-                        "reclaim target Circle snapshot image key is not resolvable".to_string(),
-                    )
-                })?;
-            (
-                ProtocolObjectContext::circle(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::CircleSnapshotImage,
-                    access.into_encryption(),
-                ),
-                crate::sync::store_commit::semantic_prefix_from_exact_object(
-                    &target.image.object,
-                    crate::sync::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
-                )
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
-            )
-        }
-        ReclaimTarget::AudienceBlob(_) => {
-            return Err(StoreReclaimError::Authorization(
-                "audience blob reclaim target has no protocol object prefix".to_string(),
-            ));
-        }
-    };
-    match storage
-        .read_protocol_object(&context, target.object(), &prefix)
-        .await
-    {
-        Err(StorageError::NotFound(_)) => Ok(()),
-        Ok(_) => Err(StoreReclaimError::Authorization(
-            "reclaim target remains readable after exact deletion".to_string(),
-        )),
-        Err(error) => Err(StoreReclaimError::Storage(error)),
     }
 }
 
@@ -3131,16 +3135,13 @@ impl AuthorizedReclaim<'_, '_> {
     }
 }
 
-fn frontier_refs(frontier: &CommitFrontier) -> Vec<&StoreBatchCommitRef> {
-    frontier.0.values().collect()
-}
-
 async fn position_covers(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     covering: &StoreBatchCommitRef,
     covered: &StoreBatchCommitRef,
 ) -> Result<bool, StoreReclaimError> {
-    super::pull::commit_position_covers(commit_verifier, covering, covered)
+    history_verifier
+        .commit_position_covers(covering, covered)
         .await
         .map_err(|error| match error {
             super::pull::CommitCoverageError::Object(error) => StoreReclaimError::Object(error),
@@ -3151,7 +3152,7 @@ async fn position_covers(
 }
 
 async fn exact_package_targets(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     coverage: &CommitFrontier,
 ) -> Result<
     Vec<(
@@ -3161,20 +3162,13 @@ async fn exact_package_targets(
     StoreReclaimError,
 > {
     let mut targets = BTreeMap::new();
-    for tip in frontier_refs(coverage) {
-        let mut cursor = Some(tip.clone());
-        while let Some(reference) = cursor {
-            if targets.contains_key(&reference) {
-                break;
-            }
-            let commit = commit_verifier
-                .load_ref(&reference)
-                .await
-                .map_err(StoreReclaimError::Object)?;
-            if let Some(package) = commit.value().store_package().cloned() {
-                targets.insert(reference.clone(), package);
-            }
-            cursor = commit.value().order.predecessor().cloned();
+    for (reference, commit) in history_verifier
+        .load_covered_commits(coverage)
+        .await
+        .map_err(reclaim_pull_error)?
+    {
+        if let Some(package) = commit.value().store_package().cloned() {
+            targets.insert(reference, package);
         }
     }
     Ok(targets.into_iter().collect())

@@ -59,12 +59,11 @@ async fn load_commit_device_join_attempt_evidence(
     history_verifier: &MergeHistoryVerifier<'_>,
     reference: &super::store_commit::DeviceJoinAttemptRef,
 ) -> Result<LoadedDeviceJoinAttemptEvidence, RegistrationLoadError> {
-    let verifier = history_verifier.commit_verifier_ref();
-    let (attempt, owner) = verifier
+    let (attempt, owner) = history_verifier
         .load_device_join_attempt_and_owner(reference)
         .await
         .map_err(RegistrationLoadError::Object)?;
-    verifier
+    history_verifier
         .validate_device_join_attempt_evidence(attempt, &owner.value)
         .await
         .map_err(registration_attempt_error)
@@ -100,8 +99,7 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
     Box::pin(async move {
         let storage = history_verifier.storage();
         let root = history_verifier.root();
-        let verifier = history_verifier.commit_verifier_ref();
-        let root_value = verifier.verified_root();
+        let root_value = history_verifier.verified_root();
         let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
         for reference in commit.device_join_cleanup_receipts() {
             let context = ProtocolObjectContext::signed_plaintext(
@@ -130,11 +128,11 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                 ));
             }
             let attempt_ref = receipt.cancellation.attempt();
-            let (attempt, owner) = verifier
+            let (attempt, owner) = history_verifier
                 .load_device_join_attempt_and_owner(attempt_ref)
                 .await
                 .map_err(RegistrationLoadError::Object)?;
-            let attempt = verifier
+            let attempt = history_verifier
                 .validate_device_join_attempt_evidence(attempt, &owner.value)
                 .await
                 .map_err(registration_attempt_error)?;
@@ -167,7 +165,7 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
             match &receipt.administrator_terminal {
                 super::device_join::ProviderAdminJoinTerminal::Completed(_) => {}
                 super::device_join::ProviderAdminJoinTerminal::Cancelled(closure) => {
-                    let administrator = verifier
+                    let administrator = history_verifier
                         .load_registration(&closure.administrator_registration)
                         .await
                         .map_err(RegistrationLoadError::Object)?
@@ -177,7 +175,7 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
                 }
                 super::device_join::ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = verifier
+                    let executor = history_verifier
                         .load_registration(&revocation.executor)
                         .await
                         .map_err(RegistrationLoadError::Object)?
@@ -193,7 +191,7 @@ pub(crate) fn load_commit_join_cleanup_receipts<'a>(
                     .verify()
                     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?,
                 super::device_join::JoinerJoinTerminal::WriteRevoked(revocation) => {
-                    let executor = verifier
+                    let executor = history_verifier
                         .load_registration(&revocation.executor)
                         .await
                         .map_err(RegistrationLoadError::Object)?
@@ -300,7 +298,7 @@ pub(super) fn validate_commit_join_cleanup_receipts(
 }
 
 pub(super) async fn validate_commit_join_outcomes(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&MembershipChain>,
@@ -344,7 +342,7 @@ pub(super) async fn validate_commit_join_outcomes(
                 "device join outcome differs from its exact Owner attempt".to_string(),
             ));
         }
-        let outcome = commit_verifier
+        let outcome = history_verifier
             .load_device_join_outcome(outcome_ref, activating_author)
             .await
             .map_err(RegistrationLoadError::Object)?
@@ -444,7 +442,7 @@ pub(super) fn validate_commit_join_attempts(
 }
 
 pub(crate) async fn registration_activation(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     activated: &ActivatedStoreDeviceRegistrationRef,
     registration: &StoreDeviceRegistration,
     activating_author: &StoreDeviceRegistration,
@@ -505,7 +503,7 @@ pub(crate) async fn registration_activation(
                     "cancelled device join outcome cannot activate a registration".to_string(),
                 ));
             };
-            let initial_ack = commit_verifier
+            let initial_ack = history_verifier
                 .load_store_ack(&readiness.initial_ack, registration)
                 .await
                 .map_err(RegistrationLoadError::Object)?
@@ -532,7 +530,7 @@ pub(crate) async fn registration_activation(
             },
             StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
         ) if origin_recovery == recovery_id && recovery_slot == node.slot() => {
-            let node_value = commit_verifier
+            let node_value = history_verifier
                 .load_owner_recovery_node(node)
                 .await
                 .map_err(RegistrationLoadError::Object)?
@@ -540,7 +538,7 @@ pub(crate) async fn registration_activation(
             let mut reached_ref = node.clone();
             let mut reached = node_value.clone();
             while let Some(predecessor_ref) = reached.predecessor.clone() {
-                let predecessor = commit_verifier
+                let predecessor = history_verifier
                     .load_owner_recovery_node(&predecessor_ref)
                     .await
                     .map_err(RegistrationLoadError::Object)?
@@ -574,7 +572,7 @@ pub(crate) async fn registration_activation(
                     "recovery node differs from its exact registration".to_string(),
                 ));
             }
-            let initial_ack = commit_verifier
+            let initial_ack = history_verifier
                 .load_store_ack(&node_value.readiness.initial_ack, registration)
                 .await
                 .map_err(RegistrationLoadError::Object)?
@@ -617,7 +615,7 @@ fn predecessor_contains_join_attempt(
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) async fn predecessor_commit_matching(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     order: &super::store_commit::StoreCommitOrder,
     matches: PredecessorCommitPredicate<'_>,
 ) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
@@ -633,10 +631,10 @@ pub(crate) async fn predecessor_commit_matching(
         if !visited.insert(reference.clone()) {
             continue;
         }
-        let commit = commit_verifier
+        let commit = history_verifier
             .load_ref(&reference)
             .await
-            .map_err(RegistrationLoadError::Object)?;
+            .map_err(registration_attempt_error)?;
         if matches(&commit) {
             return Ok(Some(commit));
         }

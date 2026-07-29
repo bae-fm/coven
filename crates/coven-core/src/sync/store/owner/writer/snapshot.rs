@@ -1065,7 +1065,6 @@ impl super::AuthorizedWriterOperation<'_> {
         let registration_ref = self.writer.registration_ref.clone();
         let registration = self.writer.registration.clone();
         self.history_verifier_mut()
-            .commit_verifier()
             .load_store_snapshot(&registration_ref, &registration, reference)
             .await
             .map(|(_, meta)| meta)
@@ -2088,7 +2087,6 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
             resolutions.extend(head.body.resolutions.iter().cloned());
             let registration = self
                 .history_verifier
-                .commit_verifier_ref()
                 .load_registration(&head.body.author_registration)
                 .await
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?
@@ -2177,7 +2175,6 @@ impl<'storage> VerifiedSnapshotBootstrap<'storage> {
         SnapshotError,
     > {
         self.history_verifier
-            .commit_verifier_ref()
             .load_founder_registration()
             .await
             .map_err(|error| SnapshotError::Parse(error.to_string()))

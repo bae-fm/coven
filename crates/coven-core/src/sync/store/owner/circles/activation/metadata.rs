@@ -20,7 +20,7 @@ use crate::sync::store_commit::{
 
 async fn load_metadata_author_roster(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -32,7 +32,7 @@ async fn load_metadata_author_roster(
 ) -> Result<CircleMaterializedRoster, CircleOperationError> {
     load_circle_roster_state(
         database,
-        commit_verifier,
+        history_verifier,
         verified_prefix,
         commit_ref,
         commit,
@@ -47,7 +47,7 @@ async fn load_metadata_author_roster(
 
 pub(super) async fn load_circle_metadata_state(
     database: &StoreDatabase,
-    commit_verifier: &mut super::super::super::StoreCommitVerifier<'_>,
+    history_verifier: &mut super::super::super::pull::MergeHistoryVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,
@@ -57,8 +57,8 @@ pub(super) async fn load_circle_metadata_state(
     commit_ref: &StoreBatchCommitRef,
     consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
 ) -> Result<CircleMetadata, CircleOperationError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root().clone();
+    let storage = history_verifier.storage();
+    let root = history_verifier.root().clone();
     commit_ref
         .verify_commit(commit)
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -125,7 +125,7 @@ pub(super) async fn load_circle_metadata_state(
         let declared_ref = CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
         let authority = resolve_circle_stream_authority(
             database,
-            commit_verifier,
+            history_verifier,
             verified_prefix,
             commit_ref,
             commit,
@@ -249,7 +249,7 @@ pub(super) async fn load_circle_metadata_state(
         }
         let author_roster = load_metadata_author_roster(
             database,
-            commit_verifier,
+            history_verifier,
             verified_prefix,
             commit,
             circle_id,

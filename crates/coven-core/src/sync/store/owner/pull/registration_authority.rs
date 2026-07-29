@@ -25,6 +25,22 @@ pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
 }
 
+pub(crate) async fn load_merge_predecessor_membership_with_retained_history(
+    history_verifier: &MergeHistoryVerifier<'_>,
+    state: &StoreMembershipStateRef,
+    verified_activations: &VerifiedMergeMembershipPrefix,
+    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
+) -> Result<MembershipChain, RegistrationLoadError> {
+    Box::pin(history_verifier.load_membership_at_verified_prefix(
+        &state.heads,
+        &state.resolutions,
+        verified_activations,
+        pending_resolution,
+    ))
+    .await
+    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+}
+
 pub(crate) fn verify_merge_membership_state_ref(
     state: &StoreMembershipStateRef,
     membership: &MembershipChain,

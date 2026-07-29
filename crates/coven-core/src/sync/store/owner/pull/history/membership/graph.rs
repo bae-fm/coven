@@ -37,14 +37,14 @@ type LoadedMembershipHeadFuture<'a> = Pin<
 >;
 
 fn load_exact_membership_head_node<'a>(
-    commit_verifier: &'a crate::sync::store::owner::StoreCommitVerifier<'_>,
+    authority: &'a mut MembershipActivationAuthority<'_, '_>,
     reference: &'a MembershipHeadRef,
 ) -> LoadedMembershipHeadFuture<'a> {
     Box::pin(async move {
-        let head = load_exact_membership_head_with_root(commit_verifier, reference).await?;
+        let head = authority.load_exact_membership_head(reference).await?;
         let loaded_entry = Box::pin(crate::sync::store_objects::load_membership_entry_ref(
-            commit_verifier.storage(),
-            commit_verifier.root().store_root_hash,
+            authority.storage(),
+            authority.root().store_root_hash,
             &head.body.entry,
         ))
         .await
@@ -414,13 +414,24 @@ pub(super) async fn project_anchored_chain_to_verified_store_prefix(
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let candidate = load_exact_membership_graph_objects(commit_verifier, candidate_heads).await?;
-    let (heads, resolutions) = project_membership_cut_to_store_prefix(&candidate, prefix)?;
-    let projected = load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+    let mut authority = MembershipActivationAuthority::VerifiedPrefix {
         commit_verifier,
+        activations: prefix,
+    };
+    let candidate = load_exact_membership_graph_objects(&mut authority, candidate_heads).await?;
+    let (heads, resolutions) = project_membership_cut_to_store_prefix(&candidate, prefix)?;
+    let owner_pubkey = authority.verified_root().descriptor.founder_pubkey.clone();
+    let root = authority.root().clone();
+    let root_value = authority.verified_root().clone();
+    let storage = authority.storage();
+    let projected = load_anchored_chain_at_exact_heads_with_root_impl(
+        &mut authority,
+        storage,
+        &root,
+        &root_value,
+        &owner_pubkey,
         &heads,
         &resolutions,
-        prefix,
         None,
     )
     .await?;
@@ -439,11 +450,7 @@ fn load_exact_membership_graph<'a>(
     exact_heads: &'a [MembershipHeadRef],
 ) -> LoadedMembershipGraphFuture<'a> {
     Box::pin(async move {
-        let graph = load_exact_membership_graph_objects(
-            activation_authority.commit_verifier(),
-            exact_heads,
-        )
-        .await?;
+        let graph = load_exact_membership_graph_objects(activation_authority, exact_heads).await?;
         for node in graph.path_heads.values() {
             if !Box::pin(validate_membership_head_activation(
                 activation_authority,
@@ -460,20 +467,17 @@ fn load_exact_membership_graph<'a>(
         }
         let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
         Box::pin(validate_provider_admin_records(
-            activation_authority.commit_verifier(),
+            activation_authority,
             &entry_values,
         ))
         .await?;
-        validate_owner_grant_records(
-            activation_authority.commit_verifier().verified_root(),
-            &entry_values,
-        )?;
+        validate_owner_grant_records(activation_authority.verified_root(), &entry_values)?;
         Ok(graph)
     })
 }
 
 pub(super) fn load_exact_membership_graph_objects<'a>(
-    commit_verifier: &'a crate::sync::store::owner::StoreCommitVerifier<'_>,
+    authority: &'a mut MembershipActivationAuthority<'_, '_>,
     exact_heads: &'a [MembershipHeadRef],
 ) -> LoadedMembershipGraphFuture<'a> {
     Box::pin(async move {
@@ -484,8 +488,7 @@ pub(super) fn load_exact_membership_graph_objects<'a>(
             let mut current = Some(requested.clone());
             let mut requested_head = None;
             while let Some(reference) = current {
-                let node =
-                    Box::pin(load_exact_membership_head_node(commit_verifier, &reference)).await?;
+                let node = Box::pin(load_exact_membership_head_node(authority, &reference)).await?;
                 if reference == *requested {
                     requested_head = Some((reference.clone(), node.head.clone()));
                 }
@@ -537,10 +540,10 @@ pub(super) fn load_exact_membership_graph_objects<'a>(
 
 #[cfg(test)]
 pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
-    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
+    authority: &mut MembershipActivationAuthority<'_, '_>,
     heads: &[MembershipHeadRef],
 ) {
-    let seed = load_exact_membership_graph_objects(commit_verifier, heads)
+    let seed = load_exact_membership_graph_objects(authority, heads)
         .await
         .expect("load seed membership graph")
         .path_heads
@@ -826,7 +829,6 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
         ));
     }
     let founder_registration = activation_authority
-        .commit_verifier()
         .load_founder_registration()
         .await
         .map_err(map_membership_object_error)?;
@@ -865,7 +867,7 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
 }
 
 async fn validate_provider_admin_records(
-    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
+    authority: &MembershipActivationAuthority<'_, '_>,
     entries: &[MembershipEntry],
 ) -> Result<(), AnchoredChainError> {
     for entry in entries {
@@ -882,11 +884,11 @@ async fn validate_provider_admin_records(
         else {
             continue;
         };
-        let registration = commit_verifier
+        let registration = authority
             .load_registration(administrator)
             .await
             .map_err(map_membership_object_error)?;
-        if registration.value.store_root != *commit_verifier.root()
+        if registration.value.store_root != *authority.root()
             || registration.value.provider != *provider
         {
             return Err(AnchoredChainError::LoadFailed(
@@ -895,10 +897,7 @@ async fn validate_provider_admin_records(
             ));
         }
         capability
-            .verify(
-                &commit_verifier.verified_root().descriptor.provider,
-                provider,
-            )
+            .verify(&authority.verified_root().descriptor.provider, provider)
             .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
     }
     Ok(())

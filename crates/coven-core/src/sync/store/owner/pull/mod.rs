@@ -74,8 +74,7 @@ mod support;
 
 use super::verification::StoreCommitVerifier;
 pub(crate) use super::verification::{
-    commit_position_covers, history_cut_covers, load_provider_access_activation,
-    CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
+    load_provider_access_activation, CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
 };
 pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
@@ -109,6 +108,7 @@ pub(crate) use membership_control::*;
 pub(crate) use registration::RegistrationLoadError;
 pub(crate) use registration_authority::{
     load_merge_predecessor_membership_with_history,
+    load_merge_predecessor_membership_with_retained_history,
     load_merge_predecessor_membership_with_verified_activations, verify_merge_membership_state_ref,
 };
 use registration_validation::load_merge_commit_registrations;
@@ -407,7 +407,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 )?;
                 let verified_commit = verified.verified.clone();
                 let package = match history_verifier
-                    .commit_verifier()
                     .load_store_package(verified_commit.reference())
                     .await
                 {
@@ -514,23 +513,25 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 let (_, current_device_state) = database
                     .store_device_state_for_history_cut(&StoreHistoryCut(current_frontier.0))
                     .await?;
-                match readiness(
-                    &database,
-                    self.history.history_verifier.commit_verifier(),
-                    &coverage,
-                    &frontier,
-                    &current_device_state,
-                    &exclusion_freezes,
-                    candidate.candidate.commit_ref(),
-                    candidate.candidate.commit(),
-                )
-                .await
-                .map_err(|error| {
-                    StorePullError::Database(format!(
-                        "evaluate Store commit readiness for {}/{}: {error}",
-                        key.0, key.1
-                    ))
-                })? {
+                match self
+                    .history
+                    .history_verifier
+                    .readiness(
+                        &database,
+                        &coverage,
+                        &frontier,
+                        &current_device_state,
+                        &exclusion_freezes,
+                        candidate.candidate.commit_ref(),
+                        candidate.candidate.commit(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        StorePullError::Database(format!(
+                            "evaluate Store commit readiness for {}/{}: {error}",
+                            key.0, key.1
+                        ))
+                    })? {
                     Readiness::AlreadyMaterialized => {
                         candidates.remove(&key);
                         blocked.remove(&key);

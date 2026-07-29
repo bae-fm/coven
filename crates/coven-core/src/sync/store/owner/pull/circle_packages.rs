@@ -7,7 +7,7 @@ pub(crate) enum PullCircleActivationError {
 
 pub(crate) async fn load_circle_payload_activations(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     identity: Option<&crate::keys::UserKeypair>,
     routing_key: Option<&crate::sync::circle::RowRoutingKey>,
@@ -23,7 +23,7 @@ pub(crate) async fn load_circle_payload_activations(
     Box::pin(
         super::super::circles::activation::load_circle_activations_with_prefix(
             database,
-            commit_verifier,
+            history_verifier,
             verified,
             identity,
             routing_key,
@@ -37,13 +37,13 @@ pub(crate) async fn load_circle_payload_activations(
 
 pub(crate) async fn load_applicable_circle_packages(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     verified: &VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
     local_store_membership: LocalStoreMembership,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
-    let root = commit_verifier.root().clone();
+    let root = history_verifier.root().clone();
     let db = database.sqlite();
     let commit_ref = verified.reference();
     let commit = verified.value();
@@ -51,7 +51,7 @@ pub(crate) async fn load_applicable_circle_packages(
         return Ok(Vec::new());
     }
     let mut replay_epochs = database
-        .circle_replay_epoch_index(commit_verifier.root().clone())
+        .circle_replay_epoch_index(history_verifier.root().clone())
         .await
         .map_err(PullCircleActivationError::Database)?;
     replay_epochs
@@ -155,7 +155,7 @@ pub(crate) async fn load_applicable_circle_packages(
                     reference.circle_id
                 )));
             };
-            let historical_commit = commit_verifier
+            let historical_commit = history_verifier
                 .load_ref(&historical_commit_ref)
                 .await
                 .map_err(|error| {
@@ -166,7 +166,7 @@ pub(crate) async fn load_applicable_circle_packages(
                 })?;
             let roster_chain = super::super::circles::activation::load_circle_control_roster_chain(
                 database,
-                commit_verifier,
+                history_verifier,
                 &historical_commit,
                 &historical.reference,
                 &historical.control,
@@ -189,7 +189,7 @@ pub(crate) async fn load_applicable_circle_packages(
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?
         };
         let package = access
-            .open_package(commit_verifier.storage(), verified, reference, author)
+            .open_package(history_verifier.storage(), verified, reference, author)
             .await
             .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
         loaded.push(LoadedCirclePackage {

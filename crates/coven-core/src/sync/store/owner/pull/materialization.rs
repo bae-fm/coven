@@ -37,7 +37,7 @@ pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
 
 pub(crate) async fn readiness(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     coverage: &super::store_commit::CommitFrontier,
     frontier: &BTreeMap<String, StoreBatchCommitRef>,
     device_state: &ResolvedStoreDeviceState,
@@ -45,13 +45,13 @@ pub(crate) async fn readiness(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Readiness, StorePullError> {
-    let root = commit_verifier.root().clone();
+    let root = history_verifier.root().clone();
     let stream_id = commit_stream_id(&commit_ref.coord);
     if let Some(current) = frontier.get(&stream_id) {
         if commit_ref.coord.sequence() <= current.coord.sequence() {
             match reference_is_materialized(
                 database,
-                commit_verifier,
+                history_verifier,
                 coverage,
                 &stream_id,
                 commit_ref,
@@ -160,7 +160,7 @@ pub(crate) async fn readiness(
         let required_stream = required_stream.to_string();
         match reference_is_materialized(
             database,
-            commit_verifier,
+            history_verifier,
             coverage,
             &required_stream,
             required_ref,
@@ -194,7 +194,7 @@ pub(crate) async fn readiness(
 
 async fn reference_is_materialized(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     coverage: &super::store_commit::CommitFrontier,
     stream_id: &str,
     reference: &StoreBatchCommitRef,
@@ -243,9 +243,16 @@ async fn reference_is_materialized(
                 },
             ));
         }
-        let verified_commit = match commit_verifier.load_ref(&cursor).await {
+        let verified_commit = match history_verifier.load_ref(&cursor).await {
             Ok(commit) => commit,
-            Err(error) => return Ok(MaterializedCheck::Held(held_object_error(error))),
+            Err(error) => {
+                return Ok(MaterializedCheck::Held(
+                    HeldStorePositionReason::ObjectUnreadable {
+                        key: "exact Store commit".to_string(),
+                        detail: error.to_string(),
+                    },
+                ))
+            }
         };
         let Some(predecessor) = verified_commit.value().order.predecessor() else {
             return Ok(MaterializedCheck::Missing);
@@ -256,12 +263,12 @@ async fn reference_is_materialized(
 
 pub(crate) async fn verify_merge_commit_currently_materialized(
     database: &StoreDatabase,
-    commit_verifier: &mut StoreCommitVerifier<'_>,
+    history_verifier: &mut MergeHistoryVerifier<'_>,
     reference: &StoreBatchCommitRef,
 ) -> Result<(), StorePullError> {
     let stream_id = reference.coord.stream_id.to_string();
     let coverage = database.snapshot_coverage_frontier().await?;
-    match reference_is_materialized(database, commit_verifier, &coverage, &stream_id, reference)
+    match reference_is_materialized(database, history_verifier, &coverage, &stream_id, reference)
         .await?
     {
         MaterializedCheck::Yes => Ok(()),
@@ -305,12 +312,9 @@ pub(super) async fn apply_candidate(
             ));
         }
     }
-    let membership_objects = verified_merge_membership_objects(
-        history_verifier.commit_verifier_ref(),
-        commit_ref,
-        commit,
-    )
-    .await?;
+    let membership_objects = history_verifier
+        .verified_membership_objects(commit_ref, commit)
+        .await?;
     let (local_store_membership, membership_after_candidate) =
         local_store_membership_after_candidate(
             latest_membership,
@@ -330,7 +334,7 @@ pub(super) async fn apply_candidate(
     } else {
         load_circle_payload_activations(
             &database,
-            history_verifier.commit_verifier(),
+            history_verifier,
             &candidate.verified,
             identity.filter(|_| local_store_membership.allows_circle_access()),
             routing_key,
@@ -376,7 +380,7 @@ pub(super) async fn apply_candidate(
     }
     let circle_packages = match load_applicable_circle_packages(
         &database,
-        history_verifier.commit_verifier(),
+        history_verifier,
         &candidate.verified,
         verified_circle_activations.circles(),
         author,
@@ -1287,11 +1291,10 @@ async fn commit_candidate(
     let (authorized_predecessor, recovery_author) =
         predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let owner_recovery = verify_commit_owner_recovery_activation(
-        history.history_verifier.commit_verifier_ref(),
-        commit,
-    )
-    .await?;
+    let owner_recovery = history
+        .history_verifier
+        .verify_owner_recovery_activation(commit)
+        .await?;
     let state_after = device_operations
         .apply_to(authorized_predecessor.clone(), &commit.device_state)
         .and_then(|state| {
@@ -1304,27 +1307,25 @@ async fn commit_candidate(
             )
         })
         .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let acknowledgement = validate_commit_acknowledgement(
-        history.history_verifier.commit_verifier_ref(),
-        commit,
-        author,
-    )
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => StorePullError::Object(error),
-        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-    })?;
+    let acknowledgement =
+        validate_commit_acknowledgement(&history.history_verifier, commit, author)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
     let retained_acknowledgement = match acknowledgement {
         Some((acknowledgement_ref, acknowledgement_value)) => Some(
-            retain_activated_acknowledgement(
-                history.history_verifier.commit_verifier_ref(),
-                commit_ref,
-                commit,
-                author,
-                acknowledgement_ref,
-                acknowledgement_value,
-            )
-            .await?,
+            history
+                .history_verifier
+                .retain_acknowledgement(
+                    commit_ref,
+                    commit,
+                    author,
+                    acknowledgement_ref,
+                    acknowledgement_value,
+                )
+                .await?,
         ),
         None => None,
     };
@@ -1368,7 +1369,6 @@ async fn commit_candidate(
         })?;
     history
         .history_verifier
-        .commit_verifier()
         .remember(candidate.verified.clone())
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     let retractions = Box::pin(verified_terminal_merge_retractions(

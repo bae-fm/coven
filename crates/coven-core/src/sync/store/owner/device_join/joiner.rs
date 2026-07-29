@@ -125,7 +125,6 @@ async fn verify_offer(
         return Err(DeviceJoinError::OfferMismatch);
     }
     let owner = history_verifier
-        .commit_verifier()
         .load_registration(&offer.owner_registration)
         .await?
         .value;
@@ -161,7 +160,6 @@ impl JoiningStore<'_> {
             .bootstrap
             .history
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_outcome(&activation.outcome, &owner.value)
             .await?
             .value;
@@ -412,14 +410,12 @@ impl PendingDeviceJoinObservation<'_> {
         let object: DeviceJoinAbandonmentObject = serde_json::from_slice(&bytes)?;
         let owner = self
             .history_verifier
-            .commit_verifier()
             .load_registration(&object.owner_registration)
             .await?
             .value;
         abandonment.abandonment.verify(&object, &owner)?;
         let activation = self
             .history_verifier
-            .commit_verifier()
             .load_ref(&abandonment.abandonment_activation)
             .await?;
         if activation.author() != &owner
@@ -540,14 +536,12 @@ impl PendingDeviceJoinAuthority<'_> {
         let owner = self
             .observation
             .history_verifier
-            .commit_verifier()
             .load_registration(&approval.request.offer.owner_registration)
             .await?
             .value;
         let administrator = self
             .observation
             .history_verifier
-            .commit_verifier()
             .load_registration(&approval.request.offer.provider_admin.administrator)
             .await?
             .value;
@@ -742,7 +736,6 @@ impl JoiningStore<'_> {
             .bootstrap
             .history
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
@@ -750,7 +743,6 @@ impl JoiningStore<'_> {
             .bootstrap
             .history
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&offer.provider_admin.administrator)
             .await?
             .value;
@@ -989,13 +981,11 @@ impl PendingDeviceJoinClosure<'_> {
         let (attempt, owner) = self
             .observation
             .history_verifier
-            .commit_verifier()
             .load_device_join_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
             .observation
             .history_verifier
-            .commit_verifier()
             .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;

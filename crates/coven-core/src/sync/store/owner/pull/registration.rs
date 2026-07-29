@@ -111,7 +111,7 @@ pub(crate) async fn load_device_join_cleanup_activation(
 }
 
 pub(crate) async fn validate_commit_acknowledgement(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
 ) -> Result<
@@ -124,7 +124,7 @@ pub(crate) async fn validate_commit_acknowledgement(
     let Some(reference) = commit.acknowledgement() else {
         return Ok(None);
     };
-    let ack = Box::pin(commit_verifier.load_store_ack(reference, activating_author))
+    let ack = Box::pin(history_verifier.load_store_ack(reference, activating_author))
         .await
         .map_err(RegistrationLoadError::Object)?
         .value;
@@ -141,11 +141,11 @@ pub(crate) async fn validate_commit_acknowledgement(
         ));
     }
     if let Some(snapshot) = &ack.snapshot {
-        let snapshot_author = commit_verifier
+        let snapshot_author = history_verifier
             .load_registration(&snapshot.author_registration)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        let (_, metadata) = Box::pin(commit_verifier.load_store_snapshot(
+        let (_, metadata) = Box::pin(history_verifier.load_store_snapshot(
             &snapshot.author_registration,
             &snapshot_author.value,
             &snapshot.snapshot,
@@ -162,7 +162,7 @@ pub(crate) async fn validate_commit_acknowledgement(
 }
 
 pub(crate) async fn load_acknowledgement_proof_chain(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     latest_ref: super::store_commit::StoreAckRef,
     latest: super::store_commit::StoreAck,
     registration: &StoreDeviceRegistration,
@@ -188,7 +188,7 @@ pub(crate) async fn load_acknowledgement_proof_chain(
                 "Store acknowledgement proof chain repeats a sequence".to_string(),
             ));
         }
-        let Some((predecessor_ref, predecessor)) = commit_verifier
+        let Some((predecessor_ref, predecessor)) = history_verifier
             .load_store_ack_predecessor(&current_ref, &current, registration)
             .await
             .map_err(RegistrationLoadError::Object)?
@@ -208,40 +208,8 @@ pub(crate) async fn load_acknowledgement_proof_chain(
     Ok(chain)
 }
 
-pub(crate) async fn retain_activated_acknowledgement(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    activating_commit: &StoreBatchCommitRef,
-    activating_commit_value: &StoreBatchCommit,
-    registration: &StoreDeviceRegistration,
-    reference: super::store_commit::StoreAckRef,
-    value: super::store_commit::StoreAck,
-) -> Result<super::store_commit::RetainedVerifiedActivatedAck, StorePullError> {
-    if activating_commit_value.acknowledgement() != Some(&reference)
-        || activating_commit_value.author_registration != reference.registration
-        || value.registration != reference.registration
-    {
-        return Err(StorePullError::Database(
-            "Store acknowledgement differs from its activating commit".to_string(),
-        ));
-    }
-    activating_commit
-        .verify_commit(activating_commit_value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let chain = load_acknowledgement_proof_chain(commit_verifier, reference, value, registration)
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-    Ok(super::store_commit::RetainedVerifiedActivatedAck {
-        chain,
-        activating_commit: activating_commit.clone(),
-        activating_commit_value: activating_commit_value.clone(),
-    })
-}
-
 async fn validate_commit_reclaim_authorization(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimAuthorizationRef,
     activating_author: &StoreDeviceRegistration,
@@ -253,7 +221,7 @@ async fn validate_commit_reclaim_authorization(
             "reclaim authorization activation has no exact predecessor owner authority".to_string(),
         )
     })?;
-    let opened = commit_verifier
+    let opened = history_verifier
         .load_reclaim_authorization(reference)
         .await
         .map_err(RegistrationLoadError::Object)?;
@@ -434,7 +402,7 @@ fn validate_circle_snapshot_activated_reclaim_target(
 }
 
 async fn validate_commit_reclaim_receipt(
-    commit_verifier: &StoreCommitVerifier<'_>,
+    history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
     reference: &super::store_reclaim::ReclaimReceiptRef,
     activating_author: &StoreDeviceRegistration,
@@ -447,7 +415,7 @@ async fn validate_commit_reclaim_receipt(
         )
     })?;
     let (receipt_executor, provider_admin_state, provider_admin_grant, authorization, executor) = {
-        let opened = Box::pin(commit_verifier.load_reclaim_receipt(reference))
+        let opened = Box::pin(history_verifier.load_reclaim_receipt(reference))
             .await
             .map_err(RegistrationLoadError::Object)?;
         (
@@ -502,7 +470,7 @@ pub(super) async fn load_commit_registrations(
     }
     if commit.acknowledgement().is_some() {
         Box::pin(validate_commit_acknowledgement(
-            history_verifier.commit_verifier_ref(),
+            history_verifier,
             commit,
             activating_author,
         ))
@@ -510,7 +478,7 @@ pub(super) async fn load_commit_registrations(
     }
     if let Some(reference) = commit.reclaim_authorization() {
         Box::pin(validate_commit_reclaim_authorization(
-            history_verifier.commit_verifier_ref(),
+            history_verifier,
             commit,
             reference,
             activating_author,
@@ -521,7 +489,7 @@ pub(super) async fn load_commit_registrations(
     }
     if let Some(reference) = commit.reclaim_receipt() {
         Box::pin(validate_commit_reclaim_receipt(
-            history_verifier.commit_verifier_ref(),
+            history_verifier,
             commit,
             reference,
             activating_author,
@@ -541,7 +509,7 @@ pub(super) async fn load_commit_registrations(
         BTreeMap::new()
     } else {
         Box::pin(validate_commit_join_outcomes(
-            history_verifier.commit_verifier_ref(),
+            history_verifier,
             commit,
             activating_author,
             predecessor,
@@ -574,21 +542,17 @@ pub(super) async fn load_commit_registrations(
     }
     let mut registrations = Vec::with_capacity(commit.device_registrations().len());
     for activated in commit.device_registrations() {
-        let registration = Box::pin(
-            history_verifier
-                .commit_verifier_ref()
-                .load_registration(&activated.registration),
-        )
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
+        let registration = Box::pin(history_verifier.load_registration(&activated.registration))
+            .await
+            .map_err(RegistrationLoadError::Object)?
+            .value;
         let predecessor = predecessor.ok_or_else(|| {
             RegistrationLoadError::Invalid(
                 "registration activation has no exact predecessor membership authority".to_string(),
             )
         })?;
         let authority = Box::pin(registration_activation(
-            history_verifier.commit_verifier_ref(),
+            history_verifier,
             activated,
             &registration,
             activating_author,

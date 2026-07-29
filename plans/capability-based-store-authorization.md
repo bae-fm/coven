@@ -161,6 +161,14 @@ The required stack order is:
   from its fields;
   - delete `AuthorizedHistoryOperation::new`;
   - make the retained history fields private;
+  - delete `MergeHistoryVerifier::commit_verifier`,
+    `MergeHistoryVerifier::commit_verifier_ref`, and
+    `MergeHistoryVerifier::verification_parts`; callers request a named
+    history operation and cannot extract the contained commit authority;
+  - bind commit authentication, registration loading, exact announcement-head
+    verification, acknowledgement proof loading, device-state verification,
+    Circle activation, snapshot evidence, and terminal nonactivation as
+    `MergeHistoryVerifier` or `AuthorizedStoreHistory` operations;
   - make Circle, join, reclaim, snapshot, acknowledgement, pull, and other
     narrower Store operations borrow the retained history capability;
   - move each database, verifier, root, membership, identity, and writer

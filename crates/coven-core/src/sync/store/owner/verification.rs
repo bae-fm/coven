@@ -1412,57 +1412,12 @@ pub(crate) enum CommitCoverageError {
     MissingAncestry { commit_hash: ObjectHash },
 }
 
-pub(crate) async fn commit_position_covers(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
-    covering: &StoreBatchCommitRef,
-    covered: &StoreBatchCommitRef,
-) -> Result<bool, CommitCoverageError> {
-    let same_stream = covering.coord.stream_id == covered.coord.stream_id;
-    if !same_stream || covering.coord.sequence() < covered.coord.sequence() {
-        return Ok(false);
-    }
-    let mut cursor = covering.clone();
-    while cursor.coord.sequence() > covered.coord.sequence() {
-        let commit = commit_verifier.load_ref(&cursor).await?;
-        cursor = commit.value().order.predecessor().cloned().ok_or(
-            CommitCoverageError::MissingAncestry {
-                commit_hash: cursor.commit_hash,
-            },
-        )?;
-    }
-    Ok(cursor == *covered)
-}
-
-fn coverage_error(error: CommitCoverageError) -> StorePullError {
-    match error {
-        CommitCoverageError::Object(error) => StorePullError::Object(error),
-        CommitCoverageError::MissingAncestry { commit_hash } => StorePullError::Database(format!(
-            "exact Store ancestry is missing commit {commit_hash}"
-        )),
-    }
-}
-
-pub(crate) async fn history_cut_covers(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
-    cut: &StoreHistoryCut,
-    covered: &StoreBatchCommitRef,
-) -> Result<bool, StorePullError> {
-    let covering = cut.0.get(&covered.coord.stream_id);
-    match covering {
-        Some(covering) => commit_position_covers(commit_verifier, covering, covered)
-            .await
-            .map_err(coverage_error),
-        None => Ok(false),
-    }
-}
-
 pub(crate) async fn load_provider_access_activation(
     history_verifier: &mut MergeHistoryVerifier<'_>,
     access: &crate::sync::provider::ActivatedStoreMemberProviderAccessGrant,
     administrator: &StoreDeviceRegistration,
 ) -> Result<VerifiedStoreBatchCommit, StorePullError> {
     let grant = history_verifier
-        .commit_verifier()
         .load_provider_access_grant(&access.grant_ref, administrator)
         .await?;
     if grant.value != access.grant {

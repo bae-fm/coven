@@ -73,9 +73,9 @@ impl AuthorizedWriterOperation<'_> {
                 .await?;
             let activation = self
                 .history_verifier_mut()
-                .commit_verifier()
                 .load_ref(&activation_commit_ref)
-                .await?;
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let activation_commit = activation.value();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(
@@ -107,7 +107,7 @@ impl AuthorizedWriterOperation<'_> {
             let database = self.database().clone();
             let roster_chain = super::activation::load_circle_control_roster_chain(
                 &database,
-                self.history_verifier_mut().commit_verifier(),
+                self.history_verifier_mut(),
                 &activation,
                 reference,
                 &current.control,

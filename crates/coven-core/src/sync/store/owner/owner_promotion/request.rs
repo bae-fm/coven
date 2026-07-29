@@ -115,7 +115,6 @@ pub(crate) async fn begin(
     };
     let member = operation
         .history_verifier_mut()
-        .commit_verifier_ref()
         .load_registration(&member_registration)
         .await
         .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;

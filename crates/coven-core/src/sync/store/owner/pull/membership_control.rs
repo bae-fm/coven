@@ -42,16 +42,12 @@ pub(crate) async fn verify_merge_membership_control(
     let verified_membership_activations =
         verified_merge_membership_prefix(&history.commits, commit_predecessor_references(commit))
             .map_err(|error| error.to_string())?;
-    let pending_resolution = verify_merge_resolution_activation_acceptance_with_history(
-        history_verifier.commit_verifier_ref(),
-        commit,
-        &history.genesis,
-        &history.commits,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let predecessor_membership = load_merge_predecessor_membership_with_verified_activations(
-        history_verifier.commit_verifier_ref(),
+    let pending_resolution = history_verifier
+        .verify_resolution_activation_acceptance(commit)
+        .await
+        .map_err(|error| error.to_string())?;
+    let predecessor_membership = load_merge_predecessor_membership_with_retained_history(
+        history_verifier,
         &commit.membership_state,
         &verified_membership_activations,
         pending_resolution.as_ref(),
@@ -67,18 +63,16 @@ pub(crate) async fn verify_merge_membership_control(
         &predecessor_state,
     )
     .map_err(|error| error.to_string())?;
-    let (commit_verifier, history) = history_verifier.verification_parts();
-    verify_merge_membership_control_with_history(
-        commit_verifier,
-        commit_ref,
-        commit,
-        &predecessor_membership,
-        &predecessor_state,
-        &history.commits,
-        pending_resolution.as_ref(),
-    )
-    .await
-    .map(|(activations, _)| activations)
+    history_verifier
+        .verify_membership_control_with_retained_history(
+            commit_ref,
+            commit,
+            &predecessor_membership,
+            &predecessor_state,
+            pending_resolution.as_ref(),
+        )
+        .await
+        .map(|(activations, _)| activations)
 }
 
 pub(crate) async fn verify_merge_membership_control_with_history(
@@ -279,17 +273,15 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         commit_predecessor_references(request_commit.verified.value()),
     )
     .map_err(|error| error.to_string())?;
-    let request_membership = load_merge_predecessor_membership_with_verified_activations(
-        commit_verifier,
-        &acceptance.request.predecessor_membership,
-        &verified_membership_activations,
-        None,
-    )
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => error.to_string(),
-        RegistrationLoadError::Invalid(error) => error,
-    })?;
+    let request_membership = commit_verifier
+        .load_membership_at_verified_prefix(
+            &acceptance.request.predecessor_membership.heads,
+            &acceptance.request.predecessor_membership.resolutions,
+            &verified_membership_activations,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     let predecessor_cut = commit
         .order
         .predecessor_cut()
@@ -386,7 +378,6 @@ pub(crate) async fn verify_merge_membership_head_activation(
         );
     }
     let activation_observation = history_verifier
-        .commit_verifier()
         .exact_next_announcement_slot(&commit.author_registration, author, Some(&verified))
         .await;
     match activation_observation {

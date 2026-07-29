@@ -526,7 +526,6 @@ async fn execute_revoke_mutation(
     let publication = plan.publication.publication().clone();
     let author = operation
         .history_verifier_mut()
-        .commit_verifier_ref()
         .load_registration(&publication.head.body.author_registration)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?

@@ -34,10 +34,7 @@ pub(crate) async fn load_active_merge_registrations(
         .await?;
     let mut verified = Vec::with_capacity(durable.len());
     for (reference, expected) in durable {
-        let opened = history_verifier
-            .commit_verifier_ref()
-            .load_registration(&reference)
-            .await?;
+        let opened = history_verifier.load_registration(&reference).await?;
         if opened.value != expected {
             return Err(StorePullError::Database(format!(
                 "activated Store registration {} differs from its exact remote bytes",
@@ -125,12 +122,10 @@ pub(crate) async fn discover_merge_owner_recoveries(
             ));
         }
         let registration = history_verifier
-            .commit_verifier_ref()
             .load_registration(&node.readiness.registration)
             .await?
             .value;
         let initial_ack = history_verifier
-            .commit_verifier_ref()
             .load_store_ack(&node.readiness.initial_ack, &registration)
             .await?
             .value;

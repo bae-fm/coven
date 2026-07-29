@@ -523,13 +523,11 @@ impl Store {
             .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
 
         if device_id.is_none() && identity_is_founder {
-            registration::install_existing_founder_device(
-                &database,
-                history.history_verifier.commit_verifier_ref(),
-                identity,
-            )
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            history
+                .history_verifier
+                .install_existing_founder_device(&database, identity)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
             device_id = database
                 .sqlite()
                 .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -1154,7 +1152,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let verified_commit = history
             .history_verifier_mut()
-            .commit_verifier()
             .authenticate_bytes(&candidate.commit, &candidate_commit.to_bytes())
             .await?;
         history
@@ -1238,7 +1235,7 @@ impl Store {
         &self,
         reference: &crate::sync::membership::MembershipHeadRef,
     ) -> Result<crate::sync::membership::AuthorHead, StoreError> {
-        let history = self
+        let mut history = self
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -1333,15 +1330,14 @@ impl Store {
             Some(reference) => Some(
                 history
                     .history_verifier_mut()
-                    .commit_verifier()
                     .load_ref(reference)
-                    .await?,
+                    .await
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
             None => None,
         };
         history
             .history_verifier_mut()
-            .commit_verifier()
             .exact_next_announcement_slot(registration_ref, registration, previous.as_ref())
             .await
     }
@@ -1355,11 +1351,11 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
+        history
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(reference)
-            .await?)
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1383,9 +1379,9 @@ impl Store {
         while !coverage.0.values().any(|covered| covered == &cursor) {
             let commit = history
                 .history_verifier_mut()
-                .commit_verifier()
                 .load_ref(&cursor)
-                .await?;
+                .await
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let predecessor = commit.order.predecessor().cloned().ok_or_else(|| {
                 StoreError::InvalidOutbound(
                     "commit ancestry ended before snapshot coverage".to_string(),
@@ -1408,7 +1404,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history
             .history_verifier
-            .commit_verifier_ref()
             .load_registration(reference)
             .await?
             .value)
@@ -1465,17 +1460,18 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        pull::readiness(
-            &self.database,
-            history.history_verifier_mut().commit_verifier(),
-            coverage,
-            frontier,
-            device_state,
-            exclusion_freezes,
-            commit_ref,
-            commit,
-        )
-        .await
+        history
+            .history_verifier_mut()
+            .readiness(
+                &self.database,
+                coverage,
+                frontier,
+                device_state,
+                exclusion_freezes,
+                commit_ref,
+                commit,
+            )
+            .await
     }
 
     #[cfg(test)]
@@ -1596,7 +1592,7 @@ impl Store {
             .map_err(|error| pull::PullCircleActivationError::Invalid(error.to_string()))?;
         pull::load_applicable_circle_packages(
             &self.database,
-            history.history_verifier_mut().commit_verifier(),
+            history.history_verifier_mut(),
             verified,
             activations,
             author,
@@ -1702,7 +1698,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history
             .history_verifier_mut()
-            .commit_verifier()
             .load_founder_registration()
             .await?)
     }
@@ -1765,7 +1760,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history
             .history_verifier_mut()
-            .commit_verifier()
             .load_store_package(reference)
             .await?)
     }
@@ -1782,7 +1776,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history
             .history_verifier_mut()
-            .commit_verifier()
             .load_store_ack(reference, registration)
             .await?
             .value)
@@ -1801,7 +1794,6 @@ impl Store {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history
             .history_verifier_mut()
-            .commit_verifier()
             .load_head(reference, registration, commit)
             .await?
             .value)

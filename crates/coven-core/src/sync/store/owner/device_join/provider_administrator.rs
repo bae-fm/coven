@@ -34,7 +34,6 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let activation = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_ref(&authorization.attempt_activation)
             .await?;
         if activation.author() != attempt_owner
@@ -77,7 +76,6 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let owner = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&request.offer.owner_registration)
             .await?
             .value;
@@ -280,7 +278,6 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let owner = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
@@ -501,13 +498,11 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let (attempt, owner) = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
@@ -629,13 +624,11 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let (attempt, owner) = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
             .writer
             .history_verifier_mut()
-            .commit_verifier()
             .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
