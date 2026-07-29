@@ -9,12 +9,13 @@ invariants own that work.
 
 The working method is a bottom-up ownership queue. Build a graph of retained
 owners and unowned stateful call groups, then select groups that do not call any
-other unowned stateful group. For each ready group, identify the
-invariant-bearing owner, move the workflow onto it, delete the prior entry
-point, repair callers through compiler errors, record the decision, and rebuild
-the graph. Each relocation exposes the next ready groups. Continue upward until
-every stateful workflow is owned and every remaining free function is a
-verified transformation, boundary, dependency primitive, or callback adapter.
+other unowned stateful group. For each ready group, choose its exact disposition:
+bind it to its invariant-bearing owner, internalize it into its caller, leave a
+verified transformation in place, or delete duplication. Repair callers through
+compiler errors, record the decision, commit that group, and rebuild the graph.
+Each disposition exposes the next ready groups. Continue upward until every
+stateful workflow is owned and every remaining free function is a verified
+transformation, boundary, dependency primitive, or callback adapter.
 
 This applies to both Rust crates, not only Store authorization:
 
@@ -285,6 +286,26 @@ coherence is hidden. Otherwise it belongs on the storage or database owner.
 Collapse recursive call groups, then order the graph from callees toward entry
 points. Work one ownership boundary at a time:
 
+A ready group authorizes changing that group only. When its correct disposition
+is to internalize it into a caller, move its body into the caller and delete the
+selected entry point, but do not relocate the caller unless the rebuilt graph
+also marks that caller ready. The caller can still depend on other unowned
+groups. Crossing that boundary forces either a reach-through or duplicate
+logic.
+
+For example, given:
+
+```text
+mark_make_remote_cancelling_on  ready
+gated_root_gate_col             ready
+cancel_make_remote              blocked by both
+```
+
+internalize `mark_make_remote_cancelling_on` into `cancel_make_remote` and
+commit that disposition while leaving `cancel_make_remote` in its existing
+module. After `gated_root_gate_col` receives its own disposition and the graph
+is rebuilt, `cancel_make_remote` becomes eligible for relocation.
+
 1. Read every function in the selected call group completely.
 1. Classify its dependencies, effects, callers, and callees.
 1. Resolve any unclassified callee first.
@@ -501,3 +522,6 @@ The work is verified when:
 - The generated artifact presents those four review sets as full lists. A
   selected row can switch to its dependency graph, and an unowned workflow with
   no suitable adjacent type explicitly permits creating its missing owner.
+- Readiness now authorizes disposition of the selected group only. Internalizing
+  a ready group into a blocked caller leaves that caller in place; its other
+  blockers receive separate commits before the caller can relocate.

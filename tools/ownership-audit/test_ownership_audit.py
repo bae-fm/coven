@@ -1079,6 +1079,8 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertIn('<div id="ownership-list"', html)
         self.assertIn('<svg id="graph"', html)
         self.assertIn("Ready ownership queue", html)
+        self.assertIn("a blocked caller remains in place", html)
+        self.assertIn("This does not make its callers ready", html)
         self.assertIn("Construction boundaries", html)
         self.assertIn('"callables": 0', html)
 

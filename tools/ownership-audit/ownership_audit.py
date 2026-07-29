@@ -3900,6 +3900,7 @@ function showQueue() {
     "<h2>Ready ownership queue</h2>" +
     '<div class="meta">These call groups do not call another unowned stateful call group.</div>' +
     "<h3>" + ready.length + " ready groups</h3>" +
+    '<div class="meta">Readiness applies to the selected group only. It may be owned, classified, deleted, or internalized into a caller; a blocked caller remains in place until its own blockers are resolved.</div>' +
     '<div class="meta">Select a row from the list to inspect its owner, callers, and dependencies.</div>';
 }
 
@@ -3950,7 +3951,7 @@ function showDetails(node) {
   const readiness = node.kind === "unbound"
     ? '<div class="meta">' +
       (node.ready
-        ? "Ready: no unowned stateful callees."
+        ? "Ready: no unowned stateful callees. This does not make its callers ready."
         : "Blocked by " + node.blockers.length + " unowned stateful callees.") +
       "</div>"
     : "";
