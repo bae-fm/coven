@@ -1000,7 +1000,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .unchecked_transaction()
                     .map_err(crate::database::DbError::from)?;
                 let store_transaction =
-                    crate::sync::store::database::StoreDatabaseTransaction::new(&tx);
+                    crate::sync::store::MergeMaterializationTransaction::new(&tx);
                 if let Some(object_ids) = operation_object_ids {
                     store_transaction
                         .activate_store_operation_remote_objects(&recorded_ref, &object_ids)?;

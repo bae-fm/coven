@@ -47,7 +47,12 @@ use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 use materialization_models::OwnedVerifiedMergeMaterialization;
 
+use super::MergeMaterializationTransaction;
+
 pub(crate) use retained_merge_replay::RetainedMergeMaterializationCache;
+pub(super) use store_device_state::{
+    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
+};
 
 #[derive(Clone)]
 pub(crate) struct StoreDatabaseRuntime {
@@ -103,16 +108,6 @@ pub(super) type OwnStreamAuthorship = tokio::sync::OwnedMutexGuard<()>;
 pub struct StoreDatabase {
     database: Database,
     runtime: StoreDatabaseRuntime,
-}
-
-pub(super) struct StoreDatabaseTransaction<'transaction, 'connection> {
-    transaction: &'transaction rusqlite::Transaction<'connection>,
-}
-
-impl<'transaction, 'connection> StoreDatabaseTransaction<'transaction, 'connection> {
-    pub(super) fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
-        Self { transaction }
-    }
 }
 
 impl StoreDatabase {
@@ -277,7 +272,7 @@ pub(crate) fn record_verified_circle_activations_for_test(
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
 ) -> Result<(), DbError> {
     let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-    StoreDatabaseTransaction::new(&transaction)
+    MergeMaterializationTransaction::new(&transaction)
         .record_verified_circle_activations(commit, activations)?;
     transaction.commit().map_err(DbError::from)
 }

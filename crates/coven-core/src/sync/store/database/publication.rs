@@ -5,7 +5,7 @@ use super::{
         parse_prepared_merge_publication_on,
     },
     publication_state::{MergeAbandonmentOutcome, PreparedStoreWriteState},
-    StoreDatabase, StoreDatabaseTransaction,
+    MergeMaterializationTransaction, StoreDatabase,
 };
 use crate::database::{
     load_activated_registration_on, load_remote_object_on, required_store_root_authority_on,
@@ -210,7 +210,7 @@ impl StoreDatabase {
                         true,
                         &[],
                     )?;
-                    StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
+                    MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
                         &root,
                         &authority.commit,
                         &[],
@@ -325,7 +325,7 @@ impl StoreDatabase {
                     local_cleanup,
                     &[head_object_id],
                 )?;
-                StoreDatabaseTransaction::new(&tx).record_materialized_merge_commit(
+                MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
                     &root,
                     &commit_value,
                     &[],

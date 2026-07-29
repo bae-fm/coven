@@ -117,7 +117,7 @@ impl StoreMembershipJournalCompletion {
                         "activated Owner-promotion graph is empty".to_string(),
                     ));
                 }
-                StoreDatabaseTransaction::new(tx)
+                MergeMaterializationTransaction::new(tx)
                     .activate_store_operation_remote_objects(candidate, &object_ids)?;
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();

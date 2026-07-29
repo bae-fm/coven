@@ -895,7 +895,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     for bootstrap in circle_activations.bootstraps() {
         super::replay::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
     }
-    let store_transaction = crate::sync::store::database::StoreDatabaseTransaction::new(conn);
+    let store_transaction = crate::sync::store::MergeMaterializationTransaction::new(conn);
     store_transaction
         .record_verified_circle_activations(&verified_commit, circle_activations.circles())?;
     // A Circle whose winning control chain is now Deleted prunes its rows,

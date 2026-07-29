@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-use super::{StoreDatabase, StoreDatabaseTransaction};
+use super::{MergeMaterializationTransaction, StoreDatabase};
 use crate::database::{
     candidate_graph_exact_objects, load_activated_registration_on, load_circle_operation_on,
     mark_remote_object_uploaded_on, persist_prepared_remote_object_on,
@@ -445,7 +445,7 @@ impl StoreDatabase {
                         &[],
                         None,
                     )?;
-                    StoreDatabaseTransaction::new(&tx)
+                    MergeMaterializationTransaction::new(&tx)
                         .record_verified_merge_materialization(materialization)?;
                     (
                         commit,
@@ -481,7 +481,7 @@ impl StoreDatabase {
                 if let Some(head_object_id) = head_object_id {
                     object_ids.push(head_object_id);
                 }
-                let store_transaction = StoreDatabaseTransaction::new(&tx);
+                let store_transaction = MergeMaterializationTransaction::new(&tx);
                 store_transaction.activate_store_operation_remote_objects(
                     &operation.commit_ref,
                     &object_ids,

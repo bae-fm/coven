@@ -6,9 +6,10 @@ use crate::sync::storage::{
     BlobWriteAuthority, ExactObjectRef, PreparedExactObject, ProtocolObjectContext,
     ProtocolObjectDomain,
 };
-use crate::sync::store::database::{StoreDatabase, StoreDatabaseTransaction};
 use crate::sync::store::owner::{device_join, owner_promotion};
-use crate::sync::store::{StoreError, StorePreparationError};
+use crate::sync::store::{
+    MergeMaterializationTransaction, StoreDatabase, StoreError, StorePreparationError,
+};
 use crate::sync::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef,

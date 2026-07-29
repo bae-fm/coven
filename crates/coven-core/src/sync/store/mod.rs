@@ -23,6 +23,8 @@ pub use database::StoreDatabase;
 mod device_join_transport;
 mod error;
 mod membership;
+mod merge_materialization_transaction;
+use merge_materialization_transaction::MergeMaterializationTransaction;
 mod owner;
 use owner::operations;
 mod package_preparation;

@@ -1023,7 +1023,7 @@ impl AuthorizedStoreHistory<'_> {
                 &[],
                 None,
             )?;
-            crate::sync::store::database::StoreDatabaseTransaction::new(&tx)
+            crate::sync::store::MergeMaterializationTransaction::new(&tx)
                 .record_verified_merge_materialization(materialization)?;
             tx.commit().map_err(crate::database::DbError::from)
         })
