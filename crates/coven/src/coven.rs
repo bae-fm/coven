@@ -44,6 +44,13 @@ pub enum CovenError {
     MalformedPath(String),
     #[error("the write SQL closure panicked")]
     WriteClosurePanicked,
+    #[error(
+        "write failed: {write}; failed to remove installed local blobs during rollback: {rollback}"
+    )]
+    WriteRollbackFailed {
+        write: Box<CovenError>,
+        rollback: String,
+    },
     #[error("synced_tables must be set before opening a coven store")]
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven store")]
@@ -1086,23 +1093,30 @@ fn run_write_batch_on_connection<R>(
     );
     match result {
         Ok(value) => Ok(value),
-        Err(error) => rollback_write_batch(error, moved),
-    }
-}
-
-fn rollback_write_batch<R>(error: CovenError, moved: Vec<StagedBlob>) -> CovenResult<R> {
-    for blob in moved.iter().rev() {
-        if let Err(e) = std::fs::remove_file(&blob.final_path) {
-            warn!(
-                namespace = %blob.namespace,
-                blob_id = %blob.id,
-                path = %blob.final_path.display(),
-                error = %e,
-                "failed to remove installed local blob after write rollback"
-            );
+        Err(error) => {
+            let mut rollback_failures = Vec::new();
+            for blob in moved.iter().rev() {
+                match std::fs::remove_file(&blob.final_path) {
+                    Ok(()) => {}
+                    Err(rollback) if rollback.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(rollback) => rollback_failures.push(format!(
+                        "{}/{} at {}: {rollback}",
+                        blob.namespace,
+                        blob.id,
+                        blob.final_path.display()
+                    )),
+                }
+            }
+            if rollback_failures.is_empty() {
+                Err(error)
+            } else {
+                Err(CovenError::WriteRollbackFailed {
+                    write: Box::new(error),
+                    rollback: rollback_failures.join("; "),
+                })
+            }
         }
     }
-    Err(error)
 }
 
 #[cfg(test)]
@@ -3653,6 +3667,42 @@ mod tests {
             .local_blob_path("media-files", "panicccc")
             .expect("panic path")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn write_surfaces_a_failed_installed_blob_rollback() {
+        let (_tmp, handle) = open_files_handle();
+        let final_path = handle
+            .store_dir()
+            .local_blob_path("media-files", "rollback-failure")
+            .expect("rollback failure path");
+        let obstructed_path = final_path.clone();
+
+        let result: CovenResult<WriteReceipt<()>> = handle
+            .write(
+                |write| {
+                    write.put_blob("media-files", "rollback-failure", b"new".to_vec());
+                    Ok(())
+                },
+                move |_sql| {
+                    std::fs::remove_file(&obstructed_path)
+                        .expect("replace installed blob with rollback obstruction");
+                    std::fs::create_dir(&obstructed_path)
+                        .expect("create rollback obstruction directory");
+                    Err(CovenError::Blob("force rollback".to_string()))
+                },
+            )
+            .await;
+
+        let error = result.expect_err("the write and its blob rollback both fail");
+        assert!(error.to_string().contains("force rollback"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to remove installed local blobs during rollback"),
+            "{error}"
+        );
+        assert!(final_path.is_dir(), "rollback obstruction remains visible");
     }
 
     #[tokio::test]
