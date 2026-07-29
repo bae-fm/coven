@@ -9,12 +9,20 @@ mod publication;
 pub(crate) mod reclaim;
 pub(crate) mod snapshot;
 
+#[derive(Clone, Copy)]
+pub(super) struct SnapshotHistoryConstruction;
+
+impl SnapshotHistoryConstruction {
+    fn authorize_history(self) -> super::history::HistoryConstructionAuthority {
+        super::history::HistoryConstructionAuthority::snapshot(self)
+    }
+}
+
 pub(crate) use acknowledgements::StoreAckError;
 pub(super) use membership_mutation::{
     validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
     PreparedMembershipTransition,
 };
-
 pub(super) struct LocalStoreWriter<'store> {
     pub(super) identity: &'store UserKeypair,
     pub(super) registration_ref: crate::sync::store_commit::StoreDeviceRegistrationRef,

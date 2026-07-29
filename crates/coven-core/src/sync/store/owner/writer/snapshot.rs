@@ -13,6 +13,7 @@ pub(crate) use image::{
 
 use tracing::{info, warn};
 
+use super::SnapshotHistoryConstruction;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::sync::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
@@ -2057,9 +2058,13 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
         root: &StoreRootRef,
     ) -> Result<Self, SnapshotError> {
         let history_verifier =
-            crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(storage, root)
-                .await
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(
+                SnapshotHistoryConstruction.authorize_history(),
+                storage,
+                root,
+            )
+            .await
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
         Ok(Self { history_verifier })
     }
 

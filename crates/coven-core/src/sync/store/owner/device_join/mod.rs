@@ -43,6 +43,15 @@ mod journal;
 mod owner;
 mod provider_administrator;
 
+#[derive(Clone, Copy)]
+pub(super) struct PendingDeviceJoinHistoryConstruction;
+
+impl PendingDeviceJoinHistoryConstruction {
+    fn authorize_history(self) -> super::history::HistoryConstructionAuthority {
+        super::history::HistoryConstructionAuthority::pending_device_join(self)
+    }
+}
+
 pub(super) struct AuthorizedJoin<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
 }

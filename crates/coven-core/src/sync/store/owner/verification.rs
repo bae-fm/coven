@@ -73,7 +73,8 @@ impl<'a> StoreCommitVerifier<'a> {
         .await
     }
 
-    pub(crate) fn from_verified_root(
+    pub(super) fn from_verified_root(
+        _authority: super::history::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
         root: &StoreRootRef,
         verified_root: VerifiedObject<StoreProtocolRoot>,

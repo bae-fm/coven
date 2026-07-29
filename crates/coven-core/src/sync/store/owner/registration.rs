@@ -462,23 +462,12 @@ mod tests {
     }
 
     async fn restoring_store<'storage>(
-        store: &'storage TestStore,
-        db: &Database,
-        membership: crate::sync::membership::MembershipChain,
+        store: &'storage crate::sync::test_helpers::TestDevice,
     ) -> super::super::restore::RestoringStore<'storage> {
-        let history = crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(
-            &store.storage,
-            &store.root,
-        )
-        .await
-        .expect("open Owner recovery history");
-        super::super::restore::RestoringStore::from_bootstrap(
-            db.clone(),
-            history,
-            membership,
-            store.signer.clone(),
-            std::path::PathBuf::new(),
-        )
+        store
+            .restoring_for_test()
+            .await
+            .expect("authorize Owner recovery Store")
     }
 
     async fn recovered_author() -> (
@@ -492,13 +481,9 @@ mod tests {
             .bind_device(&db, &store.signer)
             .await
             .expect("load recovery Store");
-        let membership = loaded
-            .membership_for_test()
-            .await
-            .expect("load exact membership");
         let authority = founder_recovery_authority(&store).await;
         let database = StoreDatabase::new(&db);
-        let registration = restoring_store(&store, &db, membership)
+        let registration = restoring_store(&loaded)
             .await
             .recover_owner_device(&authority)
             .await
@@ -648,13 +633,9 @@ mod tests {
             .bind_device(&db, &store.signer)
             .await
             .expect("load recovery Store");
-        let membership = loaded
-            .membership_for_test()
-            .await
-            .expect("load exact membership");
         let authority = founder_recovery_authority(&store).await;
         let database = StoreDatabase::new(&db);
-        let registration = restoring_store(&store, &db, membership)
+        let registration = restoring_store(&loaded)
             .await
             .recover_owner_device(&authority)
             .await
@@ -755,13 +736,9 @@ mod tests {
                 .bind_device(&db, &store.signer)
                 .await
                 .expect("load recovery Store");
-            let membership = loaded
-                .membership_for_test()
-                .await
-                .expect("load exact membership");
             let authority = founder_recovery_authority(&store).await;
             let database = StoreDatabase::new(&db);
-            let mut restoring = restoring_store(&store, &db, membership).await;
+            let mut restoring = restoring_store(&loaded).await;
             store.home.fail_exact_create_before_call(failed_call);
             assert!(
                 restoring.recover_owner_device(&authority).await.is_err(),

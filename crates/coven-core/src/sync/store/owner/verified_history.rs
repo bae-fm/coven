@@ -1746,6 +1746,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(super) async fn new(
+        authority: super::history::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
         root: &StoreRootRef,
     ) -> Result<Self, StorePullError> {
@@ -1753,12 +1754,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
                 .await
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let commit_verifier = StoreCommitVerifier::from_verified_root(storage, root, verified_root)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-        Self::from_commit_verifier(commit_verifier).await
+        let commit_verifier =
+            StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        Self::from_commit_verifier(authority, commit_verifier).await
     }
 
     pub(super) async fn from_commit_verifier(
+        _authority: super::history::HistoryConstructionAuthority,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
         let founder = commit_verifier.load_founder_registration().await?;

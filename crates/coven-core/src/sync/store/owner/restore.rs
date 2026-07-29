@@ -1022,19 +1022,15 @@ impl<'storage> RestoringStore<'storage> {
         self.bootstrap
     }
 
-    pub(super) fn from_bootstrap(
-        database: Database,
-        history_verifier: verified_history::MergeHistoryVerifier<'storage>,
+    pub(super) fn from_authorized_history(
+        history: AuthorizedStoreHistory<'storage>,
         membership: crate::sync::membership::MembershipChain,
         identity: UserKeypair,
         target_path: PathBuf,
     ) -> Self {
         Self {
             bootstrap: BootstrappedStore {
-                history: AuthorizedStoreHistory {
-                    database: StoreDatabase::from_database(database),
-                    history_verifier,
-                },
+                history,
                 membership,
                 identity,
             },

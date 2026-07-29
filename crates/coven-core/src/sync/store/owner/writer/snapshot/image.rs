@@ -295,9 +295,11 @@ impl<'storage> BootstrapResult<'storage> {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            Ok(crate::sync::store::RestoringStore::from_bootstrap(
-                db,
-                self.history_verifier,
+            Ok(crate::sync::store::RestoringStore::from_authorized_history(
+                crate::sync::store::owner::history::AuthorizedStoreHistory {
+                    database: crate::sync::store::StoreDatabase::from_database(db),
+                    history_verifier: self.history_verifier,
+                },
                 self.membership,
                 self.restorer_identity,
                 requested,

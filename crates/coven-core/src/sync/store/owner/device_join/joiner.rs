@@ -316,12 +316,14 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                 .await
                 .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
         let commit_verifier = super::super::StoreCommitVerifier::from_verified_root(
+            PendingDeviceJoinHistoryConstruction.authorize_history(),
             storage,
             store_root,
             verified_root,
         )?;
         let history_verifier =
             crate::sync::store::owner::verified_history::MergeHistoryVerifier::from_commit_verifier(
+                PendingDeviceJoinHistoryConstruction.authorize_history(),
                 commit_verifier,
             )
             .await?;
