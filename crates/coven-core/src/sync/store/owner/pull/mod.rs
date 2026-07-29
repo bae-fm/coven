@@ -118,7 +118,6 @@ use registration_validation::load_merge_commit_registrations;
 use replay::verified_terminal_merge_retractions;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
 #[cfg(test)]
-#[cfg(test)]
 mod tests;
 
 #[derive(Clone)]
@@ -156,17 +155,16 @@ impl LoadedMergePredecessorMemberships {
     }
 }
 
-impl AuthorizedWriterOperation<'_> {
+impl AuthorizedStore<'_> {
     pub(crate) async fn pull(
         &mut self,
         store_dir: &StoreDir,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StorePullResult, SyncCycleFailure> {
-        let identity = self.identity().clone();
+        let identity = self.identity.clone();
         let tables = self.database().sqlite().synced_tables().to_vec();
-        let membership = self.store.membership.clone();
+        let membership = self.membership.clone();
         let execution = self
-            .store
             .history
             .pull(
                 &tables,
@@ -177,7 +175,7 @@ impl AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
-        self.store.membership = execution.membership;
+        self.membership = execution.membership;
         Ok(execution.result)
     }
 

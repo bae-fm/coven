@@ -331,6 +331,12 @@ not recreate their free forms:
   into the database transaction. The transaction verifies the activated
   registration bytes against the already-verified commit author instead of
   reloading the Store root and reconstructing registration authority.
+- Pull is an `AuthorizedStore` operation, not a writer operation. Pull-only
+  callers therefore retain Store history, membership, identity, database, and
+  storage authority without draining registration state or constructing a
+  local writer. Test Stores retain their founder device independently from
+  arbitrary producer labels, so inspecting founder authority cannot create and
+  activate another device.
 
 ## The distinction this design preserves
 

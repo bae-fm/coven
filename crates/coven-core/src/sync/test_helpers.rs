@@ -1755,6 +1755,7 @@ impl TestDevice {
 }
 
 struct TestStoreProducers {
+    founder: TestDevice,
     unassigned: Option<TestDevice>,
     by_name: HashMap<String, TestDevice>,
 }
@@ -1880,6 +1881,7 @@ impl TestStore {
             root,
             signer,
             producers: tokio::sync::Mutex::new(TestStoreProducers {
+                founder: founder.clone(),
                 unassigned: Some(founder),
                 by_name: HashMap::new(),
             }),
@@ -2004,7 +2006,7 @@ impl TestStore {
     }
 
     pub async fn founder_device(&self) -> Result<TestDevice, String> {
-        self.ensure_producer("founder").await
+        Ok(self.producers.lock().await.founder.clone())
     }
 
     pub async fn next_commit_sequence(&self, name: &str) -> Result<u64, String> {
@@ -2245,12 +2247,12 @@ pub async fn pull_into_result(
         )
     })?;
     let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-    let mut writer = device
+    let mut authorization = device
         .store
-        .authorize_writer()
+        .authorize()
         .await
         .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
-    let result = writer
+    let result = authorization
         .pull(store_dir, Some(&routing_encryption))
         .await
         .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
