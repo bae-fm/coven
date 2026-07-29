@@ -109,10 +109,11 @@ callers are repaired.
   writer capability only when they interpret its authority.
 - acknowledgement staging, publication, draining, and nonactivation cleanup
   move to `AuthorizedWriterOperation`; exact acknowledgement parsing remains a
-  closed verification helper.
+  self-contained verification helper over already-selected inputs.
 - snapshot authoring, publication, stability decisions, and retained-history
   preparation move to `AuthorizedWriterOperation`; snapshot image encoding and
-  exact-object opening remain closed helpers.
+  exact-object opening remain self-contained helpers over already-selected
+  inputs.
 - reclaim preparation, verification, deletion, receipt publication, and
   completion move to `AuthorizedReclaim`, derived from
   `AuthorizedWriterOperation`.
@@ -128,9 +129,9 @@ callers are repaired.
 - device join begin, approval, cancellation, finalization, drive, and cleanup
   move to `AuthorizedJoin`; `begin()` now owns member eligibility, provider
   administrator resolution, signing, slot allocation, and initial Store-journal
-  persistence. The initial journal value is constructed through a closed
-  `DeviceJoinJournalRecord::owner_offered` constructor. Pre-Store bootstrap
-  enters through an associated `Store` constructor.
+  persistence. The complete initial journal value is constructed through
+  `DeviceJoinJournalRecord::owner_offered`. Pre-Store bootstrap enters through
+  an associated `Store` constructor.
 - Owner promotion membership loading, acceptance, finalization, resumption, and
   cleanup move to `AuthorizedOwnerPromotion`.
 - `protocol_root::{create_store, open_store}` become private bodies of
@@ -141,7 +142,7 @@ callers are repaired.
   and reclaim work.
 
 Functions remain dependency-taking helpers only when their inputs are already
-closed values and they do not establish, reload, choose, or interpret Store
+selected and they do not establish, reload, choose, or interpret Store
 authority. This includes canonical encoding, hashing, signature checks,
 exact-object transport, blob-cache materialization after protection is
 resolved, and SQLite row operations.
@@ -154,6 +155,26 @@ begins only after these ownership moves are complete.
 
 The required stack order is:
 
+- Audit every `super::super::` path before declaring ownership relocation
+  complete. Each occurrence is reviewed, not mechanically renamed:
+  capability construction and workflow calls move behind the immediate
+  parent; legitimate domain-type references become explicit imports at the
+  module boundary. The recorded inventory is:
+  - `crates/coven-core/src/database/tests/{connection,fixtures,history,open,remote_objects,remote_ownership,routing}.rs`;
+  - `crates/coven-core/src/storage/cloud/test_utils.rs`;
+  - `crates/coven-core/src/sync/{circle,circle_control,circle_roster,cycle,remote_object}.rs`;
+  - `crates/coven-core/src/sync/store/database/write_lifecycle.rs`;
+  - `crates/coven-core/src/sync/store/owner/circles/tests/{publication,resolution}.rs`;
+  - `crates/coven-core/src/sync/store/owner/device_join/joiner.rs`;
+  - `crates/coven-core/src/sync/store/owner/history/abandonment.rs`;
+  - `crates/coven-core/src/sync/store/owner/pull/{circle_packages,materialization,replay}.rs`;
+  - `crates/coven-core/src/sync/store/owner/{registration,verified_history}.rs`;
+  - `crates/coven-core/src/sync/store/owner/writer/operations/{plan,tests}.rs`;
+  - `crates/coven-core/src/sync/store/owner/writer/{publication,snapshot}.rs`;
+  - `crates/coven-core/src/sync/store_commit/tests.rs`;
+  - `crates/coven/src/storage/cloud/{dropbox,google_drive,onedrive,s3}.rs`.
+  Re-run `rg -n 'super::super::' --glob '*.rs' .` after every ownership
+  conversion so newly exposed ancestor reach-throughs join this stack.
 - Store authorization composition retains one owning
   `AuthorizedStoreHistory` containing the Store database and history verifier;
   `AuthorizedStore`, writer operations, and narrower operations borrow that
@@ -176,8 +197,8 @@ The required stack order is:
     cannot obtain or reconstruct raw authority;
   - eliminate every `super::…::pull` reach-through from narrower operations;
     history-dependent behavior becomes an `AuthorizedStoreHistory` operation,
-    while closed parsing and verification stays private inside the history
-    implementation;
+    while self-contained parsing and verification over already-selected inputs
+    stays private inside the history implementation;
   - move `sync::service::prepare_store_payload` beneath
     `AuthorizedWriterOperation`; Store payload preparation must use the bound
     writer and cannot be reached through a generic service namespace;
@@ -193,8 +214,8 @@ The required stack order is:
     `AuthorizedStoreHistory`, `AuthorizedStore`, or the pre-Store join
     capability; delete their loose verifier, database, storage, root,
     membership, and identity entry points;
-  - reduce `sync::store::membership` to membership-domain values and closed
-    algorithms:
+  - reduce `sync::store::membership` to membership-domain values and
+    self-contained algorithms:
     - authorization refresh belongs to `AuthorizedWriterOperation`;
     - membership cursor persistence belongs to `StoreDatabase`, and its
       test-only forwarding wrappers are deleted when their callers move;
@@ -271,8 +292,8 @@ not recreate their free forms:
 - `Store::create` owns root-creation sequencing, while `Store::open` and
   `Store::load` share the private `Store::open_protocol_root` operation;
 - the `StoreCreation` and `StoreOpening` operation wrappers are deleted, and
-  `protocol_root` retains only the closed algorithms those Store operations
-  invoke;
+  `protocol_root` retains only the deterministic algorithms those Store
+  operations invoke with already-selected inputs;
 - `create_exact_object` and `delete_exact_object` are deleted as forwarding
   wrappers over `SyncStorage`, and `load_exact_object` is private;
 - raw Store-root loading and `StoreCommitVerifier::new` are deleted;
@@ -301,7 +322,7 @@ not recreate their free forms:
   is deleted;
 - merge-history authority verification is
   `MergeHistoryVerifier::verify_merge_history_authority`; callers receive its
-  closed device-state and membership result rather than invoking a snapshot
+  verified device-state and membership result rather than invoking a snapshot
   helper;
 - device-join attempt loading and history verification are
   `MergeHistoryVerifier::load_verified_device_join_attempt` and
@@ -329,8 +350,8 @@ not recreate their free forms:
   loading and image installation, so restore does not reconstruct a commit
   verifier from a verified root.
 - `load_local_store_authority` and its tuple of root, registration reference,
-  registration, and device signer are deleted. Store tests use closed
-  Store-owned operations for retained-outbound authorization, promotion
+  registration, and device signer are deleted. Store tests use Store-owned
+  operations for retained-outbound authorization, promotion
   targets, head signing, and snapshot verification.
 - Circle snapshot publication is an `AuthorizedWriterOperation` method. It
   uses the retained root, activated registration, device signer, database, and
@@ -427,7 +448,7 @@ The capability names and ownership relationships are:
   and pull operations derive their input-specific decisions from these
   capabilities.
 
-Capabilities expose domain operations and closed verified results. Their
+Capabilities expose domain operations and verified domain results. Their
 fields, constructors, raw verifier access, and assembly helpers are private.
 
 ## Top-level construction boundaries
@@ -444,8 +465,8 @@ The allowed constructors are Store-owned operations:
   registration against the retained root and history, derives the device
   signer, and returns `AuthorizedWriterOperation`;
 - Store-associated join and restore boundaries verify bootstrap authority
-  before a runnable `Store` exists and return closed bootstrap capabilities or
-  an initialized `Store`.
+  before a runnable `Store` exists and return verified bootstrap capabilities
+  or an initialized `Store`.
 
 Pre-Store joining and restore are not exceptions that expose raw constructors.
 They enter associated `Store` boundary functions whose result proves the exact
@@ -498,7 +519,7 @@ may not access each other's private items. Store command implementations that
 must establish or narrow authority are therefore children of `owner`.
 Authority-interpreting subsystem functions are methods on a capability, or
 private helpers called by those methods. Protocol algorithms outside `owner`
-receive the opaque capability or a closed verified input. They cannot import a
+receive the opaque capability or an already-verified input. They cannot import a
 constructor merely because they live below `sync::store`.
 
 The following implementation details are not re-exported from
@@ -586,9 +607,9 @@ Every workflow that interprets Store authority uses the capability path:
 - package and blob authority decisions.
 
 Pure canonical encoding, hashing, cryptography, exact-object transport, SQLite
-row mechanics, and closed input-specific verification may remain separate.
-They accept closed values or borrow a capability; they never establish Store
-authority.
+row mechanics, and self-contained input-specific verification may remain
+separate. They accept already-selected inputs or borrow a capability; they
+never establish Store authority.
 
 ## Conversion method
 
@@ -637,9 +658,9 @@ store
 Tests for a capability constructor or a private protocol algorithm live inside
 the private owner module that owns it. No crate-wide `test-utils` feature
 exposes raw authorization constructors. A purpose-specific test operation on
-`Store` may expose a closed result under `cfg(test)` when an integration test
-must exercise a private algorithm; it cannot return a verifier, membership
-chain, raw registration, or capability field.
+`Store` may expose a verified domain result under `cfg(test)` when an
+integration test must exercise a private algorithm; it cannot return a
+verifier, membership chain, raw registration, or capability field.
 
 ## Atomicity and freshness
 
@@ -692,7 +713,7 @@ compiler rejects an import or call from Circle, membership, snapshot, reclaim,
 device-join, Owner-promotion, cycle, application, or external test code.
 
 Production lower-layer functions do not accept loose verifier/root/membership
-clusters. They accept a capability or closed verified input.
+clusters. They accept a capability or an already-verified input.
 
 Repository searches must also show:
 
