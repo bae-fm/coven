@@ -6342,9 +6342,9 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
 
     let result = loaded.membership_for_test().await;
     assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.to_string().contains("pinned owner")),
+        result.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("Store owner anchor differs from its signed root")),
         "a chain founded by a non-owner must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -7214,18 +7214,17 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     );
 }
 
-/// Issue #84 — a removed member's changeset is skipped, not applied. The owner
-/// added the member at (owner, 2) then removed them at (owner, 3); the member's
-/// changeset names its (still-valid-looking) Add grant (owner, 2), but the puller
-/// already holds the Remove, so merging the grant into the full chain still leaves
-/// the author unauthorized. Surfaced and position-advanced, like any forged write.
+/// A member publishes a changeset from its activated device, then the Owner
+/// removes that member before another device pulls it. The removal is not
+/// retroactive: the commit's exact predecessor membership proves that its
+/// author was allowed to write when the commit was created.
 #[tokio::test]
-async fn pull_skips_a_removed_members_changeset() {
+async fn pull_accepts_a_member_write_authorized_before_removal() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
-    let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let owner_db = open_test_db();
+    let storage = create_store(&owner_db, owner.clone()).await;
 
     let mut chain = exact_membership_chain(&storage).await;
     let add_member = chain
@@ -7239,6 +7238,41 @@ async fn pull_skips_a_removed_members_changeset() {
         )
         .expect("active Owner signs membership grant");
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
+    let member_db = open_test_db();
+    install_active_device_fixture(
+        &storage,
+        &owner_db,
+        &member_db,
+        &member,
+        "2026-03-01T00:02:00Z",
+    )
+    .await
+    .expect("activate member device");
+
+    let cs = capture_bytes(
+        &member_db,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromRemoved', NULL, '0000000003000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    let reference = sync_for_test(
+        &member_db,
+        member_db.synced_tables(),
+        cs,
+        0,
+        &storage,
+        "",
+        &member,
+        &member_store_dir,
+    )
+    .await
+    .expect("publish member Store changeset")
+    .expect("member Store changeset produces a commit");
+    let stream_id = commit_stream_id(&reference);
+
     let remove_member = chain
         .signed_remove_member_in_stream(
             &owner,
@@ -7248,36 +7282,35 @@ async fn pull_skips_a_removed_members_changeset() {
         )
         .expect("active Owner removes membership grant");
     publish_exact_membership_entry(&storage, &mut chain, remove_member, &owner).await;
-    // The removed member authors a changeset stamping their old grant (owner, 2).
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'FromRemoved', NULL, '0000000004000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
-    let reference = publish_exact_changeset_with_authority(
-        &storage,
-        "devM",
-        1,
-        &cs,
-        Some(membership_coord(&chain, &owner_pk, 2)),
-    )
-    .await;
-    let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
     db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
+    let (_, activation_result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    assert!(
+        activation_result.held_positions.is_empty(),
+        "device activation must materialize before its stream is discovered: {activation_result:#?}"
+    );
     let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
 
-    assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(unauthorized_positions(&result).len(), 1);
-    assert_eq!(updated.get(&stream_id), None);
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        unauthorized_positions(&result).is_empty(),
+        "causally authorized member write was held: {result:#?}"
+    );
+    assert_eq!(
+        updated.get(&stream_id).copied(),
+        Some(reference.coord.sequence())
+    );
+    assert_eq!(
+        store_database(&db2)
+            .exact_materialized_ref(&stream_id, reference.coord.sequence())
+            .await
+            .expect("load causally authorized member Store position"),
+        Some(reference),
+    );
 }
 
 #[tokio::test]
