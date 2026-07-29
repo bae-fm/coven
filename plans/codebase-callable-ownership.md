@@ -410,3 +410,7 @@ The work is verified when:
 - Semantic call sites inside closures are attributed to the closure rather than
   its enclosing function. The graph collapses recursive call groups and assigns
   every group a callee-first rank for ownership review.
+- Callable parameters, return types, receiver types, call arguments, and closure
+  bindings are recorded. Callback invocations trace their implementations
+  through borrowed and forwarded parameters; trait-dispatched callbacks and
+  named external function pointers remain explicit candidate sources.

@@ -212,6 +212,18 @@ def direct_child(source_file: SourceFile, index: int, kind: str) -> SyntaxNode |
     return None
 
 
+def descendants(
+    source_file: SourceFile,
+    index: int,
+) -> Iterable[tuple[int, SyntaxNode]]:
+    pending = list(reversed(source_file.nodes[index].children))
+    while pending:
+        child = pending.pop()
+        node = source_file.nodes[child]
+        yield child, node
+        pending.extend(reversed(node.children))
+
+
 def ancestors(source_file: SourceFile, index: int) -> Iterable[tuple[int, SyntaxNode]]:
     parent = source_file.nodes[index].parent
     while parent is not None:
@@ -406,6 +418,78 @@ def body_for(source_file: SourceFile, index: int) -> str:
     return source_file.text(block) if block is not None else ""
 
 
+def callable_parameters(
+    source_file: SourceFile,
+    index: int,
+) -> list[dict[str, str]]:
+    parameter_list = direct_child(source_file, index, "PARAM_LIST")
+    if parameter_list is None:
+        return []
+    parameters = []
+    for child in parameter_list.children:
+        parameter = source_file.nodes[child]
+        if parameter.kind == "SELF_PARAM":
+            parameters.append(
+                {
+                    "name": "self",
+                    "type": source_file.text(parameter).strip(),
+                }
+            )
+            continue
+        if parameter.kind != "PARAM":
+            continue
+        name = next(
+            (
+                direct_name(source_file, candidate_index)
+                for candidate_index, candidate in descendants(source_file, child)
+                if candidate.kind == "IDENT_PAT"
+            ),
+            None,
+        )
+        type_node = next(
+            (
+                candidate
+                for candidate_index in parameter.children
+                if (
+                    candidate := source_file.nodes[candidate_index]
+                ).kind.endswith("_TYPE")
+            ),
+            None,
+        )
+        parameters.append(
+            {
+                "name": name[0] if name is not None else source_file.text(parameter),
+                "type": (
+                    source_file.text(type_node).strip()
+                    if type_node is not None
+                    else ""
+                ),
+            }
+        )
+    return parameters
+
+
+def callable_return_type(source_file: SourceFile, index: int) -> str:
+    return_type = direct_child(source_file, index, "RET_TYPE")
+    if return_type is None:
+        return ""
+    return source_file.text(return_type).removeprefix("->").strip()
+
+
+def closure_binding(source_file: SourceFile, index: int) -> str | None:
+    for ancestor_index, ancestor in ancestors(source_file, index):
+        if ancestor.kind in CALLABLE_NODE_KINDS:
+            return None
+        if ancestor.kind != "LET_STMT":
+            continue
+        for pattern_index, pattern in descendants(source_file, ancestor_index):
+            if pattern.kind != "IDENT_PAT":
+                continue
+            name = direct_name(source_file, pattern_index)
+            return name[0] if name is not None else None
+    return None
+
+
 def retained_dependencies(signature: str) -> list[str]:
     return [
         category
@@ -421,6 +505,62 @@ def matches(body: str, patterns: dict[str, re.Pattern[str]]) -> list[str]:
 def call_text(source_file: SourceFile, node: SyntaxNode) -> str:
     text = re.sub(r"\s+", " ", source_file.text(node)).strip()
     return text[:240]
+
+
+def call_callee(
+    source_file: SourceFile,
+    index: int,
+) -> tuple[dict[str, dict[str, int]], str]:
+    node = source_file.nodes[index]
+    arguments = direct_child(source_file, index, "ARG_LIST")
+    end = arguments.start if arguments is not None else node.end
+    if node.kind == "METHOD_CALL_EXPR":
+        names = [
+            candidate
+            for _, candidate in descendants(source_file, index)
+            if candidate.kind == "NAME_REF"
+            and candidate.start < end
+        ]
+        if names:
+            name = max(names, key=lambda candidate: candidate.start)
+            return (
+                {
+                    "start": source_file.position(name.start),
+                    "end": source_file.position(name.end),
+                },
+                source_file.text(name),
+            )
+    return (
+        {
+            "start": source_file.position(node.start),
+            "end": source_file.position(end),
+        },
+        source_file.slice(node.start, end).strip(),
+    )
+
+
+def call_arguments(
+    source_file: SourceFile,
+    index: int,
+) -> list[dict[str, Any]]:
+    arguments = direct_child(source_file, index, "ARG_LIST")
+    if arguments is None:
+        return []
+    values = []
+    for child in arguments.children:
+        node = source_file.nodes[child]
+        if not (node.kind.endswith("_EXPR") or node.kind == "LITERAL"):
+            continue
+        values.append(
+            {
+                "text": re.sub(r"\s+", " ", source_file.text(node)).strip(),
+                "range": {
+                    "start": source_file.position(node.start),
+                    "end": source_file.position(node.end),
+                },
+            }
+        )
+    return values
 
 
 def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
@@ -488,6 +628,7 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
             kind = anonymous_kind
             signature = source_file.slice(node.start, min(node.end, node.start + 160))
             display_name = anonymous_kind
+        binding = closure_binding(source_file, index) if not named else None
         cfg = cfg_attributes(source_file, index)
         if cfg:
             symbol = f"{symbol}@{' & '.join(cfg)}"
@@ -500,8 +641,10 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
                 "kind": kind,
                 "crate": crate,
                 "module": "::".join([crate, *modules]),
+                "receiver_type": owner,
                 "enclosing_callable": index_to_symbol.get(parent_callable),
                 "semantic_parent": index_to_symbol.get(semantic_parent),
+                "binding": binding,
                 "path": str(source_file.path.relative_to(ROOT)),
                 "range": {
                     "start": source_file.position(node.start),
@@ -512,6 +655,8 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
                     "end": source_file.position(name_end),
                 },
                 "signature": signature,
+                "parameters": callable_parameters(source_file, index),
+                "return_type": callable_return_type(source_file, index),
                 "visibility": visibility(signature),
                 "cfg": cfg,
                 "retained_dependencies": retained_dependencies(signature),
@@ -524,7 +669,7 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
             }
         )
 
-    for node in source_file.nodes:
+    for node_index, node in enumerate(source_file.nodes):
         if node.kind not in CALL_NODE_KINDS:
             continue
         containing = [
@@ -540,6 +685,7 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
             key=lambda pair: source_file.nodes[pair[1]].end
             - source_file.nodes[pair[1]].start,
         )
+        callee_range, callee_text = call_callee(source_file, node_index)
         records[record_index]["calls"].append(
             {
                 "kind": node.kind,
@@ -548,6 +694,9 @@ def inventory_file(source_file: SourceFile) -> list[dict[str, Any]]:
                     "end": source_file.position(node.end),
                 },
                 "text": call_text(source_file, node),
+                "callee_range": callee_range,
+                "callee_text": callee_text,
+                "arguments": call_arguments(source_file, node_index),
             }
         )
     return records
@@ -802,6 +951,323 @@ def append_semantic_edge(
         edge["sites"].append(site)
 
 
+def call_name(callee: str) -> str | None:
+    match = re.fullmatch(
+        r"\s*(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+        r"((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*",
+        callee,
+    )
+    return match.group(1) if match is not None else None
+
+
+def is_data_constructor(callee: str) -> bool:
+    name = call_name(callee)
+    return name is not None and name[:1].isupper()
+
+
+def named_call_candidates(
+    record: dict[str, Any],
+    callee: str,
+    records: list[dict[str, Any]],
+) -> list[str]:
+    name = call_name(callee)
+    if name is None:
+        return []
+    segments = [
+        segment
+        for segment in callee.strip().split("::")
+        if segment
+    ]
+    candidates = [
+        candidate
+        for candidate in records
+        if candidate["name"] == name
+    ]
+    if len(segments) == 1:
+        return sorted(candidate["symbol"] for candidate in candidates)
+    first = segments[0]
+    if (
+        first[0].islower()
+        and first
+        not in {
+            "crate",
+            "self",
+            "super",
+            record["crate"],
+        }
+    ):
+        return []
+    qualifier = segments[-2]
+    if qualifier not in {"crate", "self", "super", "Self"}:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if f"<{qualifier}>" in candidate["symbol"]
+            or f"<impl {qualifier}>" in candidate["symbol"]
+            or f" {qualifier}<" in candidate["symbol"]
+        ]
+    return sorted(candidate["symbol"] for candidate in candidates)
+
+
+def parameter_position(
+    record: dict[str, Any],
+    name: str,
+) -> int | None:
+    parameters = [
+        parameter
+        for parameter in record["parameters"]
+        if parameter["name"] != "self"
+    ]
+    return next(
+        (
+            index
+            for index, parameter in enumerate(parameters)
+            if parameter["name"] == name
+        ),
+        None,
+    )
+
+
+def unborrowed_expression(expression: str) -> str:
+    value = expression.strip()
+    while True:
+        borrowed = re.fullmatch(r"&\s*(?:mut\s+)?(.+)", value, re.DOTALL)
+        if borrowed is None:
+            break
+        value = borrowed.group(1).strip()
+    while value.startswith("(") and value.endswith(")"):
+        value = value[1:-1].strip()
+    return value
+
+
+def callable_argument_reference(expression: str) -> str | None:
+    value = unborrowed_expression(expression)
+    if not re.fullmatch(
+        r"(?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+        r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*",
+        value,
+    ):
+        return None
+    return value
+
+
+def callable_factory_reference(expression: str) -> str | None:
+    value = unborrowed_expression(expression)
+    match = re.fullmatch(
+        r"((?:(?:r#)?[A-Za-z_][A-Za-z0-9_]*::)*"
+        r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*\(.*\)",
+        value,
+        re.DOTALL,
+    )
+    return match.group(1) if match is not None else None
+
+
+def bound_closure_candidates(
+    caller: dict[str, Any],
+    binding: str,
+    records: list[dict[str, Any]],
+) -> list[str]:
+    semantic_scope = (
+        caller["semantic_parent"]
+        if caller.get("kind") in {"closure", "async-block"}
+        else caller["symbol"]
+    )
+    return sorted(
+        candidate["symbol"]
+        for candidate in records
+        if candidate.get("path") == caller["path"]
+        and candidate.get("kind") == "closure"
+        and candidate.get("binding") == binding
+        and candidate.get("semantic_parent") == semantic_scope
+    )
+
+
+def returned_callable_candidates(
+    factory_symbols: list[str],
+    records: list[dict[str, Any]],
+) -> list[str]:
+    factories = set(factory_symbols)
+    return sorted(
+        record["symbol"]
+        for record in records
+        if record["kind"] in {"closure", "async-block"}
+        and record.get("enclosing_callable") in factories
+    )
+
+
+def argument_callable_candidates(
+    caller: dict[str, Any],
+    argument: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+    records_by_path: dict[Path, list[dict[str, Any]]],
+    records: list[dict[str, Any]],
+    visited_parameters: set[tuple[str, int]],
+) -> list[str]:
+    path = (ROOT / caller["path"]).resolve()
+    anonymous = [
+        candidate
+        for candidate in records_by_path.get(path, [])
+        if candidate["kind"] in {"closure", "async-block"}
+        and range_contains(argument["range"], candidate["range"]["start"])
+        and range_contains(argument["range"], candidate["range"]["end"])
+    ]
+    if anonymous:
+        return [
+            max(
+                anonymous,
+                key=lambda candidate: (
+                    candidate["range"]["end"]["line"]
+                    - candidate["range"]["start"]["line"],
+                    candidate["range"]["end"]["character"]
+                    - candidate["range"]["start"]["character"],
+                ),
+            )["symbol"]
+        ]
+    reference = callable_argument_reference(argument["text"])
+    if reference is not None:
+        name = reference.rsplit("::", 1)[-1]
+        caller_parameter = (
+            parameter_position(caller, name)
+            if "::" not in reference
+            else None
+        )
+        if caller_parameter is not None:
+            return parameter_call_candidates(
+                caller,
+                caller_parameter,
+                records_by_symbol,
+                records_by_path,
+                records,
+                visited_parameters,
+            )
+        bound = bound_closure_candidates(caller, name, records)
+        if bound:
+            return bound
+        candidates = named_call_candidates(caller, reference, records)
+        if candidates:
+            return candidates
+        if "::" in reference:
+            return [f"external-callable::{reference}"]
+    factory = callable_factory_reference(argument["text"])
+    if factory is not None:
+        factories = named_call_candidates(caller, factory, records)
+        returned = returned_callable_candidates(factories, records)
+        if returned:
+            return returned
+        if factories:
+            return [
+                f"returned-callable::{factory_symbol}"
+                for factory_symbol in factories
+            ]
+        if "::" in factory:
+            return [f"external-callable-factory::{factory}"]
+    return []
+
+
+def parameter_site_argument(
+    record: dict[str, Any],
+    site: dict[str, Any],
+    position: int,
+) -> dict[str, Any] | None:
+    arguments = site.get("arguments", [])
+    parameters = record["parameters"]
+    has_self = bool(parameters) and parameters[0]["name"] == "self"
+    explicit_self = has_self and len(arguments) == len(parameters)
+    argument_position = position + int(explicit_self)
+    return (
+        arguments[argument_position]
+        if argument_position < len(arguments)
+        else None
+    )
+
+
+def parameter_call_candidates(
+    record: dict[str, Any],
+    position: int,
+    records_by_symbol: dict[str, dict[str, Any]],
+    records_by_path: dict[Path, list[dict[str, Any]]],
+    records: list[dict[str, Any]],
+    visited_parameters: set[tuple[str, int]] | None = None,
+) -> list[str]:
+    visited_parameters = (
+        set()
+        if visited_parameters is None
+        else set(visited_parameters)
+    )
+    parameter = (record["symbol"], position)
+    if parameter in visited_parameters:
+        return []
+    visited_parameters.add(parameter)
+    candidates: set[str] = set()
+    for caller_edge in record["callers"]:
+        caller = records_by_symbol[caller_edge["symbol"]]
+        for site in caller_edge["sites"]:
+            argument = parameter_site_argument(record, site, position)
+            if argument is None:
+                continue
+            candidates.update(
+                argument_callable_candidates(
+                    caller,
+                    argument,
+                    records_by_symbol,
+                    records_by_path,
+                    records,
+                    visited_parameters,
+                )
+            )
+    if record["visibility"] != "private":
+        candidates.add("external-caller-supplied")
+    if not record["callers"] and (
+        record.get("kind") in {"trait-method", "trait-associated"}
+        or " for " in (record.get("receiver_type") or "")
+    ):
+        candidates.add("trait-dispatch-supplied")
+    return sorted(candidates)
+
+
+def lexical_call_candidates(
+    record: dict[str, Any],
+    call: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    immediate = [
+        candidate
+        for candidate in records
+        if candidate["path"] == record["path"]
+        and candidate["kind"] in {"closure", "async-block"}
+        and range_contains(call["callee_range"], candidate["range"]["start"])
+        and range_contains(call["callee_range"], candidate["range"]["end"])
+    ]
+    if immediate:
+        return [
+            max(
+                immediate,
+                key=lambda candidate: (
+                    candidate["range"]["end"]["line"]
+                    - candidate["range"]["start"]["line"],
+                    candidate["range"]["end"]["character"]
+                    - candidate["range"]["start"]["character"],
+                ),
+            )
+        ]
+    name = call_name(call["callee_text"])
+    if name is None:
+        return []
+    semantic_scope = (
+        record["semantic_parent"]
+        if record["kind"] in {"closure", "async-block"}
+        else record["symbol"]
+    )
+    return [
+        candidate
+        for candidate in records
+        if candidate["path"] == record["path"]
+        and candidate["kind"] == "closure"
+        and candidate["binding"] == name
+        and candidate["semantic_parent"] == semantic_scope
+    ]
+
+
 def call_components(
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -964,18 +1430,18 @@ def internal_symbol(
     return candidates[0]["symbol"] if candidates else None
 
 
-def source_expression(
+def source_call_site(
     source_files: dict[Path, SourceFile],
     path: Path,
     range_value: dict[str, Any],
-) -> str:
+) -> dict[str, Any]:
     source_file = source_files.get(path)
     if source_file is None:
-        return ""
+        return {"expression": "", "arguments": []}
     start = source_file.offset(range_value["start"])
     containing_calls = [
-        node
-        for node in source_file.nodes
+        (index, node)
+        for index, node in enumerate(source_file.nodes)
         if node.kind in CALL_NODE_KINDS and node.start <= start <= node.end
     ]
     if not containing_calls:
@@ -986,9 +1452,18 @@ def source_expression(
             if line + 1 < len(source_file.line_starts)
             else len(source_file.data)
         )
-        return source_file.slice(begin, end).strip()
-    node = min(containing_calls, key=lambda value: value.end - value.start)
-    return call_text(source_file, node)
+        return {
+            "expression": source_file.slice(begin, end).strip(),
+            "arguments": [],
+        }
+    index, node = min(
+        containing_calls,
+        key=lambda value: value[1].end - value[1].start,
+    )
+    return {
+        "expression": call_text(source_file, node),
+        "arguments": call_arguments(source_file, index),
+    }
 
 
 def build_index() -> dict[str, Any]:
@@ -1059,10 +1534,8 @@ def build_index() -> dict[str, Any]:
                         target,
                         {
                             "range": range_value,
-                            "expression": source_expression(
-                                source_files,
-                                path,
-                                range_value,
+                            **source_call_site(
+                                source_files, path, range_value
                             ),
                         },
                     )
@@ -1085,8 +1558,37 @@ def build_index() -> dict[str, Any]:
                 range_contains(call["range"], site)
                 for site in matched_sites[record["symbol"]]
             )
-            if call["kind"] != "MACRO_CALL" and not resolved:
-                record["unresolved_calls"].append(call)
+            if call["kind"] == "MACRO_CALL" or resolved:
+                continue
+            if is_data_constructor(call["callee_text"]):
+                continue
+            candidates = lexical_call_candidates(record, call, records)
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                append_semantic_edge(
+                    record,
+                    candidate["symbol"],
+                    {
+                        "range": call["range"],
+                        "expression": call["text"],
+                    },
+                )
+                continue
+            named_candidates = named_call_candidates(
+                record, call["callee_text"], records
+            )
+            call["dynamic_dispatch_candidates"] = sorted(
+                {
+                    candidate["symbol"]
+                    for candidate in candidates
+                }.union(named_candidates)
+            )
+            call["resolution"] = (
+                "inactive-configuration"
+                if record.get("call_hierarchy") == "unavailable"
+                else "dynamic-or-unresolved"
+            )
+            record["unresolved_calls"].append(call)
 
     for record in records:
         for edge in record["callees"]:
@@ -1098,6 +1600,25 @@ def build_index() -> dict[str, Any]:
                         "sites": edge["sites"],
                     }
                 )
+
+    for record in records:
+        for call in record["unresolved_calls"]:
+            name = call_name(call["callee_text"])
+            position = (
+                parameter_position(record, name)
+                if name is not None
+                else None
+            )
+            if position is None:
+                continue
+            call["resolution"] = "callable-parameter"
+            call["dynamic_dispatch_candidates"] = parameter_call_candidates(
+                record,
+                position,
+                records_by_symbol,
+                records_by_path,
+                records,
+            )
 
     components = call_components(records)
     return {
@@ -1207,6 +1728,11 @@ def print_record(record: dict[str, Any]) -> None:
     print(f"  callers: {len(record['callers'])}")
     print(f"  callees: {len(record['callees'])}")
     print(f"  unresolved calls: {len(record['unresolved_calls'])}")
+    for call in record["unresolved_calls"]:
+        print(
+            f"    {call['resolution']}: {call['text']} "
+            f"({len(call['dynamic_dispatch_candidates'])} candidates)"
+        )
     print(
         f"  call group: {record['component']} "
         f"(bottom-up rank {record['bottom_up_rank']})"
@@ -1303,11 +1829,9 @@ def command_check(_: argparse.Namespace) -> None:
     unresolved = [
         record
         for record in index["callables"]
-        if record["kind"] not in {"closure", "async-block"}
-        and (
-            record.get("call_hierarchy") != "resolved"
-            or record["unresolved_calls"]
-        )
+        if record.get("call_hierarchy")
+        not in {"resolved", "enclosing-resolved"}
+        or record["unresolved_calls"]
     ]
     if unresolved:
         raise RuntimeError(f"{len(unresolved)} callables have unresolved call edges")

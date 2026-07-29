@@ -49,6 +49,12 @@ impl Store {
         self.assertEqual(kinds["transform"], "free")
         self.assertEqual(kinds["open"], "associated")
         self.assertEqual(kinds["read"], "method")
+        transform = next(record for record in records if record["name"] == "transform")
+        self.assertEqual(
+            transform["parameters"],
+            [{"name": "value", "type": "u64"}],
+        )
+        self.assertEqual(transform["return_type"], "u64")
 
     def test_inventory_finds_retained_dependencies_and_ambient_access(self):
         records = self.inventory(
@@ -70,6 +76,7 @@ fn publish(database: &Database, storage: &dyn SyncStorage) {
         )
         closure = next(record for record in records if record["kind"] == "closure")
         self.assertIn("::run::<closure@", closure["symbol"])
+        self.assertEqual(closure["binding"], "load")
         self.assertTrue(closure["calls"])
 
     def test_unicode_before_callable_does_not_shift_parser_offsets(self):
@@ -97,6 +104,17 @@ impl Store {
             if call["text"] == 'tracing::info!(value = load(), "loaded")'
         ]
         self.assertEqual(len(macro_calls), 1)
+
+    def test_call_inventory_records_top_level_argument_expressions(self):
+        records = self.inventory(
+            "fn run() { target(value, || nested()); }"
+        )
+        run = next(record for record in records if record["name"] == "run")
+        target = next(call for call in run["calls"] if call["callee_text"] == "target")
+        self.assertEqual(
+            [argument["text"] for argument in target["arguments"]],
+            ["value", "|| nested()"],
+        )
 
     def test_configuration_variants_have_distinct_semantic_identities(self):
         records = self.inventory(
@@ -154,6 +172,411 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
+    def test_callable_argument_reference_ignores_borrow_wrappers(self):
+        self.assertEqual(
+            ownership_audit.callable_argument_reference("&mut build_request"),
+            "build_request",
+        )
+        self.assertEqual(
+            ownership_audit.callable_argument_reference(
+                "ffi::sqlite3changeset_new"
+            ),
+            "ffi::sqlite3changeset_new",
+        )
+
+    def test_parameter_candidates_follow_forwarded_callback_arguments(self):
+        leaf = {
+            "symbol": "sample::leaf",
+            "name": "leaf",
+            "visibility": "private",
+            "parameters": [{"name": "callback", "type": "&F"}],
+            "path": "sample.rs",
+            "callers": [
+                {
+                    "symbol": "sample::middle",
+                    "sites": [
+                        {
+                            "arguments": [
+                                {
+                                    "text": "&callback",
+                                    "range": {
+                                        "start": {"line": 2, "character": 9},
+                                        "end": {"line": 2, "character": 18},
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ],
+        }
+        middle = {
+            "symbol": "sample::middle",
+            "name": "middle",
+            "crate": "sample",
+            "visibility": "private",
+            "parameters": [{"name": "callback", "type": "F"}],
+            "path": "sample.rs",
+            "callers": [
+                {
+                    "symbol": "sample::root",
+                    "sites": [
+                        {
+                            "arguments": [
+                                {
+                                    "text": "actual_callback",
+                                    "range": {
+                                        "start": {"line": 4, "character": 11},
+                                        "end": {"line": 4, "character": 26},
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ],
+        }
+        root = {
+            "symbol": "sample::root",
+            "name": "root",
+            "crate": "sample",
+            "visibility": "private",
+            "parameters": [],
+            "path": "sample.rs",
+        }
+        actual = {
+            "symbol": "sample::actual_callback",
+            "name": "actual_callback",
+            "path": "sample.rs",
+        }
+        records = [leaf, middle, root, actual]
+        candidates = ownership_audit.parameter_call_candidates(
+            leaf,
+            0,
+            {record["symbol"]: record for record in records},
+            {ownership_audit.ROOT / "sample.rs": []},
+            records,
+        )
+        self.assertEqual(candidates, ["sample::actual_callback"])
+
+    def test_parameter_candidates_preserve_external_function_paths(self):
+        leaf = {
+            "symbol": "sample::leaf",
+            "name": "leaf",
+            "visibility": "private",
+            "parameters": [{"name": "callback", "type": "Callback"}],
+            "path": "sample.rs",
+            "callers": [
+                {
+                    "symbol": "sample::root",
+                    "sites": [
+                        {
+                            "arguments": [
+                                {
+                                    "text": "ffi::external_callback",
+                                    "range": {
+                                        "start": {"line": 2, "character": 9},
+                                        "end": {"line": 2, "character": 31},
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ],
+        }
+        root = {
+            "symbol": "sample::root",
+            "name": "root",
+            "crate": "sample",
+            "visibility": "private",
+            "parameters": [],
+            "path": "sample.rs",
+        }
+        candidates = ownership_audit.parameter_call_candidates(
+            leaf,
+            0,
+            {
+                leaf["symbol"]: leaf,
+                root["symbol"]: root,
+            },
+            {ownership_audit.ROOT / "sample.rs": []},
+            [leaf, root],
+        )
+        self.assertEqual(
+            candidates,
+            ["external-callable::ffi::external_callback"],
+        )
+
+    def test_parameter_site_argument_accounts_for_explicit_self(self):
+        record = {
+            "parameters": [
+                {"name": "self", "type": "&self"},
+                {"name": "body", "type": "Body"},
+                {"name": "callback", "type": "Callback"},
+            ]
+        }
+        explicit = {
+            "arguments": [
+                {"text": "self"},
+                {"text": "body"},
+                {"text": "callback"},
+            ]
+        }
+        method = {
+            "arguments": [
+                {"text": "body"},
+                {"text": "callback"},
+            ]
+        }
+        self.assertEqual(
+            ownership_audit.parameter_site_argument(record, explicit, 1),
+            {"text": "callback"},
+        )
+        self.assertEqual(
+            ownership_audit.parameter_site_argument(record, method, 1),
+            {"text": "callback"},
+        )
+
+    def test_trait_callback_without_static_callers_names_trait_dispatch(self):
+        record = {
+            "symbol": "sample::<trait Storage>::write",
+            "name": "write",
+            "kind": "trait-method",
+            "visibility": "private",
+            "receiver_type": "trait Storage",
+            "parameters": [
+                {"name": "self", "type": "&self"},
+                {"name": "callback", "type": "Callback"},
+            ],
+            "callers": [],
+            "path": "sample.rs",
+        }
+        self.assertEqual(
+            ownership_audit.parameter_call_candidates(
+                record,
+                0,
+                {record["symbol"]: record},
+                {ownership_audit.ROOT / "sample.rs": []},
+                [record],
+            ),
+            ["trait-dispatch-supplied"],
+        )
+
+    def test_callback_argument_resolves_a_lexically_bound_closure(self):
+        caller = {
+            "symbol": "sample::root",
+            "name": "root",
+            "crate": "sample",
+            "kind": "free",
+            "semantic_parent": None,
+            "parameters": [],
+            "path": "sample.rs",
+        }
+        closure = {
+            "symbol": "sample::root::<closure>",
+            "name": "closure",
+            "kind": "closure",
+            "binding": "sink",
+            "semantic_parent": "sample::root",
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 1, "character": 15},
+                "end": {"line": 1, "character": 24},
+            },
+        }
+        candidates = ownership_audit.argument_callable_candidates(
+            caller,
+            {
+                "text": "&sink",
+                "range": {
+                    "start": {"line": 2, "character": 8},
+                    "end": {"line": 2, "character": 13},
+                },
+            },
+            {
+                caller["symbol"]: caller,
+                closure["symbol"]: closure,
+            },
+            {ownership_audit.ROOT / "sample.rs": [caller, closure]},
+            [caller, closure],
+            set(),
+        )
+        self.assertEqual(candidates, [closure["symbol"]])
+
+    def test_callback_factory_resolves_its_returned_closure(self):
+        caller = {
+            "symbol": "sample::root",
+            "name": "root",
+            "crate": "sample",
+            "kind": "free",
+            "semantic_parent": None,
+            "parameters": [],
+            "path": "sample.rs",
+        }
+        factory = {
+            "symbol": "sample::no_progress",
+            "name": "no_progress",
+            "kind": "free",
+            "return_type": "impl Fn(u64)",
+            "path": "sample.rs",
+        }
+        closure = {
+            "symbol": "sample::no_progress::<closure>",
+            "name": "closure",
+            "kind": "closure",
+            "enclosing_callable": factory["symbol"],
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 5, "character": 4},
+                "end": {"line": 5, "character": 10},
+            },
+        }
+        records = [caller, factory, closure]
+        candidates = ownership_audit.argument_callable_candidates(
+            caller,
+            {
+                "text": "&no_progress()",
+                "range": {
+                    "start": {"line": 8, "character": 8},
+                    "end": {"line": 8, "character": 22},
+                },
+            },
+            {record["symbol"]: record for record in records},
+            {ownership_audit.ROOT / "sample.rs": records},
+            records,
+            set(),
+        )
+        self.assertEqual(candidates, [closure["symbol"]])
+
+    def test_lexical_closure_call_resolves_to_its_binding(self):
+        callable_record = {
+            "symbol": "sample::run",
+            "name": "run",
+            "kind": "free",
+            "binding": None,
+            "semantic_parent": None,
+            "path": "sample.rs",
+        }
+        closure = {
+            "symbol": "sample::run::<closure>",
+            "name": "closure",
+            "kind": "closure",
+            "binding": "load",
+            "semantic_parent": "sample::run",
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 2, "character": 15},
+                "end": {"line": 2, "character": 32},
+            },
+        }
+        caller = {
+            "symbol": "sample::run::<closure-2>",
+            "name": "closure",
+            "kind": "closure",
+            "binding": None,
+            "semantic_parent": "sample::run",
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 4, "character": 0},
+                "end": {"line": 5, "character": 1},
+            },
+        }
+        candidates = ownership_audit.lexical_call_candidates(
+            caller,
+            {
+                "text": "load()",
+                "callee_text": "load",
+                "range": {
+                    "start": {"line": 4, "character": 4},
+                    "end": {"line": 4, "character": 10},
+                },
+                "callee_range": {
+                    "start": {"line": 4, "character": 4},
+                    "end": {"line": 4, "character": 8},
+                },
+            },
+            [callable_record, closure, caller],
+        )
+        self.assertEqual(
+            [candidate["symbol"] for candidate in candidates],
+            ["sample::run::<closure>"],
+        )
+
+    def test_closure_argument_is_not_the_called_callable(self):
+        closure = {
+            "symbol": "sample::run::<closure>",
+            "name": "closure",
+            "kind": "closure",
+            "binding": None,
+            "semantic_parent": "sample::run",
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 20},
+            },
+        }
+        caller = {
+            "symbol": "sample::run",
+            "name": "run",
+            "kind": "free",
+            "binding": None,
+            "semantic_parent": None,
+            "path": "sample.rs",
+            "range": {
+                "start": {"line": 1, "character": 0},
+                "end": {"line": 3, "character": 1},
+            },
+        }
+        candidates = ownership_audit.lexical_call_candidates(
+            caller,
+            {
+                "text": "apply(|| value)",
+                "callee_text": "apply",
+                "range": {
+                    "start": {"line": 2, "character": 4},
+                    "end": {"line": 2, "character": 21},
+                },
+                "callee_range": {
+                    "start": {"line": 2, "character": 4},
+                    "end": {"line": 2, "character": 9},
+                },
+            },
+            [caller, closure],
+        )
+        self.assertEqual(candidates, [])
+
+    def test_qualified_candidate_search_uses_the_receiver_type(self):
+        record = {
+            "crate": "coven",
+        }
+        records = [
+            {"name": "new", "symbol": "coven::keys::<StoreKeys>::new"},
+            {"name": "new", "symbol": "coven::other::<Other>::new"},
+        ]
+        self.assertEqual(
+            ownership_audit.named_call_candidates(
+                record,
+                "StoreKeys::new",
+                records,
+            ),
+            ["coven::keys::<StoreKeys>::new"],
+        )
+        self.assertEqual(
+            ownership_audit.named_call_candidates(
+                record,
+                "keyring_core::Entry::new",
+                records,
+            ),
+            [],
+        )
+        self.assertTrue(
+            ownership_audit.is_data_constructor(
+                "CloudHomeError::Configuration"
+            )
+        )
+        self.assertFalse(ownership_audit.is_data_constructor("StoreKeys::new"))
+
     def test_recursive_call_groups_are_one_bottom_up_component(self):
         records = [
             {
