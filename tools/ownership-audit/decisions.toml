@@ -1,2 +1,37 @@
 # Every callable in crates/coven-core and crates/coven receives one reviewed
 # ownership disposition. `ownership_audit.py check` rejects omissions.
+
+[[decision]]
+symbol = "coven_core::database::make_remote::<Database>::mark_make_remote_cancelling_on"
+signature = "pub(crate) fn mark_make_remote_cancelling_on( conn: &Connection, root_table: &str, root_id: &str, ) -> Result<(), DbError>"
+classification = "delete"
+reason = "The state change has no lifetime independent from cancel_make_remote, whose transaction contains it."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::database::write_lifecycle::<Database>::notify_write_status_in"
+signature = "pub(super) fn notify_write_status_in( statuses: &Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>, write_id: &WriteId, status: WriteStatus, )"
+classification = "delete"
+reason = "Its only caller is Database::notify_write_status, which already owns the sender map."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::circle_roster::circle_assignment_conflict_hash"
+signature = "fn circle_assignment_conflict_hash( store_root_hash: ObjectHash, circle_id: CircleId, heads: &[CircleRosterHeadRef], member_pubkey: &str, conflicting_grants: &BTreeMap< MembershipGrantId, causal_grants::GrantRecord<CircleRosterCoord, CircleRole>, >, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of explicit conflict evidence."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::circle_roster::circle_revocation_conflict_hash"
+signature = "fn circle_revocation_conflict_hash( store_root_hash: ObjectHash, circle_id: CircleId, heads: &[CircleRosterHeadRef], cyclic_sources: &[CircleRosterCoord], involved_owner_grants: &BTreeSet<MembershipGrantId>, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of explicit revocation evidence."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::circle_roster::circle_roster_state_hash"
+signature = "fn circle_roster_state_hash( grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of the explicit grant map."
+status = "verified"

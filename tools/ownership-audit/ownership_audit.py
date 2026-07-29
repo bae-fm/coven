@@ -3158,6 +3158,7 @@ def verified_free_workflow(
         "boundary",
         "callback-adapter",
         "dependency-primitive",
+        "transformation",
     }
     classifications = []
     for record in records:

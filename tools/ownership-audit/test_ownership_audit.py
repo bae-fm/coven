@@ -1036,6 +1036,32 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertEqual(nodes["sync::run"]["kind"], "resolved")
         self.assertTrue(nodes["sample::main"]["ready"])
 
+    def test_verified_transformation_does_not_block_its_caller(self):
+        transformation = self.graph_record(
+            "sample::sync::state_hash",
+            effects=["cryptography"],
+        )
+        caller = self.graph_record(
+            "sample::sync::verify",
+            callees=[{"symbol": transformation["symbol"], "sites": [{}]}],
+        )
+        transformation["callers"] = [
+            {"symbol": caller["symbol"], "sites": [{}]}
+        ]
+        decisions = {
+            (transformation["symbol"], transformation["signature"]): {
+                "classification": "transformation",
+                "status": "verified",
+            }
+        }
+        graph = ownership_audit.build_graph_data(
+            {"callables": [caller, transformation], "reach_throughs": {}},
+            decisions,
+        )
+        nodes = {node["label"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes["sync::state_hash"]["kind"], "resolved")
+        self.assertTrue(nodes["sync::verify"]["ready"])
+
     def test_owner_method_decision_does_not_resolve_receiverless_function(self):
         helper = self.graph_record(
             "sample::store::publish",
