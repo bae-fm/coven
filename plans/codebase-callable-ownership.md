@@ -313,6 +313,10 @@ is rebuilt, `cancel_make_remote` becomes eligible for relocation.
 1. Identify the existing owner available at all legitimate call sites.
 1. Move the body onto that owner or a capability derived from it.
 1. Remove parameters already retained by the receiver.
+1. Inventory every impl block for that owner. Consolidate the struct, all of
+   its impls, and its tests in the file named for the type. Behavior with an
+   independent lifetime or invariant becomes a child owner in its own file,
+   never another scattered impl block for the parent.
 1. Move nested stateful callees encountered during the relocation before
    returning to the suspended caller.
 1. Delete the original free or associated function and every re-export.
@@ -327,6 +331,11 @@ is rebuilt, `cancel_make_remote` becomes eligible for relocation.
 Moving the deepest callable first does not mean turning transformations into
 methods. A leaf transformation is classified and left in place; the nearest
 stateful caller is the relocation target.
+
+`StoreDatabaseTransaction` is the current consolidation case: its definition,
+constructor, materialization methods, host-SQL boundary, and owner tests belong
+in one `store_database_transaction.rs` implementation home. Other modules call
+that owner; they do not add impl blocks for it.
 
 ### Constructor boundaries
 
@@ -440,6 +449,8 @@ The work is verified when:
   could retain;
 - no method accepts a dependency or state value already retained by its
   receiver;
+- each retained owner has one implementation home; independent subsystems have
+  their own child owners rather than impl blocks for the parent;
 - no workflow accepts a loose argument group whose members must describe one
   owner instance;
 - no lower layer reloads, reconstructs, or independently selects state already
