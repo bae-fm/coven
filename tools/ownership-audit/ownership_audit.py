@@ -672,6 +672,30 @@ def callable_return_type(source_file: SourceFile, index: int) -> str:
     return source_file.text(return_type).removeprefix("->").strip()
 
 
+def is_receiver_constructor(
+    owner: str | None,
+    parameters: list[dict[str, str]],
+    return_type: str,
+) -> bool:
+    concrete_owner = concrete_receiver_owner(owner)
+    owner_name = (
+        concrete_owner.rsplit("::", 1)[-1]
+        if concrete_owner is not None
+        else None
+    )
+    return bool(
+        owner is not None
+        and not any(parameter["name"] == "self" for parameter in parameters)
+        and (
+            re.search(r"\bSelf\b", return_type)
+            or (
+                owner_name is not None
+                and re.search(rf"\b{re.escape(owner_name)}\b", return_type)
+            )
+        )
+    )
+
+
 def nearest_callable_ancestor(
     source_file: SourceFile,
     index: int,
@@ -1034,6 +1058,8 @@ def inventory_file(
             symbol = f"{symbol}@{' & '.join(identity_cfg)}"
         index_to_symbol[index] = symbol
         body = body_for(source_file, index) if named else source_file.text(node)
+        parameters = callable_parameters(source_file, index)
+        return_type = callable_return_type(source_file, index)
         record = {
                 "symbol": symbol,
                 "name": display_name,
@@ -1054,8 +1080,23 @@ def inventory_file(
                     "end": source_file.position(name_end),
                 },
                 "signature": signature,
-                "parameters": callable_parameters(source_file, index),
-                "return_type": callable_return_type(source_file, index),
+                "parameters": parameters,
+                "parameter_dependencies": sorted(
+                    {
+                        dependency
+                        for parameter in parameters
+                        for dependency in retained_dependencies(
+                            parameter["type"]
+                        )
+                    }
+                ),
+                "return_type": return_type,
+                "return_dependencies": retained_dependencies(return_type),
+                "receiver_constructor": is_receiver_constructor(
+                    owner,
+                    parameters,
+                    return_type,
+                ),
                 "paths": callable_paths(source_file, index),
                 "visibility": visibility(signature),
                 "cfg": cfg,
@@ -1553,6 +1594,44 @@ def append_semantic_edge(
     existing_site["views"] = sorted(
         set(existing_site.get("views", [])).union(site.get("views", []))
     )
+
+
+def attach_nested_callable_edges(
+    records: list[dict[str, Any]],
+    attach_callers: bool,
+) -> None:
+    records_by_symbol = {
+        record["symbol"]: record
+        for record in records
+    }
+    for nested in records:
+        if nested["kind"] not in {"closure", "async-block"}:
+            continue
+        parent = records_by_symbol.get(nested.get("enclosing_callable"))
+        if parent is None or any(
+            edge["symbol"] == nested["symbol"]
+            for edge in parent["callees"]
+        ):
+            continue
+        site = {
+            "range": nested["range"],
+            "views": sorted(
+                set(parent.get("semantic_views", [])).intersection(
+                    nested.get("semantic_views", [])
+                )
+            ),
+            "expression": f"nested {nested['kind']}",
+            "arguments": [],
+            "callee_text": nested["kind"],
+        }
+        append_semantic_edge(parent, nested["symbol"], site)
+        if attach_callers:
+            nested["callers"].append(
+                {
+                    "symbol": parent["symbol"],
+                    "sites": [site],
+                }
+            )
 
 
 def call_name(callee: str) -> str | None:
@@ -2671,6 +2750,8 @@ def build_index() -> dict[str, Any]:
             )
             record["unresolved_calls"].append(call)
 
+    attach_nested_callable_edges(records, attach_callers=False)
+
     for record in records:
         for edge in record["callees"]:
             target = records_by_symbol.get(edge["symbol"])
@@ -2843,6 +2924,119 @@ def stateful_record(record: dict[str, Any]) -> bool:
     )
 
 
+def record_is_receiver_constructor(record: dict[str, Any]) -> bool:
+    return record.get(
+        "receiver_constructor",
+        is_receiver_constructor(
+            record.get("receiver_type"),
+            record.get("parameters", []),
+            record.get("return_type", ""),
+        ),
+    )
+
+
+def record_return_dependencies(record: dict[str, Any]) -> list[str]:
+    return record.get(
+        "return_dependencies",
+        retained_dependencies(record.get("return_type", "")),
+    )
+
+
+def record_parameter_dependencies(record: dict[str, Any]) -> list[str]:
+    return record.get(
+        "parameter_dependencies",
+        sorted(
+            {
+                dependency
+                for parameter in record.get("parameters", [])
+                for dependency in retained_dependencies(
+                    parameter.get("type", "")
+                )
+            }
+        ),
+    )
+
+
+def construction_boundary_roots(
+    records: list[dict[str, Any]],
+) -> set[str]:
+    produced_types = {
+        record["symbol"]: concrete_receiver_owner(record.get("receiver_type"))
+        for record in records
+        if record_is_receiver_constructor(record)
+    }
+    boundaries = set(produced_types)
+    boundaries.update(
+        record["symbol"]
+        for record in records
+        if (
+            not has_receiver(record)
+            and record.get("kind") not in {"closure", "async-block"}
+            and record_return_dependencies(record)
+            and not record_parameter_dependencies(record)
+        )
+    )
+    changed = True
+    while changed:
+        changed = False
+        for record in records:
+            if (
+                record["symbol"] in boundaries
+                or has_receiver(record)
+                or record.get("kind") in {"closure", "async-block"}
+                or record.get("ambient_dependencies")
+                or record.get("effects")
+                or record.get("unresolved_calls")
+            ):
+                continue
+            callees = record.get("callees", [])
+            if (
+                not callees
+                or any(edge["symbol"] not in produced_types for edge in callees)
+            ):
+                continue
+            return_type = record.get("return_type", "")
+            for edge in callees:
+                produced_type = produced_types.get(edge["symbol"])
+                if produced_type is None:
+                    continue
+                type_name = produced_type.rsplit("::", 1)[-1]
+                if re.search(rf"\b{re.escape(type_name)}\b", return_type):
+                    produced_types[record["symbol"]] = produced_type
+                    boundaries.add(record["symbol"])
+                    changed = True
+                    break
+    return boundaries
+
+
+def construction_boundary_members(
+    records: list[dict[str, Any]],
+) -> tuple[set[str], dict[str, str]]:
+    roots = construction_boundary_roots(records)
+    root_by_symbol = {
+        symbol: symbol
+        for symbol in roots
+    }
+    changed = True
+    while changed:
+        changed = False
+        for record in records:
+            if record["symbol"] in root_by_symbol:
+                continue
+            parent_root = root_by_symbol.get(record.get("enclosing_callable"))
+            if parent_root is None:
+                continue
+            root_by_symbol[record["symbol"]] = parent_root
+            changed = True
+    return roots, root_by_symbol
+
+
+def construction_boundary_symbols(
+    records: list[dict[str, Any]],
+) -> set[str]:
+    return set(construction_boundary_members(records)[1])
+
+
 def bound_owner(
     record: dict[str, Any],
     records_by_symbol: dict[str, dict[str, Any]],
@@ -2983,6 +3177,7 @@ def callable_graph_record(record: dict[str, Any]) -> dict[str, Any]:
         "symbol": record["symbol"],
         "signature": record["signature"],
         "kind": record["kind"],
+        "visibility": record.get("visibility", "private"),
         "module": record["module"],
         "path": record["path"],
         "receiver": record.get("receiver_type"),
@@ -3016,13 +3211,21 @@ def build_graph_data(
 ) -> dict[str, Any]:
     decisions = decisions or {}
     records = index["callables"]
+    attach_nested_callable_edges(records, attach_callers=True)
     records_by_symbol = {
         record["symbol"]: record
         for record in records
     }
-    components = index.get("components")
-    if components is None:
-        components = call_components(records)
+    construction_roots, construction_root_by_symbol = (
+        construction_boundary_members(records)
+    )
+    construction_boundaries = set(construction_root_by_symbol)
+    workflow_records = [
+        record
+        for record in records
+        if record["symbol"] not in construction_boundaries
+    ]
+    components = call_components(workflow_records)
     component_records = {
         component["id"]: [
             records_by_symbol[symbol]
@@ -3058,6 +3261,90 @@ def build_graph_data(
                 findings_by_symbol[symbol] = (
                     findings_by_symbol.get(symbol, 0) + 1
                 )
+
+    construction_nodes = []
+    construction_node_id_by_root = {
+        root: f"construction|{root}"
+        for root in construction_roots
+    }
+    construction_members_by_root = {
+        root: []
+        for root in construction_roots
+    }
+    for record in records:
+        root = construction_root_by_symbol.get(record["symbol"])
+        if root is not None:
+            construction_members_by_root[root].append(record)
+    for root in sorted(construction_roots):
+        members = sorted(
+            construction_members_by_root[root],
+            key=lambda record: record["symbol"],
+        )
+        root_record = records_by_symbol[root]
+        caller_symbols = sorted(
+            {
+                caller["symbol"]
+                for member in members
+                for caller in member.get("callers", [])
+                if construction_root_by_symbol.get(caller["symbol"]) != root
+                and caller["symbol"] in records_by_symbol
+            }
+        )
+        module = root_record["module"].rsplit("::", 1)[-1]
+        receiver = root_record.get("receiver_type")
+        label = (
+            f"{module}::<{receiver}>::{root_record['name']}"
+            if receiver is not None
+            else f"{module}::{root_record['name']}"
+        )
+        construction_nodes.append(
+            {
+                "id": construction_node_id_by_root[root],
+                "kind": "construction",
+                "label": label,
+                "realm": component_realm(members),
+                "crate": root_record["crate"],
+                "components": [],
+                "callables": [
+                    callable_graph_record(record)
+                    for record in members
+                ],
+                "construction_callers": [
+                    callable_graph_record(records_by_symbol[symbol])
+                    for symbol in caller_symbols
+                ],
+                "requirements": sorted(
+                    {
+                        dependency
+                        for record in members
+                        for dependency in dependency_bundle(record)
+                    }
+                ),
+                "effects": sorted(
+                    {
+                        effect
+                        for record in members
+                        for effect in record.get("effects", [])
+                    }
+                ),
+                "modules": sorted(
+                    {record["module"] for record in members}
+                ),
+                "findings": sum(
+                    findings_by_symbol.get(record["symbol"], 0)
+                    for record in members
+                ),
+                "rank": root_record.get("bottom_up_rank", 0),
+                "directly_stateful": int(
+                    any(stateful_record(record) for record in members)
+                ),
+                "blockers": [],
+                "blocked_callers": [],
+                "ready": False,
+                "candidate_owner": None,
+                "classifications": ["construction-boundary"],
+            }
+        )
 
     owner_nodes: dict[str, dict[str, Any]] = {}
     component_to_node: dict[str, str] = {}
@@ -3193,7 +3480,7 @@ def build_graph_data(
             )
 
     edge_counts: dict[tuple[str, str], int] = {}
-    for record in records:
+    for record in workflow_records:
         source = component_to_node.get(record.get("component"))
         if source is None:
             continue
@@ -3220,6 +3507,39 @@ def build_graph_data(
         }
         for (source, target), sites in sorted(edge_counts.items())
     ]
+    construction_edge_counts: dict[tuple[str, str], int] = {}
+    for record in records:
+        source_root = construction_root_by_symbol.get(record["symbol"])
+        source = (
+            construction_node_id_by_root[source_root]
+            if source_root is not None
+            else component_to_node.get(record.get("component"))
+        )
+        if source is None:
+            continue
+        for edge in record.get("callees", []):
+            target_root = construction_root_by_symbol.get(edge["symbol"])
+            if target_root is None:
+                continue
+            target = construction_node_id_by_root[target_root]
+            if source == target:
+                continue
+            key = (source, target)
+            construction_edge_counts[key] = (
+                construction_edge_counts.get(key, 0)
+                + len(edge.get("sites", []))
+            )
+    construction_edges = [
+        {
+            "source": source,
+            "target": target,
+            "kind": "constructs",
+            "sites": sites,
+        }
+        for (source, target), sites in sorted(
+            construction_edge_counts.items()
+        )
+    ]
     for node in workflow_nodes:
         if node["kind"] != "unbound":
             continue
@@ -3238,7 +3558,7 @@ def build_graph_data(
 
     capability_nodes: dict[str, dict[str, Any]] = {}
     supporting_edges: list[dict[str, Any]] = []
-    for node in nodes:
+    for node in [*nodes, *construction_nodes]:
         for requirement in node["requirements"]:
             capability_id = f"capability|{requirement}"
             capability_nodes.setdefault(
@@ -3298,6 +3618,8 @@ def build_graph_data(
                 for node in workflow_nodes
             ),
             "call_edges": len(call_edges),
+            "construction_boundaries": len(construction_nodes),
+            "construction_edges": len(construction_edges),
             "semantic_views": [
                 view["name"]
                 for view in index.get("semantic_views", [])
@@ -3316,7 +3638,9 @@ def build_graph_data(
             [*nodes, *capability_nodes.values()],
             key=lambda node: node["id"],
         ),
+        "construction_boundaries": construction_nodes,
         "call_edges": call_edges,
+        "construction_edges": construction_edges,
         "supporting_edges": supporting_edges,
     }
 
@@ -3402,6 +3726,7 @@ main {
 }
 .edge { stroke: #657985; stroke-opacity: .25; fill: none; }
 .edge.candidate { stroke: #efc56c; stroke-dasharray: 7 5; }
+.edge.constructs { stroke: #74b6a9; stroke-dasharray: 7 5; }
 .edge.requires { stroke: #a98bc4; stroke-dasharray: 2 5; }
 .edge.active { stroke: #fff0a6; stroke-opacity: .9; }
 .node rect { stroke-width: 2; cursor: pointer; }
@@ -3430,6 +3755,7 @@ main {
     <button data-mode="ready" class="active">Ready leaves</button>
     <button data-mode="unbound">All unowned</button>
     <button data-mode="owners">Owner graph</button>
+    <button data-mode="construction">Construction boundaries</button>
     <input id="search" type="search" placeholder="Filter owner, workflow, module, callable">
     <label><input id="tests" type="checkbox"> tests</label>
     <label><input id="macros" type="checkbox"> macro expansions</label>
@@ -3439,8 +3765,8 @@ main {
 </header>
 <main>
   <section id="canvas">
-    <svg id="graph" role="img" aria-label="Owner and stateful workflow graph"></svg>
-    <div class="legend">Arrow: caller → callee · amber: ready · red: blocked · blue: owner · green: reviewed boundary · purple: required capability</div>
+    <svg id="graph" role="img" aria-label="Callable ownership graph"></svg>
+    <div class="legend">Arrow: caller → callee · amber: ready · red: blocked · blue: owner · teal: construction · green: reviewed boundary · purple: required capability</div>
   </section>
   <aside id="details"></aside>
 </main>
@@ -3454,7 +3780,9 @@ const includeTests = document.getElementById("tests");
 const includeMacros = document.getElementById("macros");
 const includeCapabilities = document.getElementById("capabilities");
 const includeAllEdges = document.getElementById("allEdges");
-const nodesById = new Map(DATA.nodes.map(function(node) { return [node.id, node]; }));
+const CONSTRUCTION_NODES = DATA.construction_boundaries || [];
+const ALL_NODES = DATA.nodes.concat(CONSTRUCTION_NODES);
+const nodesById = new Map(ALL_NODES.map(function(node) { return [node.id, node]; }));
 let mode = "ready";
 let selected = null;
 
@@ -3485,6 +3813,7 @@ function matches(node, query) {
 function nodeColor(node) {
   if (node.kind === "owner") return "#43849a";
   if (node.kind === "resolved") return "#4f8a68";
+  if (node.kind === "construction") return "#477f78";
   if (node.kind === "capability") return "#80639b";
   if (node.ready) return "#b98737";
   return "#a64f4f";
@@ -3495,6 +3824,7 @@ function kindLabel(node) {
   if (node.kind === "resolved") {
     return "verified " + (node.classifications.join(", ") || "workflow");
   }
+  if (node.kind === "construction") return "construction boundary";
   if (node.kind === "capability") return "required capability";
   if (node.ready) return "ready unowned stateful call group";
   return "blocked unowned stateful call group";
@@ -3527,6 +3857,7 @@ function callableMarkup(items) {
       .concat(item.unresolved.length ? ["unknown calls:" + item.unresolved.length] : []);
     return '<div class="callable"><div>' + escapeHtml(item.symbol) + '</div>' +
       '<div class="meta">' + escapeHtml(item.kind) + " · " +
+      escapeHtml(item.visibility) + " · " +
       escapeHtml(item.path) + " · raw rank " + item.rank + "</div>" +
       "<div>" + badges(facts) + "</div></div>";
   }).join("");
@@ -3564,12 +3895,43 @@ function showQueue() {
   attachRelationHandlers();
 }
 
+function showConstructionQueue() {
+  const boundaries = CONSTRUCTION_NODES
+    .filter(realmVisible)
+    .sort(function(left, right) {
+      return left.rank - right.rank ||
+        right.findings - left.findings ||
+        left.id.localeCompare(right.id);
+    });
+  const rows = boundaries.map(function(node, index) {
+    return '<button class="queue-row" data-node="' + escapeHtml(node.id) + '">' +
+      '<span>' + (index + 1) + ". " + escapeHtml(node.label) +
+      '<span class="meta"><br>' + escapeHtml(node.modules.join(", ")) + '</span></span>' +
+      '<span class="meta">' + node.construction_callers.length +
+      " callers</span></button>";
+  }).join("");
+  details.innerHTML =
+    "<h2>Construction boundary queue</h2>" +
+    '<div class="meta">Review which parent boundary may call each constructor or opener; repository callers and current visibility are shown.</div>' +
+    "<h3>" + boundaries.length + " construction boundaries</h3>" + rows;
+  attachRelationHandlers();
+}
+
+function graphEdges() {
+  return callEdges()
+    .concat(DATA.supporting_edges);
+}
+
+function callEdges() {
+  return DATA.call_edges.concat(DATA.construction_edges || []);
+}
+
 function showDetails(node) {
   selected = node.id;
-  const incoming = DATA.call_edges
+  const incoming = callEdges()
     .filter(function(edge) { return edge.target === node.id; })
     .map(function(edge) { return edge.source; });
-  const outgoing = DATA.call_edges
+  const outgoing = callEdges()
     .filter(function(edge) { return edge.source === node.id; })
     .map(function(edge) { return edge.target; });
   const candidate = node.candidate_owner
@@ -3600,12 +3962,20 @@ function showDetails(node) {
       (badges(node.requirements) || '<span class="meta">none detected directly</span>') +
       "</div>" +
     "<h3>Effects</h3><div>" +
-      (badges(node.effects) || '<span class="meta">inherited through callees</span>') +
+      (badges(node.effects) || '<span class="meta">' +
+        (node.directly_stateful || node.kind === "construction"
+          ? "none detected directly"
+          : "stateful behavior inherited through callees") +
+        "</span>") +
       "</div>" +
     relatedRows(node.blockers, "Unowned stateful blockers") +
     relatedRows(node.blocked_callers, "Callers this group unblocks") +
     relatedRows(outgoing, "Calls") +
     relatedRows(incoming, "Called by") +
+    ((node.construction_callers || []).length
+      ? "<h3>Direct construction callers</h3>" +
+        callableMarkup(node.construction_callers)
+      : "") +
     "<h3>Modules</h3><div>" + badges(node.modules) + "</div>" +
     "<h3>Callables</h3>" + callableMarkup(node.callables);
   document.getElementById("neighborhood").addEventListener("click", function() {
@@ -3624,11 +3994,12 @@ function setModeButtons() {
 }
 
 function selectedBaseNodes(query) {
-  let nodes = DATA.nodes.filter(function(node) {
+  let nodes = ALL_NODES.filter(function(node) {
     if (!realmVisible(node) || !matches(node, query)) return false;
     if (mode === "ready") return node.kind === "unbound" && node.ready;
     if (mode === "unbound") return node.kind === "unbound";
     if (mode === "owners") return node.kind === "owner" || node.kind === "resolved";
+    if (mode === "construction") return node.kind === "construction";
     return false;
   });
   nodes.sort(function(left, right) {
@@ -3636,13 +4007,13 @@ function selectedBaseNodes(query) {
       right.findings - left.findings ||
       left.id.localeCompare(right.id);
   });
-  if (mode === "ready" && selected) {
+  if ((mode === "ready" || mode === "construction") && selected) {
     const ids = new Set([selected]);
-    DATA.call_edges.concat(DATA.supporting_edges).forEach(function(edge) {
+    graphEdges().forEach(function(edge) {
       if (edge.source === selected) ids.add(edge.target);
       if (edge.target === selected) ids.add(edge.source);
     });
-    nodes = DATA.nodes.filter(function(node) {
+    nodes = ALL_NODES.filter(function(node) {
       return ids.has(node.id) && realmVisible(node) && matches(node, query);
     });
   } else if (mode !== "neighborhood") {
@@ -3650,11 +4021,11 @@ function selectedBaseNodes(query) {
   }
   if (mode === "neighborhood" && selected) {
     const ids = new Set([selected]);
-    DATA.call_edges.concat(DATA.supporting_edges).forEach(function(edge) {
+    graphEdges().forEach(function(edge) {
       if (edge.source === selected) ids.add(edge.target);
       if (edge.target === selected) ids.add(edge.source);
     });
-    nodes = DATA.nodes.filter(function(node) {
+    nodes = ALL_NODES.filter(function(node) {
       return ids.has(node.id) && realmVisible(node) && matches(node, query);
     });
   }
@@ -3664,12 +4035,19 @@ function selectedBaseNodes(query) {
 function render() {
   const query = search.value.trim().toLowerCase();
   let nodes = selectedBaseNodes(query);
-  const ids = new Set(nodes.map(function(node) { return node.id; }));
 
   if (mode === "ready") {
     const contextIds = new Set();
-    DATA.call_edges.concat(DATA.supporting_edges).forEach(function(edge) {
-      if (!ids.has(edge.source)) return;
+    const workflowIds = new Set(
+      nodes
+        .filter(function(node) {
+          return node.kind === "unbound" &&
+            (!selected || node.id === selected);
+        })
+        .map(function(node) { return node.id; })
+    );
+    graphEdges().forEach(function(edge) {
+      if (!workflowIds.has(edge.source)) return;
       const target = nodesById.get(edge.target);
       if (target && (target.kind === "owner" || target.kind === "resolved" ||
           (includeCapabilities.checked && target.kind === "capability"))) {
@@ -3683,7 +4061,7 @@ function render() {
   }
 
   const visibleIds = new Set(nodes.map(function(node) { return node.id; }));
-  let edges = DATA.call_edges.concat(DATA.supporting_edges).filter(function(edge) {
+  let edges = graphEdges().filter(function(edge) {
     if (!visibleIds.has(edge.source) || !visibleIds.has(edge.target)) return false;
     if (edge.kind === "requires" && !includeCapabilities.checked) return false;
     return true;
@@ -3755,6 +4133,8 @@ function render() {
       node.realm === "macro" ? "Macro · " + node.label : node.label;
     const status = node.kind === "unbound"
       ? (node.ready ? "ready" : node.blockers.length + " blockers")
+      : node.kind === "construction"
+        ? node.construction_callers.length + " direct callers"
       : node.callables.length + " callables";
     return '<g class="node ' + (selected === node.id ? "selected" : "") +
       '" data-node="' + escapeHtml(node.id) + '" transform="translate(' +
@@ -3788,10 +4168,12 @@ function render() {
   const owners = DATA.nodes.filter(function(node) {
     return node.kind === "owner" && realmVisible(node);
   }).length;
+  const boundaries = CONSTRUCTION_NODES.filter(realmVisible).length;
   summary.textContent =
     ready.toLocaleString() + " ready · " +
     unbound.toLocaleString() + " unowned stateful groups · " +
     owners.toLocaleString() + " retained owners · " +
+    boundaries.toLocaleString() + " construction boundaries · " +
     visibleWorkflows.toLocaleString() + " visible unowned groups";
 }
 
@@ -3802,6 +4184,7 @@ document.querySelectorAll("[data-mode]").forEach(function(button) {
     setModeButtons();
     render();
     if (mode === "ready") showQueue();
+    else if (mode === "construction") showConstructionQueue();
     else details.innerHTML = "<h2>Select a node</h2>";
   });
 });
@@ -3810,6 +4193,7 @@ document.querySelectorAll("[data-mode]").forEach(function(button) {
     control.addEventListener(control === search ? "input" : "change", function() {
       render();
       if (mode === "ready" && !selected) showQueue();
+      if (mode === "construction" && !selected) showConstructionQueue();
     });
   });
 

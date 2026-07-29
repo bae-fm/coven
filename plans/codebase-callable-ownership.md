@@ -188,7 +188,12 @@ does not produce a false ordering.
 It presents ownership groups and call direction first, then permits drilling
 into callables, retained dependencies, effects, configuration-specific edges,
 and unresolved candidate sets. The graph is reviewed before production
-ownership relocations begin.
+ownership relocations begin. Construction boundaries have a separate queue
+that shows each constructor or opener, its lexical body, its direct callers,
+its visibility, and its calls into other construction boundaries. Callers are
+the complete repository caller set; public visibility separately exposes calls
+that downstream hosts may make. Construction boundaries do not participate in
+the workflow dependency order.
 
 ## Dependency and effect classification
 
@@ -295,6 +300,24 @@ points. Work one ownership boundary at a time:
 Moving the deepest callable first does not mean turning transformations into
 methods. A leaf transformation is classified and left in place; the nearest
 stateful caller is the relocation target.
+
+### Constructor boundaries
+
+A receiverless associated callable that produces its receiver type is a
+constructor, not an unowned workflow. A free function that has no direct
+or ambient effects, has no unresolved calls, and only forwards construction
+into such a callable is the same boundary, including chains of those forwarding
+functions. A receiverless function that creates and returns a retained
+capability from inputs that are not retained capabilities is also a
+construction boundary; this covers constructors supplied by external crates.
+A function that derives a value from an existing database, storage, identity,
+or authority remains a workflow rather than being classified from its return
+type. Lexically nested closures, async blocks, and local functions are part of
+their construction boundary. Constructors remain in the complete callable
+ledger and receive a separate boundary disposition, including review of which
+parent boundary may call them. They do not enter the workflow relocation queue.
+Separate stateful helpers called by a constructor remain in the graph and
+receive their own dispositions.
 
 ## Cross-layer reach-throughs
 
@@ -460,6 +483,13 @@ The work is verified when:
   ready only when none of its stateful callees are also unowned. It shows
   candidate owners and required capabilities without treating either as a
   decision. Rebuilding the graph after a verified classification or relocation
-  removes that blocker and exposes its callers. The current complete index
-  contains 1,582 production unowned stateful call groups, of which 631 are
-  ready, alongside 250 production retained owners.
+  removes that blocker and exposes its callers.
+- Receiver constructors, effect-free forwarding factories, and their lexical
+  bodies now remain in a construction-boundary queue rather than the workflow
+  queue. The same queue includes functions that create retained capabilities
+  through external constructors and shows every direct caller. Elsewhere,
+  lexically nested closures and async blocks contribute explicit
+  parent-to-child edges, so a parent cannot appear ready while its nested
+  stateful work remains unowned. The current complete index produces 1,266
+  production unowned stateful call groups, of which 488 are ready, alongside
+  250 production retained owners and 490 production construction boundaries.

@@ -56,6 +56,83 @@ impl Store {
         )
         self.assertEqual(transform["return_type"], "u64")
 
+    def test_inventory_marks_receiver_constructors(self):
+        records = self.inventory(
+            """
+struct Store {
+    database: Database,
+}
+struct Database;
+impl Store {
+    fn new(database: Database) -> Self {
+        Self { database }
+    }
+
+    fn checked(database: Database) -> Self {
+        assert!(database.is_valid());
+        Self { database }
+    }
+
+    fn loaded(database: Database) -> Self {
+        Self {
+            database: load(database),
+        }
+    }
+
+    fn explicit(database: Database) -> Store {
+        Self { database }
+    }
+}
+impl Database {
+    fn is_valid(&self) -> bool { true }
+}
+fn load(database: Database) -> Database { database }
+"""
+        )
+        constructors = {
+            record["name"]: record["receiver_constructor"]
+            for record in records
+            if record["receiver_type"] == "Store"
+        }
+        self.assertEqual(
+            constructors,
+            {
+                "new": True,
+                "checked": True,
+                "loaded": True,
+                "explicit": True,
+            },
+        )
+
+    def test_inventory_separates_parameter_and_return_dependencies(self):
+        records = self.inventory(
+            """
+fn open_image(image: &[u8]) -> Result<Connection, DbError> {
+    todo!()
+}
+fn load_root(conn: &Connection) -> Result<StoreRootRef, DbError> {
+    todo!()
+}
+"""
+        )
+        by_name = {
+            record["name"]: record
+            for record in records
+        }
+        self.assertEqual(by_name["open_image"]["parameter_dependencies"], [])
+        self.assertEqual(
+            by_name["open_image"]["return_dependencies"],
+            ["database"],
+        )
+        self.assertEqual(
+            by_name["load_root"]["parameter_dependencies"],
+            ["database"],
+        )
+        self.assertEqual(
+            by_name["load_root"]["return_dependencies"],
+            ["authority"],
+        )
+
     def test_inventory_uses_the_implemented_type_as_receiver(self):
         records = self.inventory(
             """
@@ -440,10 +517,15 @@ class SemanticIndexTests(unittest.TestCase):
     def graph_record(self, symbol, **overrides):
         record = {
             "symbol": symbol,
+            "name": symbol.rsplit("::", 1)[-1],
             "signature": "fn call()",
             "module": symbol.rsplit("::", 1)[0],
             "crate": "sample",
             "path": "crates/sample/src/lib.rs",
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 1},
+            },
             "kind": "free",
             "receiver_type": None,
             "parameters": [],
@@ -521,6 +603,322 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertEqual(node["label"], "store::open")
         self.assertTrue(node["ready"])
 
+    def test_receiver_constructor_is_not_a_workflow(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            retained_dependencies=["database"],
+            receiver_constructor=True,
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [constructor], "reach_throughs": {}}
+        )
+        self.assertEqual(graph["summary"]["stateful_components"], 0)
+        self.assertFalse(
+            any(node["kind"] != "capability" for node in graph["nodes"])
+        )
+        self.assertEqual(
+            [
+                boundary["callables"][0]["symbol"]
+                for boundary in graph["construction_boundaries"]
+            ],
+            [constructor["symbol"]],
+        )
+
+    def test_construction_boundary_exposes_its_direct_callers(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        caller = self.graph_record(
+            "sample::application::open_store",
+            module="sample::application",
+            callees=[{"symbol": constructor["symbol"], "sites": [{}, {}]}],
+        )
+        constructor["callers"] = [
+            {"symbol": caller["symbol"], "sites": [{}, {}]}
+        ]
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [caller, constructor],
+                "reach_throughs": {},
+            }
+        )
+        boundary = graph["construction_boundaries"][0]
+        self.assertEqual(
+            [record["symbol"] for record in boundary["construction_callers"]],
+            [caller["symbol"]],
+        )
+        self.assertEqual(graph["summary"]["construction_boundaries"], 1)
+
+    def test_free_factory_is_not_a_workflow(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        factory = self.graph_record(
+            "sample::store::open_store",
+            return_type="Result<Store, OpenError>",
+            retained_dependencies=["database"],
+            callees=[{"symbol": constructor["symbol"], "sites": [{}]}],
+        )
+        constructor["callers"] = [
+            {"symbol": factory["symbol"], "sites": [{}]}
+        ]
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [factory, constructor],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(graph["summary"]["stateful_components"], 0)
+        self.assertFalse(
+            any(node["kind"] != "capability" for node in graph["nodes"])
+        )
+
+    def test_free_retained_capability_constructor_is_not_a_workflow(self):
+        boundary = self.graph_record(
+            "sample::database::open_image",
+            return_type="Result<Connection, DbError>",
+            retained_dependencies=["database"],
+            effects=["database-write"],
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [boundary], "reach_throughs": {}}
+        )
+        self.assertEqual(graph["summary"]["stateful_components"], 0)
+        self.assertFalse(
+            any(node["kind"] != "capability" for node in graph["nodes"])
+        )
+
+    def test_loader_from_retained_state_is_not_a_constructor(self):
+        loader = self.graph_record(
+            "sample::database::load_store_root",
+            parameters=[{"name": "conn", "type": "&Connection"}],
+            return_type="Result<StoreRootRef, DbError>",
+            retained_dependencies=["database", "authority"],
+            effects=["database-read"],
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [loader], "reach_throughs": {}}
+        )
+        self.assertEqual(graph["summary"]["unbound"], 1)
+        self.assertEqual(graph["construction_boundaries"], [])
+
+    def test_factory_boundary_propagates_through_factory_wrappers(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        factory = self.graph_record(
+            "sample::store::open_store",
+            return_type="Result<Store, OpenError>",
+            callees=[{"symbol": constructor["symbol"], "sites": [{}]}],
+        )
+        wrapper = self.graph_record(
+            "sample::store::open_test_store",
+            return_type="Result<Store, OpenError>",
+            retained_dependencies=["storage"],
+            callees=[{"symbol": factory["symbol"], "sites": [{}]}],
+        )
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [wrapper, factory, constructor],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(graph["summary"]["stateful_components"], 0)
+        self.assertFalse(
+            any(node["kind"] != "capability" for node in graph["nodes"])
+        )
+
+    def test_workflow_returning_another_type_is_not_a_factory_boundary(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        workflow = self.graph_record(
+            "sample::store::create_account",
+            return_type="Result<Account, OpenError>",
+            retained_dependencies=["database"],
+            callees=[{"symbol": constructor["symbol"], "sites": [{}]}],
+        )
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [workflow, constructor],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(graph["summary"]["unbound"], 1)
+        self.assertEqual(
+            [
+                node["label"]
+                for node in graph["nodes"]
+                if node["kind"] == "unbound"
+            ],
+            ["store::create_account"],
+        )
+
+    def test_workflow_that_calls_a_constructor_is_not_a_factory_boundary(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        load = self.graph_record(
+            "sample::store::load_database",
+            effects=["database-read"],
+        )
+        workflow = self.graph_record(
+            "sample::store::load_store",
+            return_type="Result<Store, OpenError>",
+            retained_dependencies=["database"],
+            callees=[
+                {"symbol": load["symbol"], "sites": [{}]},
+                {"symbol": constructor["symbol"], "sites": [{}]},
+            ],
+        )
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [workflow, load, constructor],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(
+            {
+                callable_record["symbol"]
+                for node in graph["nodes"]
+                if node["kind"] == "unbound"
+                for callable_record in node["callables"]
+            },
+            {workflow["symbol"], load["symbol"]},
+        )
+
+    def test_constructor_lexical_body_is_part_of_the_boundary(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::new",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            return_type="Self",
+            receiver_constructor=True,
+        )
+        closure = self.graph_record(
+            "sample::store::<Store>::new::<closure@1:1>",
+            kind="closure",
+            enclosing_callable=constructor["symbol"],
+            effects=["database-read"],
+        )
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [constructor, closure],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(graph["summary"]["stateful_components"], 0)
+        self.assertFalse(
+            any(node["kind"] != "capability" for node in graph["nodes"])
+        )
+
+    def test_constructor_boundary_stops_stateful_propagation(self):
+        helper = self.graph_record(
+            "sample::store::load",
+            effects=["database-read"],
+        )
+        constructor = self.graph_record(
+            "sample::store::<Store>::open",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            receiver_constructor=True,
+            callees=[{"symbol": helper["symbol"], "sites": [{}]}],
+        )
+        entry = self.graph_record(
+            "sample::open_store",
+            callees=[{"symbol": constructor["symbol"], "sites": [{}]}],
+        )
+        helper["callers"] = [
+            {"symbol": constructor["symbol"], "sites": [{}]}
+        ]
+        constructor["callers"] = [
+            {"symbol": entry["symbol"], "sites": [{}]}
+        ]
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [entry, constructor, helper],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(
+            [
+                callable_record["symbol"]
+                for node in graph["nodes"]
+                for callable_record in node["callables"]
+            ],
+            [helper["symbol"]],
+        )
+
+    def test_constructor_is_removed_from_recursive_workflow_group(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::parse",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            receiver_constructor=True,
+        )
+        verifier = self.graph_record(
+            "sample::store::verify",
+            effects=["database-read"],
+        )
+        constructor["callees"] = [
+            {"symbol": verifier["symbol"], "sites": [{}]}
+        ]
+        constructor["callers"] = [
+            {"symbol": verifier["symbol"], "sites": [{}]}
+        ]
+        verifier["callees"] = [
+            {"symbol": constructor["symbol"], "sites": [{}]}
+        ]
+        verifier["callers"] = [
+            {"symbol": constructor["symbol"], "sites": [{}]}
+        ]
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [constructor, verifier],
+                "reach_throughs": {},
+            }
+        )
+        self.assertEqual(
+            [
+                callable_record["symbol"]
+                for node in graph["nodes"]
+                for callable_record in node["callables"]
+            ],
+            [verifier["symbol"]],
+        )
+
     def test_nested_stateful_callable_inherits_receiver_owner(self):
         method = self.graph_record(
             "sample::store::<Store>::sync",
@@ -548,6 +946,36 @@ class SemanticIndexTests(unittest.TestCase):
         ]
         self.assertEqual([owner["label"] for owner in owners], ["Store"])
         self.assertEqual(graph["summary"]["unbound"], 0)
+
+    def test_nested_unowned_stateful_callable_blocks_its_parent(self):
+        parent = self.graph_record("sample::run")
+        closure = self.graph_record(
+            "sample::run::<closure@1:1>",
+            kind="closure",
+            enclosing_callable=parent["symbol"],
+            effects=["database-read"],
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [parent, closure], "reach_throughs": {}}
+        )
+        parent_node = next(
+            node
+            for node in graph["nodes"]
+            if any(
+                callable_record["symbol"] == parent["symbol"]
+                for callable_record in node["callables"]
+            )
+        )
+        closure_node = next(
+            node
+            for node in graph["nodes"]
+            if any(
+                callable_record["symbol"] == closure["symbol"]
+                for callable_record in node["callables"]
+            )
+        )
+        self.assertTrue(closure_node["ready"])
+        self.assertEqual(parent_node["blockers"], [closure_node["id"]])
 
     def test_ready_group_keeps_adjacent_receiver_as_candidate_not_owner(self):
         owner = self.graph_record(
@@ -635,18 +1063,22 @@ class SemanticIndexTests(unittest.TestCase):
         html = ownership_audit.render_graph_html(
             {
                 "nodes": [],
+                "construction_boundaries": [],
                 "call_edges": [],
+                "construction_edges": [],
                 "supporting_edges": [],
                 "summary": {
                     "callables": 0,
                     "ready": 0,
                     "unbound": 0,
                     "owners": 0,
+                    "construction_boundaries": 0,
                 },
             }
         )
         self.assertIn('<svg id="graph"', html)
         self.assertIn("Ready ownership queue", html)
+        self.assertIn("Construction boundaries", html)
         self.assertIn('"callables": 0', html)
 
     def test_reach_through_reports_cover_static_calls_and_field_bundles(self):
