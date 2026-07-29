@@ -56,6 +56,32 @@ impl Store {
         )
         self.assertEqual(transform["return_type"], "u64")
 
+    def test_inventory_uses_the_implemented_type_as_receiver(self):
+        records = self.inventory(
+            """
+struct Store<'a>(&'a ());
+impl<'a> Store<'a> {
+    fn read(&self) {}
+}
+#[async_trait]
+impl<'a> Reader for Store<'a> {
+    fn load(&self) {}
+}
+"""
+        )
+        read = next(record for record in records if record["name"] == "read")
+        load = next(record for record in records if record["name"] == "load")
+        self.assertEqual(read["receiver_type"], "Store<'a>")
+        self.assertEqual(load["receiver_type"], "Reader for Store<'a>")
+        self.assertEqual(
+            read["symbol"],
+            "coven_core::sample::<Store<'a>>::read",
+        )
+        self.assertEqual(
+            load["symbol"],
+            "coven_core::sample::<Reader for Store<'a>>::load",
+        )
+
     def test_inventory_finds_retained_dependencies_and_ambient_access(self):
         records = self.inventory(
             """
@@ -323,6 +349,24 @@ fn install() {}
         self.assertEqual(len(symbols), 2)
         self.assertTrue(all("@#[cfg" in symbol for symbol in symbols))
 
+    def test_impl_configuration_distinguishes_method_identities(self):
+        records = self.inventory(
+            """
+struct Store;
+#[cfg(target_os = "macos")]
+impl Store { fn install(&self) {} }
+#[cfg(target_os = "linux")]
+impl Store { fn install(&self) {} }
+"""
+        )
+        installs = [
+            record["symbol"]
+            for record in records
+            if record["name"] == "install"
+        ]
+        self.assertEqual(len(set(installs)), 2)
+        self.assertTrue(all("@#[cfg" in symbol for symbol in installs))
+
     def test_callable_and_call_conditions_include_ancestor_cfg(self):
         records = self.inventory(
             """
@@ -339,6 +383,18 @@ mod provider {
         self.assertEqual(run["cfg"], ['#[cfg(feature = "provider")]'])
         target = next(call for call in run["calls"] if call["callee_text"] == "target")
         self.assertEqual(target["cfg"], ["#[cfg(test)]"])
+
+    def test_nested_callables_inherit_test_context(self):
+        records = self.inventory(
+            """
+#[tokio::test]
+async fn writes() {
+    run(|| save());
+}
+"""
+        )
+        self.assertTrue(records)
+        self.assertTrue(all(record["test_context"] for record in records))
 
     def test_nested_functions_belong_to_their_enclosing_callable(self):
         records = self.inventory(
@@ -381,12 +437,13 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
-    def test_graph_data_aggregates_calls_by_module(self):
+    def test_graph_data_aggregates_candidate_groups_into_subsystems(self):
         index = {
             "callables": [
                 {
                     "symbol": "sample::left::run",
                     "module": "sample::left",
+                    "path": "crates/sample/src/left.rs",
                     "kind": "free",
                     "receiver_type": None,
                     "retained_dependencies": ["database"],
@@ -396,6 +453,8 @@ class SemanticIndexTests(unittest.TestCase):
                     "unresolved_calls": [],
                     "semantic_views": ["library-default"],
                     "bottom_up_rank": 1,
+                    "callers": [],
+                    "enclosing_callable": None,
                     "callees": [
                         {
                             "symbol": "sample::right::load",
@@ -409,6 +468,7 @@ class SemanticIndexTests(unittest.TestCase):
                 {
                     "symbol": "sample::right::load",
                     "module": "sample::right",
+                    "path": "crates/sample/src/right.rs",
                     "kind": "free",
                     "receiver_type": None,
                     "retained_dependencies": [],
@@ -418,6 +478,13 @@ class SemanticIndexTests(unittest.TestCase):
                     "unresolved_calls": [],
                     "semantic_views": ["library-default"],
                     "bottom_up_rank": 0,
+                    "callers": [
+                        {
+                            "symbol": "sample::left::run",
+                            "sites": [{}, {}],
+                        }
+                    ],
+                    "enclosing_callable": None,
                     "callees": [],
                 },
             ],
@@ -428,30 +495,102 @@ class SemanticIndexTests(unittest.TestCase):
             },
         }
         graph = ownership_audit.build_graph_data(index)
-        self.assertEqual(len(graph["modules"]), 2)
+        self.assertEqual(len(graph["subsystems"]), 2)
+        self.assertEqual(len(graph["groups"]), 2)
         self.assertEqual(
-            graph["edges"],
+            graph["subsystem_edges"],
             [
                 {
-                    "source": "sample::left",
-                    "target": "sample::right",
+                    "source": "production|sample::left",
+                    "target": "production|sample::right",
                     "sites": 2,
                 }
             ],
         )
         left = next(
-            module
-            for module in graph["modules"]
-            if module["id"] == "sample::left"
+            subsystem
+            for subsystem in graph["subsystems"]
+            if subsystem["id"] == "production|sample::left"
         )
         self.assertEqual(left["findings"], 1)
         self.assertEqual(left["stateful"], 1)
 
+    def test_stateful_free_callable_joins_a_dominant_adjacent_owner_candidate(self):
+        owner = {
+            "symbol": "sample::store::<Store>::run",
+            "module": "sample::store",
+            "path": "crates/sample/src/store.rs",
+            "receiver_type": "Store",
+            "enclosing_callable": None,
+        }
+        helper = {
+            "symbol": "sample::store::load",
+            "module": "sample::store",
+            "path": "crates/sample/src/store.rs",
+            "receiver_type": None,
+            "enclosing_callable": None,
+            "retained_dependencies": ["database"],
+            "ambient_dependencies": [],
+            "effects": ["database-read"],
+            "callers": [
+                {
+                    "symbol": owner["symbol"],
+                    "sites": [{}, {}],
+                }
+            ],
+            "callees": [],
+        }
+        placement = ownership_audit.ownership_group_for(
+            helper,
+            {
+                owner["symbol"]: owner,
+                helper["symbol"]: helper,
+            },
+        )
+        self.assertEqual(placement["kind"], "candidate-owner")
+        self.assertEqual(placement["label"], "Candidate · Store")
+
+    def test_test_only_caller_does_not_propose_a_production_owner(self):
+        test_owner = {
+            "symbol": "sample::tests::<Fixture>::run",
+            "module": "sample::tests",
+            "path": "crates/sample/src/tests.rs",
+            "receiver_type": "Fixture",
+            "enclosing_callable": None,
+        }
+        helper = {
+            "symbol": "sample::store::load",
+            "module": "sample::store",
+            "path": "crates/sample/src/store.rs",
+            "receiver_type": None,
+            "enclosing_callable": None,
+            "retained_dependencies": ["database"],
+            "ambient_dependencies": [],
+            "effects": ["database-read"],
+            "callers": [
+                {
+                    "symbol": test_owner["symbol"],
+                    "sites": [{}, {}],
+                }
+            ],
+            "callees": [],
+        }
+        placement = ownership_audit.ownership_group_for(
+            helper,
+            {
+                test_owner["symbol"]: test_owner,
+                helper["symbol"]: helper,
+            },
+        )
+        self.assertEqual(placement["kind"], "unowned")
+
     def test_graph_html_contains_svg_and_embedded_index(self):
         html = ownership_audit.render_graph_html(
             {
-                "modules": [],
-                "edges": [],
+                "subsystems": [],
+                "groups": [],
+                "subsystem_edges": [],
+                "group_edges": [],
                 "summary": {"callables": 0},
             }
         )

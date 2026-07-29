@@ -517,11 +517,22 @@ def impl_name(source_file: SourceFile, index: int) -> str | None:
         if ancestor.kind == "TRAIT":
             name = direct_name(source_file, ancestor_index)
             return f"trait {name[0]}" if name else "trait"
-        body = direct_child(source_file, ancestor_index, "ASSOC_ITEM_LIST")
-        header_end = body.start if body is not None else ancestor.end
-        header = source_file.slice(ancestor.start, header_end)
-        header = re.sub(r"\s+", " ", header).strip()
-        return header.removeprefix("impl ").strip()
+        implemented_types = [
+            source_file.text(source_file.nodes[child]).strip()
+            for child in ancestor.children
+            if source_file.nodes[child].kind.endswith("_TYPE")
+        ]
+        if not implemented_types:
+            return None
+        has_trait = any(
+            source_file.nodes[child].kind == "FOR_KW"
+            for child in ancestor.children
+        )
+        return (
+            f"{implemented_types[-2]} for {implemented_types[-1]}"
+            if has_trait and len(implemented_types) >= 2
+            else implemented_types[-1]
+        )
     return None
 
 
@@ -544,6 +555,18 @@ def effective_cfg_attributes(
     return list(normalize_conditions(conditions))
 
 
+def identity_cfg_attributes(
+    source_file: SourceFile,
+    index: int,
+) -> list[str]:
+    conditions = cfg_attributes(source_file, index)
+    for ancestor_index, _ in ancestors(source_file, index):
+        if is_callable_node(source_file, ancestor_index):
+            break
+        conditions.extend(cfg_attributes(source_file, ancestor_index))
+    return list(normalize_conditions(conditions))
+
+
 def nested_cfg_attributes(
     source_file: SourceFile,
     index: int,
@@ -555,6 +578,23 @@ def nested_cfg_attributes(
             break
         conditions.extend(cfg_attributes(source_file, ancestor_index))
     return list(normalize_conditions(conditions))
+
+
+def is_test_context(
+    source_file: SourceFile,
+    index: int,
+) -> bool:
+    candidates = [index, *(ancestor for ancestor, _ in ancestors(source_file, index))]
+    return any(
+        re.search(
+            r"#\s*\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+            r"(?:test|test_case|rstest)\b",
+            source_file.text(source_file.nodes[child]),
+        )
+        for candidate in candidates
+        for child in source_file.nodes[candidate].children
+        if source_file.nodes[child].kind == "ATTR"
+    )
 
 
 def visibility(signature: str) -> str:
@@ -988,10 +1028,10 @@ def inventory_file(
             signature = source_file.slice(node.start, min(node.end, node.start + 160))
             display_name = anonymous_kind
         binding = closure_binding(source_file, index) if not named else None
-        direct_cfg = cfg_attributes(source_file, index)
+        identity_cfg = identity_cfg_attributes(source_file, index)
         cfg = effective_cfg_attributes(source_file, index)
-        if direct_cfg:
-            symbol = f"{symbol}@{' & '.join(direct_cfg)}"
+        if identity_cfg:
+            symbol = f"{symbol}@{' & '.join(identity_cfg)}"
         index_to_symbol[index] = symbol
         body = body_for(source_file, index) if named else source_file.text(node)
         record = {
@@ -1019,6 +1059,7 @@ def inventory_file(
                 "paths": callable_paths(source_file, index),
                 "visibility": visibility(signature),
                 "cfg": cfg,
+                "test_context": is_test_context(source_file, index),
                 "retained_dependencies": retained_dependencies(signature),
                 "ambient_dependencies": matches(body, AMBIENT_PATTERNS),
                 "effects": matches(body, EFFECT_PATTERNS),
@@ -2714,22 +2755,271 @@ def read_index() -> dict[str, Any]:
     return json.loads(INDEX_PATH.read_text())
 
 
-def build_graph_data(index: dict[str, Any]) -> dict[str, Any]:
-    records = index["callables"]
-    records_by_symbol = {
-        record["symbol"]: record
-        for record in records
+def record_realm(record: dict[str, Any]) -> str:
+    if "macro_origin" in record:
+        return "macro"
+    path = record["path"]
+    module_parts = record["module"].split("::")
+    test_module = any(
+        part == "tests"
+        or part.endswith("_tests")
+        or part
+        in {
+            "test_helpers",
+            "test_support",
+            "test_utils",
+        }
+        for part in module_parts
+    )
+    test_path = (
+        "/tests/" in path
+        or path.endswith("_tests.rs")
+        or "/test_" in path
+    )
+    test_configuration = bool(record.get("cfg_paths")) and all(
+        any(
+            "test" in condition
+            or 'feature = "test-utils"' in condition
+            for condition in conditions
+        )
+        for conditions in record["cfg_paths"]
+    )
+    return (
+        "test"
+        if (
+            record.get("test_context", False)
+            or test_module
+            or test_path
+            or test_configuration
+        )
+        else "production"
+    )
+
+
+def without_generic_arguments(value: str) -> str:
+    output = []
+    depth = 0
+    for character in value:
+        if character == "<":
+            depth += 1
+            continue
+        if character == ">":
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            output.append(character)
+    return re.sub(r"\s+", " ", "".join(output)).strip()
+
+
+def concrete_receiver_owner(receiver: str | None) -> str | None:
+    if receiver is None or receiver.startswith("trait "):
+        return None
+    concrete = receiver.rsplit(" for ", 1)[-1]
+    return without_generic_arguments(concrete)
+
+
+def receiver_interface(receiver: str | None) -> str | None:
+    if receiver is None:
+        return None
+    if receiver.startswith("trait "):
+        return receiver.removeprefix("trait ").strip()
+    if " for " in receiver:
+        return without_generic_arguments(receiver.rsplit(" for ", 1)[0])
+    return None
+
+
+def ownership_subsystem(record: dict[str, Any]) -> str:
+    parts = record["module"].split("::")
+    return "::".join(parts[: min(3, len(parts))])
+
+
+def ownership_domain(record: dict[str, Any]) -> str:
+    parts = record["module"].split("::")
+    return "::".join(parts[: min(2, len(parts))])
+
+
+def ownership_area(record: dict[str, Any]) -> str:
+    parts = record["module"].split("::")
+    depth = min(4, len(parts))
+    if parts[:4] in (
+        ["coven_core", "sync", "store", "owner"],
+        ["coven_core", "sync", "store", "database"],
+    ):
+        depth = min(5, len(parts))
+    if parts[:5] == [
+        "coven_core",
+        "sync",
+        "store",
+        "owner",
+        "writer",
+    ]:
+        depth = min(6, len(parts))
+    return "::".join(parts[:depth])
+
+
+def stateful_record(record: dict[str, Any]) -> bool:
+    return bool(
+        record.get("retained_dependencies")
+        or record.get("ambient_dependencies")
+        or record.get("effects")
+    )
+
+
+def anchored_owner(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> str | None:
+    owner = concrete_receiver_owner(record.get("receiver_type"))
+    if owner is not None:
+        return owner
+    visited: set[str] = set()
+    parent_symbol = record.get("enclosing_callable")
+    while parent_symbol is not None and parent_symbol not in visited:
+        visited.add(parent_symbol)
+        parent = records_by_symbol.get(parent_symbol)
+        if parent is None:
+            break
+        owner = concrete_receiver_owner(parent.get("receiver_type"))
+        if owner is not None:
+            return owner
+        parent_symbol = parent.get("enclosing_callable")
+    return None
+
+
+def adjacent_owner_scores(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    scores: dict[str, int] = {}
+    for edge in record.get("callers", []):
+        caller = records_by_symbol.get(edge["symbol"])
+        if caller is None or record_realm(caller) != record_realm(record):
+            continue
+        owner = anchored_owner(caller, records_by_symbol)
+        if owner is not None:
+            scores[owner] = scores.get(owner, 0) + 2 * len(
+                edge.get("sites", [])
+            )
+    for edge in record.get("callees", []):
+        callee = records_by_symbol.get(edge["symbol"])
+        if callee is None or record_realm(callee) != record_realm(record):
+            continue
+        owner = anchored_owner(callee, records_by_symbol)
+        if owner is not None:
+            scores[owner] = scores.get(owner, 0) + len(
+                edge.get("sites", [])
+            )
+    return scores
+
+
+def inferred_owner(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> tuple[str, int] | None:
+    scores = adjacent_owner_scores(record, records_by_symbol)
+    ranked = sorted(
+        scores.items(),
+        key=lambda candidate: (-candidate[1], candidate[0]),
+    )
+    if not ranked:
+        return None
+    best_owner, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    if best_score < 2 or best_score <= second_score:
+        return None
+    return best_owner, best_score
+
+
+def dependency_bundle(record: dict[str, Any]) -> list[str]:
+    return sorted(
+        set(
+            record.get("retained_dependencies", [])
+            + record.get("ambient_dependencies", [])
+            + record.get("effects", [])
+        )
+    )
+
+
+def ownership_group_for(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    realm = record_realm(record)
+    domain = ownership_domain(record)
+    subsystem = ownership_subsystem(record)
+    area = ownership_area(record)
+    anchored = anchored_owner(record, records_by_symbol)
+    interface = receiver_interface(record.get("receiver_type"))
+    if anchored is not None:
+        kind = "existing-owner"
+        label = anchored
+        evidence = ""
+        identity = anchored
+    elif (record.get("receiver_type") or "").startswith("trait "):
+        kind = "interface"
+        label = f"Interface · {interface}"
+        evidence = ""
+        identity = label
+    elif realm == "macro":
+        kind = "macro"
+        macro = record["macro_origin"]["name"]
+        label = f"Macro · {macro}"
+        evidence = record["macro_origin"]["path"]
+        identity = f"{macro}:{record['macro_origin']['path']}"
+    elif stateful_record(record):
+        candidate = inferred_owner(record, records_by_symbol)
+        if candidate is not None:
+            kind = "candidate-owner"
+            label = f"Candidate · {candidate[0]}"
+            evidence = f"{candidate[1]} adjacent call-site points"
+            identity = candidate[0]
+        else:
+            kind = "unowned"
+            bundle = dependency_bundle(record)
+            rendered_bundle = ", ".join(bundle) if bundle else "state"
+            label = (
+                f"Unowned · {record['module'].rsplit('::', 1)[-1]}"
+                f" · {rendered_bundle}"
+            )
+            evidence = "No dominant adjacent owner"
+            identity = f"{record['module']}:{rendered_bundle}"
+    else:
+        kind = "transformation"
+        label = f"Transformations · {record['module'].rsplit('::', 1)[-1]}"
+        evidence = ""
+        identity = record["module"]
+    return {
+        "id": f"{realm}|{area}|{kind}|{identity}",
+        "kind": kind,
+        "label": label,
+        "realm": realm,
+        "domain": domain,
+        "subsystem": subsystem,
+        "area": area,
+        "evidence": evidence,
     }
-    modules: dict[str, dict[str, Any]] = {}
-    for record in records:
-        module = record["module"]
-        summary = modules.setdefault(
-            module,
+
+
+def aggregate_ownership_nodes(
+    children: list[dict[str, Any]],
+    level: str,
+    child_collection: str,
+) -> list[dict[str, Any]]:
+    nodes: dict[str, dict[str, Any]] = {}
+    for child in children:
+        node_id = f"{child['realm']}|{child[level]}"
+        node = nodes.setdefault(
+            node_id,
             {
-                "id": module,
-                "crate": module.split("::", 1)[0],
-                "callables": [],
-                "owners": set(),
+                "id": node_id,
+                "label": child[level],
+                "realm": child["realm"],
+                "crate": child[level].split("::", 1)[0],
+                "domain": child.get("domain"),
+                "subsystem": child.get("subsystem"),
+                "area": child.get("area"),
+                child_collection: [],
+                "callables": 0,
                 "stateful": 0,
                 "unresolved": 0,
                 "captures": 0,
@@ -2737,22 +3027,101 @@ def build_graph_data(index: dict[str, Any]) -> dict[str, Any]:
                 "ranks": [],
             },
         )
-        receiver = record.get("receiver_type")
-        if receiver:
-            summary["owners"].add(receiver)
-        stateful = bool(
-            record.get("retained_dependencies")
-            or record.get("ambient_dependencies")
-            or record.get("effects")
+        node[child_collection].append(child["id"])
+        node["callables"] += (
+            len(child["callables"])
+            if isinstance(child["callables"], list)
+            else child["callables"]
         )
-        summary["stateful"] += int(stateful)
-        summary["unresolved"] += len(record.get("unresolved_calls", []))
-        summary["captures"] += len(record.get("captured_values", []))
-        summary["ranks"].append(record.get("bottom_up_rank", 0))
-        summary["callables"].append(
+        node["stateful"] += child["stateful"]
+        node["unresolved"] += child["unresolved"]
+        node["captures"] += child["captures"]
+        node["findings"] += child["findings"]
+        node["ranks"].append(child["rank"])
+    rendered = []
+    for node in nodes.values():
+        rendered.append(
+            {
+                **node,
+                child_collection: sorted(node[child_collection]),
+                "rank": max(node["ranks"]) if node["ranks"] else 0,
+            }
+        )
+        rendered[-1].pop("ranks")
+    return sorted(rendered, key=lambda node: node["id"])
+
+
+def aggregate_ownership_edges(
+    group_edge_counts: dict[tuple[str, str], int],
+    groups_by_id: dict[str, dict[str, Any]],
+    level: str,
+) -> list[dict[str, Any]]:
+    counts: dict[tuple[str, str], int] = {}
+    for (source, target), sites in group_edge_counts.items():
+        source_group = groups_by_id[source]
+        target_group = groups_by_id[target]
+        source_node = f"{source_group['realm']}|{source_group[level]}"
+        target_node = f"{target_group['realm']}|{target_group[level]}"
+        if source_node == target_node:
+            continue
+        key = (source_node, target_node)
+        counts[key] = counts.get(key, 0) + sites
+    return [
+        {
+            "source": source,
+            "target": target,
+            "sites": sites,
+        }
+        for (source, target), sites in sorted(counts.items())
+    ]
+
+
+def build_graph_data(index: dict[str, Any]) -> dict[str, Any]:
+    records = index["callables"]
+    records_by_symbol = {
+        record["symbol"]: record
+        for record in records
+    }
+    findings_by_symbol: dict[str, int] = {}
+    for entries in index.get("reach_throughs", {}).values():
+        for entry in entries:
+            symbol = entry.get("symbol") or entry.get("caller")
+            if symbol is not None:
+                findings_by_symbol[symbol] = (
+                    findings_by_symbol.get(symbol, 0) + 1
+                )
+
+    groups: dict[str, dict[str, Any]] = {}
+    symbol_to_group: dict[str, str] = {}
+    for record in records:
+        placement = ownership_group_for(record, records_by_symbol)
+        symbol_to_group[record["symbol"]] = placement["id"]
+        group = groups.setdefault(
+            placement["id"],
+            {
+                **placement,
+                "callables": [],
+                "stateful": 0,
+                "unresolved": 0,
+                "captures": 0,
+                "findings": 0,
+                "modules": set(),
+                "ranks": [],
+            },
+        )
+        group["modules"].add(record["module"])
+        receiver = record.get("receiver_type")
+        group["stateful"] += int(stateful_record(record))
+        group["unresolved"] += len(record.get("unresolved_calls", []))
+        group["captures"] += len(record.get("captured_values", []))
+        group["findings"] += findings_by_symbol.get(record["symbol"], 0)
+        group["ranks"].append(record.get("bottom_up_rank", 0))
+        group["callables"].append(
             {
                 "symbol": record["symbol"],
                 "kind": record["kind"],
+                "module": record["module"],
+                "path": record["path"],
                 "receiver": receiver,
                 "retained": record.get("retained_dependencies", []),
                 "ambient": record.get("ambient_dependencies", []),
@@ -2764,54 +3133,83 @@ def build_graph_data(index: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    for entries in index.get("reach_throughs", {}).values():
-        for entry in entries:
-            module = entry.get("module")
-            if module is None:
-                symbol = entry.get("symbol") or entry.get("caller")
-                record = records_by_symbol.get(symbol)
-                module = record["module"] if record is not None else None
-            if module in modules:
-                modules[module]["findings"] += 1
-
-    edge_counts: dict[tuple[str, str], int] = {}
+    group_edge_counts: dict[tuple[str, str], int] = {}
     for record in records:
-        source = record["module"]
+        source = symbol_to_group[record["symbol"]]
         for edge in record.get("callees", []):
-            target_record = records_by_symbol.get(edge["symbol"])
-            if target_record is None:
-                continue
-            target = target_record["module"]
-            if source == target:
+            target = symbol_to_group.get(edge["symbol"])
+            if target is None or source == target:
                 continue
             key = (source, target)
-            edge_counts[key] = edge_counts.get(key, 0) + len(
+            group_edge_counts[key] = group_edge_counts.get(key, 0) + len(
                 edge["sites"]
             )
 
-    rendered_modules = []
-    for module in modules.values():
-        rendered_modules.append(
+    rendered_groups = []
+    for group in groups.values():
+        rendered_groups.append(
             {
-                **module,
-                "owners": sorted(module["owners"]),
+                **group,
+                "modules": sorted(group["modules"]),
                 "callables": sorted(
-                    module["callables"],
+                    group["callables"],
                     key=lambda callable_record: callable_record["symbol"],
                 ),
                 "rank": (
-                    max(module["ranks"])
-                    if module["ranks"]
+                    max(group["ranks"])
+                    if group["ranks"]
                     else 0
                 ),
             }
         )
-        rendered_modules[-1].pop("ranks")
+        rendered_groups[-1].pop("ranks")
+
+    rendered_areas = aggregate_ownership_nodes(
+        rendered_groups,
+        "area",
+        "groups",
+    )
+    rendered_subsystems = aggregate_ownership_nodes(
+        rendered_areas,
+        "subsystem",
+        "areas",
+    )
+    rendered_domains = aggregate_ownership_nodes(
+        rendered_subsystems,
+        "domain",
+        "subsystems",
+    )
+    groups_by_id = {
+        group["id"]: group
+        for group in rendered_groups
+    }
+    area_edges = aggregate_ownership_edges(
+        group_edge_counts,
+        groups_by_id,
+        "area",
+    )
+    subsystem_edges = aggregate_ownership_edges(
+        group_edge_counts,
+        groups_by_id,
+        "subsystem",
+    )
+    domain_edges = aggregate_ownership_edges(
+        group_edge_counts,
+        groups_by_id,
+        "domain",
+    )
+
     return {
         "summary": {
             "callables": len(records),
-            "modules": len(modules),
-            "edges": len(edge_counts),
+            "groups": len(groups),
+            "areas": len(rendered_areas),
+            "subsystems": len(rendered_subsystems),
+            "domains": len(rendered_domains),
+            "group_edges": len(group_edge_counts),
+            "area_edges": len(area_edges),
+            "subsystem_edges": len(subsystem_edges),
+            "domain_edges": len(domain_edges),
             "semantic_views": [
                 view["name"]
                 for view in index.get("semantic_views", [])
@@ -2826,17 +3224,28 @@ def build_graph_data(index: dict[str, Any]) -> dict[str, Any]:
                 ).values()
             ),
         },
-        "modules": sorted(
-            rendered_modules,
-            key=lambda module: module["id"],
+        "domains": rendered_domains,
+        "subsystems": sorted(
+            rendered_subsystems,
+            key=lambda subsystem: subsystem["id"],
         ),
-        "edges": [
+        "areas": rendered_areas,
+        "groups": sorted(
+            rendered_groups,
+            key=lambda group: group["id"],
+        ),
+        "domain_edges": domain_edges,
+        "subsystem_edges": subsystem_edges,
+        "area_edges": area_edges,
+        "group_edges": [
             {
                 "source": source,
                 "target": target,
                 "sites": sites,
             }
-            for (source, target), sites in sorted(edge_counts.items())
+            for (source, target), sites in sorted(
+                group_edge_counts.items()
+            )
         ],
     }
 
@@ -2868,22 +3277,31 @@ header {{
 }}
 h1 {{ font-size: 17px; margin: 0 0 8px; }}
 #summary {{ color: #9fb0bc; font-size: 12px; }}
-.controls {{ display: flex; gap: 12px; align-items: center; }}
+.controls {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }}
 input[type="search"] {{
-  width: 360px;
+  width: 330px;
   padding: 8px 10px;
   border: 1px solid #455562;
   border-radius: 4px;
   background: #0c1013;
   color: inherit;
 }}
+button {{
+  padding: 7px 9px;
+  border: 1px solid #455562;
+  border-radius: 4px;
+  background: #202a31;
+  color: inherit;
+  cursor: pointer;
+}}
+button:hover {{ background: #2a3740; }}
 main {{
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 430px;
+  grid-template-columns: minmax(0, 1fr) 470px;
   height: calc(100vh - 78px);
 }}
-#canvas {{ position: relative; overflow: hidden; }}
-#graph {{ width: 100%; height: 100%; background: #0d1115; }}
+#canvas {{ position: relative; overflow: auto; }}
+#graph {{ display: block; min-width: 100%; min-height: 100%; background: #0d1115; }}
 #details {{
   overflow: auto;
   padding: 16px;
@@ -2907,17 +3325,24 @@ main {{
   background: #26343e;
   color: #c5d4dc;
 }}
-.edge {{ stroke: #53636e; stroke-opacity: .34; fill: none; }}
-.node circle {{ stroke-width: 2; cursor: pointer; }}
+.group-row {{
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  width: 100%;
+  margin: 5px 0;
+  text-align: left;
+}}
+.edge {{ stroke: #657985; stroke-opacity: .18; fill: none; }}
+.edge.active {{ stroke: #f2c879; stroke-opacity: .78; }}
+.node rect {{ stroke-width: 2; cursor: pointer; }}
 .node text {{
   fill: #dce7ed;
-  font-size: 10px;
+  font-size: 11px;
   pointer-events: none;
-  paint-order: stroke;
-  stroke: #101418;
-  stroke-width: 3px;
 }}
-.node.selected circle {{ stroke: #fff4c2; stroke-width: 4; }}
+.node .count {{ fill: #a9bac4; font-size: 9px; }}
+.node.selected rect {{ stroke: #fff4c2; stroke-width: 4; }}
 .legend {{
   position: absolute;
   left: 14px;
@@ -2937,32 +3362,48 @@ main {{
     <div id="summary"></div>
   </div>
   <div class="controls">
-    <input id="search" type="search" placeholder="Filter module or callable">
-    <label><input id="allModules" type="checkbox"> show modules without ownership findings</label>
+    <button id="back" hidden>All subsystems</button>
+    <input id="search" type="search" placeholder="Filter subsystem, owner, or callable">
+    <label><input id="tests" type="checkbox"> tests</label>
+    <label><input id="macros" type="checkbox"> macro expansions</label>
+    <label><input id="transformations" type="checkbox"> transformations</label>
+    <label><input id="allEdges" type="checkbox"> all boundary calls</label>
   </div>
 </header>
 <main>
   <section id="canvas">
-    <svg id="graph" viewBox="0 0 1500 950" role="img"
-      aria-label="Directed module call graph"></svg>
-    <div class="legend">Arrow: caller → callee · size: callable count · outline: ownership findings</div>
+    <svg id="graph" role="img" aria-label="Directed ownership graph"></svg>
+    <div class="legend">Arrow: caller → callee · orange outline: review findings · dashed: inferred or unowned</div>
   </section>
-  <aside id="details">Select a module to inspect its owners and callables.</aside>
+  <aside id="details">Select a domain to inspect its subsystems and candidate ownership groups.</aside>
 </main>
 <script>
 const DATA = {data};
 const svg = document.getElementById("graph");
 const details = document.getElementById("details");
 const search = document.getElementById("search");
-const allModules = document.getElementById("allModules");
+const includeTests = document.getElementById("tests");
+const includeMacros = document.getElementById("macros");
+const includeTransformations = document.getElementById("transformations");
+const includeAllEdges = document.getElementById("allEdges");
+const back = document.getElementById("back");
 const summary = document.getElementById("summary");
+const groupsById = new Map(DATA.groups.map(group => [group.id, group]));
+const areasById = new Map(DATA.areas.map(area => [area.id, area]));
+const subsystemsById = new Map(
+  DATA.subsystems.map(subsystem => [subsystem.id, subsystem])
+);
+const domainsById = new Map(DATA.domains.map(domain => [domain.id, domain]));
+let level = "domains";
+let activeDomain = null;
+let activeSubsystem = null;
+let activeArea = null;
 let selected = null;
 
 summary.textContent =
   `${{DATA.summary.callables.toLocaleString()}} callables · ` +
-  `${{DATA.summary.modules.toLocaleString()}} modules · ` +
-  `${{DATA.summary.edges.toLocaleString()}} module edges · ` +
-  `${{DATA.summary.macro_expansions.toLocaleString()}} macro expansions · ` +
+  `${{DATA.summary.groups.toLocaleString()}} candidate groups · ` +
+  `${{DATA.summary.domains.toLocaleString()}} domains · ` +
   `${{DATA.summary.reach_through_findings.toLocaleString()}} review findings`;
 
 function escapeHtml(value) {{
@@ -2973,23 +3414,65 @@ function escapeHtml(value) {{
     .replaceAll('"', "&quot;");
 }}
 
-function moduleMatches(module, query) {{
+function realmVisible(realm) {{
+  if (realm === "test") return includeTests.checked;
+  if (realm === "macro") return includeMacros.checked;
+  return true;
+}}
+
+function groupMatches(group, query) {{
   if (!query) return true;
-  return module.id.toLowerCase().includes(query) ||
-    module.callables.some(item => item.symbol.toLowerCase().includes(query));
+  return group.label.toLowerCase().includes(query) ||
+    group.modules.some(module => module.toLowerCase().includes(query)) ||
+    group.callables.some(item => item.symbol.toLowerCase().includes(query));
 }}
 
-function color(module) {{
-  if (module.crate === "coven_core") return "#67b7d1";
-  return "#b68bd7";
+function subsystemMatches(subsystem, query) {{
+  if (!query) return true;
+  if (subsystem.label.toLowerCase().includes(query)) return true;
+  return subsystem.areas.some(id => areaMatches(areasById.get(id), query));
 }}
 
-function showDetails(module) {{
-  selected = module.id;
-  const ownerBadges = module.owners.length
-    ? module.owners.map(owner => `<span class="badge">${{escapeHtml(owner)}}</span>`).join("")
-    : '<span class="meta">free callables only</span>';
-  const callables = module.callables.map(item => {{
+function areaMatches(area, query) {{
+  if (!query) return true;
+  if (area.label.toLowerCase().includes(query)) return true;
+  return area.groups.some(id => groupMatches(groupsById.get(id), query));
+}}
+
+function domainMatches(domain, query) {{
+  if (!query) return true;
+  if (domain.label.toLowerCase().includes(query)) return true;
+  return domain.subsystems.some(id =>
+    subsystemMatches(subsystemsById.get(id), query));
+}}
+
+function nodeColor(node) {{
+  if (level !== "groups") {{
+    return node.crate === "coven_core" ? "#4d96ad" : "#8f6ab0";
+  }}
+  return {{
+    "existing-owner": "#4d96ad",
+    "candidate-owner": "#c49a4a",
+    "unowned": "#b85f58",
+    "interface": "#8f6ab0",
+    "transformation": "#66757f",
+    "macro": "#568f70",
+  }}[node.kind] || "#66757f";
+}}
+
+function kindLabel(kind) {{
+  return {{
+    "existing-owner": "existing receiver",
+    "candidate-owner": "inferred candidate owner",
+    "unowned": "unowned stateful workflow",
+    "interface": "trait interface",
+    "transformation": "transformation",
+    "macro": "macro expansion",
+  }}[kind] || kind;
+}}
+
+function callableMarkup(items) {{
+  return items.map(item => {{
     const facts = [
       ...item.retained.map(value => `retains:${{value}}`),
       ...item.ambient.map(value => `ambient:${{value}}`),
@@ -2999,38 +3482,205 @@ function showDetails(module) {{
     ];
     return `<div class="callable">
       <div>${{escapeHtml(item.symbol)}}</div>
-      <div class="meta">${{escapeHtml(item.kind)}} · rank ${{item.rank}}</div>
+      <div class="meta">${{escapeHtml(item.kind)}} · ${{escapeHtml(item.path)}} · rank ${{item.rank}}</div>
       <div>${{facts.map(fact => `<span class="badge">${{escapeHtml(fact)}}</span>`).join("")}}</div>
     </div>`;
   }}).join("");
+}}
+
+function childRows(children, attribute) {{
+  return children
+    .sort((left, right) =>
+      right.findings - left.findings ||
+      right.stateful - left.stateful ||
+      left.label.localeCompare(right.label)
+    )
+    .map(child => `
+    <button class="group-row" data-${{attribute}}="${{escapeHtml(child.id)}}">
+      <span>${{escapeHtml(child.label)}}</span>
+      <span class="meta">${{child.callables}} · ${{child.findings}} findings</span>
+    </button>`).join("");
+}}
+
+function summaryMarkup(node) {{
+  return `${{node.callables}} callables · ${{node.stateful}} stateful ·
+    ${{node.unresolved}} unresolved calls · ${{node.findings}} findings`;
+}}
+
+function showDomain(domain) {{
+  activeDomain = domain.id;
+  selected = domain.id;
+  const children = domain.subsystems.map(id => subsystemsById.get(id));
   details.innerHTML = `
-    <h2>${{escapeHtml(module.id)}}</h2>
-    <div class="meta">${{module.callables.length}} callables · ${{module.stateful}} stateful ·
-      ${{module.unresolved}} unresolved calls · ${{module.findings}} findings</div>
-    <h3>Receiver owners</h3>${{ownerBadges}}
-    <h3>Callables</h3>${{callables}}`;
+    <h2>${{escapeHtml(domain.label)}}</h2>
+    <div class="meta">${{summaryMarkup(domain)}}</div>
+    <p><button id="drill">Show subsystems</button></p>
+    <h3>Subsystems</h3>${{childRows(children, "subsystem")}}`;
+  document.getElementById("drill").addEventListener("click", () => {{
+    activeDomain = domain.id;
+    level = "subsystems";
+    selected = null;
+    search.value = "";
+    back.hidden = false;
+    render();
+  }});
+  details.querySelectorAll("[data-subsystem]").forEach(button => {{
+    button.addEventListener("click", () =>
+      showSubsystem(subsystemsById.get(button.dataset.subsystem)));
+  }});
+  render();
+}}
+
+function showSubsystem(subsystem) {{
+  activeDomain = `${{subsystem.realm}}|${{subsystem.domain}}`;
+  selected = subsystem.id;
+  const children = subsystem.areas.map(id => areasById.get(id));
+  details.innerHTML = `
+    <h2>${{escapeHtml(subsystem.label)}}</h2>
+    <div class="meta">${{summaryMarkup(subsystem)}}</div>
+    <p><button id="drill">Show implementation areas</button></p>
+    <h3>Areas</h3>${{childRows(children, "area")}}`;
+  document.getElementById("drill").addEventListener("click", () => {{
+    activeSubsystem = subsystem.id;
+    level = "areas";
+    selected = null;
+    search.value = "";
+    back.hidden = false;
+    render();
+  }});
+  details.querySelectorAll("[data-area]").forEach(button => {{
+    button.addEventListener("click", () =>
+      showArea(areasById.get(button.dataset.area)));
+  }});
+  render();
+}}
+
+function showArea(area) {{
+  activeDomain = `${{area.realm}}|${{area.domain}}`;
+  activeSubsystem = `${{area.realm}}|${{area.subsystem}}`;
+  selected = area.id;
+  const groups = area.groups
+    .map(id => groupsById.get(id))
+    .sort((left, right) =>
+      right.findings - left.findings ||
+      right.stateful - left.stateful ||
+      left.label.localeCompare(right.label)
+    );
+  const rows = groups.map(group => `
+    <button class="group-row" data-group="${{escapeHtml(group.id)}}">
+      <span>${{escapeHtml(group.label)}}</span>
+      <span class="meta">${{group.callables.length}} · ${{group.findings}} findings</span>
+    </button>`).join("");
+  details.innerHTML = `
+    <h2>${{escapeHtml(area.label)}}</h2>
+    <div class="meta">${{summaryMarkup(area)}}</div>
+    <p><button id="drill">Show candidate ownership groups</button></p>
+    <h3>Groups</h3>${{rows}}`;
+  document.getElementById("drill").addEventListener("click", () => {{
+    activeArea = area.id;
+    level = "groups";
+    selected = null;
+    search.value = "";
+    back.hidden = false;
+    render();
+  }});
+  details.querySelectorAll("[data-group]").forEach(button => {{
+    button.addEventListener("click", () => {{
+      showGroup(groupsById.get(button.dataset.group));
+    }});
+  }});
+  render();
+}}
+
+function showGroup(group) {{
+  activeDomain = `${{group.realm}}|${{group.domain}}`;
+  activeSubsystem = `${{group.realm}}|${{group.subsystem}}`;
+  activeArea = `${{group.realm}}|${{group.area}}`;
+  level = "groups";
+  if (group.kind === "transformation") includeTransformations.checked = true;
+  back.hidden = false;
+  selected = group.id;
+  const inbound = DATA.group_edges.filter(edge => edge.target === group.id);
+  const outbound = DATA.group_edges.filter(edge => edge.source === group.id);
+  details.innerHTML = `
+    <h2>${{escapeHtml(group.label)}}</h2>
+    <div class="meta">${{escapeHtml(kindLabel(group.kind))}} ·
+      ${{group.callables.length}} callables · ${{group.stateful}} stateful ·
+      ${{group.findings}} findings</div>
+    ${{group.evidence ? `<p class="meta">${{escapeHtml(group.evidence)}}</p>` : ""}}
+    <div>${{group.modules.map(module => `<span class="badge">${{escapeHtml(module)}}</span>`).join("")}}</div>
+    <h3>Boundary calls</h3>
+    <div class="meta">${{inbound.length}} incoming groups · ${{outbound.length}} outgoing groups</div>
+    <h3>Callables</h3>${{callableMarkup(group.callables)}}`;
   render();
 }}
 
 function render() {{
   const query = search.value.trim().toLowerCase();
-  let modules = DATA.modules.filter(module =>
-    moduleMatches(module, query) &&
-    (allModules.checked || query || module.findings || module.stateful ||
-      module.unresolved || module.captures));
-  const ids = new Set(modules.map(module => module.id));
-  const edges = DATA.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target));
-  const width = 1500;
-  const height = 950;
-  const columns = Math.max(1, Math.ceil(Math.sqrt(modules.length * 1.6)));
-  const rows = Math.max(1, Math.ceil(modules.length / columns));
+  let nodes;
+  let edges;
+  if (level === "domains") {{
+    nodes = DATA.domains.filter(domain =>
+      realmVisible(domain.realm) && domainMatches(domain, query));
+    const ids = new Set(nodes.map(node => node.id));
+    edges = DATA.domain_edges.filter(edge =>
+      ids.has(edge.source) && ids.has(edge.target));
+  }} else if (level === "subsystems") {{
+    nodes = DATA.subsystems.filter(subsystem =>
+      `${{subsystem.realm}}|${{subsystem.domain}}` === activeDomain &&
+      realmVisible(subsystem.realm) && subsystemMatches(subsystem, query));
+    const ids = new Set(nodes.map(node => node.id));
+    edges = DATA.subsystem_edges.filter(edge =>
+      ids.has(edge.source) && ids.has(edge.target));
+  }} else if (level === "areas") {{
+    nodes = DATA.areas.filter(area =>
+      `${{area.realm}}|${{area.subsystem}}` === activeSubsystem &&
+      realmVisible(area.realm) && areaMatches(area, query));
+    const ids = new Set(nodes.map(node => node.id));
+    edges = DATA.area_edges.filter(edge =>
+      ids.has(edge.source) && ids.has(edge.target));
+  }} else {{
+    nodes = DATA.groups.filter(group =>
+      `${{group.realm}}|${{group.area}}` === activeArea &&
+      realmVisible(group.realm) &&
+      (includeTransformations.checked || group.kind !== "transformation") &&
+      groupMatches(group, query));
+    const ids = new Set(nodes.map(node => node.id));
+    edges = DATA.group_edges.filter(edge =>
+      ids.has(edge.source) && ids.has(edge.target));
+  }}
+  if (!includeAllEdges.checked) {{
+    edges = selected
+      ? edges.filter(edge =>
+          edge.source === selected || edge.target === selected)
+      : [...edges].sort((left, right) => right.sites - left.sites).slice(0, 40);
+  }}
+  nodes.sort((left, right) =>
+    right.findings - left.findings ||
+    right.stateful - left.stateful ||
+    (left.label || left.id).localeCompare(right.label || right.id)
+  );
+  const nodeWidth = 210;
+  const nodeHeight = 54;
+  const gapX = 90;
+  const gapY = 38;
+  const columns = Math.min(
+    4,
+    Math.max(1, Math.ceil(Math.sqrt(nodes.length * 1.7)))
+  );
+  const rows = Math.max(1, Math.ceil(nodes.length / columns));
+  const width = Math.max(900, 70 + columns * (nodeWidth + gapX));
+  const height = Math.max(650, 70 + rows * (nodeHeight + gapY));
+  svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
   const positions = new Map();
-  modules.forEach((module, index) => {{
+  nodes.forEach((node, index) => {{
     const column = index % columns;
     const row = Math.floor(index / columns);
-    positions.set(module.id, {{
-      x: 70 + column * ((width - 140) / Math.max(1, columns - 1)),
-      y: 60 + row * ((height - 120) / Math.max(1, rows - 1)),
+    positions.set(node.id, {{
+      x: 40 + column * (nodeWidth + gapX),
+      y: 40 + row * (nodeHeight + gapY),
     }});
   }});
   const marker = `<defs><marker id="arrow" viewBox="0 0 10 10"
@@ -3039,35 +3689,116 @@ function render() {{
   const edgeMarkup = edges.map(edge => {{
     const source = positions.get(edge.source);
     const target = positions.get(edge.target);
-    const width = Math.min(5, 0.6 + Math.log2(edge.sites + 1) * 0.45);
-    return `<line class="edge" x1="${{source.x}}" y1="${{source.y}}"
-      x2="${{target.x}}" y2="${{target.y}}" stroke-width="${{width}}"
+    const sourceCenter = {{
+      x: source.x + nodeWidth / 2,
+      y: source.y + nodeHeight / 2,
+    }};
+    const targetCenter = {{
+      x: target.x + nodeWidth / 2,
+      y: target.y + nodeHeight / 2,
+    }};
+    const dx = targetCenter.x - sourceCenter.x;
+    const dy = targetCenter.y - sourceCenter.y;
+    const scale = 0.5 / Math.max(
+      Math.abs(dx) / nodeWidth,
+      Math.abs(dy) / nodeHeight,
+      0.001
+    );
+    const start = {{
+      x: sourceCenter.x + dx * scale,
+      y: sourceCenter.y + dy * scale,
+    }};
+    const end = {{
+      x: targetCenter.x - dx * scale,
+      y: targetCenter.y - dy * scale,
+    }};
+    const edgeWidth = Math.min(5, 0.6 + Math.log2(edge.sites + 1) * 0.45);
+    const active = selected && (edge.source === selected || edge.target === selected);
+    return `<line class="edge ${{active ? "active" : ""}}"
+      x1="${{start.x}}" y1="${{start.y}}"
+      x2="${{end.x}}" y2="${{end.y}}"
+      stroke-width="${{edgeWidth}}"
       marker-end="url(#arrow)"><title>${{escapeHtml(edge.source)}} → ${{escapeHtml(edge.target)}} (${{edge.sites}} sites)</title></line>`;
   }}).join("");
-  const nodeMarkup = modules.map(module => {{
-    const point = positions.get(module.id);
-    const radius = Math.min(24, 6 + Math.sqrt(module.callables.length) * 1.4);
-    const stroke = module.findings ? "#e09a70" : "#52636e";
-    const label = module.id.split("::").slice(-2).join("::");
-    return `<g class="node ${{selected === module.id ? "selected" : ""}}"
-      data-module="${{escapeHtml(module.id)}}" transform="translate(${{point.x}} ${{point.y}})">
-      <circle r="${{radius}}" fill="${{color(module)}}" fill-opacity=".78" stroke="${{stroke}}">
-        <title>${{escapeHtml(module.id)}} · ${{module.callables.length}} callables · ${{module.findings}} findings</title>
-      </circle>
-      <text x="${{radius + 5}}" y="4">${{escapeHtml(label)}}</text>
+  const nodeMarkup = nodes.map(node => {{
+    const point = positions.get(node.id);
+    const stroke = node.findings ? "#e09a70" : "#52636e";
+    const dashed = level === "groups" &&
+      (node.kind === "candidate-owner" || node.kind === "unowned");
+    const baseLabel = node.label || node.id;
+    const label = node.realm === "test"
+      ? `Test · ${{baseLabel}}`
+      : node.realm === "macro"
+        ? `Macro · ${{baseLabel}}`
+        : baseLabel;
+    const count = level === "groups" ? node.callables.length : node.callables;
+    return `<g class="node ${{selected === node.id ? "selected" : ""}}"
+      data-node="${{escapeHtml(node.id)}}" transform="translate(${{point.x}} ${{point.y}})">
+      <rect width="${{nodeWidth}}" height="${{nodeHeight}}" rx="7"
+        fill="${{nodeColor(node)}}" fill-opacity=".82" stroke="${{stroke}}"
+        stroke-dasharray="${{dashed ? "7 5" : "none"}}">
+        <title>${{escapeHtml(label)}} · ${{count}} callables · ${{node.findings}} findings</title>
+      </rect>
+      <text x="10" y="22">${{escapeHtml(label.length > 31 ? label.slice(0, 29) + "…" : label)}}</text>
+      <text class="count" x="10" y="41">${{count}} callables · ${{node.findings}} findings</text>
     </g>`;
   }}).join("");
   svg.innerHTML = marker + edgeMarkup + nodeMarkup;
   svg.querySelectorAll(".node").forEach(node => {{
     node.addEventListener("click", () => {{
-      const module = DATA.modules.find(item => item.id === node.dataset.module);
-      if (module) showDetails(module);
+      if (level === "domains") {{
+        const domain = domainsById.get(node.dataset.node);
+        if (domain) showDomain(domain);
+      }} else if (level === "subsystems") {{
+        const subsystem = subsystemsById.get(node.dataset.node);
+        if (subsystem) showSubsystem(subsystem);
+      }} else if (level === "areas") {{
+        const area = areasById.get(node.dataset.node);
+        if (area) showArea(area);
+      }} else {{
+        const group = groupsById.get(node.dataset.node);
+        if (group) showGroup(group);
+      }}
     }});
   }});
+  const context = {{
+    domains: "domains",
+    subsystems: `subsystems in ${{domainsById.get(activeDomain)?.label || activeDomain}}`,
+    areas: `areas in ${{subsystemsById.get(activeSubsystem)?.label || activeSubsystem}}`,
+    groups: `groups in ${{areasById.get(activeArea)?.label || activeArea}}`,
+  }}[level];
+  back.hidden = level === "domains";
+  back.textContent = {{
+    subsystems: "All domains",
+    areas: "Subsystems",
+    groups: "Implementation areas",
+  }}[level] || "Back";
+  summary.textContent =
+    `${{DATA.summary.callables.toLocaleString()}} callables · ` +
+    `${{nodes.length}} visible ${{context}} · ` +
+    `${{edges.length}} visible edges · ` +
+    `${{DATA.summary.reach_through_findings.toLocaleString()}} review findings`;
 }}
 
 search.addEventListener("input", render);
-allModules.addEventListener("change", render);
+[includeTests, includeMacros, includeTransformations, includeAllEdges].forEach(control =>
+  control.addEventListener("change", render));
+back.addEventListener("click", () => {{
+  if (level === "groups") {{
+    level = "areas";
+    activeArea = null;
+  }} else if (level === "areas") {{
+    level = "subsystems";
+    activeSubsystem = null;
+  }} else {{
+    level = "domains";
+    activeDomain = null;
+  }}
+  selected = null;
+  search.value = "";
+  details.textContent = "Select a node to inspect the next ownership level.";
+  render();
+}});
 render();
 </script>
 </body>

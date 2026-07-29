@@ -442,3 +442,14 @@ The work is verified when:
   duplicate receiver dependencies, constructor calls, and raw receiver-field
   bundles. The generated review graph contains 15,060 callables across 397
   modules, 3,799 directed module edges, and 11,699 reach-through candidates.
+- The module-level rendering proved too dense to expose architecture. The
+  review artifact now infers candidate ownership from existing receivers,
+  enclosing operations, adjacent call provenance, and retained dependency
+  bundles. It keeps existing, inferred, unowned, interface, transformation,
+  macro, and test groups distinct.
+- Graph navigation proceeds from domain to subsystem to implementation area to
+  candidate ownership group. Each level shows its strongest cross-boundary
+  calls by default, exposes the complete edge set on request, and drills into
+  the contributing callables and evidence. Receiver identities now come from
+  the implemented type rather than the textual `impl` header, and test
+  attributes keep nested test callables outside production groups.
