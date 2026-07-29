@@ -332,10 +332,12 @@ Moving the deepest callable first does not mean turning transformations into
 methods. A leaf transformation is classified and left in place; the nearest
 stateful caller is the relocation target.
 
-`StoreDatabaseTransaction` is the current consolidation case: its definition,
-constructor, materialization methods, host-SQL boundary, and owner tests belong
-in one `store_database_transaction.rs` implementation home. Other modules call
-that owner; they do not add impl blocks for it.
+The transaction work currently conflated by `StoreDatabaseTransaction` has two
+owners. `HostSqlTransaction` owns the scoped host authorizer and the exact
+SQLite transaction on which its closure runs. `MergeMaterializationTransaction`
+owns the atomic recording of verified merge materialization. Each type,
+implementation, and owner test belongs in its own implementation home; neither
+becomes a catch-all database transaction wrapper.
 
 ### Constructor boundaries
 

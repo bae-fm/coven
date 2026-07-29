@@ -6,13 +6,12 @@ use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
 use crate::blob::decl::PublicationBlob;
-use crate::database::{
-    attach_session, authorize_host_sql, capture_changeset, local_merge_stream_id_on, *,
-};
+use crate::database::{attach_session, capture_changeset, local_merge_stream_id_on, *};
 use crate::encryption::EncryptionService;
 use crate::sync::gate::{self, Gates};
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
 
+use super::host_sql_transaction::HostSqlTransaction;
 use super::*;
 
 enum AudienceBlobMoveMaterialization<'a> {
@@ -59,28 +58,6 @@ impl StoreDatabase {
         let mut inverse = Vec::new();
         rusqlite::session::invert_strm(&mut &changeset[..], &mut inverse).map_err(DbError::from)?;
         Ok(inverse)
-    }
-
-    pub(super) fn run_host_sql_on<R, E>(
-        conn: &Connection,
-        f: impl FnOnce() -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<DbError>,
-    {
-        conn.authorizer(Some(authorize_host_sql))
-            .map_err(DbError::from)
-            .map_err(E::from)?;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        if let Err(error) = conn.authorizer(
-            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        ) {
-            panic!("failed to remove host SQL gate-baseline guard: {error}");
-        }
-        match outcome {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
     }
 
     fn capture_store_write_blob_facts_on(
@@ -522,7 +499,9 @@ impl StoreDatabase {
             let mut journal =
                 Self::start_host_change_journal_on(&tx, synced_tables).map_err(E::from)?;
             let value = match sql_authority {
-                StoreWriteSqlAuthority::Host => Self::run_host_sql_on(&tx, || f(&tx))?,
+                StoreWriteSqlAuthority::Host => {
+                    HostSqlTransaction::begin(&tx).map_err(E::from)?.run(f)?
+                }
                 StoreWriteSqlAuthority::Coven => f(&tx)?,
             };
             let mut captured =
@@ -868,114 +847,5 @@ impl StoreDatabase {
             circles,
             local,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_sql_authorizer_is_removed_after_success_error_and_panic() {
-        let conn = Connection::open_in_memory().expect("open");
-        conn.execute_batch(
-            "ATTACH ':memory:' AS coven_gate_empty; \
-             CREATE TABLE coven_gate_empty.baseline (id TEXT PRIMARY KEY) STRICT; \
-             INSERT INTO coven_gate_empty.baseline VALUES ('guarded');",
-        )
-        .expect("attach guarded schema");
-        let assert_guard_removed = || {
-            let id: String = conn
-                .query_row("SELECT id FROM coven_gate_empty.baseline", [], |row| {
-                    row.get(0)
-                })
-                .expect("internal SQL can address the baseline after host SQL");
-            assert_eq!(id, "guarded");
-        };
-
-        StoreDatabase::run_host_sql_on(&conn, || Ok::<_, DbError>(()))
-            .expect("successful host SQL");
-        assert_guard_removed();
-
-        let error =
-            StoreDatabase::run_host_sql_on(&conn, || Err::<(), _>(DbError::Message("host".into())));
-        assert!(error.is_err());
-        assert_guard_removed();
-
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            StoreDatabase::run_host_sql_on(&conn, || -> Result<(), DbError> {
-                panic!("host panic")
-            })
-            .expect("panicking host SQL closure never returns");
-        }));
-        assert!(panic.is_err());
-        assert_guard_removed();
-    }
-
-    #[test]
-    fn host_sql_cannot_mutate_coven_owned_tables() {
-        let conn = Connection::open_in_memory().expect("open");
-        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
-
-        let error = StoreDatabase::run_host_sql_on(&conn, || {
-            conn.execute(
-                "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
-                [],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .expect_err("host SQL must not write Coven bookkeeping");
-        assert!(error.to_string().contains("not authorized"));
-
-        let stored: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM protocol_state WHERE key = 'host-owned'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query protocol state after refused host write");
-        assert!(!stored);
-    }
-
-    /// Coven's own entry points are documented to run inside the host's write
-    /// closure (an external-blob registration or delete enqueue commits with
-    /// the row change that motivated it), so the reserved-table writes they
-    /// perform must pass the very authorizer that refuses the host's.
-    #[test]
-    fn coven_owned_writes_pass_the_host_sql_authorizer() {
-        let conn = Connection::open_in_memory().expect("open");
-        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
-
-        StoreDatabase::run_host_sql_on(&conn, || {
-            crate::database::with_coven_sql_authority(|| {
-                conn.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES ('coven-owned', 'yes')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-            })?;
-            conn.execute(
-                "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
-                [],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .expect_err("host SQL after the Coven-owned write is still refused");
-
-        let stored: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM protocol_state WHERE key = 'coven-owned'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query protocol state after the authorized Coven write");
-        assert!(stored, "the Coven-owned write commits");
     }
 }

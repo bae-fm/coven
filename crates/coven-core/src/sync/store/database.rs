@@ -11,6 +11,7 @@ mod device_exclusion;
 mod device_join;
 mod device_join_challenges;
 mod device_registration_journal;
+mod host_sql_transaction;
 mod host_write_capture;
 mod materialization;
 pub(super) mod materialization_models;
