@@ -525,3 +525,6 @@ The work is verified when:
 - Readiness now authorizes disposition of the selected group only. Internalizing
   a ready group into a blocked caller leaves that caller in place; its other
   blockers receive separate commits before the caller can relocate.
+- `d1568a60` records that ready-item scope in the plan and generated queue.
+- `e5e0fa7d` deletes `mark_make_remote_cancelling_on` and internalizes its SQL
+  into its only caller without relocating that blocked caller.
