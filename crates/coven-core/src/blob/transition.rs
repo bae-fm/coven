@@ -319,11 +319,25 @@ pub async fn cancel_make_remote(
         let tx = conn.unchecked_transaction()?;
         match Database::make_remote_intent_state(&tx, &root_table_owned, &root_id_owned)? {
             Some(MakeRemoteIntentState::Uploading) => {
-                Database::mark_make_remote_cancelling_on(
-                    &tx,
-                    &root_table_owned,
-                    &root_id_owned,
-                )?;
+                let updated = tx
+                    .execute(
+                        "UPDATE blob_make_remote_intents SET state = 'cancelling'
+                         WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
+                        (&root_table_owned, &root_id_owned),
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(format!(
+                        "make_remote intent {root_table_owned:?}/{root_id_owned:?} cannot enter cancellation"
+                    )));
+                }
+                tx.execute(
+                    "UPDATE cloud_outbox
+                     SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
+                     WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                    (&root_table_owned, &root_id_owned),
+                )
+                .map_err(DbError::from)?;
             }
             Some(MakeRemoteIntentState::Cancelling) => {}
             Some(MakeRemoteIntentState::Publishing(write_id)) => {

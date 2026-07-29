@@ -168,39 +168,6 @@ impl Database {
             .transpose()
     }
 
-    pub(crate) fn mark_make_remote_cancelling_on(
-        conn: &Connection,
-        root_table: &str,
-        root_id: &str,
-    ) -> Result<(), DbError> {
-        let updated = conn
-            .execute(
-                "UPDATE blob_make_remote_intents SET state = 'cancelling'
-                 WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
-                (root_table, root_id),
-            )
-            .map_err(DbError::from)?;
-        if updated == 1 {
-            conn.execute(
-                "UPDATE cloud_outbox
-                 SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
-                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                (root_table, root_id),
-            )
-            .map_err(DbError::from)?;
-            return Ok(());
-        }
-        if matches!(
-            Self::make_remote_intent_state(conn, root_table, root_id)?,
-            Some(MakeRemoteIntentState::Cancelling)
-        ) {
-            return Ok(());
-        }
-        Err(DbError::Message(format!(
-            "make_remote intent {root_table:?}/{root_id:?} cannot enter cancellation"
-        )))
-    }
-
     pub fn mark_make_remote_publishing_on(
         conn: &Connection,
         root_table: &str,
