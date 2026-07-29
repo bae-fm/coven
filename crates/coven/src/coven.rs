@@ -901,7 +901,16 @@ fn remove_orphaned_temps_in_dir(
                     continue;
                 }
             }
-            remove_file_if_present(&path)?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    debug!(
+                        path = %path.display(),
+                        "file already absent during local blob cleanup"
+                    );
+                }
+                Err(error) => return Err(CovenError::Io(error)),
+            }
         } else if file_type.is_file() && path.file_name().and_then(|name| name.to_str()).is_none() {
             debug!(
                 path = %path.display(),
@@ -939,20 +948,6 @@ async fn remove_staged_path(path: &Path) {
             error = %error,
             "failed to remove staged local blob"
         );
-    }
-}
-
-fn remove_file_if_present(path: &Path) -> CovenResult<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            debug!(
-                path = %path.display(),
-                "file already absent during local blob cleanup"
-            );
-            Ok(())
-        }
-        Err(error) => Err(CovenError::Io(error)),
     }
 }
 
