@@ -437,164 +437,216 @@ status = "verified"
 
 
 class SemanticIndexTests(unittest.TestCase):
-    def test_graph_data_aggregates_candidate_groups_into_subsystems(self):
-        index = {
-            "callables": [
-                {
-                    "symbol": "sample::left::run",
-                    "module": "sample::left",
-                    "path": "crates/sample/src/left.rs",
-                    "kind": "free",
-                    "receiver_type": None,
-                    "retained_dependencies": ["database"],
-                    "ambient_dependencies": [],
-                    "effects": ["database-read"],
-                    "captured_values": [],
-                    "unresolved_calls": [],
-                    "semantic_views": ["library-default"],
-                    "bottom_up_rank": 1,
-                    "callers": [],
-                    "enclosing_callable": None,
-                    "callees": [
-                        {
-                            "symbol": "sample::right::load",
-                            "sites": [
-                                {"views": ["one", "two", "three"]},
-                                {"views": ["one", "two"]},
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "symbol": "sample::right::load",
-                    "module": "sample::right",
-                    "path": "crates/sample/src/right.rs",
-                    "kind": "free",
-                    "receiver_type": None,
-                    "retained_dependencies": [],
-                    "ambient_dependencies": [],
-                    "effects": [],
-                    "captured_values": [],
-                    "unresolved_calls": [],
-                    "semantic_views": ["library-default"],
-                    "bottom_up_rank": 0,
-                    "callers": [
-                        {
-                            "symbol": "sample::left::run",
-                            "sites": [{}, {}],
-                        }
-                    ],
-                    "enclosing_callable": None,
-                    "callees": [],
-                },
-            ],
-            "reach_throughs": {
-                "deep_ancestor_paths": [
-                    {"symbol": "sample::left::run"}
-                ]
-            },
+    def graph_record(self, symbol, **overrides):
+        record = {
+            "symbol": symbol,
+            "signature": "fn call()",
+            "module": symbol.rsplit("::", 1)[0],
+            "crate": "sample",
+            "path": "crates/sample/src/lib.rs",
+            "kind": "free",
+            "receiver_type": None,
+            "parameters": [],
+            "retained_dependencies": [],
+            "ambient_dependencies": [],
+            "effects": [],
+            "captured_values": [],
+            "unresolved_calls": [],
+            "semantic_views": ["library-default"],
+            "callers": [],
+            "enclosing_callable": None,
+            "callees": [],
         }
-        graph = ownership_audit.build_graph_data(index)
-        self.assertEqual(len(graph["subsystems"]), 2)
-        self.assertEqual(len(graph["groups"]), 2)
+        record.update(overrides)
+        return record
+
+    def test_graph_data_exposes_bottom_up_ready_stateful_queue(self):
+        owner = self.graph_record(
+            "sample::store::<Store>::persist",
+            module="sample::store",
+            kind="method",
+            receiver_type="Store",
+            parameters=[{"name": "self", "type": "&self"}],
+            effects=["database-write"],
+        )
+        leaf = self.graph_record(
+            "sample::store::publish_blob",
+            retained_dependencies=["storage"],
+            effects=["storage-write"],
+            callers=[
+                {
+                    "symbol": "sample::store::publish_snapshot",
+                    "sites": [{}],
+                }
+            ],
+            callees=[{"symbol": owner["symbol"], "sites": [{}, {}]}],
+        )
+        parent = self.graph_record(
+            "sample::store::publish_snapshot",
+            callers=[],
+            callees=[{"symbol": leaf["symbol"], "sites": [{}]}],
+        )
+        owner["callers"] = [
+            {"symbol": leaf["symbol"], "sites": [{}, {}]}
+        ]
+        graph = ownership_audit.build_graph_data(
+            {"callables": [parent, leaf, owner], "reach_throughs": {}}
+        )
+        nodes = {node["label"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes["Store"]["kind"], "owner")
+        self.assertTrue(nodes["store::publish_blob"]["ready"])
+        self.assertEqual(nodes["store::publish_snapshot"]["blockers"], [
+            nodes["store::publish_blob"]["id"]
+        ])
+        self.assertFalse(nodes["store::publish_snapshot"]["ready"])
+        self.assertEqual(graph["summary"]["ready"], 1)
+
+    def test_receiverless_associated_stateful_function_is_unbound(self):
+        constructor = self.graph_record(
+            "sample::store::<Store>::open",
+            module="sample::store",
+            kind="associated",
+            receiver_type="Store",
+            retained_dependencies=["database"],
+            effects=["database-read"],
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [constructor], "reach_throughs": {}}
+        )
+        node = next(
+            node
+            for node in graph["nodes"]
+            if node["kind"] == "unbound"
+        )
+        self.assertEqual(node["label"], "store::open")
+        self.assertTrue(node["ready"])
+
+    def test_nested_stateful_callable_inherits_receiver_owner(self):
+        method = self.graph_record(
+            "sample::store::<Store>::sync",
+            module="sample::store",
+            kind="method",
+            receiver_type="Store",
+            parameters=[{"name": "self", "type": "&self"}],
+        )
+        closure = self.graph_record(
+            "sample::store::<Store>::sync::$closure@1",
+            module="sample::store",
+            kind="closure",
+            enclosing_callable=method["symbol"],
+            effects=["storage-write"],
+        )
+        method["callees"] = [{"symbol": closure["symbol"], "sites": [{}]}]
+        closure["callers"] = [{"symbol": method["symbol"], "sites": [{}]}]
+        graph = ownership_audit.build_graph_data(
+            {"callables": [method, closure], "reach_throughs": {}}
+        )
+        owners = [
+            node
+            for node in graph["nodes"]
+            if node["kind"] == "owner"
+        ]
+        self.assertEqual([owner["label"] for owner in owners], ["Store"])
+        self.assertEqual(graph["summary"]["unbound"], 0)
+
+    def test_ready_group_keeps_adjacent_receiver_as_candidate_not_owner(self):
+        owner = self.graph_record(
+            "sample::store::<Store>::sync",
+            module="sample::store",
+            kind="method",
+            receiver_type="Store",
+            parameters=[{"name": "self", "type": "&self"}],
+            callees=[
+                {"symbol": "sample::store::publish", "sites": [{}, {}]}
+            ],
+        )
+        helper = self.graph_record(
+            "sample::store::publish",
+            retained_dependencies=["storage"],
+            effects=["storage-write"],
+            callers=[
+                {"symbol": owner["symbol"], "sites": [{}, {}]}
+            ],
+        )
+        graph = ownership_audit.build_graph_data(
+            {"callables": [owner, helper], "reach_throughs": {}}
+        )
+        workflow = next(
+            node
+            for node in graph["nodes"]
+            if node["kind"] == "unbound"
+        )
+        self.assertEqual(workflow["candidate_owner"]["label"], "Store")
         self.assertEqual(
-            graph["subsystem_edges"],
-            [
-                {
-                    "source": "production|sample::left",
-                    "target": "production|sample::right",
-                    "sites": 2,
-                }
-            ],
+            workflow["candidate_owner"]["id"],
+            "owner|production|sample|Store",
         )
-        left = next(
-            subsystem
-            for subsystem in graph["subsystems"]
-            if subsystem["id"] == "production|sample::left"
-        )
-        self.assertEqual(left["findings"], 1)
-        self.assertEqual(left["stateful"], 1)
 
-    def test_stateful_free_callable_joins_a_dominant_adjacent_owner_candidate(self):
-        owner = {
-            "symbol": "sample::store::<Store>::run",
-            "module": "sample::store",
-            "path": "crates/sample/src/store.rs",
-            "receiver_type": "Store",
-            "enclosing_callable": None,
-        }
-        helper = {
-            "symbol": "sample::store::load",
-            "module": "sample::store",
-            "path": "crates/sample/src/store.rs",
-            "receiver_type": None,
-            "enclosing_callable": None,
-            "retained_dependencies": ["database"],
-            "ambient_dependencies": [],
-            "effects": ["database-read"],
-            "callers": [
-                {
-                    "symbol": owner["symbol"],
-                    "sites": [{}, {}],
-                }
-            ],
-            "callees": [],
-        }
-        placement = ownership_audit.ownership_group_for(
-            helper,
-            {
-                owner["symbol"]: owner,
-                helper["symbol"]: helper,
-            },
+    def test_verified_boundary_does_not_block_its_caller(self):
+        boundary = self.graph_record(
+            "sample::sync::run",
+            effects=["network"],
         )
-        self.assertEqual(placement["kind"], "candidate-owner")
-        self.assertEqual(placement["label"], "Candidate · Store")
+        caller = self.graph_record(
+            "sample::main",
+            callees=[{"symbol": boundary["symbol"], "sites": [{}]}],
+        )
+        boundary["callers"] = [
+            {"symbol": caller["symbol"], "sites": [{}]}
+        ]
+        decisions = {
+            (boundary["symbol"], boundary["signature"]): {
+                "classification": "boundary",
+                "status": "verified",
+            }
+        }
+        graph = ownership_audit.build_graph_data(
+            {"callables": [caller, boundary], "reach_throughs": {}},
+            decisions,
+        )
+        nodes = {node["label"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes["sync::run"]["kind"], "resolved")
+        self.assertTrue(nodes["sample::main"]["ready"])
 
-    def test_test_only_caller_does_not_propose_a_production_owner(self):
-        test_owner = {
-            "symbol": "sample::tests::<Fixture>::run",
-            "module": "sample::tests",
-            "path": "crates/sample/src/tests.rs",
-            "receiver_type": "Fixture",
-            "enclosing_callable": None,
-        }
-        helper = {
-            "symbol": "sample::store::load",
-            "module": "sample::store",
-            "path": "crates/sample/src/store.rs",
-            "receiver_type": None,
-            "enclosing_callable": None,
-            "retained_dependencies": ["database"],
-            "ambient_dependencies": [],
-            "effects": ["database-read"],
-            "callers": [
-                {
-                    "symbol": test_owner["symbol"],
-                    "sites": [{}, {}],
-                }
-            ],
-            "callees": [],
-        }
-        placement = ownership_audit.ownership_group_for(
-            helper,
-            {
-                test_owner["symbol"]: test_owner,
-                helper["symbol"]: helper,
-            },
+    def test_owner_method_decision_does_not_resolve_receiverless_function(self):
+        helper = self.graph_record(
+            "sample::store::publish",
+            retained_dependencies=["storage"],
+            effects=["storage-write"],
         )
-        self.assertEqual(placement["kind"], "unowned")
+        decisions = {
+            (helper["symbol"], helper["signature"]): {
+                "classification": "owner-method",
+                "status": "verified",
+            }
+        }
+        graph = ownership_audit.build_graph_data(
+            {"callables": [helper], "reach_throughs": {}},
+            decisions,
+        )
+        workflow = next(
+            node
+            for node in graph["nodes"]
+            if node["kind"] == "unbound"
+        )
+        self.assertTrue(workflow["ready"])
 
     def test_graph_html_contains_svg_and_embedded_index(self):
         html = ownership_audit.render_graph_html(
             {
-                "subsystems": [],
-                "groups": [],
-                "subsystem_edges": [],
-                "group_edges": [],
-                "summary": {"callables": 0},
+                "nodes": [],
+                "call_edges": [],
+                "supporting_edges": [],
+                "summary": {
+                    "callables": 0,
+                    "ready": 0,
+                    "unbound": 0,
+                    "owners": 0,
+                },
             }
         )
         self.assertIn('<svg id="graph"', html)
+        self.assertIn("Ready ownership queue", html)
         self.assertIn('"callables": 0', html)
 
     def test_reach_through_reports_cover_static_calls_and_field_bundles(self):

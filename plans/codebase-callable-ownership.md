@@ -7,6 +7,15 @@ every callable, resolve its callers and callees, identify the state and services
 it uses, and place each stateful workflow on the type whose lifetime and
 invariants own that work.
 
+The working method is a bottom-up ownership queue. Build a graph of retained
+owners and unowned stateful call groups, then select groups that do not call any
+other unowned stateful group. For each ready group, identify the
+invariant-bearing owner, move the workflow onto it, delete the prior entry
+point, repair callers through compiler errors, record the decision, and rebuild
+the graph. Each relocation exposes the next ready groups. Continue upward until
+every stateful workflow is owned and every remaining free function is a
+verified transformation, boundary, dependency primitive, or callback adapter.
+
 This applies to both Rust crates, not only Store authorization:
 
 - `crates/coven-core/**/*.rs`; and
@@ -442,14 +451,15 @@ The work is verified when:
   duplicate receiver dependencies, constructor calls, and raw receiver-field
   bundles. The generated review graph contains 15,060 callables across 397
   modules, 3,799 directed module edges, and 11,699 reach-through candidates.
-- The module-level rendering proved too dense to expose architecture. The
-  review artifact now infers candidate ownership from existing receivers,
-  enclosing operations, adjacent call provenance, and retained dependency
-  bundles. It keeps existing, inferred, unowned, interface, transformation,
-  macro, and test groups distinct.
-- Graph navigation proceeds from domain to subsystem to implementation area to
-  candidate ownership group. Each level shows its strongest cross-boundary
-  calls by default, exposes the complete edge set on request, and drills into
-  the contributing callables and evidence. Receiver identities now come from
-  the implemented type rather than the textual `impl` header, and test
-  attributes keep nested test callables outside production groups.
+- The module hierarchy rendering proved too dense and did not encode the
+  relocation order. The review artifact now propagates stateful behavior
+  through the collapsed call graph, combines receiver-bound components into
+  retained-owner nodes, and leaves receiverless stateful components as
+  individual ownership decisions.
+- The default graph view is the bottom-up work queue: an unowned component is
+  ready only when none of its stateful callees are also unowned. It shows
+  candidate owners and required capabilities without treating either as a
+  decision. Rebuilding the graph after a verified classification or relocation
+  removes that blocker and exposes its callers. The current complete index
+  contains 1,582 production unowned stateful call groups, of which 631 are
+  ready, alongside 250 production retained owners.
