@@ -530,3 +530,5 @@ The work is verified when:
   into its only caller without relocating that blocked caller.
 - `587db0fe` deletes `notify_write_status_in`; `Database::notify_write_status`
   now accesses its retained sender map directly.
+- The circle-roster and Store-membership conflict and state hashes are verified
+  transformations over explicit inputs; they remain private free functions.

@@ -35,3 +35,24 @@ signature = "fn circle_roster_state_hash( grants: &BTreeMap<MembershipGrantId, G
 classification = "transformation"
 reason = "The hash is a deterministic domain-separated encoding of the explicit grant map."
 status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::membership::membership_assignment_conflict_hash"
+signature = "fn membership_assignment_conflict_hash( heads: &[MembershipHeadRef], member_pubkey: &str, conflicting_grants: &BTreeMap< MembershipGrantId, causal_grants::GrantRecord<MembershipCoord, StoreAssignment>, >, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of explicit assignment-conflict evidence."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::membership::membership_revocation_conflict_hash"
+signature = "fn membership_revocation_conflict_hash( heads: &[MembershipHeadRef], cyclic_sources: &[MembershipCoord], involved_owner_grants: &BTreeSet<MembershipGrantId>, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of explicit revocation-conflict evidence."
+status = "verified"
+
+[[decision]]
+symbol = "coven_core::sync::membership::store_membership_state_hash"
+signature = "fn store_membership_state_hash( grants: &BTreeMap< MembershipGrantId, GrantState<MembershipGrantRecord, MembershipGrantRetirement>, >, provider_admin: &super::provider::ProviderAdminResolution, ) -> ObjectHash"
+classification = "transformation"
+reason = "The hash is a deterministic domain-separated encoding of the explicit grant map and provider-administrator state."
+status = "verified"
