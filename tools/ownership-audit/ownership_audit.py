@@ -3661,6 +3661,7 @@ def render_graph_html(graph: dict[str, Any]) -> str:
   color: #e5edf2;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; min-height: 100vh; }
 header {
   display: grid;
@@ -3692,6 +3693,18 @@ main {
   height: calc(100vh - 74px);
 }
 #canvas { position: relative; overflow: auto; }
+#ownership-list { padding: 12px; }
+.node-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  width: 100%;
+  margin: 0 0 7px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.node-list-row.selected { border-color: #fff4c2; background: #344550; }
+.node-list-row .status { text-align: right; }
 #graph { display: block; min-width: 100%; min-height: 100%; background: #0d1115; }
 #details {
   overflow: auto;
@@ -3760,26 +3773,27 @@ main {
     <label><input id="tests" type="checkbox"> tests</label>
     <label><input id="macros" type="checkbox"> macro expansions</label>
     <label><input id="capabilities" type="checkbox"> capability requirements</label>
-    <label><input id="allEdges" type="checkbox"> all calls</label>
   </div>
 </header>
 <main>
   <section id="canvas">
+    <div id="ownership-list"></div>
     <svg id="graph" role="img" aria-label="Callable ownership graph"></svg>
-    <div class="legend">Arrow: caller → callee · amber: ready · red: blocked · blue: owner · teal: construction · green: reviewed boundary · purple: required capability</div>
+    <div id="legend" class="legend">Arrow: caller → callee · amber: ready · red: blocked · blue: owner · teal: construction · green: reviewed boundary · purple: required capability</div>
   </section>
   <aside id="details"></aside>
 </main>
 <script>
 const DATA = __GRAPH_DATA__;
 const svg = document.getElementById("graph");
+const ownershipList = document.getElementById("ownership-list");
 const details = document.getElementById("details");
 const summary = document.getElementById("summary");
 const search = document.getElementById("search");
 const includeTests = document.getElementById("tests");
 const includeMacros = document.getElementById("macros");
 const includeCapabilities = document.getElementById("capabilities");
-const includeAllEdges = document.getElementById("allEdges");
+const legend = document.getElementById("legend");
 const CONSTRUCTION_NODES = DATA.construction_boundaries || [];
 const ALL_NODES = DATA.nodes.concat(CONSTRUCTION_NODES);
 const nodesById = new Map(ALL_NODES.map(function(node) { return [node.id, node]; }));
@@ -3882,17 +3896,11 @@ function showQueue() {
         right.findings - left.findings ||
         left.id.localeCompare(right.id);
     });
-  const rows = ready.map(function(node, index) {
-    return '<button class="queue-row" data-node="' + escapeHtml(node.id) + '">' +
-      '<span>' + (index + 1) + ". " + escapeHtml(node.label) +
-      '<span class="meta"><br>' + escapeHtml(node.modules.join(", ")) + '</span></span>' +
-      '<span class="meta">' + node.findings + " findings</span></button>";
-  }).join("");
   details.innerHTML =
     "<h2>Ready ownership queue</h2>" +
     '<div class="meta">These call groups do not call another unowned stateful call group.</div>' +
-    "<h3>" + ready.length + " ready groups</h3>" + rows;
-  attachRelationHandlers();
+    "<h3>" + ready.length + " ready groups</h3>" +
+    '<div class="meta">Select a row from the list to inspect its owner, callers, and dependencies.</div>';
 }
 
 function showConstructionQueue() {
@@ -3903,18 +3911,11 @@ function showConstructionQueue() {
         right.findings - left.findings ||
         left.id.localeCompare(right.id);
     });
-  const rows = boundaries.map(function(node, index) {
-    return '<button class="queue-row" data-node="' + escapeHtml(node.id) + '">' +
-      '<span>' + (index + 1) + ". " + escapeHtml(node.label) +
-      '<span class="meta"><br>' + escapeHtml(node.modules.join(", ")) + '</span></span>' +
-      '<span class="meta">' + node.construction_callers.length +
-      " callers</span></button>";
-  }).join("");
   details.innerHTML =
     "<h2>Construction boundary queue</h2>" +
     '<div class="meta">Review which parent boundary may call each constructor or opener; repository callers and current visibility are shown.</div>' +
-    "<h3>" + boundaries.length + " construction boundaries</h3>" + rows;
-  attachRelationHandlers();
+    "<h3>" + boundaries.length + " construction boundaries</h3>" +
+    '<div class="meta">Select a row from the list to inspect its callers and visibility.</div>';
 }
 
 function graphEdges() {
@@ -3934,15 +3935,17 @@ function showDetails(node) {
   const outgoing = callEdges()
     .filter(function(edge) { return edge.source === node.id; })
     .map(function(edge) { return edge.target; });
-  const candidate = node.candidate_owner
-    ? '<h3>Candidate owner</h3><div>' +
-      (node.candidate_owner.id
-        ? '<button class="relation-row" data-node="' +
-          escapeHtml(node.candidate_owner.id) + '"><span>' +
-          escapeHtml(node.candidate_owner.label) + '</span><span class="meta">' +
-          node.candidate_owner.score + " adjacent call points</span></button>"
-        : escapeHtml(node.candidate_owner.label)) +
-      "</div>"
+  const candidate = node.kind === "unbound"
+    ? '<h3>Owner decision</h3><div>' +
+      (node.candidate_owner
+        ? (node.candidate_owner.id
+          ? '<button class="relation-row" data-node="' +
+            escapeHtml(node.candidate_owner.id) + '"><span>' +
+            escapeHtml(node.candidate_owner.label) + '</span><span class="meta">' +
+            node.candidate_owner.score + " adjacent call points</span></button>"
+          : escapeHtml(node.candidate_owner.label))
+        : '<span class="meta">No existing owner detected.</span>') +
+      '<div class="meta">The adjacent type is evidence, not a constraint. Create an owner when this workflow has a distinct lifetime or invariant.</div></div>'
     : "";
   const readiness = node.kind === "unbound"
     ? '<div class="meta">' +
@@ -4007,18 +4010,6 @@ function selectedBaseNodes(query) {
       right.findings - left.findings ||
       left.id.localeCompare(right.id);
   });
-  if ((mode === "ready" || mode === "construction") && selected) {
-    const ids = new Set([selected]);
-    graphEdges().forEach(function(edge) {
-      if (edge.source === selected) ids.add(edge.target);
-      if (edge.target === selected) ids.add(edge.source);
-    });
-    nodes = ALL_NODES.filter(function(node) {
-      return ids.has(node.id) && realmVisible(node) && matches(node, query);
-    });
-  } else if (mode !== "neighborhood") {
-    nodes = nodes.slice(0, 80);
-  }
   if (mode === "neighborhood" && selected) {
     const ids = new Set([selected]);
     graphEdges().forEach(function(edge) {
@@ -4032,33 +4023,70 @@ function selectedBaseNodes(query) {
   return nodes;
 }
 
+function nodeStatus(node) {
+  if (node.kind === "unbound") {
+    return node.ready ? "ready" : node.blockers.length + " blockers";
+  }
+  if (node.kind === "construction") {
+    return node.construction_callers.length + " repository callers";
+  }
+  return node.callables.length + " callables";
+}
+
+function updateSummary(visibleNodes) {
+  const ready = DATA.nodes.filter(function(node) {
+    return node.kind === "unbound" && node.ready && realmVisible(node);
+  }).length;
+  const unbound = DATA.nodes.filter(function(node) {
+    return node.kind === "unbound" && realmVisible(node);
+  }).length;
+  const owners = DATA.nodes.filter(function(node) {
+    return node.kind === "owner" && realmVisible(node);
+  }).length;
+  const boundaries = CONSTRUCTION_NODES.filter(realmVisible).length;
+  summary.textContent =
+    ready.toLocaleString() + " ready · " +
+    unbound.toLocaleString() + " unowned stateful groups · " +
+    owners.toLocaleString() + " retained owners · " +
+    boundaries.toLocaleString() + " construction boundaries · " +
+    visibleNodes.toLocaleString() + " visible rows";
+}
+
+function renderList(nodes) {
+  ownershipList.innerHTML = nodes.map(function(node) {
+    const label = node.realm === "test" ? "Test · " + node.label :
+      node.realm === "macro" ? "Macro · " + node.label : node.label;
+    return '<button class="node-list-row ' +
+      (selected === node.id ? "selected" : "") +
+      '" data-node="' + escapeHtml(node.id) + '"><span>' +
+      escapeHtml(label) + '<span class="meta"><br>' +
+      escapeHtml(node.modules.join(", ")) + '</span></span>' +
+      '<span class="status"><span>' + escapeHtml(kindLabel(node)) +
+      '</span><span class="meta"><br>' + escapeHtml(nodeStatus(node)) +
+      " · " + node.findings + " findings</span></span></button>";
+  }).join("");
+  ownershipList.querySelectorAll("[data-node]").forEach(function(element) {
+    element.addEventListener("click", function() {
+      const node = nodesById.get(element.dataset.node);
+      if (node) showDetails(node);
+    });
+  });
+}
+
 function render() {
   const query = search.value.trim().toLowerCase();
   let nodes = selectedBaseNodes(query);
-
-  if (mode === "ready") {
-    const contextIds = new Set();
-    const workflowIds = new Set(
-      nodes
-        .filter(function(node) {
-          return node.kind === "unbound" &&
-            (!selected || node.id === selected);
-        })
-        .map(function(node) { return node.id; })
-    );
-    graphEdges().forEach(function(edge) {
-      if (!workflowIds.has(edge.source)) return;
-      const target = nodesById.get(edge.target);
-      if (target && (target.kind === "owner" || target.kind === "resolved" ||
-          (includeCapabilities.checked && target.kind === "capability"))) {
-        contextIds.add(target.id);
-      }
-    });
-    contextIds.forEach(function(id) {
-      const node = nodesById.get(id);
-      if (realmVisible(node) && matches(node, query)) nodes.push(node);
-    });
+  updateSummary(nodes.length);
+  if (mode !== "neighborhood") {
+    svg.hidden = true;
+    legend.hidden = true;
+    ownershipList.hidden = false;
+    renderList(nodes);
+    return;
   }
+  ownershipList.hidden = true;
+  svg.hidden = false;
+  legend.hidden = false;
 
   const visibleIds = new Set(nodes.map(function(node) { return node.id; }));
   let edges = graphEdges().filter(function(edge) {
@@ -4066,14 +4094,6 @@ function render() {
     if (edge.kind === "requires" && !includeCapabilities.checked) return false;
     return true;
   });
-  if (!includeAllEdges.checked && mode !== "neighborhood") {
-    edges = selected
-      ? edges.filter(function(edge) {
-          return edge.source === selected || edge.target === selected;
-        })
-      : edges.sort(function(left, right) { return right.sites - left.sites; }).slice(0, 60);
-  }
-
   nodes.sort(function(left, right) {
     return Number(right.ready) - Number(left.ready) ||
       left.rank - right.rank ||
@@ -4131,11 +4151,6 @@ function render() {
     const point = positions.get(node.id);
     const label = node.realm === "test" ? "Test · " + node.label :
       node.realm === "macro" ? "Macro · " + node.label : node.label;
-    const status = node.kind === "unbound"
-      ? (node.ready ? "ready" : node.blockers.length + " blockers")
-      : node.kind === "construction"
-        ? node.construction_callers.length + " direct callers"
-      : node.callables.length + " callables";
     return '<g class="node ' + (selected === node.id ? "selected" : "") +
       '" data-node="' + escapeHtml(node.id) + '" transform="translate(' +
       point.x + " " + point.y + ')"><rect width="' + nodeWidth +
@@ -4145,7 +4160,7 @@ function render() {
       '</title></rect><text x="10" y="23">' +
       escapeHtml(label.length > 34 ? label.slice(0, 32) + "…" : label) +
       '</text><text class="count" x="10" y="43">' +
-      escapeHtml(status + " · " + node.findings + " findings") +
+      escapeHtml(nodeStatus(node) + " · " + node.findings + " findings") +
       "</text></g>";
   }).join("");
 
@@ -4156,25 +4171,6 @@ function render() {
       if (node) showDetails(node);
     });
   });
-  const visibleWorkflows = nodes.filter(function(node) {
-    return node.kind === "unbound";
-  }).length;
-  const ready = DATA.nodes.filter(function(node) {
-    return node.kind === "unbound" && node.ready && realmVisible(node);
-  }).length;
-  const unbound = DATA.nodes.filter(function(node) {
-    return node.kind === "unbound" && realmVisible(node);
-  }).length;
-  const owners = DATA.nodes.filter(function(node) {
-    return node.kind === "owner" && realmVisible(node);
-  }).length;
-  const boundaries = CONSTRUCTION_NODES.filter(realmVisible).length;
-  summary.textContent =
-    ready.toLocaleString() + " ready · " +
-    unbound.toLocaleString() + " unowned stateful groups · " +
-    owners.toLocaleString() + " retained owners · " +
-    boundaries.toLocaleString() + " construction boundaries · " +
-    visibleWorkflows.toLocaleString() + " visible unowned groups";
 }
 
 document.querySelectorAll("[data-mode]").forEach(function(button) {
@@ -4188,7 +4184,7 @@ document.querySelectorAll("[data-mode]").forEach(function(button) {
     else details.innerHTML = "<h2>Select a node</h2>";
   });
 });
-[search, includeTests, includeMacros, includeCapabilities, includeAllEdges]
+[search, includeTests, includeMacros, includeCapabilities]
   .forEach(function(control) {
     control.addEventListener(control === search ? "input" : "change", function() {
       render();

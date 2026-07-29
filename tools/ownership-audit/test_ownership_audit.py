@@ -1076,6 +1076,7 @@ class SemanticIndexTests(unittest.TestCase):
                 },
             }
         )
+        self.assertIn('<div id="ownership-list"', html)
         self.assertIn('<svg id="graph"', html)
         self.assertIn("Ready ownership queue", html)
         self.assertIn("Construction boundaries", html)

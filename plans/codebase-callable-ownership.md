@@ -185,15 +185,15 @@ rest unresolved. Recursive call groups are collapsed into one node so recursion
 does not produce a false ordering.
 
 `graph` writes a generated review artifact under `target/ownership-audit/`.
-It presents ownership groups and call direction first, then permits drilling
-into callables, retained dependencies, effects, configuration-specific edges,
-and unresolved candidate sets. The graph is reviewed before production
-ownership relocations begin. Construction boundaries have a separate queue
-that shows each constructor or opener, its lexical body, its direct callers,
-its visibility, and its calls into other construction boundaries. Callers are
-the complete repository caller set; public visibility separately exposes calls
-that downstream hosts may make. Construction boundaries do not participate in
-the workflow dependency order.
+Its normal modes are complete ordered lists: ready workflow leaves, every
+unowned workflow, retained owners, and construction boundaries. Selecting a
+row shows its callables, dependencies, effects, callers, and owner evidence.
+The graph is reserved for the selected row's dependency neighborhood.
+Construction boundaries have their own list showing each constructor or
+opener, its lexical body, its direct callers, its visibility, and its calls
+into other construction boundaries. Callers are the complete repository caller
+set; public visibility separately exposes calls that downstream hosts may make.
+Construction boundaries do not participate in the workflow dependency order.
 
 ## Dependency and effect classification
 
@@ -247,6 +247,11 @@ The owner is already present when:
 Compose existing owners and domain types before introducing another type. Add
 an operation capability only when the calling graph proves a distinct lifetime
 or invariant that no existing owner represents.
+
+An adjacent existing type is evidence, not a required destination. When no
+existing type owns the workflow's complete lifetime and invariant, create the
+missing owner and attach it to the object graph. Do not leave the workflow free
+or force it onto a neighboring type to avoid introducing that owner.
 
 If sibling modules need the same capability, move it to their direct common
 owner. A grandchild does not construct a grandparent's internal authority.
@@ -493,3 +498,6 @@ The work is verified when:
   stateful work remains unowned. The current complete index produces 1,266
   production unowned stateful call groups, of which 488 are ready, alongside
   250 production retained owners and 490 production construction boundaries.
+- The generated artifact presents those four review sets as full lists. A
+  selected row can switch to its dependency graph, and an unowned workflow with
+  no suitable adjacent type explicitly permits creating its missing owner.
