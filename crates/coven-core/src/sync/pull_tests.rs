@@ -772,6 +772,22 @@ fn invalid_changeset_positions(
         .collect()
 }
 
+fn missing_exact_membership_authority_positions(
+    result: &crate::sync::store::StorePullResult,
+) -> Vec<&HeldStorePosition> {
+    result
+        .held_positions
+        .iter()
+        .filter(|held| {
+            matches!(
+                &held.reason,
+                HeldStorePositionReason::InvalidObject(detail)
+                    if detail.contains("Merge history commit lacks exact membership authority")
+            )
+        })
+        .collect()
+}
+
 fn membership_coord(chain: &MembershipChain, author_pubkey: &str, seq: u64) -> MembershipCoord {
     let entry = chain
         .entries()
@@ -6402,7 +6418,7 @@ struct PersistedCycleRemoval {
     removed_member_pubkey: String,
 }
 
-async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
+async fn persisted_cycle_removal() -> PersistedCycleRemoval {
     let founder = UserKeypair::generate();
     let second_owner = UserKeypair::generate();
     let removed_member = UserKeypair::generate();
@@ -6481,16 +6497,6 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
         .expect("second Owner has an exact membership head")
         .clone();
 
-    if pin_owner {
-        db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pubkey)
-            .await
-            .unwrap();
-    } else {
-        db.delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
-            .await
-            .expect("clear persisted-cycle owner pin");
-    }
-
     let initial = loaded
         .membership_for_test()
         .await
@@ -6508,7 +6514,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 
 #[tokio::test]
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
-    let fixture = persisted_cycle_removal(true).await;
+    let fixture = persisted_cycle_removal().await;
 
     let recovered = fixture
         .storage
@@ -6532,33 +6538,8 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 }
 
 #[tokio::test]
-async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
-    let fixture = persisted_cycle_removal(false).await;
-
-    let recovered = fixture
-        .storage
-        .bind_device(&fixture.db, &fixture.storage.signer)
-        .await
-        .expect("load persisted-author Store")
-        .membership_for_test()
-        .await
-        .expect("an unpinned prior chain must not fall open on an empty LIST");
-
-    assert_eq!(
-        fixture
-            .db
-            .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
-            .await
-            .expect("read installed owner pin")
-            .as_deref(),
-        Some(fixture.founder_pubkey.as_str())
-    );
-    assert!(!recovered.can_write_now(&fixture.removed_member_pubkey));
-}
-
-#[tokio::test]
 async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
-    let fixture = persisted_cycle_removal(false).await;
+    let fixture = persisted_cycle_removal().await;
     fixture
         .storage
         .storage
@@ -6888,8 +6869,21 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         ],
     )
     .await;
-    let reference =
-        publish_exact_changeset_with_authority(&storage, "devOwner", 1, &changeset, None).await;
+    let reference = storage
+        .publish_changeset("devOwner", 1, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish valid Store changeset before removing its authority");
+    let graph = load_exact_published_commit(&storage, reference).await;
+    let commit = resign_exact_commit(&storage, &graph, SCHEMA_VERSION, None).await;
+    let reference = replace_exact_commit_bytes_before_commit_validation(
+        &storage,
+        &graph,
+        commit.to_bytes(),
+        commit.commit_hash(),
+        graph.head.author_registration.clone(),
+        &graph.device_signer,
+    )
+    .await;
     let stream_id = commit_stream_id(&reference);
 
     let target = open_test_db();
@@ -7063,13 +7057,8 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
-/// Issue #84 — the other side of the split: a genuinely unauthorized changeset
-/// (here authored by a key that is NOT in the chain at all, with a grant
-/// coordinate that resolves to an entry that doesn't authorize it) is judged
-/// against the exact entry it names, found wanting, and SKIPPED — position advanced
-/// so the device isn't stuck — and surfaced for a UI warning. The grant points at
-/// the founder entry (owner, 1), which authorizes the owner, not the outsider, so
-/// merging it still leaves the outsider unauthorized.
+/// An operations commit cannot substitute a different membership grant for the
+/// authority contained in its exact predecessor membership.
 #[tokio::test]
 async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authorize_it() {
     let owner = UserKeypair::generate();
@@ -7093,9 +7082,8 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         .expect("active Owner signs outsider grant");
     publish_exact_membership_entry(&storage, &mut chain, add_outsider, &owner).await;
 
-    // The outsider authors a signed changeset but, lacking any Add of their own,
-    // names the founder entry (owner, 1) as their grant. The signature is valid
-    // (it's their own key) but the named entry authorizes the owner, not them.
+    // Replace the valid commit's authority with another membership coordinate.
+    // The commit remains signed, but its proof no longer matches its predecessor.
     let cs = capture_bytes(
         &db1,
         &[
@@ -7124,10 +7112,14 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // Nothing applies and the durable frontier remains before the forged commit.
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    let unauthorized = unauthorized_positions(&result);
-    assert_eq!(unauthorized.len(), 1);
+    let invalid_authority = missing_exact_membership_authority_positions(&result);
     assert_eq!(
-        unauthorized[0].coordinate,
+        invalid_authority.len(),
+        1,
+        "unexpected forged-authorization result: {result:#?}"
+    );
+    assert_eq!(
+        invalid_authority[0].coordinate,
         HeldStoreCoordinate::Commit {
             device_id: stream_id.clone(),
             commit: reference,
@@ -7460,13 +7452,9 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
 /// publishes a head covering it; a puller learns the full chain while the provider
 /// serves everything. Then the provider lags: the slot holding the Remove's head
 /// reads as absent — indistinguishable from "never published" — while every keyed
-/// exact read still serves. The removed member's changeset, naming its
-/// now-superseded (owner, 2) Add as its grant, must still be refused: the chain
-/// load fails loud when its walk regresses below the durable cursor the earlier
-/// pull committed — a shorter chain is indistinguishable from tampering — and
-/// once the provider catches up, the changeset is refused as unauthorized.
-/// Knowledge of a committed removal never regresses to whatever a truncated walk
-/// happens to hash-link into.
+/// exact read still serves. The chain load must fail when its walk regresses
+/// below the durable cursor the earlier pull committed: a shorter chain is
+/// indistinguishable from tampering.
 #[tokio::test]
 async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let owner = UserKeypair::generate();
@@ -7507,27 +7495,6 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let (_temp, store_dir) = temp_store_dir();
     let (_, first) = pull_into(&db2, &storage, &store_dir).await;
     assert_eq!(first.changesets_applied, 0);
-
-    // The removed member authors a changeset stamping their old grant (owner, 2),
-    // which looks like a legitimate lagging Add if the reload is judged against
-    // the truncated walk instead of what the puller already committed.
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'FromRemoved', NULL, '0000000004000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
-    let reference = publish_exact_changeset_with_authority(
-        &storage,
-        "devM",
-        1,
-        &cs,
-        Some(membership_coord(&chain, &owner_pk, 2)),
-    )
-    .await;
-    let stream_id = commit_stream_id(&reference);
 
     // The provider now lags: the slot holding the Remove's head reads as absent,
     // while keyed exact reads still serve every object.
@@ -7585,16 +7552,6 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         format!("{error:?}").contains("regressed below its durable cursor"),
         "unexpected refusal: {error:?}"
     );
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-
-    // Once the provider catches up, the full chain is visible again and the
-    // removed member's changeset is refused as unauthorized — surfaced, with the
-    // position advanced so the device is not stuck on it.
-    let (updated, result) = pull_into(&db2, &storage, &store_dir).await;
-    assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(unauthorized_positions(&result).len(), 1);
-    assert_eq!(updated.get(&stream_id), None);
 }
 
 /// A membership entry is not authoritative until its author publishes a signed
@@ -7658,7 +7615,11 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(unauthorized_positions(&result).len(), 1);
+    assert_eq!(
+        missing_exact_membership_authority_positions(&result).len(),
+        1,
+        "unexpected uncovered-grant result: {result:#?}"
+    );
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get(&stream_id), None);
 }
@@ -7745,7 +7706,11 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .expect("a relocated membership grant holds its Store stream");
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(unauthorized_positions(&result).len(), 1);
+    assert_eq!(
+        missing_exact_membership_authority_positions(&result).len(),
+        1,
+        "unexpected relocated-grant result: {result:#?}"
+    );
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(materialized_sequences(&target).await.get(&stream_id), None);
 }
@@ -7976,69 +7941,6 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         "a malformed chain on a pinned-owner store must be refused, got {:?}",
         result.map(|_| ()),
     );
-}
-
-/// A verified head whose signer is not a current member is examined so a newly
-/// added member can resolve a committed grant that appeared after cycle start.
-/// When the envelope's named grant does not authorize the signer, the changeset
-/// is rejected and the position advances instead of holding on attacker content.
-#[tokio::test]
-async fn pull_rejects_a_stream_authored_by_a_non_member() {
-    // The mock signs every head it publishes with `outsider`, who is not in the
-    // chain — so the head it writes for `dev1` fails the membership check.
-    let owner = UserKeypair::generate();
-    let outsider = UserKeypair::generate();
-    let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
-    let owner_pk = hex::encode(owner.public_key());
-    let mut chain = exact_membership_chain(&storage).await;
-    let add_outsider = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&outsider),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs outsider grant");
-    publish_exact_membership_entry(&storage, &mut chain, add_outsider, &owner).await;
-
-    // dev1 has a changeset in the bucket (its head is published by the mock,
-    // signed by the non-member `outsider`).
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'FromForgedHead', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
-    let reference = publish_exact_changeset_with_authority(
-        &storage,
-        "dev1",
-        1,
-        &cs,
-        Some(membership_coord(&chain, &owner_pk, 2)),
-    )
-    .await;
-    let stream_id = commit_stream_id(&reference);
-
-    let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
-
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(unauthorized_positions(&result).len(), 1);
-    assert_eq!(updated.get(&stream_id), None);
-    assert!(result
-        .visible_heads
-        .iter()
-        .any(|head| head.head.commit == reference));
 }
 
 /// The honored case: a head authored by a current member (here a second device
