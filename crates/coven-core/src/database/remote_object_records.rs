@@ -2,7 +2,6 @@ use crate::database::blob_records::remote_audience_to_db;
 use crate::database::store_reclaim_records::store_reclaim_journal_error;
 
 use super::*;
-use crate::sync::store::load_author_exclusion_activation_locator_on;
 
 pub(crate) enum RemoteStoredRepresentationRef<'a> {
     Inline(&'a [u8]),
@@ -68,7 +67,6 @@ pub(crate) fn load_remote_object_on(
     remote.validate().map_err(|error| {
         DbError::Message(format!("prepared remote object {object_id}: {error}"))
     })?;
-    validate_author_exclusion_proof_locators_on(conn, remote.nonactivation_proofs())?;
     let actual = remote_object_id(remote.object());
     if actual != object_id {
         return Err(DbError::Message(format!(
@@ -213,7 +211,6 @@ pub(crate) fn load_protocol_inert_object_on(
     inert
         .validate()
         .map_err(|error| DbError::Message(format!("protocol-inert object {object_id}: {error}")))?;
-    validate_author_exclusion_proof_locators_on(conn, inert.nonactivation_proofs())?;
     if inert.object_id() != object_id {
         return Err(DbError::Message(format!(
             "protocol-inert object key is {object_id}, exact reference hashes to {}",
@@ -221,33 +218,6 @@ pub(crate) fn load_protocol_inert_object_on(
         )));
     }
     Ok(inert)
-}
-
-pub(super) fn validate_author_exclusion_proof_locators_on(
-    conn: &Connection,
-    proofs: Vec<&crate::sync::remote_object::CandidateNonactivationProof>,
-) -> Result<(), DbError> {
-    for proof in proofs {
-        let crate::sync::remote_object::CandidateNonactivationProof::AuthorExclusion {
-            exclusion,
-            accepted_cut,
-            activation_head,
-        } = proof
-        else {
-            continue;
-        };
-        let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
-        if locator.accepted_cut() != accepted_cut
-            || locator.activation_head() != activation_head
-            || locator.exclusion() != exclusion
-        {
-            return Err(DbError::Message(
-                "author-exclusion candidate proof differs from its immutable activation locator"
-                    .to_string(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn load_reclaimed_store_package_on(

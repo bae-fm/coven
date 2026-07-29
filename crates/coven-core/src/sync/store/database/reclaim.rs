@@ -17,8 +17,10 @@ use crate::sync::store::{
 };
 use crate::sync::store_commit::{StoreBatchCommitRef, StoreCommitCoord, StorePackageRef};
 
+pub(crate) mod journal;
+
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn begin_store_reclaim_operation(
+    pub(crate) async fn begin_store_reclaim_operation(
         &self,
         operation: DurableStoreReclaimOperation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
@@ -56,8 +58,9 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn store_package_is_retained_for_replay(
+    pub(crate) async fn store_package_is_retained_for_replay(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         target: StorePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
@@ -93,6 +96,7 @@ impl StoreDatabase {
                     } = &commit.coord;
                     crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_on(
                         conn,
+                        &root,
                         &stream_id.to_string(),
                         *sequence,
                         commit,
@@ -104,8 +108,9 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn circle_package_is_retained_for_replay(
+    pub(crate) async fn circle_package_is_retained_for_replay(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         target: crate::sync::store_commit::CirclePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
@@ -141,6 +146,7 @@ impl StoreDatabase {
                     } = &commit.coord;
                     crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_on(
                         conn,
+                        &root,
                         &stream_id.to_string(),
                         *sequence,
                         commit,
@@ -157,7 +163,7 @@ impl StoreDatabase {
     /// bootstrap is a retained replay input and is never eligible for reclamation —
     /// the per-Circle analogue of the package retained-replay guard, re-checked
     /// before deletion so a seed installed since authoring fails the delete loud.
-    pub(in crate::sync::store) async fn circle_bootstrap_image_is_retained_for_replay(
+    pub(crate) async fn circle_bootstrap_image_is_retained_for_replay(
         &self,
         coverage: crate::sync::circle::CircleBootstrapCoverageRef,
     ) -> Result<bool, DbError> {
@@ -173,7 +179,7 @@ impl StoreDatabase {
     /// the projection came from — a recipient bootstrap installed on pull or a
     /// standalone snapshot installed on restore — so both kinds of image answer the
     /// same question against the same row.
-    pub(in crate::sync::store) async fn circle_image_is_retained_for_replay(
+    pub(crate) async fn circle_image_is_retained_for_replay(
         &self,
         circle_id: crate::sync::circle::CircleId,
         image: crate::sync::store_commit::SnapshotImageRef,
@@ -206,7 +212,7 @@ impl StoreDatabase {
     /// the activated Store commits whose package bindings published it.
     /// `blob_locators` is the stored-blob subset of `remote_objects`, so it is the
     /// exact candidate set without scanning every remote object.
-    pub(in crate::sync::store) async fn stored_blob_reclaim_candidates(
+    pub(crate) async fn stored_blob_reclaim_candidates(
         &self,
     ) -> Result<
         Vec<(
@@ -289,7 +295,7 @@ impl StoreDatabase {
     /// applies before deleting a blob body. An unresolved reference is not an
     /// answer: it means a row's locality cannot be decided yet, so it fails rather
     /// than counting as an orphan.
-    pub(in crate::sync::store) async fn stored_blob_is_row_orphaned(
+    pub(crate) async fn stored_blob_is_row_orphaned(
         &self,
         stored: crate::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
@@ -323,7 +329,7 @@ impl StoreDatabase {
     /// say. Re-checked before deletion, so an image published since the
     /// authorization was signed fails the delete loud rather than removing a blob
     /// a restore now needs.
-    pub(in crate::sync::store) async fn audience_blob_is_retained_for_replay(
+    pub(crate) async fn audience_blob_is_retained_for_replay(
         &self,
         stored: crate::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
@@ -376,7 +382,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn store_reclaim_operations(
+    pub(crate) async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
         self.database
@@ -406,7 +412,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_store_reclaim_receipt(
+    pub(crate) async fn begin_store_reclaim_receipt(
         &self,
         expected: DurableStoreReclaimOperation,
         object: DurableStoreReclaimObject,
@@ -459,7 +465,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn mark_store_reclaim_target_absent(
+    pub(crate) async fn mark_store_reclaim_target_absent(
         &self,
         expected: DurableStoreReclaimOperation,
         target: crate::sync::store::ReclaimTarget,
@@ -507,7 +513,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn replace_store_reclaim_candidate(
+    pub(crate) async fn replace_store_reclaim_candidate(
         &self,
         expected: DurableStoreReclaimOperation,
         replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
@@ -580,7 +586,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_store_reclaim_candidate_replacement(
+    pub(crate) async fn begin_store_reclaim_candidate_replacement(
         &self,
         expected: DurableStoreReclaimOperation,
         replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
@@ -726,7 +732,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn store_reclaim_replacement_cleanup_targets(
+    pub(crate) async fn store_reclaim_replacement_cleanup_targets(
         &self,
         expected: DurableStoreReclaimOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
@@ -753,7 +759,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn complete_store_reclaim_candidate_replacement(
+    pub(crate) async fn complete_store_reclaim_candidate_replacement(
         &self,
         expected: DurableStoreReclaimOperation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {

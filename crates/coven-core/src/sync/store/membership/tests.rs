@@ -1,8 +1,17 @@
 use super::*;
+use crate::database::Database;
+use crate::encryption::{EncryptionService, MasterKeyring};
+use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::ObjectSlot;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-use crate::sync::membership::AuthorStreamId;
-use crate::sync::storage::ExactObjectRef;
+use crate::sync::cloud_storage::{CloudCipher, CloudCipherAccess};
+use crate::sync::hlc::Hlc;
+use crate::sync::membership::{
+    validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
+    MembershipCoord, MembershipGrantId, MembershipHeadRef,
+};
+use crate::sync::storage::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
+};
 use crate::sync::store::database::StoreDatabase;
 use crate::sync::test_helpers::{
     install_active_device_fixture, open_test_db, promote_active_member_fixture, pubkey_hex,
@@ -12,6 +21,7 @@ use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
     store: TestStore,
+    device: crate::sync::test_helpers::TestDevice,
     db: Database,
     database: StoreDatabase,
     owner: UserKeypair,
@@ -25,9 +35,14 @@ async fn merge_fixture(store_id: &str) -> MergeFixture {
     let store = TestStore::create(&db, store_id, owner.clone())
         .await
         .expect("create exact Store");
+    let device = store
+        .bind_device(&db, &owner)
+        .await
+        .expect("bind exact Store");
     let database = StoreDatabase::new(&db);
     MergeFixture {
         store,
+        device,
         db,
         database,
         owner,
@@ -36,14 +51,11 @@ async fn merge_fixture(store_id: &str) -> MergeFixture {
 }
 
 async fn load_fixture(fixture: &MergeFixture) -> MembershipChain {
-    load_current_exact_chain(
-        &fixture.store.storage,
-        &fixture.store.root,
-        Some(&fixture.owner_pubkey),
-        Some(&StoreDatabase::new(&fixture.db)),
-    )
-    .await
-    .expect("load exact membership chain")
+    fixture
+        .device
+        .membership_for_test()
+        .await
+        .expect("load exact membership chain")
 }
 
 async fn invite_fixture_member(
@@ -51,21 +63,20 @@ async fn invite_fixture_member(
     member: &UserKeypair,
     role: MemberRole,
 ) -> crate::join_code::InviteCode {
-    invite_member(
-        &fixture.store.storage,
-        fixture.store.home.as_ref(),
-        &fixture.owner,
-        &Hlc::new("owner-device".to_string()),
-        &pubkey_hex(member),
-        None,
-        role,
-        &EncryptionService::from_key([42; 32]),
-        fixture.store.storage.store_id(),
-        "Test Store",
-        &fixture.database,
-    )
-    .await
-    .expect("invite exact member")
+    fixture
+        .store
+        .invite_member(
+            &fixture.db,
+            &fixture.owner,
+            &Hlc::new("owner-device".to_string()),
+            &pubkey_hex(member),
+            None,
+            role,
+            &EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("invite exact member")
 }
 
 async fn try_remove_fixture_member(
@@ -73,22 +84,17 @@ async fn try_remove_fixture_member(
     member: &UserKeypair,
 ) -> Result<String, MembershipOpsError> {
     let custody = TestCustody::default();
-    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [42; 32],
-    )));
-    remove_member(
-        &fixture.store.storage,
-        fixture.store.home.as_ref(),
-        &fixture.owner,
-        &Hlc::new("owner-device".to_string()),
-        &pubkey_hex(member),
-        &EncryptionService::from_key([42; 32]),
-        &custody,
-        &cipher,
-        &PendingRotation::none(),
-        &fixture.database,
-    )
-    .await
+    fixture
+        .store
+        .remove_member(
+            &fixture.db,
+            &fixture.owner,
+            &Hlc::new("owner-device".to_string()),
+            &pubkey_hex(member),
+            &EncryptionService::from_key([42; 32]),
+            &custody,
+        )
+        .await
 }
 
 async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
@@ -132,7 +138,10 @@ async fn overwrite_head(fixture: &MergeFixture, reference: &MembershipHeadRef, h
             serde_json::to_vec(head).expect("serialize replacement head"),
         )
         .expect("prepare replacement head");
-    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    fixture
+        .store
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("write replacement head");
 }
@@ -159,14 +168,13 @@ async fn current_floor_is_the_exact_signed_head_cut() {
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
 
     let chain = load_fixture(&fixture).await;
-    let floor = current_membership_floor(
-        &fixture.store.storage,
-        &fixture.store.root,
-        Some(&fixture.owner_pubkey),
-        Some(&StoreDatabase::new(&fixture.db)),
-    )
-    .await
-    .expect("read exact membership floor");
+    let floor = fixture
+        .device
+        .restore_membership()
+        .await
+        .expect("read exact membership floor")
+        .membership_floor
+        .0;
 
     assert_eq!(floor, chain.head_refs());
     assert!(floor.iter().all(|reference| reference.coord.seq > 0));
@@ -179,10 +187,11 @@ async fn current_floor_requires_every_exact_entry() {
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let chain = load_fixture(&fixture).await;
     let head = chain.head_refs().last().expect("current head").clone();
-    let loaded_head =
-        load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &head)
-            .await
-            .expect("load exact head");
+    let loaded_head = fixture
+        .device
+        .load_membership_head_for_test(&head)
+        .await
+        .expect("load exact head");
     fixture
         .store
         .storage
@@ -190,14 +199,10 @@ async fn current_floor_requires_every_exact_entry() {
         .await
         .expect("remove exact selected entry");
 
-    current_membership_floor(
-        &fixture.store.storage,
-        &fixture.store.root,
-        Some(&fixture.owner_pubkey),
-        Some(&StoreDatabase::new(&fixture.db)),
-    )
-    .await
-    .expect_err("a signed head whose exact entry is absent must fail");
+    assert!(
+        fixture.device.restore_membership().await.is_err(),
+        "a signed head whose exact entry is absent must fail"
+    );
 }
 
 #[tokio::test]
@@ -221,14 +226,8 @@ async fn persisted_author_floor_requires_readable_head() {
 
 async fn load_fixture_result(
     fixture: &MergeFixture,
-) -> Result<MembershipChain, MembershipOpsError> {
-    load_current_exact_chain(
-        &fixture.store.storage,
-        &fixture.store.root,
-        Some(&fixture.owner_pubkey),
-        Some(&StoreDatabase::new(&fixture.db)),
-    )
-    .await
+) -> Result<MembershipChain, crate::sync::store::StoreError> {
+    fixture.device.membership_for_test().await
 }
 
 #[tokio::test]
@@ -238,10 +237,11 @@ async fn membership_head_must_match_its_exact_author_coordinate() {
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let chain = load_fixture(&fixture).await;
     let reference = chain.head_refs().last().expect("current head").clone();
-    let mut head =
-        load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &reference)
-            .await
-            .expect("load exact head");
+    let mut head = fixture
+        .device
+        .load_membership_head_for_test(&reference)
+        .await
+        .expect("load exact head");
     head.body.entry.coord.author_pubkey = hex::encode([9; 32]);
     overwrite_head(&fixture, &reference, &head).await;
 
@@ -261,12 +261,18 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .unwrap();
-    let before_cursors = read_head_cursors(&fixture.db).await.unwrap();
+    let before_cursors = fixture
+        .database
+        .membership_head_cursors()
+        .await
+        .unwrap()
+        .head_refs;
     let reference = chain.head_refs().last().expect("current head").clone();
-    let mut head =
-        load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &reference)
-            .await
-            .expect("load exact head");
+    let mut head = fixture
+        .device
+        .load_membership_head_for_test(&reference)
+        .await
+        .expect("load exact head");
     head.signature = hex::encode([0; 64]);
     overwrite_head(&fixture, &reference, &head).await;
 
@@ -282,7 +288,12 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
         before_owner
     );
     assert_eq!(
-        read_head_cursors(&fixture.db).await.unwrap(),
+        fixture
+            .database
+            .membership_head_cursors()
+            .await
+            .unwrap()
+            .head_refs,
         before_cursors
     );
 }
@@ -296,15 +307,29 @@ async fn forked_membership_cursor_preserves_the_accepted_reference() {
         .first()
         .expect("founder head")
         .clone();
-    persist_head_cursors(&fixture.db, std::slice::from_ref(&current))
+    fixture
+        .database
+        .persist_membership_head_cursors(vec![current.clone()])
         .await
         .unwrap();
     let mut fork = current.clone();
     fork.head_hash = crate::sync::store_commit::ObjectHash::digest(b"forked head");
     fork.object = altered_exact(&current.object, b"forked object");
 
-    assert!(persist_head_cursors(&fixture.db, &[fork]).await.is_err());
-    assert_eq!(read_head_cursors(&fixture.db).await.unwrap(), vec![current]);
+    assert!(fixture
+        .database
+        .persist_membership_head_cursors(vec![fork])
+        .await
+        .is_err());
+    assert_eq!(
+        fixture
+            .database
+            .membership_head_cursors()
+            .await
+            .unwrap()
+            .head_refs,
+        vec![current]
+    );
 }
 
 #[tokio::test]
@@ -319,14 +344,11 @@ async fn missing_membership_head_is_rejected() {
         .await
         .expect("remove founder head");
 
-    load_exact_anchored_chain(
-        &fixture.store.storage,
-        &fixture.store.root,
-        &[],
-        Some(&fixture.owner_pubkey),
-    )
-    .await
-    .expect_err("a founder entry without its exact signed head is uncommitted");
+    fixture
+        .device
+        .load_membership_at_exact_heads_for_test(&[], &[])
+        .await
+        .expect_err("a founder entry without its exact signed head is uncommitted");
 }
 
 #[tokio::test]
@@ -352,7 +374,10 @@ async fn entry_beyond_membership_head_is_not_committed() {
     )
     .await
     .expect("prepare unheaded entry");
-    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    fixture
+        .store
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish unheaded entry");
 
@@ -384,9 +409,10 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         )
         .expect("open a Store-owned storage session"),
     );
-    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
-        .await
-        .expect("load Store owner");
+    let store =
+        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
+            .await
+            .expect("load Store owner");
     assert!(store
         .membership_conflict(Some(&fixture.owner.public_key()))
         .await
@@ -407,12 +433,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         },
     );
     let result = store
-        .resolve_membership_conflict(
-            &fixture.owner,
-            "owner-device",
-            &choice,
-            "2026-07-22T00:00:00Z",
-        )
+        .resolve_membership_conflict(&choice, "2026-07-22T00:00:00Z")
         .await;
 
     assert!(
@@ -445,9 +466,10 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
         )
         .expect("open a Store-owned storage session"),
     );
-    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
-        .await
-        .expect("load Store owner");
+    let store =
+        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
+            .await
+            .expect("load Store owner");
     fixture
         .db
         .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
@@ -481,9 +503,10 @@ async fn store_membership_reads_reject_tampered_founder_state() {
         )
         .expect("open a Store-owned storage session"),
     );
-    let store = crate::sync::store::Store::load(fixture.database.clone(), storage)
-        .await
-        .expect("load Store owner");
+    let store =
+        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
+            .await
+            .expect("load Store owner");
     fixture
         .db
         .set_protocol_state(crate::database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
@@ -510,23 +533,14 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
     let member = UserKeypair::generate();
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let current = load_fixture(&fixture).await;
-    let root_value = crate::sync::store_objects::load_store_protocol_root(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("load Store root")
-    .value;
-
-    let projected = project_anchored_chain_to_verified_store_prefix(
-        &fixture.store.storage,
-        &fixture.store.root,
-        &root_value,
-        current.head_refs(),
-        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
-    )
-    .await
-    .expect("project direct membership to the empty Store prefix");
+    let projected = fixture
+        .device
+        .project_membership_for_test(
+            current.head_refs(),
+            &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix::default(),
+        )
+        .await
+        .expect("project direct membership to the empty Store prefix");
 
     assert_eq!(projected.head_refs(), current.head_refs());
     assert!(projected.can_write_now(&pubkey_hex(&member)));
@@ -564,23 +578,14 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     invite_fixture_member(&fixture, &later_member, MemberRole::Member).await;
     let candidate = load_fixture(&fixture).await;
     assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
-    let root_value = crate::sync::store_objects::load_store_protocol_root(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("load Store root")
-    .value;
-
-    let projected = project_anchored_chain_to_verified_store_prefix(
-        &fixture.store.storage,
-        &fixture.store.root,
-        &root_value,
-        candidate.head_refs(),
-        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
-    )
-    .await
-    .expect("project membership before the Owner promotion Store control");
+    let projected = fixture
+        .device
+        .project_membership_for_test(
+            candidate.head_refs(),
+            &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix::default(),
+        )
+        .await
+        .expect("project membership before the Owner promotion Store control");
 
     assert_eq!(projected.head_refs(), before_promotion.head_refs());
     assert!(projected.can_write_now(&pubkey_hex(&member)));
@@ -597,10 +602,11 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .first()
         .expect("founder membership head")
         .clone();
-    let founder_head =
-        load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &founder_ref)
-            .await
-            .expect("load founder membership head");
+    let founder_head = fixture
+        .device
+        .load_membership_head_for_test(&founder_ref)
+        .await
+        .expect("load founder membership head");
     let registration = crate::sync::store::database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(founder_head.body.author_registration.clone())
         .await
@@ -640,7 +646,10 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
             serde_json::to_vec(&relocated).expect("serialize relocated membership head"),
         )
         .expect("prepare relocated membership head");
-    crate::sync::store_objects::create_exact_object(&fixture.store.storage, &prepared)
+    fixture
+        .store
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish relocated membership head");
     let relocated_ref = MembershipHeadRef {
@@ -649,13 +658,9 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         object: prepared.reference().clone(),
     };
 
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("open relocated membership history");
-    load_anchored_chain_at_exact_heads_with_history(&mut history_verifier, &[relocated_ref], &[])
+    fixture
+        .device
+        .load_membership_at_exact_heads_for_test(&[relocated_ref], &[])
         .await
         .expect_err("a membership head relocated outside its grant anchor must fail");
 }
@@ -677,62 +682,21 @@ async fn invite_carries_the_founder_and_exact_root() {
 #[tokio::test]
 async fn inviting_yourself_is_a_typed_self_invite_error() {
     let fixture = merge_fixture("self-invite").await;
-    let result = invite_member(
-        &fixture.store.storage,
-        fixture.store.home.as_ref(),
-        &fixture.owner,
-        &Hlc::new("owner-device".to_string()),
-        &fixture.owner_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        fixture.store.storage.store_id(),
-        "Test Store",
-        &fixture.database,
-    )
-    .await;
+    let result = fixture
+        .store
+        .invite_member(
+            &fixture.db,
+            &fixture.owner,
+            &Hlc::new("owner-device".to_string()),
+            &fixture.owner_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await;
 
     assert!(matches!(result, Err(MembershipOpsError::SelfInvite)));
-}
-
-#[tokio::test]
-async fn inviting_without_an_exact_root_is_refused_with_a_typed_variant() {
-    let store = TestStore::new().await;
-    let db = open_test_db();
-    let invitee = UserKeypair::generate();
-
-    let result = invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &store.signer,
-        &Hlc::new("owner-device".to_string()),
-        &pubkey_hex(&invitee),
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Test Store",
-        &StoreDatabase::new(&db),
-    )
-    .await;
-
-    assert!(matches!(result, Err(MembershipOpsError::NoFounderChain)));
-}
-
-#[tokio::test]
-async fn store_root_state_failures_keep_membership_error_variants() {
-    let store = TestStore::new().await;
-    let db = open_test_db();
-
-    assert!(matches!(
-        get_members(
-            &store.storage,
-            None,
-            &crate::sync::store::database::StoreDatabase::new(&db),
-        )
-        .await,
-        Err(MembershipOpsError::NoFounderChain)
-    ));
 }
 
 #[tokio::test]
@@ -777,7 +741,8 @@ fn apply_key_rotation_replays_an_already_adopted_keyring() {
         .persist(&MasterKeyring::from(live.clone()))
         .expect("seed custody");
     let cipher = RwLock::new(CloudCipher::Encrypted(live.clone()));
-    let fingerprint = apply_key_rotation(EncryptionService::from_key([1; 32]), &custody, &cipher)
+    let fingerprint = cipher
+        .adopt_key_rotation(&EncryptionService::from_key([1; 32]), &custody)
         .expect("an already-covered keyring is an idempotent adoption");
     assert_eq!(fingerprint, live.fingerprint());
     assert_eq!(
@@ -806,12 +771,26 @@ async fn head_cursor_persist_never_regresses() {
     lower.head_hash = crate::sync::store_commit::ObjectHash::digest(b"head 9");
     lower.object = altered_exact(&current.object, b"object 9");
 
-    persist_head_cursors(&fixture.db, std::slice::from_ref(&higher))
+    fixture
+        .database
+        .persist_membership_head_cursors(vec![higher.clone()])
         .await
         .unwrap();
-    persist_head_cursors(&fixture.db, &[lower]).await.unwrap();
+    fixture
+        .database
+        .persist_membership_head_cursors(vec![lower])
+        .await
+        .unwrap();
 
-    assert_eq!(read_head_cursors(&fixture.db).await.unwrap(), vec![higher]);
+    assert_eq!(
+        fixture
+            .database
+            .membership_head_cursors()
+            .await
+            .unwrap()
+            .head_refs,
+        vec![higher]
+    );
 }
 
 #[tokio::test]
@@ -823,14 +802,18 @@ async fn head_cursor_rejects_a_reference_from_another_author_stream() {
         .first()
         .expect("founder head")
         .clone();
-    persist_head_cursors(&fixture.db, std::slice::from_ref(&current))
+    fixture
+        .database
+        .persist_membership_head_cursors(vec![current.clone()])
         .await
         .unwrap();
     let mut mismatched = current.clone();
     mismatched.coord.author_pubkey = hex::encode([3; 32]);
     mismatched.coord.seq = current.coord.seq + 1;
 
-    assert!(persist_head_cursors(&fixture.db, &[mismatched])
+    assert!(fixture
+        .database
+        .persist_membership_head_cursors(vec![mismatched])
         .await
         .is_err());
 }
@@ -905,7 +888,8 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     second.object = altered_exact(&first.object, b"second exact head");
     let mut floor = vec![first, second.clone()];
     floor.sort_by_key(|reference| reference.coord.stream_key());
-    let rejected_key = head_cursor_key(&second);
+    let rejected_key =
+        crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
     db.call(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_second_membership_floor \
@@ -918,8 +902,17 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     .await
     .unwrap();
 
-    assert!(seed_head_watermark(&db, &floor).await.is_err());
-    assert!(read_head_cursors(&db).await.unwrap().is_empty());
+    let database = StoreDatabase::new(&db);
+    assert!(database
+        .persist_membership_head_cursors(floor)
+        .await
+        .is_err());
+    assert!(database
+        .membership_head_cursors()
+        .await
+        .unwrap()
+        .head_refs
+        .is_empty());
 }
 
 #[tokio::test]
@@ -932,7 +925,8 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .first()
         .expect("founder head")
         .clone();
-    let rejected_key = head_cursor_key(&head);
+    let rejected_key =
+        crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
     db.call(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_anchor_cursor \
@@ -945,11 +939,11 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
     .await
     .unwrap();
 
-    assert!(load_and_persist_owner_anchor(
-        &fixture.store.storage,
+    assert!(crate::sync::store::Store::open(
+        StoreDatabase::new(&db),
+        fixture.store.storage.clone(),
         &fixture.store.root,
-        &fixture.owner_pubkey,
-        &crate::sync::store::database::StoreDatabase::new(&db),
+        &fixture.owner,
     )
     .await
     .is_err());
@@ -957,7 +951,12 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None
     );
-    assert!(read_head_cursors(&db).await.unwrap().is_empty());
+    assert!(StoreDatabase::new(&db)
+        .membership_head_cursors()
+        .await
+        .unwrap()
+        .head_refs
+        .is_empty());
 }
 
 #[tokio::test]
@@ -968,10 +967,11 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
     remove_fixture_member(&fixture, &member).await;
     let chain = load_fixture(&fixture).await;
     let latest = chain.head_refs().last().expect("latest head").clone();
-    let latest_head =
-        load_exact_membership_head(&fixture.store.storage, &fixture.store.root, &latest)
-            .await
-            .expect("load latest head");
+    let latest_head = fixture
+        .device
+        .load_membership_head_for_test(&latest)
+        .await
+        .expect("load latest head");
     let predecessor = latest_head.body.predecessor.expect("remove predecessor");
     fixture
         .store
@@ -991,61 +991,11 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
 async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively() {
     let fixture = merge_fixture("deep-membership-projection").await;
     let chain = load_fixture(&fixture).await;
-    let root_value = crate::sync::store_objects::load_store_protocol_root(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("load Store root")
-    .value;
-    let seed = load_exact_membership_graph_objects(
-        &fixture.store.storage,
-        &fixture.store.root,
-        &root_value,
-        chain.head_refs(),
-    )
-    .await
-    .expect("load seed membership graph")
-    .path_heads
-    .into_values()
-    .next()
-    .expect("founder membership head");
-
-    let mut path_heads = BTreeMap::new();
-    let mut predecessor = None;
-    for sequence in 1..=20_000_u64 {
-        let mut node = seed.clone();
-        node.entry.seq = sequence;
-        node.entry.previous_hash = predecessor
-            .as_ref()
-            .map(|reference: &MembershipHeadRef| reference.coord.entry_hash);
-        node.entry.dependencies.clear();
-        node.entry.resolution_dependencies.clear();
-        node.reference.coord = node.entry.coord();
-        node.head.body.entry.coord = node.reference.coord.clone();
-        node.head.body.predecessor = predecessor.clone();
-        predecessor = Some(node.reference.clone());
-        path_heads.insert(node.reference.coord.clone(), node);
-    }
-    let graph = LoadedExactMembershipGraph {
-        entries: path_heads
-            .iter()
-            .map(|(coord, node)| (coord.clone(), node.entry.clone()))
-            .collect(),
-        heads: Vec::new(),
-        path_heads,
-    };
-    let statuses = membership_projection_statuses(
-        &graph,
-        &crate::sync::store::pull::VerifiedMergeMembershipPrefix::default(),
-        &BTreeMap::new(),
-    )
-    .expect("project deep predecessor path");
-
-    assert_eq!(statuses.len(), 20_000);
-    assert!(statuses
-        .values()
-        .all(|status| *status == MembershipProjectionStatus::Included));
+    fixture
+        .device
+        .assert_deep_membership_projection_for_test(chain.head_refs())
+        .await
+        .expect("project deep membership path");
 }
 
 /// A Store-activated removal composes its candidate against this device's next
@@ -1092,30 +1042,19 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
                  '0000000001000-0000-owner', '2026-07-21')",
     )
     .await;
-    let device_id = fixture
-        .db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read the owner device id")
-        .expect("the owner has an active device");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let membership =
-        crate::sync::store::pull::load_cycle_membership(&fixture.store.storage, &fixture.database)
-            .await
-            .expect("load the owner's membership");
-    assert!(
-        Box::pin(crate::sync::store::preparation::prepare_store_write(
-            &fixture.database,
-            &fixture.store.storage,
-            &device_id,
-            "2026-07-21T01:00:00Z",
-            &fixture.owner,
-            &store_dir,
-            &membership,
-        ))
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.owner)
         .await
-        .expect("queue a host write at the contended position")
-    );
+        .expect("load owner Store");
+    let mut writer = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize owner writer");
+    assert!(Box::pin(writer.prepare_pending_store_write(&store_dir))
+        .await
+        .expect("queue a host write at the contended position"));
 
     // Stop the removal before it publishes anything, leaving its candidate
     // durable and bound to the position it composed against.
@@ -1134,12 +1073,9 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     );
 
     assert_eq!(
-        Box::pin(crate::sync::store::publication::drain_store_writes(
-            &fixture.database,
-            &fixture.store.storage,
-        ))
-        .await
-        .expect("publish the queued host write"),
+        Box::pin(writer.drain_store_writes())
+            .await
+            .expect("publish the queued host write"),
         1,
     );
 

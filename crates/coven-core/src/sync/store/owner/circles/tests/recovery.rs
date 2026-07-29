@@ -15,26 +15,23 @@ struct RevokedOperation {
 async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let founder_pubkey = keys::public_key_hex(&founder);
     let store = create_test_store_in_its_own_task(&db, name, &founder).await;
     let successor = UserKeypair::generate();
     let successor_pubkey = keys::public_key_hex(&successor);
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::membership::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &successor_pubkey,
-        None,
-        MemberRole::Member,
-        &encryption,
-        name,
-        "Recovery test Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite successor member");
+    store
+        .invite_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &successor_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Recovery test Store",
+        )
+        .await
+        .expect("invite successor member");
     let successor_db = open_test_db();
     install_active_device_fixture(
         &store,
@@ -45,27 +42,24 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
     )
     .await
     .expect("activate successor device");
-    let exact_membership = crate::sync::store::membership::load_current_exact_chain(
-        &store.storage,
-        &store.root,
-        Some(&founder_pubkey),
-        Some(&StoreDatabase::new(&successor_db)),
-    )
-    .await
-    .expect("load the operation author's exact Store grant");
+    let exact_membership = store
+        .bind_device(&successor_db, &successor)
+        .await
+        .expect("bind successor Store")
+        .membership_for_test()
+        .await
+        .expect("load the operation author's exact Store grant");
     let [author_grant_id] = exact_membership
         .active_grant_ids(&successor_pubkey)
         .into_iter()
         .collect::<Vec<_>>()
         .try_into()
         .expect("operation author has one active Store grant");
-    let successor_device_id = local_device_id(&successor_db).await;
     // The member device is the one that authors and publishes; drive everything
     // through its database so its local membership view governs authority.
     let journal = prepare_circle_operation(
         &successor_db,
         &store.storage,
-        &successor_device_id,
         "0000000001003-0000-successor",
         "Revoked Circle",
         &successor,
@@ -80,22 +74,17 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let cipher = store.storage.cipher_state().clone();
-    let pending_rotation = store.storage.shared_pending_rotation();
-    crate::sync::store::membership::remove_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &successor_pubkey,
-        &encryption,
-        &custody,
-        cipher.as_ref(),
-        pending_rotation.as_ref(),
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("remove successor grant");
+    store
+        .remove_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &successor_pubkey,
+            &encryption,
+            &custody,
+        )
+        .await
+        .expect("remove successor grant");
 
     RevokedOperation {
         db: successor_db,
@@ -143,11 +132,9 @@ async fn operation_inspection_surface_reports_the_typed_block() {
     let founder = UserKeypair::generate();
     let store =
         create_test_store_in_its_own_task(&db, "recovery-inspection-notblocked", &founder).await;
-    let device_id = local_device_id(&db).await;
     let journal = prepare_circle_operation(
         &db,
         &store.storage,
-        &device_id,
         "0000000001000-0000-founder",
         "Ready Circle",
         &founder,
@@ -206,11 +193,9 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(&db, "recovery-retry-republish", &founder).await;
-    let device_id = local_device_id(&db).await;
     let journal = prepare_circle_operation(
         &db,
         &store.storage,
-        &device_id,
         "0000000001000-0000-founder",
         "Household",
         &founder,
@@ -222,14 +207,13 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let expected_control = journal.operation().creation.control.coord.clone();
     let expected_commit_object = journal.operation().commit_ref.object.clone();
     let founder_pubkey = keys::public_key_hex(&founder);
-    let exact_membership = crate::sync::store::membership::load_current_exact_chain(
-        &store.storage,
-        &store.root,
-        Some(&founder_pubkey),
-        Some(&StoreDatabase::new(&db)),
-    )
-    .await
-    .expect("load the founder's exact Store grant");
+    let exact_membership = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind founder Store")
+        .membership_for_test()
+        .await
+        .expect("load the founder's exact Store grant");
     let [author_grant_id] = exact_membership
         .active_grant_ids(&founder_pubkey)
         .into_iter()
@@ -286,7 +270,7 @@ async fn discard_without_nonactivation_proof_is_refused() {
     let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-refusal").await;
     let operation_id = journal.operation_id.clone();
 
-    let refusal = discard_circle_operation(&db, &store.storage, &operation_id)
+    let refusal = discard_circle_operation(&db, &store.storage, &operation_id, &signer)
         .await
         .expect_err("discard without a nonactivation proof is refused");
     assert!(
@@ -305,7 +289,6 @@ async fn discard_without_nonactivation_proof_is_refused() {
             .is_some(),
         "a refused discard leaves the operation durable"
     );
-    let _ = signer;
 }
 
 /// An accepted Store commit names the membership transition that revokes the
@@ -332,26 +315,25 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue the membership-revocation witness");
-    let owner_device_id = local_device_id(&revoked.owner_db).await;
     let (_owner_temp, owner_store_dir) = temp_store_dir();
-    let mut owner_authorization =
-        crate::sync::store::Store::authorize_borrowed(&revoked.store.storage, &revoked.owner_db)
-            .await
-            .expect("authorize the revocation witness");
+    let owner_store = revoked
+        .store
+        .bind_device(&revoked.owner_db, &revoked.founder)
+        .await
+        .expect("load the revocation witness Store");
+    let mut writer = owner_store
+        .authorize_writer()
+        .await
+        .expect("authorize the revocation witness writer");
     assert!(
-        owner_authorization
-            .prepare_pending_store_write(
-                &owner_device_id,
-                "0000000001004-0000-founder",
-                &revoked.founder,
-                &owner_store_dir,
-            )
+        writer
+            .prepare_pending_store_write(&owner_store_dir)
             .await
             .expect("prepare the membership-revocation witness"),
         "membership revocation must be named by a Store commit"
     );
     assert_eq!(
-        owner_authorization
+        writer
             .drain_store_writes()
             .await
             .expect("publish the membership-revocation witness"),
@@ -361,15 +343,15 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
 
     let member_store = revoked
         .store
-        .loaded_store(&revoked.db)
+        .bind_device(&revoked.db, &revoked.successor)
         .await
         .expect("load removed member Store");
     let (_member_temp, member_store_dir) = temp_store_dir();
     let pull = member_store
-        .authorize()
+        .authorize_writer()
         .await
         .expect("authorize removed member Store pull")
-        .pull(&member_store_dir, &revoked.successor, None)
+        .pull(&member_store_dir, None)
         .await
         .expect("pull the accepted membership-revocation witness");
     assert!(
@@ -378,9 +360,14 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         pull.held_positions
     );
 
-    discard_circle_operation(&revoked.db, &revoked.store.storage, &revoked.operation_id)
-        .await
-        .expect("the accepted membership revocation permits discard");
+    discard_circle_operation(
+        &revoked.db,
+        &revoked.store.storage,
+        &revoked.operation_id,
+        &revoked.successor,
+    )
+    .await
+    .expect("the accepted membership revocation permits discard");
 
     assert!(
         StoreDatabase::new(&revoked.db)
@@ -416,7 +403,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         "the candidate commit reached cloud storage before the slot was lost"
     );
 
-    discard_circle_operation(&db, &store.storage, &operation_id)
+    discard_circle_operation(&db, &store.storage, &operation_id, &signer)
         .await
         .expect("the verified winner permits discard");
 
@@ -461,7 +448,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
     // Fail the first candidate-exclusive deletion, after the transaction that
     // recorded the proof and moved the row into `Discarding` has committed.
     store.home.fail_exact_delete_on_call(1);
-    discard_circle_operation(&db, &store.storage, &operation_id)
+    discard_circle_operation(&db, &store.storage, &operation_id, &signer)
         .await
         .expect_err("the injected delete failure interrupts cleanup");
     assert_eq!(
@@ -494,11 +481,9 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(&db, "recovery-retry-refusal", &founder).await;
-    let device_id = local_device_id(&db).await;
     let ready = prepare_circle_operation(
         &db,
         &store.storage,
-        &device_id,
         "0000000001000-0000-founder",
         "Household",
         &founder,
@@ -557,11 +542,9 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
 async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it() {
     let db = open_test_db();
     let (store, signer, first) = persist_merge_operation(&db, "recovery-position-lost").await;
-    let device_id = local_device_id(&db).await;
     let second = prepare_circle_operation(
         &db,
         &store.storage,
-        &device_id,
         "0000000002000-0000-creator",
         "Second household",
         &signer,

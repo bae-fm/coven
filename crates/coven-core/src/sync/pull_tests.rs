@@ -5,6 +5,7 @@
 //! the real `pull_changes` + blob plumbing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
@@ -18,10 +19,10 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
+use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::store::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
-use crate::sync::store::{PullError, OWNER_PUBKEY_STATE_KEY};
 use crate::sync::store_commit::StoreDeviceHead;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
@@ -65,6 +66,28 @@ async fn row_blob_ref(
     db.row_blob_ref(table, row_id)
         .await
         .expect("load exact row blob reference")
+}
+
+async fn pull_with_bound_storage(
+    db: &crate::database::Database,
+    storage: Arc<dyn SyncStorage>,
+    identity: UserKeypair,
+    store_dir: &crate::store_dir::StoreDir,
+    routing_encryption: Option<&EncryptionService>,
+) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
+    let store = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(db),
+        storage,
+        identity,
+    )
+    .await
+    .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?;
+    store
+        .authorize_writer()
+        .await
+        .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?
+        .pull(store_dir, routing_encryption)
+        .await
 }
 
 async fn stored_remote_object(
@@ -356,7 +379,7 @@ async fn local_announcement_stream(
 
 #[async_trait]
 trait TestStoreStorage {
-    fn sync_storage(&self) -> &dyn SyncStorage;
+    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage>;
 
     async fn bind_for_test_publish(
         &self,
@@ -367,16 +390,16 @@ trait TestStoreStorage {
 
 #[async_trait]
 impl TestStoreStorage for TestStore {
-    fn sync_storage(&self) -> &dyn SyncStorage {
-        &self.storage
+    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage> {
+        self.storage.clone()
     }
 
     async fn bind_for_test_publish(
         &self,
         db: &crate::database::Database,
-        _keypair: &UserKeypair,
+        keypair: &UserKeypair,
     ) -> Result<(), String> {
-        self.open_into(db)
+        self.bind_device(db, keypair)
             .await
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -384,9 +407,9 @@ impl TestStoreStorage for TestStore {
 }
 
 #[async_trait]
-impl TestStoreStorage for CloudSyncStorage {
-    fn sync_storage(&self) -> &dyn SyncStorage {
-        self
+impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
+    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage> {
+        self.clone()
     }
 
     async fn bind_for_test_publish(
@@ -400,9 +423,9 @@ impl TestStoreStorage for CloudSyncStorage {
             .map_err(|error| error.to_string())?
             .is_none()
         {
-            crate::sync::store::protocol_root::create_store(
-                &crate::sync::store::StoreDatabase::new(db),
-                self,
+            crate::sync::store::Store::create(
+                crate::sync::store::StoreDatabase::new(db),
+                self.clone(),
                 self.store_id(),
                 keypair,
             )
@@ -419,9 +442,11 @@ fn cloud_test_storage(
     blob_paths: BlobPathScheme,
     store_id: &str,
     keypair: UserKeypair,
-) -> CloudSyncStorage {
-    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
-        .expect("test cloud storage supports immutable copies")
+) -> std::sync::Arc<CloudSyncStorage> {
+    std::sync::Arc::new(
+        CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
+            .expect("test cloud storage supports immutable copies"),
+    )
 }
 
 /// Publish exact package bytes through the durable Store write ledger.
@@ -431,7 +456,6 @@ async fn sync_for_test<S: TestStoreStorage>(
     outgoing: Vec<u8>,
     local_seq: u64,
     storage: &S,
-    timestamp: &str,
     message: &str,
     keypair: &UserKeypair,
     store_dir: &crate::store_dir::StoreDir,
@@ -444,7 +468,14 @@ async fn sync_for_test<S: TestStoreStorage>(
         "Store commits carry no arbitrary message"
     );
     storage.bind_for_test_publish(db, keypair).await?;
-    let before = crate::sync::store::StoreDatabase::new(db)
+    let store = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(db),
+        storage.cloud_storage(),
+        keypair.clone(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let before = store
         .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())?;
@@ -458,27 +489,22 @@ async fn sync_for_test<S: TestStoreStorage>(
         .enqueue_store_changeset_for_test(outgoing)
         .await
         .map_err(|error| error.to_string())?;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let mut writer = store
+        .authorize_writer()
         .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "exact test Store has no activated local device".to_string())?;
-    let mut authorization =
-        crate::sync::store::Store::authorize_borrowed(storage.sync_storage(), db)
-            .await
-            .map_err(|error| error.to_string())?;
-    let prepared = authorization
-        .prepare_pending_store_write(&device_id, timestamp, keypair, store_dir)
+        .map_err(|error| error.to_string())?;
+    let prepared = writer
+        .prepare_pending_store_write(store_dir)
         .await
         .map_err(|error| error.to_string())?;
     if !prepared {
         return Ok(None);
     }
-    authorization
+    writer
         .drain_store_writes()
         .await
         .map_err(|error| error.to_string())?;
-    crate::sync::store::StoreDatabase::new(db)
+    writer
         .latest_local_store_position()
         .await
         .map_err(|error| error.to_string())
@@ -487,7 +513,7 @@ async fn sync_for_test<S: TestStoreStorage>(
 async fn pull_exact_store_into(
     destination: &crate::database::Database,
     source: &crate::database::Database,
-    storage: &CloudSyncStorage,
+    storage: &Arc<CloudSyncStorage>,
     store_dir: &crate::store_dir::StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
@@ -498,37 +524,23 @@ async fn pull_exact_store_into(
         .await
         .expect("read source Store root")
         .expect("source Store has exact root authority");
-    let destination_store = crate::sync::store::StoreDatabase::new(destination);
-    let protocol_root =
-        crate::sync::store::protocol_root::open_store(&destination_store, storage, &root)
-            .await
-            .expect("open exact Store on destination");
-    crate::sync::store::anchor_owner_membership(
-        storage,
-        &destination_store,
+    let initialized = crate::sync::store::Store::open(
+        crate::sync::store::StoreDatabase::new(destination),
+        storage.clone(),
         &root,
-        &protocol_root.value,
         storage.user_keypair(),
     )
     .await
-    .expect("anchor exact Store membership");
-    let membership = crate::sync::store::load_cycle_membership(storage, &destination_store)
-        .await
-        .expect("load exact Store membership");
+    .expect("open exact Store on destination");
     let routing_encryption = EncryptionService::from_key([42; 32]);
-    let result = crate::sync::store::pull_store_commits(
-        &store_database(destination),
-        destination.synced_tables(),
-        storage,
-        root.store_root_hash,
-        store_dir,
-        &membership,
-        None,
-        Some(&routing_encryption),
-    )
-    .await
-    .expect("pull exact Store commits")
-    .result;
+    let result = initialized
+        .store
+        .authorize_writer()
+        .await
+        .expect("authorize exact destination Store")
+        .pull(store_dir, Some(&routing_encryption))
+        .await
+        .expect("pull exact Store commits");
     let positions = result
         .frontier
         .iter()
@@ -656,7 +668,6 @@ async fn publish_blob_changeset(
         changeset,
         local_sequence,
         storage,
-        "2026-01-01T00:00:00Z",
         "",
         &storage.protocol_founder_keypair(),
         store_dir,
@@ -673,7 +684,11 @@ async fn make_test_root_remote(
     root_id: &str,
 ) {
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store::ensure_active_registration(&store_database(db), &storage.storage)
+    storage
+        .bind_device(db, &storage.signer)
+        .await
+        .expect("load exact fixture Store")
+        .authorize_writer()
         .await
         .expect("activate exact fixture writer");
     let hlc = crate::sync::hlc::Hlc::new("blob-fixture".to_string());
@@ -787,15 +802,19 @@ fn membership_author_stream(
 
 async fn exact_membership_chain(storage: &TestStore) -> MembershipChain {
     let db = open_test_db();
-    storage
+    let device = storage
         .open_into(&db)
         .await
-        .expect("load exact test Store membership")
+        .expect("load exact test Store membership");
+    device
+        .membership_for_test()
+        .await
+        .expect("authorize exact test Store membership")
 }
 
 async fn exact_membership_registration(
     storage: &TestStore,
-    history_verifier: &crate::sync::store::MergeHistoryVerifier<'_>,
+    authority: &crate::sync::store::Store,
     chain: &MembershipChain,
     entry: &crate::sync::membership::MembershipEntry,
     signer: &UserKeypair,
@@ -809,21 +828,14 @@ async fn exact_membership_registration(
         &entry.author_owner_grant,
         entry.stream_id,
     ) {
-        let head = crate::sync::store::load_exact_membership_head_with_history(
-            history_verifier,
-            predecessor,
-        )
-        .await
-        .expect("load exact predecessor membership head");
-        let registration = crate::sync::store_objects::load_registration_ref_with_root(
-            &storage.storage,
-            &storage.root,
-            history_verifier.verified_root(),
-            &head.body.author_registration,
-        )
-        .await
-        .expect("load exact membership author registration")
-        .value;
+        let head = authority
+            .load_membership_head_for_test(predecessor)
+            .await
+            .expect("load exact predecessor membership head");
+        let registration = authority
+            .load_registration_for_test(&head.body.author_registration)
+            .await
+            .expect("load exact membership author registration");
         let device_signer = registration
             .device_signer(signer)
             .expect("membership signer owns exact device registration");
@@ -928,9 +940,12 @@ async fn exact_membership_registration(
     let prepared = storage
         .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
         .expect("prepare exact membership registration object");
-    let object = crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish exact membership registration object");
+    let object = prepared.reference().clone();
     let reference = StoreDeviceRegistrationRef::from_registration(&registration, object);
     let device_signer = registration
         .device_signer(signer)
@@ -948,13 +963,13 @@ async fn publish_exact_membership_entry(
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{membership_head_slot_prefix, StreamActivation, SuccessorLink};
 
-    let history_verifier =
-        crate::sync::store::MergeHistoryVerifier::new(&storage.storage, &storage.root)
-            .await
-            .expect("authenticate exact membership publication");
+    let authority = storage
+        .founder_device()
+        .await
+        .expect("authenticate exact membership publication");
     let coord = entry.coord();
     let (registration_ref, registration, device_signer) =
-        exact_membership_registration(storage, &history_verifier, chain, &entry, signer).await;
+        exact_membership_registration(storage, &authority, chain, &entry, signer).await;
     let predecessor = chain
         .head_ref_for_stream(
             &coord.author_pubkey,
@@ -968,15 +983,13 @@ async fn publish_exact_membership_entry(
         .clone();
     let current_slot = match predecessor.as_ref() {
         Some(reference) => {
-            crate::sync::store::load_exact_membership_head_with_history(
-                &history_verifier,
-                reference,
-            )
-            .await
-            .expect("load exact membership predecessor")
-            .body
-            .successor
-            .next_slot
+            authority
+                .load_membership_head_for_test(reference)
+                .await
+                .expect("load exact membership predecessor")
+                .body
+                .successor
+                .next_slot
         }
         None => match &anchor {
             crate::sync::store_commit::GrantStreamAnchor::StoreMembership { first_slot } => {
@@ -999,7 +1012,9 @@ async fn publish_exact_membership_entry(
     )
     .await
     .expect("prepare exact membership entry");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &entry_object)
+    storage
+        .storage
+        .create_protocol_object(&entry_object)
         .await
         .expect("publish exact membership entry");
 
@@ -1059,9 +1074,12 @@ async fn publish_exact_membership_entry(
             serde_json::to_vec(&head).expect("serialize exact membership head"),
         )
         .expect("prepare exact membership head");
-    let object = crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish exact membership head");
+    let object = prepared.reference().clone();
     chain
         .add_entry(entry)
         .expect("extend exact membership test chain");
@@ -1098,12 +1116,11 @@ async fn load_exact_published_commit_as(
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration};
 
-    let mut commit_verifier =
-        crate::sync::store::StoreCommitVerifier::new(&storage.storage, &storage.root)
-            .await
-            .expect("open Store commit verifier");
-    let commit = commit_verifier
-        .load_ref(&reference)
+    let commit = storage
+        .founder_device()
+        .await
+        .expect("open Store authority")
+        .load_commit_for_test(&reference)
         .await
         .expect("verify exact published Store commit");
     let registration = commit.author().clone();
@@ -1227,10 +1244,12 @@ async fn publish_replacement_exact_commit(
     let commit_prepared = storage
         .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
         .expect("prepare replacement exact Store commit");
-    let commit_object =
-        crate::sync::store_objects::create_exact_object(&storage.storage, &commit_prepared)
-            .await
-            .expect("publish replacement exact Store commit");
+    storage
+        .storage
+        .create_protocol_object(&commit_prepared)
+        .await
+        .expect("publish replacement exact Store commit");
+    let commit_object = commit_prepared.reference().clone();
     crate::sync::store_commit::StoreBatchCommitRef {
         coord: graph.reference.coord.clone(),
         commit_hash,
@@ -1277,7 +1296,9 @@ async fn replace_exact_commit_head(
             head.to_bytes(),
         )
         .expect("prepare replacement exact Store head");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &head_prepared)
+    storage
+        .storage
+        .create_protocol_object(&head_prepared)
         .await
         .expect("publish replacement exact Store head");
 }
@@ -1342,7 +1363,9 @@ async fn replace_exact_head(
             head.to_bytes(),
         )
         .expect("prepare replacement exact Store head");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish replacement exact Store head");
 }
@@ -1357,12 +1380,15 @@ async fn resign_exact_commit(
         .commit
         .store_package()
         .expect("test Store commit carries a Store package");
-    let package_bytes =
-        crate::sync::store_objects::load_store_package(&storage.storage, &graph.commit)
-            .await
-            .expect("load exact Store package")
-            .expect("exact Store package exists")
-            .value;
+    let package_bytes = storage
+        .founder_device()
+        .await
+        .expect("load Store package authority")
+        .load_store_package_for_test(&graph.reference)
+        .await
+        .expect("load exact Store package")
+        .expect("exact Store package exists")
+        .value;
     let predecessor = match &membership_authority {
         Some(authority) => authority.clone(),
         None => graph
@@ -1458,7 +1484,9 @@ async fn replace_exact_package_bytes(
     let prepared = storage
         .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
         .expect("prepare replacement exact Store package");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish replacement exact Store package");
 }
@@ -1538,76 +1566,6 @@ async fn publish_exact_changeset_with_authority(
     .await
 }
 
-async fn create_exact_blob(
-    db: &crate::database::Database,
-    storage: &TestStore,
-    namespace: &str,
-    id: &str,
-    cloud_path: Option<&str>,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let (uploader, registration) = store_database(db)
-        .local_blob_write_authority()
-        .await
-        .expect("load exact blob write authority");
-    let authority = crate::sync::storage::BlobWriteAuthority::new(&uploader, &registration)
-        .expect("validate exact blob write authority");
-    let protection = EncryptionService::from_key([42; 32]);
-    let locator = match cloud_path {
-        Some(path) => crate::blob::locator::BlobLocator::browsable(
-            namespace,
-            id,
-            uploader.clone(),
-            path,
-            bytes.len() as u64,
-            crate::sync::store_commit::ObjectHash::digest(bytes),
-        ),
-        None => crate::blob::locator::BlobLocator::opaque(
-            namespace,
-            id,
-            uploader.clone(),
-            crate::blob::locator::RemoteAudience::Store,
-            crate::blob::BlobScope::Master,
-            protection.seal_key_fingerprint(),
-            bytes.len() as u64,
-            crate::sync::store_commit::ObjectHash::digest(bytes),
-        ),
-    }
-    .expect("build exact blob locator");
-    let temp = tempfile::tempdir().expect("create exact blob spool directory");
-    let plaintext = temp.path().join("plaintext");
-    let spool = temp.path().join("stored");
-    crate::local_blob::write_atomic(&plaintext, bytes)
-        .await
-        .expect("write exact blob plaintext");
-    let slot = storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate exact blob slot");
-    let spool_protection = match cloud_path {
-        Some(_) => crate::sync::storage::BlobSpoolProtection::Browsable,
-        None => crate::sync::storage::BlobSpoolProtection::Opaque(protection),
-    };
-    storage
-        .seal_blob_to_spool(&locator, &authority, spool_protection, &plaintext, &spool)
-        .await
-        .expect("seal exact blob");
-    let stored = storage
-        .prepare_blob_object(&locator, &authority, slot, &spool)
-        .await
-        .expect("prepare exact blob object");
-    storage
-        .create_blob_object_from_file(
-            &stored,
-            &authority,
-            &spool,
-            &crate::storage::cloud::no_progress(),
-        )
-        .await
-        .expect("create exact blob object");
-    stored
-}
-
 async fn read_exact_blob(
     storage: &TestStore,
     blob: &crate::blob::locator::StoredBlobRef,
@@ -1665,6 +1623,11 @@ impl FaultingStorage {
             membership_reads_until_failure: std::sync::atomic::AtomicUsize::new(0),
             fail_blob_read: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    fn arm_membership(&self, read: usize) {
+        self.membership_reads_until_failure
+            .store(read, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn fail_membership_read(&self, semantic_prefix: &str) -> bool {
@@ -2099,8 +2062,12 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_op
     assert!(encoded.contains(&package_application));
     let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
     replace_retained_merge_input(&target, stream_id.clone(), missing_receiver).await;
-    let error = match store_database(&target)
-        .retained_merge_materialization(commit.clone())
+    let target_store = storage
+        .bind_device(&target, &storage.signer)
+        .await
+        .expect("load retained materialization Store");
+    let error = match target_store
+        .retained_merge_materialization_for_test(commit.clone())
         .await
     {
         Ok(_) => panic!("a retained package must carry its receive-time conflict bound"),
@@ -2112,8 +2079,8 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_op
 
     replace_retained_merge_input(&target, stream_id.clone(), canonical_input.clone()).await;
 
-    let verified_before_corruption = store_database(&target)
-        .retained_merge_replay_inputs()
+    let verified_before_corruption = target_store
+        .retained_merge_replay_inputs_for_test()
         .await
         .expect("load verified retained Merge history")
         .into_iter()
@@ -2137,8 +2104,8 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_at_op
         })
         .await
         .expect("corrupt retained Merge input");
-    let verified_after_corruption = store_database(&target)
-        .retained_merge_replay_inputs()
+    let verified_after_corruption = target_store
+        .retained_merge_replay_inputs_for_test()
         .await
         .expect("the open connection retains its verified Merge history")
         .into_iter()
@@ -2214,9 +2181,11 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         &crate::sync::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
     ));
     replace_stored_remote_object(&target, &second_package.object, &missing).await;
+    let root = storage.root.clone();
     assert!(target
-        .call(|conn| {
-            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        .call(move |conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
+                .map(drop)
         })
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
@@ -2244,9 +2213,11 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         ),
     );
     replace_stored_remote_object(&target, &second_package.object, &tampered).await;
+    let root = storage.root.clone();
     assert!(target
-        .call(|conn| {
-            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        .call(move |conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
+                .map(drop)
         })
         .await
         .expect_err("tampered replay pin must fail durable retained-history verification")
@@ -2304,9 +2275,11 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure")
     );
+    let root = storage.root.clone();
     assert!(target
-        .call(|conn| {
-            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn).map(drop)
+        .call(move |conn| {
+            crate::sync::store::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
+                .map(drop)
         })
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
@@ -3132,7 +3105,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 
 /// The push side stamps an outgoing changeset with the db's
 /// [`Database::schema_version`], driven through the real producer
-/// (`service::sync`) and read back off the produced envelope — so a regression
+/// (Store write preparation) and read back off the produced envelope — so a regression
 /// that stamped a constant instead would fail here. Paired with
 /// `pull_gate_tracks_the_dbs_schema_version`, which covers the receiver gate.
 #[tokio::test]
@@ -3154,31 +3127,21 @@ async fn push_stamps_the_dbs_schema_version() {
     .await;
 
     let keypair = storage.protocol_founder_keypair();
-    let result = sync_for_test(
-        &db1,
-        &tables,
-        outgoing,
-        0,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await
-    .expect("sync push");
+    let result = sync_for_test(&db1, &tables, outgoing, 0, &storage, "", &keypair, &ld1)
+        .await
+        .expect("sync push");
 
     let position = result.expect("an outgoing Store commit");
     let stream_id = commit_stream_id(&position);
-    let (_commit_ref, commit) = load_exact_materialized_commit(
-        &db1,
-        &storage.storage,
-        &stream_id,
-        position.coord.sequence(),
-    )
-    .await
-    .expect("load exact Store commit")
-    .expect("Store commit slot");
+    let device = storage
+        .bind_device(&db1, &keypair)
+        .await
+        .expect("load exact materialized Store");
+    let (_commit_ref, commit) =
+        load_exact_materialized_commit(&device, &stream_id, position.coord.sequence())
+            .await
+            .expect("load exact Store commit")
+            .expect("Store commit slot");
     assert_eq!(
         commit
             .store_package()
@@ -3216,7 +3179,6 @@ async fn sync_reuses_opened_schema_models() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &keypair,
         &store_dir,
@@ -3232,6 +3194,10 @@ async fn sync_reuses_opened_schema_models() {
 async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let db1 = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db1, UserKeypair::generate()).await;
+    let source_device = storage
+        .founder_device()
+        .await
+        .expect("retain source Store device");
 
     // Source dev1: seq 1 references a photo blob; seq 2 is a plain note.
     capture_bytes(
@@ -3250,7 +3216,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let (_source_tmp, source_store_dir) = temp_store_dir();
     store_local(&source_store_dir, "ph1", b"PHOTO-BYTES").await;
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
-    let first_commit = crate::sync::store::StoreDatabase::new(&db1)
+    let first_commit = source_device
         .latest_local_store_position()
         .await
         .expect("read first exact Store position")
@@ -3755,6 +3721,10 @@ async fn malformed_store_package_isolates_to_one_device() {
 async fn blob_round_trips_through_storage_via_blob_plan() {
     let db1 = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db1, UserKeypair::generate()).await;
+    let source_device = storage
+        .founder_device()
+        .await
+        .expect("retain source Store device");
 
     // Source: a note + a cover photo. The blob id is ≥4 chars so it forms the
     // `{ab}/{cd}` cache shard.
@@ -3775,7 +3745,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let (_source_tmp, source_store_dir) = temp_store_dir();
     store_local(&source_store_dir, "p1ab", b"PHOTOBYTES").await;
     make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
-    let commit = crate::sync::store::StoreDatabase::new(&db1)
+    let commit = source_device
         .latest_local_store_position()
         .await
         .expect("read blob commit position")
@@ -3897,30 +3867,23 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         CacheFill::CacheLazy,
     ));
     let (_t, ld) = temp_store_dir();
-    let membership = storage
+    storage
         .open_into(&db2)
         .await
         .expect("open exact Store before failed lazy verification");
-    let failing = crate::sync::test_helpers::InterceptedStorage::new(
-        &storage.storage,
-        FaultingStorage::blob(),
-    );
-    let error = crate::sync::store::pull_store_commits(
-        &store_database(&db2),
-        db2.synced_tables(),
-        &failing,
-        storage.root.store_root_hash,
-        &ld,
-        &membership,
-        None,
-        None,
-    )
-    .await
-    .expect_err("lazy blob verification failure rejects the Store commit");
+    let failing: Arc<dyn SyncStorage> =
+        Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
+            storage.storage.clone(),
+            FaultingStorage::blob(),
+        ));
+    let error = pull_with_bound_storage(&db2, failing, storage.signer.clone(), &ld, None)
+        .await
+        .expect_err("lazy blob verification failure rejects the Store commit");
     assert!(
-        matches!(&error, crate::sync::store::StorePullError::BlobDownloads(_)),
+        error.contains("blob"),
         "unexpected lazy verification error: {error:?}"
     );
+    assert!(error.is_offline());
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 
     // The same commit applies once the exact blob can be opened and verified.
@@ -3983,16 +3946,11 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .open_into(&source)
         .await
         .expect("open scoped source Store");
-    let device_id = source
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read scoped source device")
-        .expect("scoped source device exists");
     let circle_id = storage
-        .loaded_store(&source)
+        .bind_device(&source, &owner)
         .await
         .expect("load scoped source Store")
-        .create_circle(&device_id, "0000000001000-0000-owner", "Readers", &owner)
+        .create_circle("0000000001000-0000-owner", "Readers")
         .await
         .expect("create exact Circle");
     let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
@@ -4031,25 +3989,19 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .expect("publish Circle-scoped rows");
 
     let target = open_scoped_circle_test_db();
-    let target_membership = storage
+    let target_device = storage
         .open_into(&target)
         .await
         .expect("open scoped target Store");
     let (_target_temp, target_dir) = temp_store_dir();
     let routing_encryption = EncryptionService::from_key([42; 32]);
-    let result = crate::sync::store::pull_store_commits(
-        &store_database(&target),
-        target.synced_tables(),
-        &storage.storage,
-        storage.root.store_root_hash,
-        &target_dir,
-        &target_membership,
-        Some(&owner),
-        Some(&routing_encryption),
-    )
-    .await
-    .expect("pull Circle-scoped rows")
-    .result;
+    let result = target_device
+        .authorize_writer()
+        .await
+        .expect("authorize scoped target writer")
+        .pull(&target_dir, Some(&routing_encryption))
+        .await
+        .expect("pull Circle-scoped rows");
 
     assert!(result.changesets_applied >= 1);
     assert!(
@@ -4136,78 +4088,46 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     assert!(
         local_announcement_stream(successor).await < local_announcement_stream(activator).await
     );
-    let activator_device = activator
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read Circle activator device")
-        .expect("Circle activator device exists");
     let circle_id = storage
-        .loaded_store(activator)
+        .bind_device(activator, &owner)
         .await
         .expect("load Circle activator Store")
-        .create_circle(
-            &activator_device,
-            "0000000001000-0000-owner",
-            "Readers",
-            &owner,
-        )
+        .create_circle("0000000001000-0000-owner", "Readers")
         .await
         .expect("create Circle on the later-sorted stream");
 
     let (_successor_temp, successor_dir) = temp_store_dir();
-    let successor_membership = storage
+    let successor_device = storage
         .open_into(successor)
         .await
         .expect("open Store before pulling Circle activation");
-    crate::sync::store::pull_store_commits(
-        &store_database(successor),
-        successor.synced_tables(),
-        &storage.storage,
-        storage.root.store_root_hash,
-        &successor_dir,
-        &successor_membership,
-        Some(&owner),
-        Some(&routing_encryption),
-    )
-    .await
-    .expect("pull Circle activation before authoring successor");
-    let successor_device = successor
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    successor_device
+        .authorize_writer()
         .await
-        .expect("read Circle successor device")
-        .expect("Circle successor device exists");
+        .expect("authorize Circle successor writer")
+        .pull(&successor_dir, Some(&routing_encryption))
+        .await
+        .expect("pull Circle activation before authoring successor");
     storage
-        .loaded_store(successor)
+        .bind_device(successor, &owner)
         .await
         .expect("load Circle successor Store")
-        .rename_circle(
-            &successor_device,
-            "0000000002000-0000-owner",
-            circle_id,
-            "Renamed readers",
-            &owner,
-        )
+        .rename_circle("0000000002000-0000-owner", circle_id, "Renamed readers")
         .await
         .expect("publish Circle successor from the earlier-sorted stream");
 
     let (_receiver_temp, receiver_dir) = temp_store_dir();
-    let receiver_membership = storage
+    let receiver_device = storage
         .open_into(&receiver)
         .await
         .expect("open Store before ordered Circle pull");
-    let result = crate::sync::store::pull_store_commits(
-        &store_database(&receiver),
-        receiver.synced_tables(),
-        &storage.storage,
-        storage.root.store_root_hash,
-        &receiver_dir,
-        &receiver_membership,
-        Some(&owner),
-        Some(&routing_encryption),
-    )
-    .await
-    .expect("pull Circle activation and successor in one pass")
-    .result;
+    let result = receiver_device
+        .authorize_writer()
+        .await
+        .expect("authorize ordered Circle receiver")
+        .pull(&receiver_dir, Some(&routing_encryption))
+        .await
+        .expect("pull Circle activation and successor in one pass");
 
     assert!(result.held_positions.is_empty(), "{result:?}");
     assert_eq!(
@@ -4301,27 +4221,21 @@ async fn author_scoped_write(store: &TestStore, db: &crate::database::Database, 
 async fn pull_scoped(
     store: &TestStore,
     db: &crate::database::Database,
-    owner: &UserKeypair,
 ) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError> {
-    let membership = store.open_into(db).await.map_err(|error| {
+    let device = store.open_into(db).await.map_err(|error| {
         crate::sync::store::StorePullError::Membership(
             crate::sync::store::StorePullMembershipError::Message(error),
         )
     })?;
     let (_temp, dir) = temp_store_dir();
     let routing_encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::pull_store_commits(
-        &store_database(db),
-        db.synced_tables(),
-        &store.storage,
-        store.root.store_root_hash,
-        &dir,
-        &membership,
-        Some(owner),
-        Some(&routing_encryption),
-    )
-    .await
-    .map(|execution| execution.result)
+    device
+        .authorize_writer()
+        .await
+        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?
+        .pull(&dir, Some(&routing_encryption))
+        .await
+        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))
 }
 
 /// A receiver holds a category only because a comment it owns references it as an
@@ -4350,26 +4264,16 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
     .await
     .expect("install receiver device");
 
-    let founder_device = founder
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read founder device")
-        .expect("founder device exists");
     let loaded = storage
-        .loaded_store(&founder)
+        .bind_device(&founder, &owner)
         .await
         .expect("load founder Store");
     let circle_a = loaded
-        .create_circle(&founder_device, "0000000001000-0000-owner", "First", &owner)
+        .create_circle("0000000001000-0000-owner", "First")
         .await
         .expect("create first Circle");
     let circle_b = loaded
-        .create_circle(
-            &founder_device,
-            "0000000001001-0000-owner",
-            "Second",
-            &owner,
-        )
+        .create_circle("0000000001001-0000-owner", "Second")
         .await
         .expect("create second Circle");
 
@@ -4391,7 +4295,7 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
 
     // Receiver pulls the note and category, then authors a comment that references
     // both — the only place the category is held as a foreign-key ancestor.
-    pull_scoped(&storage, &receiver, &owner)
+    pull_scoped(&storage, &receiver)
         .await
         .expect("receiver pulls the valid relationship");
     assert!(
@@ -4426,7 +4330,7 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
 
     // The receiver applies the move against its comment: the resulting component
     // crosses Circles, so the final-component validation refuses it.
-    let outcome = pull_scoped(&storage, &receiver, &owner).await;
+    let outcome = pull_scoped(&storage, &receiver).await;
     let refusal = match &outcome {
         Err(error) => error.to_string(),
         Ok(result) => panic!("the cross-Circle move must be refused, not applied: {result:?}"),
@@ -4455,6 +4359,10 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
         CacheFill::CacheLazy,
     ));
     let storage = create_store(&db, UserKeypair::generate()).await;
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain local Store device");
     let (tmp, ld) = temp_store_dir();
     let external = tmp.path().join("audio.flac");
     std::fs::write(&external, b"local audio").expect("write external file");
@@ -4496,7 +4404,6 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &storage.protocol_founder_keypair(),
         &ld,
@@ -4505,7 +4412,7 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
     .expect("a Local blob does not require remote object authority");
     assert!(result.is_some(), "the changeset publishes a Store commit");
     assert!(
-        crate::sync::store::StoreDatabase::new(&db)
+        device
             .latest_local_store_position()
             .await
             .expect("read exact local Store position")
@@ -4522,6 +4429,10 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         CacheFill::CacheLazy,
     ));
     let storage = create_store(&db, UserKeypair::generate()).await;
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain local Store device");
     let outgoing = capture_bytes(
         &db,
         &[
@@ -4547,7 +4458,6 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &storage.protocol_founder_keypair(),
         &ld,
@@ -4563,7 +4473,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         "the error must name the absent remote blob: {err}",
     );
     assert!(
-        crate::sync::store::StoreDatabase::new(&db)
+        device
             .latest_local_store_position()
             .await
             .expect("read exact local Store position")
@@ -4580,6 +4490,10 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         CacheFill::CacheLazy,
     ));
     let storage = create_store(&db, UserKeypair::generate()).await;
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain local Store device");
     capture_bytes(
         &db,
         &[
@@ -4606,7 +4520,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     .await
     .expect("register exact external audio fixture");
     make_test_root_remote(&db, &storage, &store_dir, "n1").await;
-    let result = crate::sync::store::StoreDatabase::new(&db)
+    let result = device
         .latest_local_store_position()
         .await
         .expect("read exact local Store position");
@@ -4651,7 +4565,6 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &storage.protocol_founder_keypair(),
         &ld,
@@ -4705,7 +4618,6 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &keypair,
         &ld1,
@@ -4788,18 +4700,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     }
 
     // The row is re-emitted. The blob has no local bytes to upload — and needs none.
-    let result = sync_for_test(
-        &db,
-        &tables,
-        outgoing,
-        1,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld,
-    )
-    .await;
+    let result = sync_for_test(&db, &tables, outgoing, 1, &storage, "", &keypair, &ld).await;
     assert!(
         result.is_ok(),
         "a blob already in the cloud must not abort the push for want of a local copy",
@@ -4835,7 +4736,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
 
     // Device A: a shared note + a cover photo whose file is present locally.
-    // Driven through the real `service::sync` + `push_changeset` so the
+    // Driven through the real Store write preparation and publication path so the
     // production blob-upload path keys the blob from its `cloud_path`.
     let plaintext = b"COVERART";
 
@@ -4864,7 +4765,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &keypair,
         &ld1,
@@ -4959,19 +4859,9 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     )
     .await;
 
-    let err = sync_for_test(
-        &db,
-        &tables,
-        outgoing,
-        0,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld,
-    )
-    .await
-    .expect_err("a cloud path that does not name its blob must fail the cycle");
+    let err = sync_for_test(&db, &tables, outgoing, 0, &storage, "", &keypair, &ld)
+        .await
+        .expect_err("a cloud path that does not name its blob must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -5429,19 +5319,9 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         )],
     )
     .await;
-    let err = sync_for_test(
-        &db,
-        &tables,
-        outgoing,
-        1,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld,
-    )
-    .await
-    .expect_err("repointing a write-once row must fail the cycle");
+    let err = sync_for_test(&db, &tables, outgoing, 1, &storage, "", &keypair, &ld)
+        .await
+        .expect_err("repointing a write-once row must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -5641,19 +5521,9 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         )],
     )
     .await;
-    let err = sync_for_test(
-        &db1,
-        &tables,
-        outgoing,
-        1,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await
-    .expect_err("a repointing that holds its cloud path must fail the cycle");
+    let err = sync_for_test(&db1, &tables, outgoing, 1, &storage, "", &keypair, &ld1)
+        .await
+        .expect_err("a repointing that holds its cloud path must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -5667,7 +5537,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     );
 }
 
-/// Push one cycle's captured changeset the way the sync loop does: `service::sync`
+/// Push one cycle's captured changeset through the sync loop's Store writer
 /// prepares (and uploads the host-provided blobs of) the gated changeset, then
 /// publishes the resulting immutable Store objects, as `device`.
 async fn push_cycle_as<S: TestStoreStorage>(
@@ -5680,15 +5550,7 @@ async fn push_cycle_as<S: TestStoreStorage>(
     store_dir: &crate::store_dir::StoreDir,
 ) {
     let result = sync_for_test(
-        db,
-        tables,
-        outgoing,
-        local_seq,
-        storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        keypair,
-        store_dir,
+        db, tables, outgoing, local_seq, storage, "", keypair, store_dir,
     )
     .await
     .expect("sync");
@@ -5699,7 +5561,7 @@ async fn push_cycle_as<S: TestStoreStorage>(
 async fn push_cycle(
     db: &crate::database::Database,
     tables: &[SyncedTable],
-    storage: &CloudSyncStorage,
+    storage: &Arc<CloudSyncStorage>,
     outgoing: Vec<u8>,
     local_seq: u64,
     keypair: &UserKeypair,
@@ -5710,7 +5572,7 @@ async fn push_cycle(
 
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
 /// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
-/// `service::sync`; the blob lands ciphertext at rest. Device B — a fresh DB
+/// Store write preparation; the blob lands ciphertext at rest. Device B — a fresh DB
 /// with its own asset directory but the same store key — pulls, downloads the
 /// blob, decrypts it, and recovers the original bytes byte-for-byte.
 #[tokio::test]
@@ -5759,7 +5621,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         outgoing,
         0,
         &storage,
-        "2026-01-01T00:00:00Z",
         "",
         &keypair,
         &ld1,
@@ -5949,20 +5810,22 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // The source makes the root Local again. Its gate retraction carries the child
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
-    crate::blob::transition::make_local(
-        &store_database(&db1),
-        &storage.storage,
-        &source_store_dir,
-        &crate::sync::hlc::Hlc::new("delete-fixture".to_string()),
-        None,
-        None,
-        "notes",
-        "n1",
-        &HashMap::new(),
-        &cancel,
-    )
-    .await
-    .expect("make exact blob root Local");
+    storage
+        .bind_device(&db1, &storage.signer)
+        .await
+        .expect("load blob transition Store")
+        .make_local(
+            &source_store_dir,
+            &crate::sync::hlc::Hlc::new("delete-fixture".to_string()),
+            None,
+            None,
+            "notes",
+            "n1",
+            &HashMap::new(),
+            &cancel,
+        )
+        .await
+        .expect("make exact blob root Local");
     assert!(storage
         .publish_pending(&db1, &source_store_dir)
         .await
@@ -6466,7 +6329,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let db2 = open_test_db();
-    storage
+    let loaded = storage
         .open_into(&db2)
         .await
         .expect("open exact Store before replacing the owner pin");
@@ -6477,13 +6340,11 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let result = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::StoreDatabase::new(&db2),
-    )
-    .await;
+    let result = loaded.membership_for_test().await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("pinned owner")),
         "a chain founded by a non-owner must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -6499,10 +6360,14 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
     let source = open_test_db();
     let storage = create_store(&source, owner).await;
     let db2 = open_test_db();
-    let chain = storage
+    let loaded = storage
         .open_into(&db2)
         .await
         .expect("open exact Store before removing its membership head");
+    let chain = loaded
+        .membership_for_test()
+        .await
+        .expect("load exact membership");
     let founder_head = chain
         .head_refs()
         .iter()
@@ -6519,13 +6384,11 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .expect("remove exact founder membership head");
 
-    let result = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::StoreDatabase::new(&db2),
-    )
-    .await;
+    let result = loaded.membership_for_test().await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("membership")),
         "an empty chain with a pinned owner must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -6549,21 +6412,19 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     let db = open_test_db();
     let storage = create_store(&db, founder.clone()).await;
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("persisted-cycle-second-owner".to_string()),
-        &second_owner_pubkey,
-        None,
-        MemberRole::Member,
-        &encryption,
-        "test-lib",
-        "Test Store",
-        &store_database(&db),
-    )
-    .await
-    .expect("invite second Owner as a Member");
+    storage
+        .invite_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("persisted-cycle-second-owner".to_string()),
+            &second_owner_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Test Store",
+        )
+        .await
+        .expect("invite second Owner as a Member");
     let second_owner_db = open_test_db();
     install_active_device_fixture(
         &storage,
@@ -6584,8 +6445,12 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     )
     .await
     .expect("promote active second Owner");
-    let mut chain = storage
+    let loaded = storage
         .open_into(&db)
+        .await
+        .expect("load membership after second Owner promotion");
+    let mut chain = loaded
+        .membership_for_test()
         .await
         .expect("load membership after second Owner promotion");
     let second_owner_stream = membership_author_stream(&chain, &second_owner);
@@ -6626,12 +6491,10 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
             .expect("clear persisted-cycle owner pin");
     }
 
-    let initial = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::StoreDatabase::new(&db),
-    )
-    .await
-    .expect("accept and persist the complete multi-author chain");
+    let initial = loaded
+        .membership_for_test()
+        .await
+        .expect("accept and persist the complete multi-author chain");
     assert!(!initial.can_write_now(&removed_member_pubkey));
 
     PersistedCycleRemoval {
@@ -6647,12 +6510,14 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(true).await;
 
-    let recovered = crate::sync::store::load_cycle_membership(
-        &fixture.storage.storage,
-        &crate::sync::store::StoreDatabase::new(&fixture.db),
-    )
-    .await
-    .expect("empty LIST must use the persisted author floors");
+    let recovered = fixture
+        .storage
+        .bind_device(&fixture.db, &fixture.storage.signer)
+        .await
+        .expect("load persisted-author Store")
+        .membership_for_test()
+        .await
+        .expect("empty LIST must use the persisted author floors");
 
     assert_eq!(
         fixture
@@ -6670,12 +6535,14 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 async fn cycle_pins_persisted_authors_when_membership_listing_is_empty() {
     let fixture = persisted_cycle_removal(false).await;
 
-    let recovered = crate::sync::store::load_cycle_membership(
-        &fixture.storage.storage,
-        &crate::sync::store::StoreDatabase::new(&fixture.db),
-    )
-    .await
-    .expect("an unpinned prior chain must not fall open on an empty LIST");
+    let recovered = fixture
+        .storage
+        .bind_device(&fixture.db, &fixture.storage.signer)
+        .await
+        .expect("load persisted-author Store")
+        .membership_for_test()
+        .await
+        .expect("an unpinned prior chain must not fall open on an empty LIST");
 
     assert_eq!(
         fixture
@@ -6699,18 +6566,20 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
         .await
         .expect("delete exact persisted membership head");
 
-    let error = match crate::sync::store::load_cycle_membership(
-        &fixture.storage.storage,
-        &crate::sync::store::StoreDatabase::new(&fixture.db),
-    )
-    .await
+    let error = match fixture
+        .storage
+        .bind_device(&fixture.db, &fixture.storage.signer)
+        .await
+        .expect("load persisted-author Store")
+        .membership_for_test()
+        .await
     {
         Err(error) => error,
         Ok(_) => panic!("a persisted author floor requires its signed head"),
     };
 
     assert!(
-        matches!(&error, PullError::MembershipTampered(message) if message.contains("durable cursor")),
+        error.to_string().contains("durable cursor"),
         "missing persisted-author state must be membership tamper: {error}"
     );
 }
@@ -6723,7 +6592,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let source = open_test_db();
     let storage = create_store(&source, owner.clone()).await;
     let target = open_test_db();
-    let mut chain = storage
+    let loaded = storage
         .open_into(&target)
         .await
         .expect("bind mid-cycle fixture to its exact Store root");
@@ -6732,12 +6601,14 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .unwrap();
 
-    let cycle_membership = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::StoreDatabase::new(&target),
-    )
-    .await
-    .expect("load founder at cycle start");
+    let mut chain = loaded
+        .membership_for_test()
+        .await
+        .expect("load founder at cycle start");
+    let mut writer = loaded
+        .authorize_writer()
+        .await
+        .expect("authorize the cycle before membership advances");
 
     let add_member = chain
         .signed_set_member_in_stream(
@@ -6769,19 +6640,10 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let stream_id = commit_stream_id(&reference);
 
     let (_tmp, store_dir) = temp_store_dir();
-    let result = crate::sync::store::pull_store_commits(
-        &store_database(&target),
-        target.synced_tables(),
-        &storage.storage,
-        storage.store_root_hash(),
-        &store_dir,
-        &cycle_membership,
-        None,
-        None,
-    )
-    .await
-    .expect("pull with an empty mid-cycle membership LIST")
-    .result;
+    let result = writer
+        .pull(&store_dir, None)
+        .await
+        .expect("pull with an empty mid-cycle membership LIST");
     let updated: HashMap<_, _> = result
         .frontier
         .iter()
@@ -6832,17 +6694,21 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .open_into(&db2)
         .await
         .expect("open exact Store before fault injection");
-    let failing = crate::sync::test_helpers::InterceptedStorage::new(
-        &storage.storage,
+    let failing = std::sync::Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
+        storage.storage.clone(),
         FaultingStorage::membership(1),
-    );
-    let result = crate::sync::store::load_cycle_membership(
-        &failing,
-        &crate::sync::store::StoreDatabase::new(&db2),
+    ));
+    let result = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(&db2),
+        failing,
+        owner,
     )
+    .await
+    .expect("load fault-injected Store")
+    .membership_for_test()
     .await;
     assert!(
-        matches!(result, Err(PullError::MembershipLoad(_))),
+        result.is_err(),
         "an exact membership read failure on an owner-pinned store must abort the cycle",
     );
     assert!(
@@ -6911,21 +6777,19 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await
         .expect("activate a separate founder-identity Store producer");
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &owner,
-        &crate::sync::hlc::Hlc::new("exact-predecessor-second-owner".to_string()),
-        &pubkey_hex(&second_owner),
-        None,
-        MemberRole::Member,
-        &encryption,
-        "test-store",
-        "Test Store",
-        &store_database(&source),
-    )
-    .await
-    .expect("invite second Owner as a Member");
+    storage
+        .invite_member(
+            &source,
+            &owner,
+            &crate::sync::hlc::Hlc::new("exact-predecessor-second-owner".to_string()),
+            &pubkey_hex(&second_owner),
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Test Store",
+        )
+        .await
+        .expect("invite second Owner as a Member");
     let second_owner_db = open_test_db();
     install_active_device_fixture(
         &storage,
@@ -6949,6 +6813,9 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     let chain = storage
         .open_into(&source)
         .await
+        .expect("load Store after second Owner promotion")
+        .membership_for_test()
+        .await
         .expect("load membership after second Owner promotion");
     let changeset = capture_bytes(
         &source,
@@ -6969,21 +6836,17 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
 
     let second_owner_custody = TestCustody::default();
     second_owner_custody.set_initial_key(encryption.key_bytes());
-    let second_owner_cipher = std::sync::RwLock::new(CloudCipher::Encrypted(encryption.clone()));
-    crate::sync::store::remove_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &second_owner,
-        &crate::sync::hlc::Hlc::new("exact-predecessor-founder-removal".to_string()),
-        &owner_pk,
-        &encryption,
-        &second_owner_custody,
-        &second_owner_cipher,
-        &crate::sync::cloud_storage::PendingRotation::none(),
-        &store_database(&second_owner_db),
-    )
-    .await
-    .expect("successor Owner removes founder with exact recovery state");
+    storage
+        .remove_member(
+            &second_owner_db,
+            &second_owner,
+            &crate::sync::hlc::Hlc::new("exact-predecessor-founder-removal".to_string()),
+            &owner_pk,
+            &encryption,
+            &second_owner_custody,
+        )
+        .await
+        .expect("successor Owner removes founder with exact recovery state");
 
     let target = open_test_db();
     target
@@ -7423,6 +7286,10 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
     let storage = create_store(&owner_db, owner.clone()).await;
+    let owner_device = storage
+        .founder_device()
+        .await
+        .expect("retain revocation-witness Owner device");
     let mut chain = exact_membership_chain(&storage).await;
     let add_member = chain
         .signed_set_member_in_stream(
@@ -7462,7 +7329,6 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         member_changeset,
         0,
         &storage,
-        "2026-03-01T00:03:00Z",
         "",
         &member,
         &member_store_dir,
@@ -7492,7 +7358,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     )
     .await;
     let (_owner_temp, owner_store_dir) = temp_store_dir();
-    let owner_sequence = crate::sync::store::StoreDatabase::new(&owner_db)
+    let owner_sequence = owner_device
         .latest_local_store_position()
         .await
         .expect("read Owner witness predecessor")
@@ -7503,7 +7369,6 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         owner_changeset,
         owner_sequence,
         &storage,
-        "2026-03-01T00:05:00Z",
         "",
         &owner,
         &owner_store_dir,
@@ -7517,13 +7382,13 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     pull_into_result(&member_db, &storage, &pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
-    crate::sync::store::cleanup_merge_candidate(
-        &store_database(&member_db),
-        &storage.storage,
-        write_id.clone(),
-    )
-    .await
-    .expect("verify and resume removed-member candidate cleanup");
+    storage
+        .bind_device(&member_db, &member)
+        .await
+        .expect("load removed-member Store")
+        .cleanup_merge_candidate_for_test(write_id.clone())
+        .await
+        .expect("verify and resume removed-member candidate cleanup");
     crate::sync::store::StoreDatabase::new(&member_db)
         .finish_retracted_merge_candidate_cleanup(write_id.clone())
         .await
@@ -7664,16 +7529,25 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
             Ok(())
         }
     }
-    let lagging = InterceptedStorage::new(&*storage.storage, LaggingHeadSlot { hidden });
+    let lagging = std::sync::Arc::new(InterceptedStorage::new(
+        storage.storage.clone(),
+        LaggingHeadSlot { hidden },
+    ));
 
     // The lagging view is refused outright: the walk comes up shorter than the
     // durable cursor the first pull committed, and a shorter chain is
     // indistinguishable from tampering, so the load fails loud instead of
     // re-admitting whatever the truncated walk hash-links into.
-    let store_db2 = crate::sync::store::StoreDatabase::new(&db2);
-    let error = crate::sync::store::load_cycle_membership(&lagging, &store_db2)
-        .await
-        .expect_err("a chain regressing below the durable cursor is refused");
+    let error = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(&db2),
+        lagging,
+        owner,
+    )
+    .await
+    .expect("load lagging Store")
+    .membership_for_test()
+    .await
+    .expect_err("a chain regressing below the durable cursor is refused");
     assert!(
         format!("{error:?}").contains("regressed below its durable cursor"),
         "unexpected refusal: {error:?}"
@@ -7723,7 +7597,9 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     )
     .await
     .expect("prepare uncommitted exact membership entry");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish uncommitted exact membership entry");
 
@@ -7796,7 +7672,9 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let prepared = storage
         .prepare_protocol_object(&context, slot, &relocated_prefix, grant_bytes)
         .expect("prepare relocated exact membership grant");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("relocate the grant to another author's coordinate");
 
@@ -7858,10 +7736,22 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let loaded = storage
+    storage
         .open_into(&db2)
         .await
         .expect("load exact committed membership prefix");
+    let failing = Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
+        storage.storage.clone(),
+        FaultingStorage::membership(0),
+    ));
+    let retained_store =
+        crate::sync::store::Store::load(store_database(&db2), failing.clone(), owner.clone())
+            .await
+            .expect("bind fault-injected Store");
+    let mut retained_writer = retained_store
+        .authorize_writer()
+        .await
+        .expect("authorize retained founder-only membership");
 
     let add_member = chain
         .signed_set_member_in_stream(
@@ -7894,7 +7784,6 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         cs,
         0,
         &storage,
-        "2026-03-01T00:03:00Z",
         "",
         &member,
         &publish_store_dir,
@@ -7904,23 +7793,12 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     .expect("member Store changeset produces a commit");
     let stream_id = commit_stream_id(&reference);
 
-    let failing = crate::sync::test_helpers::InterceptedStorage::new(
-        &storage.storage,
-        FaultingStorage::membership(1),
-    );
-    let result = crate::sync::store::pull_store_commits(
-        &store_database(&db2),
-        db2.synced_tables(),
-        &failing,
-        storage.root.store_root_hash,
-        &temp_store_dir().1,
-        &loaded,
-        None,
-        None,
-    )
-    .await
-    .expect("a failed membership reload holds only the affected stream")
-    .result;
+    failing.interceptor().arm_membership(1);
+    let (_pull_temp, pull_store_dir) = temp_store_dir();
+    let result = retained_writer
+        .pull(&pull_store_dir, None)
+        .await
+        .expect("a failed membership reload holds only the affected stream");
 
     // The failed read leaves authorization undecided and the position unchanged.
     assert!(result.held_positions.iter().any(|held| matches!(
@@ -8017,10 +7895,13 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
             coord.stream_id,
         )
         .expect("exact founder head reference");
-    let head =
-        crate::sync::store::load_exact_membership_head(&storage.storage, &storage.root, head_ref)
-            .await
-            .expect("load exact founder head");
+    let head = storage
+        .founder_device()
+        .await
+        .expect("load founder Store")
+        .load_membership_head_for_test(head_ref)
+        .await
+        .expect("load exact founder head");
     let mut bad = founder.clone();
     bad.signature = "00".to_string();
     let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
@@ -8046,7 +7927,9 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
             serde_json::to_vec(&bad).expect("serialize corrupt founder"),
         )
         .expect("prepare corrupt exact founder entry");
-    crate::sync::store_objects::create_exact_object(&storage.storage, &prepared)
+    storage
+        .storage
+        .create_protocol_object(&prepared)
         .await
         .expect("publish corrupt exact founder entry");
 
@@ -8357,6 +8240,10 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         (&second, &first, second_stream, first_stream)
     };
     assert!(update_stream < insert_stream);
+    let inserter_device = storage
+        .bind_device(db_ins, &keypair)
+        .await
+        .expect("retain inserter Store device");
 
     let (_ti, ld_ins) = temp_store_dir();
     let insert = capture_bytes(
@@ -8368,7 +8255,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     )
     .await;
     push_cycle_as(db_ins, &tables, &storage, insert, 0, &keypair, &ld_ins).await;
-    let insert_position = crate::sync::store::StoreDatabase::new(db_ins)
+    let insert_position = inserter_device
         .latest_local_store_position()
         .await
         .expect("read inserter position")
@@ -8394,8 +8281,12 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     )
     .await;
     push_cycle_as(db_upd, &tables, &storage, update, 0, &keypair, &ld_upd).await;
+    let updater = storage
+        .bind_device(db_upd, &keypair)
+        .await
+        .expect("load updater Store");
     let (_, update_commit) =
-        load_exact_materialized_commit(db_upd, &storage.storage, &update_stream.to_string(), 1)
+        load_exact_materialized_commit(&updater, &update_stream.to_string(), 1)
             .await
             .expect("load updater Store commit")
             .expect("updater Store commit is materialized");
@@ -8412,85 +8303,5 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         query_text(&receiver, "SELECT title FROM notes WHERE id = 'n1'").await,
         "updated",
         "the dependent UPDATE must wait for its exact INSERT dependency",
-    );
-}
-
-#[tokio::test]
-async fn provider_blob_download_failure_remains_typed() {
-    let (db, _) = crate::database::Database::open(
-        std::path::Path::new(":memory:"),
-        test_synced_tables_with_blob(BlobDecl::new(
-            "photos",
-            Provenance::HostProvided,
-            CacheFill::CacheEager,
-        )),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        "download-provider-failure".to_string(),
-        &test_migrations(),
-    )
-    .expect("open blob database");
-    let bytes = b"provider-down";
-    let hash = crate::blob::content_hash(bytes);
-    host_exec(
-        &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('download-root', 'download', NULL, 1, \
-                     '0000000001000-0000-source', '2026-01-01')",
-    )
-    .await;
-    host_exec(
-        &db,
-        &format!(
-            "INSERT INTO note_photos \
-                 (id, note_id, kind, size, hash, _updated_at, created_at) \
-                 VALUES ('download-blob', 'download-root', 'cover', {}, '{}', \
-                         '0000000001000-0000-source', '2026-01-01')",
-            bytes.len(),
-            hash,
-        ),
-    )
-    .await;
-    let storage = create_store(&db, UserKeypair::generate()).await;
-    let stored = create_exact_blob(&db, &storage, "photos", "download-blob", None, bytes).await;
-    let local = db
-        .row_blob_ref("note_photos", "download-blob")
-        .await
-        .expect("load exact download row blob reference");
-    let remote = crate::blob::RowBlobRef::new(
-        local.table().to_string(),
-        local.row_id().to_string(),
-        local.row_stamp().to_string(),
-        local.column().to_string(),
-        local.blob().clone(),
-        local.plaintext_size(),
-        local.plaintext_hash(),
-        crate::blob::RowBlobAuthority::Remote(
-            crate::sync::audience_package::PackageAudience::Store,
-        ),
-        Some(stored),
-    )
-    .expect("attach exact stored blob publication to row");
-    let failing = crate::sync::test_helpers::InterceptedStorage::new(
-        &storage.storage,
-        FaultingStorage::blob(),
-    );
-    let (_temp, store_dir) = temp_store_dir();
-
-    let failures =
-        crate::sync::store::download_blobs(
-            &store_database(&db),
-            vec![crate::sync::store::BlobDownload::from_row(remote)
-                .expect("build exact blob download")],
-            &failing,
-            &store_dir,
-        )
-        .await
-        .expect_err("provider download failure remains a typed batch failure");
-    assert_eq!(failures.failures().len(), 1);
-    assert!(failures.has_transport_failure());
-    assert!(
-        crate::sync::cycle::SyncCycleFailure::operation("pull Store commits", failures,)
-            .is_offline()
     );
 }

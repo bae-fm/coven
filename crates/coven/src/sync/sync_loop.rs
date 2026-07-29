@@ -26,10 +26,11 @@ use crate::coven::StoreOpenGuard;
 use crate::keys::MasterKeyCustody;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{BlobPathScheme, CloudSyncStorage};
+use super::cloud_storage::BlobPathScheme;
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
+use super::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -440,8 +441,19 @@ impl SyncLoopHandle {
 
     // -- Accessors for membership operations --
 
-    pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
+    pub(crate) fn storage(&self) -> &Arc<dyn SyncStorage> {
         self.inner.components.storage()
+    }
+
+    pub(crate) fn store(&self) -> Arc<crate::sync::store::Store> {
+        self.inner.components.store()
+    }
+
+    pub(crate) async fn discard_blocked_write(
+        &self,
+        write_id: coven_core::WriteId,
+    ) -> Result<Vec<coven_core::WriteId>, crate::sync::store::StoreError> {
+        self.inner.components.discard_blocked_write(write_id).await
     }
 
     pub(crate) fn store_dir(&self) -> &StoreDir {

@@ -16,7 +16,7 @@ use crate::sync::store_commit::{
 };
 
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn insert_circle_operation(
+    pub(crate) async fn insert_circle_operation(
         &self,
         journal: CircleOperationJournal,
     ) -> Result<(), DbError> {
@@ -52,7 +52,7 @@ impl StoreDatabase {
     /// a waiting close operation there; the deletion removes it and takes the slot
     /// in one transaction, so no window leaves the Circle carrying both a pending
     /// close and a pending deletion.
-    pub(in crate::sync::store) async fn insert_circle_operation_superseding(
+    pub(crate) async fn insert_circle_operation_superseding(
         &self,
         journal: CircleOperationJournal,
         superseded: CircleOperationId,
@@ -97,7 +97,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn circle_operation(
+    pub(crate) async fn circle_operation(
         &self,
         operation_id: &CircleOperationId,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
@@ -107,7 +107,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn oldest_pending_circle_operation(
+    pub(crate) async fn oldest_pending_circle_operation(
         &self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         self.database
@@ -144,7 +144,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn waiting_circle_operations(
+    pub(crate) async fn waiting_circle_operations(
         &self,
     ) -> Result<Vec<CircleOperationJournal>, DbError> {
         self.database
@@ -185,7 +185,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn update_circle_operation(
+    pub(crate) async fn update_circle_operation(
         &self,
         journal: CircleOperationJournal,
     ) -> Result<(), DbError> {
@@ -198,7 +198,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_circle_operation_finalization(
+    pub(crate) async fn begin_circle_operation_finalization(
         &self,
         journal: CircleOperationJournal,
     ) -> Result<(), DbError> {
@@ -246,7 +246,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn block_circle_operation(
+    pub(crate) async fn block_circle_operation(
         &self,
         operation_id: &CircleOperationId,
         block: crate::sync::circle::CircleOperationBlock,
@@ -268,7 +268,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn unblock_circle_operation(
+    pub(crate) async fn unblock_circle_operation(
         &self,
         operation_id: &CircleOperationId,
     ) -> Result<(), DbError> {
@@ -289,7 +289,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn activate_circle_operation(
+    pub(crate) async fn activate_circle_operation(
         &self,
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,

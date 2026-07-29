@@ -189,7 +189,7 @@ pub(super) fn update_store_device_exclusion_on(
 }
 
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn begin_outbound_store_device_exclusion(
+    pub(crate) async fn begin_outbound_store_device_exclusion(
         &self,
         operation: DurableStoreDeviceExclusionOperation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
@@ -242,13 +242,13 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn active_outbound_store_device_exclusion(
+    pub(crate) async fn active_outbound_store_device_exclusion(
         &self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
         Box::pin(self.database.call(load_active_store_device_exclusion_on)).await
     }
 
-    pub(in crate::sync::store) async fn outbound_store_device_exclusion_operations(
+    pub(crate) async fn outbound_store_device_exclusion_operations(
         &self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
         Box::pin(self.database.call(|conn| {
@@ -277,7 +277,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn replace_outbound_store_device_exclusion_candidate(
+    pub(crate) async fn replace_outbound_store_device_exclusion_candidate(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
         replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
@@ -325,7 +325,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) fn complete_outbound_store_device_exclusion_activation<'a>(
+    pub(crate) fn complete_outbound_store_device_exclusion_activation<'a>(
         &'a self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Pin<
@@ -379,7 +379,7 @@ impl StoreDatabase {
         })
     }
 
-    pub(in crate::sync::store) async fn complete_outbound_store_device_exclusion_slot_loss(
+    pub(crate) async fn complete_outbound_store_device_exclusion_slot_loss(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
         winner: DurableStoreDeviceExclusionObject,
@@ -438,7 +438,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn begin_outbound_store_device_exclusion_nonactivation(
+    pub(crate) async fn begin_outbound_store_device_exclusion_nonactivation(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
@@ -506,7 +506,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn begin_outbound_store_device_exclusion_replacement(
+    pub(crate) async fn begin_outbound_store_device_exclusion_replacement(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
         replacement: crate::sync::store::operations::PreparedStoreOperationCommit,
@@ -609,7 +609,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn nonactivating_store_device_exclusion_cleanup_targets(
+    pub(crate) async fn nonactivating_store_device_exclusion_cleanup_targets(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
@@ -645,7 +645,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn complete_store_device_exclusion_replacement_cleanup(
+    pub(crate) async fn complete_store_device_exclusion_replacement_cleanup(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
@@ -725,7 +725,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn complete_nonactivating_store_device_exclusion(
+    pub(crate) async fn complete_nonactivating_store_device_exclusion(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
@@ -805,7 +805,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn mark_store_device_exclusion_authority_uploaded(
+    pub(crate) async fn mark_store_device_exclusion_authority_uploaded(
         &self,
         operation: DurableStoreDeviceExclusionOperation,
     ) -> Result<(), DbError> {

@@ -245,11 +245,12 @@ pub(super) enum MergeCandidateHeadEvidence<'a> {
 
 pub(crate) fn author_exclusion_activation_for_candidate_on(
     conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
     let expected_stream = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-        required_store_root_authority_on(conn)?.store_root_hash,
+        root.store_root_hash,
         author,
         crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
     );
@@ -289,7 +290,7 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
         terminals.as_slice(),
         &expected_stream,
         *sequence,
-        |exclusion| load_author_exclusion_activation_locator_on(conn, exclusion),
+        |exclusion| load_author_exclusion_activation_locator_on(conn, root, exclusion),
     )
 }
 
@@ -316,6 +317,7 @@ pub(crate) fn select_author_exclusion_activation_locator(
 
 pub(crate) fn load_author_exclusion_activation_locator_on(
     conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
     exclusion: &crate::sync::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
     let exclusion_json = serde_json::to_string(exclusion).map_err(|error| {
@@ -354,6 +356,7 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
     let retained =
         crate::sync::store::database::StoreDatabase::load_retained_merge_materialization_by_ref_on(
             conn,
+            root,
             locator.activation_commit(),
         )?;
     let accepted_cut = StoreHistoryCut(locator.accepted_cut().clone());
@@ -406,6 +409,7 @@ pub(super) fn blocked_merge_candidate_nonactivation(
 
 pub(super) fn validate_terminal_candidate_authority_on(
     conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
     candidate: &PreparedMergeCandidate,
     durable: &crate::sync::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
@@ -418,11 +422,12 @@ pub(super) fn validate_terminal_candidate_authority_on(
             "terminal candidate authority names another candidate".to_string(),
         ));
     }
-    validate_terminal_nonactivation_authority_on(conn, durable)
+    validate_terminal_nonactivation_authority_on(conn, root, durable)
 }
 
 pub(crate) fn validate_terminal_nonactivation_authority_on(
     conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
     durable: &crate::sync::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
     match durable.proof() {
@@ -440,6 +445,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let current = author_exclusion_activation_for_candidate_on(
                 conn,
+                root,
                 &reference,
                 &commit.author_registration,
             )?
@@ -483,7 +489,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
             dependency_nonactivation,
             ..
         } => {
-            validate_terminal_nonactivation_authority_on(conn, dependency_nonactivation)?;
+            validate_terminal_nonactivation_authority_on(conn, root, dependency_nonactivation)?;
         }
         crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
             return Err(DbError::Message(
@@ -496,6 +502,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
 
 pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
     tx: &rusqlite::Transaction<'_>,
+    root: &crate::sync::store_commit::StoreRootRef,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
     nonactivation: &BlockedMergeCandidateNonactivation,
@@ -503,7 +510,7 @@ pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
     extra_objects: &[ExactObjectRef],
 ) -> Result<(), DbError> {
     if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
-        validate_terminal_candidate_authority_on(tx, candidate, durable)?;
+        validate_terminal_candidate_authority_on(tx, root, candidate, durable)?;
     }
     match nonactivation {
         BlockedMergeCandidateNonactivation::Merge(durable) => {
@@ -647,6 +654,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// Circle-operation discard so both derive the authority identically.
 pub(super) fn terminal_candidate_verification_on(
     conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,
 ) -> Result<Option<TerminalCandidateCleanupVerification>, DbError> {
     let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
@@ -661,7 +669,7 @@ pub(super) fn terminal_candidate_verification_on(
             exclusion,
             ..
         } => TerminalCandidateAuthority::AuthorExclusion(
-            load_author_exclusion_activation_locator_on(conn, exclusion)?,
+            load_author_exclusion_activation_locator_on(conn, root, exclusion)?,
         ),
         crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
             grant_id,
@@ -681,7 +689,7 @@ pub(super) fn terminal_candidate_verification_on(
                 proof.clone(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
-            validate_terminal_nonactivation_authority_on(conn, &durable)?;
+            validate_terminal_nonactivation_authority_on(conn, root, &durable)?;
             TerminalCandidateAuthority::DependencyRetraction(
                 crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                     .map_err(|error| DbError::Message(error.to_string()))?,

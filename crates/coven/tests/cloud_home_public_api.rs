@@ -7,7 +7,7 @@ use coven::{
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
     CloudVersionedObject, CovenHandle, DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer,
     DeviceJoinWriteRevocationExecutor, ExactSlotStorage, JoinerJoinTerminal, ObjectSlot,
-    PhysicalObjectLocator, ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminGrantId,
+    PhysicalObjectLocator, ProviderAccessLocator, ProviderAccessWithdrawal,
     ProviderAdminJoinTerminal, ProviderDeviceBinding, ProviderPrincipalId,
     ProviderWriteAuthorityRef, ResolvedProviderBinding, StoreProviderBinding,
 };
@@ -41,18 +41,13 @@ impl DeviceJoinWriteRevocationExecutor for ExternalWriteRevocationExecutor {
 async fn external_host_can_revoke_missing_device_join_producers(
     handle: &CovenHandle,
     cancellation: DeviceJoinCancellation,
-    executor_grant: ProviderAdminGrantId,
 ) -> Result<(), coven::SyncError> {
     let executor = ExternalWriteRevocationExecutor;
     let _: ProviderAdminJoinTerminal = handle
-        .revoke_device_provider_admission_writes(
-            cancellation.clone(),
-            &executor,
-            executor_grant.clone(),
-        )
+        .revoke_device_provider_admission_writes(cancellation.clone(), &executor)
         .await?;
     let _: JoinerJoinTerminal = handle
-        .revoke_joining_device_writes(cancellation, &executor, executor_grant)
+        .revoke_joining_device_writes(cancellation, &executor)
         .await?;
     Ok(())
 }

@@ -34,7 +34,6 @@ mod refresh_tests;
 pub(crate) mod remote_object;
 pub mod restore_code;
 pub(crate) mod routing_contract;
-pub mod service;
 pub mod session;
 pub mod status;
 pub mod storage;

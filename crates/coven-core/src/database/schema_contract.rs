@@ -27,7 +27,7 @@ impl DurablePreparedProtocolObject {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreBatchLocalCleanup {
-    pub drops: Vec<crate::sync::service::DeferredLocalBlobDrop>,
+    pub drops: Vec<crate::sync::cycle::DeferredLocalBlobDrop>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

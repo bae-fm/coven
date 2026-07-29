@@ -29,14 +29,11 @@ async fn circle_blob_opening_error(
     authority: &crate::blob::RowBlobAuthority,
     stored: &crate::blob::locator::StoredBlobRef,
 ) -> crate::blob::cache::BlobCacheError {
-    match crate::sync::store::blob::opening_protection(
-        &StoreDatabase::new(db),
-        storage,
-        authority,
-        stored,
-    )
-    .await
-    {
+    let database = StoreDatabase::new(db);
+    let opening = crate::sync::store::blob::StoreBlobOpening::open(&database, storage)
+        .await
+        .expect("open Store blob authority");
+    match opening.protection(authority, stored).await {
         Ok(_) => panic!("invalid Circle blob authority must fail"),
         Err(error) => error,
     }
@@ -231,13 +228,10 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("activate founder transition");
-    let device_id = local_device_id(&db).await;
-
     store.home.fail_exact_create_before_call(1);
     let error = rename_circle(
         &db,
         &store.storage,
-        &device_id,
         "0000000002000-0000-creator",
         circle_id,
         "Household money",
@@ -334,10 +328,8 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("activate founder transition");
-    let device_id = local_device_id(&db).await;
-
     store.home.fail_exact_create_before_call(1);
-    let error = delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+    let error = delete_circle(&db, &store.storage, circle_id, &signer)
         .await
         .expect_err("failed exact create interrupts delete publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
@@ -416,10 +408,8 @@ async fn a_forged_deletion_control_is_held_invalid() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("activate founder transition");
-    let device_id = local_device_id(&db).await;
-
     store.home.fail_exact_create_before_call(1);
-    delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+    delete_circle(&db, &store.storage, circle_id, &signer)
         .await
         .expect_err("interrupt delete before its first exact upload");
     let operation_id = StoreDatabase::new(&db)
@@ -497,21 +487,19 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("activate founder transition");
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-bootstrap-member".to_string()),
-        &member_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle bootstrap Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-bootstrap-member".to_string()),
+            &member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle bootstrap Store",
+        )
+        .await
+        .expect("invite Store member");
     let member_db = crate::sync::test_helpers::open_test_db_schema(
         vec![crate::sync::session::SyncedTable::new(
             "documents",
@@ -602,21 +590,19 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
 
     let concurrent_writer = UserKeypair::generate();
     let concurrent_writer_pubkey = keys::public_key_hex(&concurrent_writer);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-bootstrap-concurrent-writer".to_string()),
-        &concurrent_writer_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle bootstrap Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite concurrent Store writer");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-bootstrap-concurrent-writer".to_string()),
+            &concurrent_writer_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle bootstrap Store",
+        )
+        .await
+        .expect("invite concurrent Store writer");
     let concurrent_db = crate::sync::test_helpers::open_test_db_schema(
         vec![crate::sync::session::SyncedTable::new(
             "documents",
@@ -664,17 +650,16 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("load concurrent writer Circle bootstrap commit")
         .1;
     let concurrent_store = store
-        .loaded_store(&concurrent_db)
+        .bind_device(&concurrent_db, &concurrent_writer)
         .await
         .expect("load concurrent Circle writer Store");
     let (_concurrent_temp, concurrent_store_dir) = temp_store_dir();
     concurrent_store
-        .authorize()
+        .authorize_writer()
         .await
         .expect("authorize concurrent Circle writer")
         .pull(
             &concurrent_store_dir,
-            &concurrent_writer,
             Some(&EncryptionService::from_key([42; 32])),
         )
         .await
@@ -709,14 +694,18 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     crate::blob::local_files::store(&concurrent_store_dir, "files", late_id, late_bytes)
         .await
         .expect("stage late concurrent Circle blob");
-    let concurrent_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::sync::cloud_storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        concurrent_writer.clone(),
-    )
-    .expect("construct concurrent Circle writer storage");
+    let concurrent_storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
+                [42; 32],
+            )),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            concurrent_writer.clone(),
+        )
+        .expect("construct concurrent Circle writer storage"),
+    );
     components
         .add_circle_member(
             &store_dir,
@@ -726,16 +715,18 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("activate Circle member successor");
-    let mut concurrent_authorization =
-        crate::sync::store::Store::authorize_borrowed(&concurrent_storage, &concurrent_db)
-            .await
-            .expect("authorize concurrent Circle writer Store");
-    let concurrent_device_id = concurrent_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let concurrent_store = crate::sync::store::Store::load(
+        StoreDatabase::new(&concurrent_db),
+        concurrent_storage.clone(),
+        concurrent_writer.clone(),
+    )
+    .await
+    .expect("load concurrent Circle writer Store");
+    let mut concurrent_writer = concurrent_store
+        .authorize_writer()
         .await
-        .expect("read concurrent Circle writer device id")
-        .expect("concurrent Circle writer device id is installed");
-    concurrent_authorization
+        .expect("authorize concurrent Circle writer Store");
+    concurrent_writer
         .drain_uploads(
             &concurrent_store_dir,
             &crate::clock::SystemClock,
@@ -745,21 +736,9 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("publish late concurrent Circle blob");
-    assert!(
-        concurrent_authorization
-            .prepare_pending_store_write(
-                &concurrent_device_id,
-                "2026-07-23T00:00:02Z",
-                &concurrent_writer,
-                &concurrent_store_dir,
-            )
-            .await
-            .expect("prepare late concurrent Circle package"),
-        "late concurrent Circle package must be prepared"
-    );
     assert_eq!(
-        concurrent_authorization
-            .drain_store_writes()
+        concurrent_writer
+            .publish_pending_store_writes(&concurrent_store_dir)
             .await
             .expect("publish late concurrent Circle package"),
         1
@@ -773,7 +752,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         status => panic!("late concurrent Circle write was not published: {status:?}"),
     };
     let member_store = store
-        .loaded_store(&member_db)
+        .bind_device(&member_db, &member)
         .await
         .expect("load Circle member Store");
     let (member_temp, member_store_dir) = temp_store_dir();
@@ -797,12 +776,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
     );
     let injected = member_store
-        .authorize()
+        .authorize_writer()
         .await
         .expect("authorize Circle member Store for failed bootstrap")
         .pull(
             &member_store_dir,
-            &member,
             Some(&EncryptionService::from_key([42; 32])),
         )
         .await
@@ -851,12 +829,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("inspect failed bootstrap transaction");
     assert_eq!(partial_state, (false, false, false, false));
     let member_pull = member_store
-        .authorize()
+        .authorize_writer()
         .await
         .expect("authorize Circle member Store")
         .pull(
             &member_store_dir,
-            &member,
             Some(&EncryptionService::from_key([42; 32])),
         )
         .await
@@ -966,6 +943,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let retained_merge_materializations =
         crate::sync::store::database::StoreDatabase::new(&member_db)
             .retained_merge_materialization_cache();
+    let replay_root = store.root.clone();
     let (retained_count, retained_late_count, sabotaged_count, sabotaged_late_count) = member_db
         .call(move |connection| {
             let tx = connection.unchecked_transaction().map_err(DbError::from)?;
@@ -975,8 +953,9 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-            let retained = crate::sync::store::pull::replay_retained_merge_projection_on(
+            let retained = crate::sync::store::owner::pull::replay_retained_merge_projection_on(
                 &tx,
+                &replay_root,
                 &mut retained_merge_materializations,
                 &replay_blob_decls,
                 &replay_gates,
@@ -985,7 +964,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 &BTreeSet::new(),
                 None,
                 false,
-                crate::sync::store::pull::LocalStoreMembership::Current,
+                crate::sync::store::owner::pull::LocalStoreMembership::Current,
             )?;
             let retained_count: i64 = retained.query_row(
                 "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -999,8 +978,9 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             )?;
             tx.execute("DELETE FROM circle_bootstrap_coverage", [])
                 .map_err(DbError::from)?;
-            let sabotaged = crate::sync::store::pull::replay_retained_merge_projection_on(
+            let sabotaged = crate::sync::store::owner::pull::replay_retained_merge_projection_on(
                 &tx,
+                &replay_root,
                 &mut retained_merge_materializations,
                 &replay_blob_decls,
                 &replay_gates,
@@ -1009,7 +989,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 &BTreeSet::new(),
                 None,
                 false,
-                crate::sync::store::pull::LocalStoreMembership::Current,
+                crate::sync::store::owner::pull::LocalStoreMembership::Current,
             )?;
             let sabotaged_count: i64 = sabotaged.query_row(
                 "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -1055,6 +1035,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     member_db
         .call({
             let activation_commit = member_bootstrap_commit.clone();
+            let root = store.root.clone();
             move |connection| {
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 transaction
@@ -1073,10 +1054,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                     .map_err(DbError::from)?;
                 let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
                     &transaction,
+                    &root,
                     &activation_commit,
                 )?;
                 let error = StoreDatabase::record_circle_bootstrap_coverage_on(
                     &transaction,
+                    &root,
                     &activation_commit,
                     retained.circle_activations(),
                 )
@@ -1092,35 +1075,39 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         })
         .await
         .expect("reject corrupted Circle bootstrap coverage");
-    crate::sync::store::blob::materialize_row_blob(
-        &StoreDatabase::new(&db),
+    let database = StoreDatabase::new(&db);
+    let blob_access = crate::sync::store::blob::StoreBlobAccess::open(
+        &database,
         &store_dir,
         Some(&store.storage),
-        &historical_blob,
     )
     .await
-    .expect("materialize a blob through its retained founder control");
-    assert_eq!(
-        crate::sync::store::blob::read_blob(
-            &StoreDatabase::new(&db),
-            &store_dir,
-            Some(&store.storage),
-            &historical_blob,
-        )
+    .expect("open Store blob access");
+    blob_access
+        .materialize(&historical_blob)
         .await
-        .expect("read a blob through its retained founder control"),
+        .expect("materialize a blob through its retained founder control");
+    assert_eq!(
+        blob_access
+            .read(&historical_blob)
+            .await
+            .expect("read a blob through its retained founder control"),
         blob_bytes,
     );
-    let protection = crate::sync::store::blob::opening_protection(
-        &StoreDatabase::new(&member_db),
-        &store.storage,
-        historical_blob.authority(),
-        historical_blob
-            .stored()
-            .expect("published historical blob has an exact stored reference"),
-    )
-    .await
-    .expect("new Circle member resolves the founder blob key from its successor grant");
+    let member_database = StoreDatabase::new(&member_db);
+    let member_opening =
+        crate::sync::store::blob::StoreBlobOpening::open(&member_database, &store.storage)
+            .await
+            .expect("open member Store blob authority");
+    let protection = member_opening
+        .protection(
+            historical_blob.authority(),
+            historical_blob
+                .stored()
+                .expect("published historical blob has an exact stored reference"),
+        )
+        .await
+        .expect("new Circle member resolves the founder blob key from its successor grant");
     let opened_destination = member_temp.path().join("new-member-opened-founder-blob");
     let opened = store
         .storage
@@ -1157,14 +1144,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         historical_blob.stored().cloned(),
     )
     .expect("construct same-Circle successor-control substitution");
-    let substitution_error = crate::sync::store::blob::read_blob(
-        &StoreDatabase::new(&db),
-        &store_dir,
-        Some(&store.storage),
-        &substituted,
-    )
-    .await
-    .expect_err("row blob binding must reject a substituted Circle control");
+    let substitution_error = blob_access
+        .read(&substituted)
+        .await
+        .expect_err("row blob binding must reject a substituted Circle control");
     assert!(
         substitution_error.to_string().contains("is stale"),
         "{substitution_error}"
@@ -1282,38 +1265,34 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
 
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-removal-owner".to_string()),
-        &member_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle removal Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-removal-owner".to_string()),
+            &member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle removal Store",
+        )
+        .await
+        .expect("invite Store member");
     let remaining_member = UserKeypair::generate();
     let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-removal-second-member".to_string()),
-        &remaining_member_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle removal Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite remaining Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-removal-second-member".to_string()),
+            &remaining_member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle removal Store",
+        )
+        .await
+        .expect("invite remaining Store member");
     let member_db = open_circle_routing_test_db();
     install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
@@ -1404,12 +1383,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         crate::WriteStatus::Published(position) => position.commit,
         status => panic!("pre-close Circle write was not published: {status:?}"),
     };
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
-            .await
-            .expect("create Store commit verifier");
-    let package_commit = commit_verifier
-        .load_ref(&package_commit_ref)
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind pre-close Circle package Store");
+    let package_commit = device
+        .load_commit_for_test(&package_commit_ref)
         .await
         .expect("load pre-close Circle package commit");
     let package_author = package_commit.author().clone();
@@ -1463,29 +1442,30 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .is_err());
-    let historical_access = StoreDatabase::new(&db)
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind historical Circle access Store");
+    let historical_access = device
         .circle_package_access(circle_id, prior_control.clone())
         .await
         .expect("load historical pre-close access")
         .expect("historical pre-close access remains retained");
-    assert!(historical_access
-        .writers
-        .contains(&keys::public_key_hex(&signer)));
-    let loaded_packages = match crate::sync::store::pull::load_applicable_circle_packages(
-        &StoreDatabase::new(&db),
-        &mut commit_verifier,
-        &package_commit,
-        &[],
-        &package_author,
-        crate::sync::store::pull::LocalStoreMembership::Current,
-    )
-    .await
+    assert!(historical_access.authorizes_writer(&keys::public_key_hex(&signer)));
+    let loaded_packages = match device
+        .load_applicable_circle_packages_for_test(
+            &package_commit,
+            &[],
+            &package_author,
+            crate::sync::store::owner::pull::LocalStoreMembership::Current,
+        )
+        .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
             panic!("load late pre-close Circle package from retained access: {error}")
         }
-        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
             panic!("load late pre-close Circle package from retained access: {error}")
         }
     };
@@ -1529,11 +1509,16 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .activated_store_device_registration(participant.registration.clone())
         .await
         .expect("load response author registration");
-    let mut authorized_store = crate::sync::store::Store::authorize_borrowed(&store.storage, &db)
+    let loaded_store = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("load Circle close response Store");
+    let mut authorized_store = loaded_store
+        .authorize_writer()
         .await
         .expect("authorize Circle close response");
     authorized_store
-        .publish_circle_epoch_close_responses(&signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish local Circle epoch-close response");
     let (bytes, response_object) = store
@@ -1582,11 +1567,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     let error = authorized_store
         .finalize_ready_circle_epoch_closes(
-            &participant.registration.device_id.to_string(),
             "2026-07-23T00:00:01Z",
             &store_dir,
             &EncryptionService::from_key([42; 32]),
-            &signer,
         )
         .await
         .expect_err("malformed occupied response must prevent finalization");
@@ -1623,14 +1606,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .roster
         .members()
         .contains_key(&remaining_member_pubkey));
-    let historical_protection = crate::sync::store::blob::opening_protection(
-        &StoreDatabase::new(&db),
-        &store.storage,
-        &historical_authority,
-        &historical_stored,
-    )
-    .await
-    .expect("resolve old-epoch blob protection through retained Circle authority");
+    let database = StoreDatabase::new(&db);
+    let opening = crate::sync::store::blob::StoreBlobOpening::open(&database, &store.storage)
+        .await
+        .expect("open Store blob authority");
+    let historical_protection = opening
+        .protection(&historical_authority, &historical_stored)
+        .await
+        .expect("resolve old-epoch blob protection through retained Circle authority");
     let crate::sync::storage::BlobSpoolProtection::Opaque(historical_encryption) =
         historical_protection
     else {
@@ -1737,11 +1720,16 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     assert_eq!(*close_id, close.close_id);
     assert!(cutoff.covers_commit(&package_commit_ref));
 
-    let activation = StoreDatabase::new(&db)
-        .verified_circle_activation(circle_id, successor.control.coord.clone())
-        .await
-        .expect("read successor Circle activation")
-        .expect("successor Circle activation is retained");
+    let activation = verified_circle_activation(
+        &store,
+        &db,
+        &signer,
+        circle_id,
+        successor.control.coord.clone(),
+    )
+    .await
+    .expect("read successor Circle activation")
+    .expect("successor Circle activation is retained");
     let outcome_ref = activation
         .reference
         .objects()
@@ -1811,21 +1799,20 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("read accepted pre-cutoff Circle row after replay"));
 
     store.home.clear_exact_reads();
-    let accepted_after_cutoff = match crate::sync::store::pull::load_applicable_circle_packages(
-        &StoreDatabase::new(&db),
-        &mut commit_verifier,
-        &package_commit,
-        &[],
-        &package_author,
-        crate::sync::store::pull::LocalStoreMembership::Current,
-    )
-    .await
+    let accepted_after_cutoff = match device
+        .load_applicable_circle_packages_for_test(
+            &package_commit,
+            &[],
+            &package_author,
+            crate::sync::store::owner::pull::LocalStoreMembership::Current,
+        )
+        .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
             panic!("load accepted Circle package after cutoff: {error}")
         }
-        Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
             panic!("load accepted Circle package after cutoff: {error}")
         }
     };
@@ -1837,8 +1824,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .clone();
     assert!(store.home.exact_reads().contains(&package_slot));
 
-    let successor_commit = commit_verifier
-        .load_ref(&successor_commit_ref)
+    let successor_commit = device
+        .load_commit_for_test(&successor_commit_ref)
         .await
         .expect("load exact successor Circle commit");
     let successor_author = successor_commit.author();
@@ -1877,7 +1864,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let candidate_package_context = ProtocolObjectContext::circle(
         successor_commit.store_root_hash,
         ProtocolObjectDomain::CirclePackage,
-        historical_access.encryption.clone(),
+        historical_access.into_encryption(),
     );
     let candidate_package_slot = store
         .storage
@@ -1897,7 +1884,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             candidate_package_bytes.clone(),
         )
         .expect("prepare exact old-control package");
-    crate::sync::store_objects::create_exact_object(&store.storage, &candidate_package_object)
+    store
+        .storage
+        .create_protocol_object(&candidate_package_object)
         .await
         .expect("publish exact old-control package");
     let circle_packages = [crate::sync::store_commit::CirclePackageInput {
@@ -1988,26 +1977,28 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("combined Circle candidate binds its exact old-control package");
 
     let candidate_base_database = open_circle_routing_test_db_at(&candidate_base_path);
+    let candidate_device = store
+        .bind_device(&candidate_base_database, &signer)
+        .await
+        .expect("bind candidate successor Circle Store");
     store.home.clear_exact_reads();
-    let omitted_by_candidate_successor =
-        match crate::sync::store::pull::load_applicable_circle_packages(
-            &StoreDatabase::new(&candidate_base_database),
-            &mut commit_verifier,
+    let omitted_by_candidate_successor = match candidate_device
+        .load_applicable_circle_packages_for_test(
             &verified_candidate,
             std::slice::from_ref(&activation),
             successor_author,
-            crate::sync::store::pull::LocalStoreMembership::Current,
+            crate::sync::store::owner::pull::LocalStoreMembership::Current,
         )
         .await
-        {
-            Ok(packages) => packages,
-            Err(crate::sync::store::pull::PullCircleActivationError::Database(error)) => {
-                panic!("classify package against candidate successor cutoff: {error}")
-            }
-            Err(crate::sync::store::pull::PullCircleActivationError::Invalid(error)) => {
-                panic!("classify package against candidate successor cutoff: {error}")
-            }
-        };
+    {
+        Ok(packages) => packages,
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
+            panic!("classify package against candidate successor cutoff: {error}")
+        }
+        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
+            panic!("classify package against candidate successor cutoff: {error}")
+        }
+    };
     assert!(omitted_by_candidate_successor.is_empty());
     assert!(!store
         .home
@@ -2245,45 +2236,41 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
 }
 
 async fn member_pull(fixture: &ClosingFounderCircle) {
-    crate::sync::store::Store::authorize_borrowed(&fixture.member_storage, &fixture.member_db)
-        .await
-        .expect("authorize Circle member Store")
-        .pull(
-            &fixture.member_store_dir,
-            &fixture.member,
-            Some(&EncryptionService::from_key([42; 32])),
-        )
-        .await
-        .expect("member pull");
+    crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.member_db),
+        fixture.member_storage.clone(),
+        fixture.member.clone(),
+    )
+    .await
+    .expect("load Circle member Store")
+    .authorize_writer()
+    .await
+    .expect("authorize Circle member Store")
+    .pull(
+        &fixture.member_store_dir,
+        Some(&EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("member pull");
 }
 
 /// Publish the member device's oldest pending durable write, returning the number
 /// of Store packages published. Errors while old-epoch publication is frozen —
 /// the closing Circle has no active control to resolve.
-async fn member_push(fixture: &ClosingFounderCircle, stamp: &str) -> Result<u64, String> {
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.member_storage, &fixture.member_db)
-            .await
-            .map_err(|error| error.to_string())?;
-    let device_id = fixture
-        .member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read member device id")
-        .expect("member device id is installed");
-    authorized
-        .prepare_pending_store_write(
-            &device_id,
-            stamp,
-            &fixture.member,
-            &fixture.member_store_dir,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    authorized
-        .drain_store_writes()
-        .await
-        .map_err(|error| error.to_string())
+async fn member_push(fixture: &ClosingFounderCircle) -> Result<u64, String> {
+    crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.member_db),
+        fixture.member_storage.clone(),
+        fixture.member.clone(),
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .authorize_writer()
+    .await
+    .map_err(|error| error.to_string())?
+    .publish_pending_store_writes(&fixture.member_store_dir)
+    .await
+    .map_err(|error| error.to_string())
 }
 
 struct ClosingFounderCircle {
@@ -2296,7 +2283,7 @@ struct ClosingFounderCircle {
     circle_id: CircleId,
     member: UserKeypair,
     member_db: Database,
-    member_storage: crate::sync::cloud_storage::CloudSyncStorage,
+    member_storage: Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     _member_temp: tempfile::TempDir,
     member_store_dir: crate::store_dir::StoreDir,
     member_pubkey: String,
@@ -2319,38 +2306,34 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
 
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-cancel-owner".to_string()),
-        &member_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle cancel Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-cancel-owner".to_string()),
+            &member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle cancel Store",
+        )
+        .await
+        .expect("invite Store member");
     let remaining_member = UserKeypair::generate();
     let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-cancel-second-member".to_string()),
-        &remaining_member_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle cancel Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite remaining Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-cancel-second-member".to_string()),
+            &remaining_member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle cancel Store",
+        )
+        .await
+        .expect("invite remaining Store member");
     let member_db = open_circle_routing_test_db();
     install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-24T00:00:00Z")
         .await
@@ -2396,25 +2379,35 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
 
     // The member's own device installs the Circle bootstrap and becomes an active
     // effective member holding the epoch key.
-    let member_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::sync::cloud_storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
+    let member_storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
+                [42; 32],
+            )),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            member.clone(),
+        )
+        .expect("open Circle member storage"),
+    );
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    crate::sync::store::Store::load(
+        StoreDatabase::new(&member_db),
+        member_storage.clone(),
         member.clone(),
     )
-    .expect("open Circle member storage");
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    crate::sync::store::Store::authorize_borrowed(&member_storage, &member_db)
-        .await
-        .expect("authorize Circle member Store")
-        .pull(
-            &member_store_dir,
-            &member,
-            Some(&EncryptionService::from_key([42; 32])),
-        )
-        .await
-        .expect("member installs the Circle bootstrap");
+    .await
+    .expect("load Circle member Store")
+    .authorize_writer()
+    .await
+    .expect("authorize Circle member Store")
+    .pull(
+        &member_store_dir,
+        Some(&EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("member installs the Circle bootstrap");
 
     let prior = StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
@@ -2515,7 +2508,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         .expect("member captures an old-epoch Circle row");
     member_pull(&fixture).await;
     assert!(
-        member_push(&fixture, "2026-07-24T00:00:10Z").await.is_err(),
+        member_push(&fixture).await.is_err(),
         "old-epoch publication is frozen while the epoch is closing"
     );
     assert!(
@@ -2581,11 +2574,16 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     );
 
     // The reopening control retains its exact cancellation binding.
-    let activation = StoreDatabase::new(&fixture.db)
-        .verified_circle_activation(fixture.circle_id, reopened.control.coord.clone())
-        .await
-        .expect("read reopened Circle activation")
-        .expect("reopened Circle activation is retained");
+    let activation = verified_circle_activation(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        fixture.circle_id,
+        reopened.control.coord.clone(),
+    )
+    .await
+    .expect("read reopened Circle activation")
+    .expect("reopened Circle activation is retained");
     let cancellation_ref = activation
         .reference
         .objects()
@@ -2602,7 +2600,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     // old-epoch write now publishes successfully under the restored epoch key.
     member_pull(&fixture).await;
     assert_eq!(
-        member_push(&fixture, "2026-07-24T00:00:20Z")
+        member_push(&fixture)
             .await
             .expect("member publishes after the reopen"),
         1,
@@ -2617,14 +2615,13 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         crate::WriteStatus::Published(position) => *position,
         status => panic!("old-epoch member write did not publish after reopen: {status:?}"),
     };
-    let mut commit_verifier = crate::sync::store::pull::StoreCommitVerifier::new(
-        &fixture.store.storage,
-        &fixture.store.root,
-    )
-    .await
-    .expect("create Store commit verifier");
-    let member_package_commit = commit_verifier
-        .load_ref(published.commit())
+    let member_device = fixture
+        .store
+        .bind_device(&fixture.member_db, &fixture.member)
+        .await
+        .expect("bind member Circle package Store");
+    let member_package_commit = member_device
+        .load_commit_for_test(published.commit())
         .await
         .expect("load the member's published old-epoch package commit");
     let member_package = member_package_commit
@@ -2645,12 +2642,7 @@ async fn cancelling_a_finalized_close_is_refused() {
 
     // Finalize the close: publish the sole owner-device response, then drive the
     // cycle that activates the exact outcome.
-    let authorized_store =
-        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-            .await
-            .expect("authorize Circle close response");
-    authorized_store
-        .publish_circle_epoch_close_responses(&fixture.signer)
+    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -2771,10 +2763,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
 
     // Finalize the close: publish the owner-device response and drive the cycle
     // that activates the closed-origin successor without the removed member.
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-        .await
-        .expect("authorize Circle close response")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -2857,11 +2846,16 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
         .roster
         .members()
         .contains_key(&fixture.member_pubkey));
-    let readded_activation = StoreDatabase::new(&fixture.db)
-        .verified_circle_activation(fixture.circle_id, readded.control.coord.clone())
-        .await
-        .expect("read re-add activation")
-        .expect("re-add activation is retained");
+    let readded_activation = verified_circle_activation(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        fixture.circle_id,
+        readded.control.coord.clone(),
+    )
+    .await
+    .expect("read re-add activation")
+    .expect("re-add activation is retained");
     assert!(
         readded_activation
             .reference
@@ -2910,17 +2904,19 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-            .await
-            .expect("authorize Circle preparation");
-    let mut authority = authorized.operation_authority();
-    let activation_commit = authority
-        .history_verifier
-        .commit_verifier()
-        .load_ref(&activation_commit_ref)
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Circle preparation Store");
+    let activation_commit = loaded_store
+        .load_commit_for_test(&activation_commit_ref)
         .await
         .expect("load closing activation commit");
+    let mut authority = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize Circle writer");
     let author = activation_commit.author();
     let activation_commit = activation_commit.value();
     let previous_control = activation_commit
@@ -2932,10 +2928,8 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         })
         .expect("closing control is present in its activating commit")
         .clone();
-    let device_id = local_device_id(&fixture.db).await;
     let journal = prepare_circle_operation_request(
         &mut authority,
-        &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {
                 operation_id: fixture.operation_id.clone(),
@@ -2945,7 +2939,6 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
                 previous_control,
             },
         )),
-        &fixture.signer,
     )
     .await
     .expect("prepare Circle reopen");
@@ -2959,7 +2952,10 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         if step == "epoch-close-cancellation" || step == "store-commit" || step == "store-head" {
             continue;
         }
-        crate::sync::store_objects::create_exact_object(&fixture.store.storage, object)
+        fixture
+            .store
+            .storage
+            .create_protocol_object(object)
             .await
             .expect("publish reopen exact object");
     }
@@ -2988,7 +2984,6 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let error = load_circle_activations(
         &fixture.db,
         &fixture.store.storage,
-        &fixture.store.root,
         &journal.operation().commit_ref,
         &forged_commit,
         author,
@@ -3008,22 +3003,23 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
 /// the `Finalizing` state a crash leaves before any object is published.
 async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
     let owner_pubkey = keys::public_key_hex(&fixture.signer);
-    let device_id = local_device_id(&fixture.db).await;
     let (current, activation_commit_ref) = StoreDatabase::new(&fixture.db)
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-            .await
-            .expect("authorize Circle preparation");
-    let mut authority = authorized.operation_authority();
-    let activation_commit = authority
-        .history_verifier
-        .commit_verifier()
-        .load_ref(&activation_commit_ref)
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Circle preparation Store");
+    let activation_commit = loaded_store
+        .load_commit_for_test(&activation_commit_ref)
         .await
         .expect("load closing activation commit");
+    let mut authority = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize Circle writer");
     let previous_control = activation_commit
         .value()
         .circle_controls()
@@ -3036,7 +3032,6 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
         .clone();
     let prepared = prepare_circle_operation_request(
         &mut authority,
-        &device_id,
         super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
             super::super::commands::CircleCancelEpochCloseRequest {
                 operation_id: fixture.operation_id.clone(),
@@ -3046,7 +3041,6 @@ async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
                 previous_control,
             },
         )),
-        &fixture.signer,
     )
     .await
     .expect("prepare Circle reopen");
@@ -3225,15 +3219,19 @@ async fn interrupted_cancellation_flow() {
 #[tokio::test]
 async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     let fixture = setup_closing_founder_circle("circle-finalize-durable-first").await;
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-            .await
-            .expect("authorize Owner Store");
+    let store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner Store");
+    let mut authorized = store
+        .authorize_writer()
+        .await
+        .expect("authorize Owner Store");
     authorized
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
-    let device_id = local_device_id(&fixture.db).await;
 
     // The finalization records its complete payload — including the random
     // successor key — into the durable journal before uploading anything. Failing
@@ -3241,11 +3239,9 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     fixture.store.home.fail_exact_create_before_call(1);
     let interrupted = authorized
         .finalize_ready_circle_epoch_closes(
-            &device_id,
             "2026-07-24T03:00:00Z",
             &fixture.store_dir,
             &EncryptionService::from_key([42; 32]),
-            &fixture.signer,
         )
         .await
         .expect_err("the first finalization upload fails");
@@ -3337,7 +3333,7 @@ struct SilentParticipantCircle {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_db: Database,
-    silent_storage: crate::sync::cloud_storage::CloudSyncStorage,
+    silent_storage: Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     prior_epoch: crate::sync::circle::CircleEpochId,
 }
 
@@ -3352,7 +3348,7 @@ struct SilentParticipantClose {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_db: Database,
-    silent_storage: crate::sync::cloud_storage::CloudSyncStorage,
+    silent_storage: Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     operation_id: CircleOperationId,
     prior_epoch: crate::sync::circle::CircleEpochId,
 }
@@ -3417,38 +3413,34 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
 
     let removed = UserKeypair::generate();
     let removed_pubkey = keys::public_key_hex(&removed);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-exclude-removed".to_string()),
-        &removed_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle exclude Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite removed Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-exclude-removed".to_string()),
+            &removed_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle exclude Store",
+        )
+        .await
+        .expect("invite removed Store member");
     let silent = UserKeypair::generate();
     let silent_pubkey = keys::public_key_hex(&silent);
-    crate::sync::store::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &signer,
-        &crate::sync::hlc::Hlc::new("circle-exclude-silent".to_string()),
-        &silent_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store.storage.store_id(),
-        "Circle exclude Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite silent Store member");
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &crate::sync::hlc::Hlc::new("circle-exclude-silent".to_string()),
+            &silent_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle exclude Store",
+        )
+        .await
+        .expect("invite silent Store member");
     let silent_db = open_circle_routing_test_db();
     install_active_device_fixture(&store, &db, &silent_db, &silent, "2026-07-24T01:00:00Z")
         .await
@@ -3492,14 +3484,18 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         .await
         .expect("add silent Circle member");
 
-    let silent_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::sync::cloud_storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        silent.clone(),
-    )
-    .expect("open silent participant storage");
+    let silent_storage = Arc::new(
+        crate::sync::cloud_storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
+                [42; 32],
+            )),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            silent.clone(),
+        )
+        .expect("open silent participant storage"),
+    );
 
     let prior_epoch = StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
@@ -3575,11 +3571,16 @@ async fn finalized_close_outcome(
         fixture.circle_id,
         *close_id,
     );
-    let activation = StoreDatabase::new(&fixture.db)
-        .verified_circle_activation(fixture.circle_id, successor.control.coord.clone())
-        .await
-        .expect("read successor activation")
-        .expect("successor activation retained");
+    let activation = verified_circle_activation(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        fixture.circle_id,
+        successor.control.coord.clone(),
+    )
+    .await
+    .expect("read successor activation")
+    .expect("successor activation retained");
     let outcome_ref = activation
         .reference
         .objects()
@@ -3606,12 +3607,17 @@ async fn owner_exclusion_completes_a_stalled_close() {
     let fixture = setup_closing_with_silent_participant("circle-exclude-complete").await;
 
     // The Owner responds; the silent participant does not, so the close stalls.
-    let authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-            .await
-            .expect("authorize Circle close response");
+    let store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Circle close response Store");
+    let mut authorized = store
+        .authorize_writer()
+        .await
+        .expect("authorize Circle close response");
     authorized
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
     fixture
@@ -3705,10 +3711,15 @@ async fn close_status_reports_a_response_and_an_exclusion() {
     let silent_device_id = silent_participant_device_id(&fixture).await;
 
     // The Owner responds; the silent participant does not. Its slot is empty.
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Circle close response Store")
+        .authorize_writer()
         .await
         .expect("authorize Circle close response")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
 
@@ -3852,40 +3863,47 @@ async fn circle_bootstrap_coverage_count(db: &Database, circle_id: CircleId) -> 
 /// Store view.
 async fn silent_pull(
     fixture: &SilentParticipantCircle,
-) -> Result<crate::sync::store::pull::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
+) -> Result<crate::sync::store::owner::pull::StorePullResult, crate::sync::cycle::SyncCycleFailure>
+{
     let (_temp, store_dir) = temp_store_dir();
-    crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
-        .await
-        .expect("authorize silent participant Store")
-        .pull(
-            &store_dir,
-            &fixture.silent,
-            Some(&EncryptionService::from_key([42; 32])),
-        )
-        .await
+    crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.silent_db),
+        fixture.silent_storage.clone(),
+        fixture.silent.clone(),
+    )
+    .await
+    .expect("load silent participant Store")
+    .authorize_writer()
+    .await
+    .expect("authorize silent participant Store")
+    .pull(&store_dir, Some(&EncryptionService::from_key([42; 32])))
+    .await
 }
 
 /// Publish the silent participant's pending Store write from its own device,
 /// without pulling — so it authors under whatever epoch its device currently
 /// holds.
-async fn silent_publish_pending_write(fixture: &SilentParticipantCircle, stamp: &str) {
+async fn silent_publish_pending_write(fixture: &SilentParticipantCircle) {
     let (_temp, store_dir) = temp_store_dir();
-    let device_id = local_device_id(&fixture.silent_db).await;
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
-            .await
-            .expect("authorize silent participant Store");
-    assert!(
-        authorized
-            .prepare_pending_store_write(&device_id, stamp, &fixture.silent, &store_dir)
-            .await
-            .expect("prepare silent participant Circle write"),
-        "the silent participant has a pending Circle write to publish"
-    );
-    authorized
-        .drain_store_writes()
+    let silent_store = crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.silent_db),
+        fixture.silent_storage.clone(),
+        fixture.silent.clone(),
+    )
+    .await
+    .expect("load silent participant Store");
+    let mut writer = silent_store
+        .authorize_writer()
         .await
-        .expect("publish silent participant Circle write");
+        .expect("authorize silent participant writer");
+    assert_eq!(
+        writer
+            .publish_pending_store_writes(&store_dir)
+            .await
+            .expect("publish silent participant Circle write"),
+        1,
+        "the silent participant has one pending Circle write to publish"
+    );
 }
 
 /// A silent participant excluded from an epoch close, whose device accepted
@@ -3930,10 +3948,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
         .await
         .expect("activate the Circle epoch close");
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-        .await
-        .expect("authorize Owner close response")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
         .await
         .expect("publish Owner close response");
     let silent_device_id = close_participant_to_exclude(&fixture.db).await;
@@ -3959,7 +3974,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         "0000000009000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000009000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
     assert!(
         document_present(&fixture.silent_db, beyond_id).await,
         "the silent participant accepts its own beyond-cutoff Circle row"
@@ -3993,7 +4008,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         "0000000010000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000010000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
     assert!(
         matches!(
             fixture
@@ -4043,10 +4058,7 @@ async fn drive_close_and_exclude_silent(
         .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
         .await
         .expect("activate the Circle epoch close");
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-        .await
-        .expect("authorize Owner close response")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
         .await
         .expect("publish Owner close response");
     let silent_device_id = close_participant_to_exclude(&fixture.db).await;
@@ -4079,12 +4091,16 @@ async fn successor_control_coord(
 /// Pull every published Store commit onto the Owner's device without running a
 /// full cycle, so reclamation is driven explicitly afterwards.
 async fn owner_pull(fixture: &SilentParticipantCircle) {
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner Store")
+        .authorize_writer()
         .await
         .expect("authorize Owner Store")
         .pull(
             &fixture.store_dir,
-            &fixture.signer,
             Some(&EncryptionService::from_key([42; 32])),
         )
         .await
@@ -4098,7 +4114,12 @@ async fn circle_package_object_present(
     package: &crate::sync::store_commit::CirclePackageRef,
     activation: &StoreBatchCommitRef,
 ) -> bool {
-    let access = StoreDatabase::new(&fixture.db)
+    let device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle package access Store");
+    let access = device
         .circle_package_access(package.circle_id, package.control.clone())
         .await
         .expect("resolve Circle package access")
@@ -4106,7 +4127,7 @@ async fn circle_package_object_present(
     let context = ProtocolObjectContext::circle(
         fixture.store.root.store_root_hash,
         ProtocolObjectDomain::CirclePackage,
-        access.encryption,
+        access.into_encryption(),
     );
     let prefix = crate::sync::store_commit::circle_package_semantic_prefix(
         package.circle_id,
@@ -4150,7 +4171,7 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
         "0000000009000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000009000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
     let beyond_commit_ref = match fixture
         .silent_db
         .write_status(&beyond_write)
@@ -4209,12 +4230,12 @@ async fn circle_package_in(
     store: &TestStore,
     commit_ref: &StoreBatchCommitRef,
 ) -> crate::sync::store_commit::CirclePackageRef {
-    let mut commit_verifier =
-        crate::sync::store::pull::StoreCommitVerifier::new(&store.storage, &store.root)
-            .await
-            .expect("create Store commit verifier");
-    let commit = commit_verifier
-        .load_ref(commit_ref)
+    let device = store
+        .founder_device()
+        .await
+        .expect("bind exact Circle package Store");
+    let commit = device
+        .load_commit_for_test(commit_ref)
         .await
         .expect("load the exact Circle package commit");
     let [package] = commit.value().circle_packages() else {
@@ -4263,26 +4284,34 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .await
         .expect("activate the Circle epoch close");
     let (_temp, respond_dir) = temp_store_dir();
-    let mut member =
-        crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
-            .await
-            .expect("authorize responding member Store");
+    let member_store = crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.silent_db),
+        fixture.silent_storage.clone(),
+        fixture.silent.clone(),
+    )
+    .await
+    .expect("load responding member Store");
+    let mut member = member_store
+        .authorize_writer()
+        .await
+        .expect("authorize responding member Store");
     member
-        .pull(
-            &respond_dir,
-            &fixture.silent,
-            Some(&EncryptionService::from_key([42; 32])),
-        )
+        .pull(&respond_dir, Some(&EncryptionService::from_key([42; 32])))
         .await
         .expect("member pulls the epoch close");
     member
-        .publish_circle_epoch_close_responses(&fixture.silent)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("member publishes its close response");
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner close response Store")
+        .authorize_writer()
         .await
         .expect("authorize Owner close response")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
     fixture
@@ -4314,7 +4343,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         "0000000010000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000010000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
     assert!(
         matches!(
             fixture
@@ -4341,11 +4370,16 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     // the finalized activation's access references. Holding every copy makes the
     // silent participant's own image unreadable.
     let successor_control = successor_control_coord(&fixture).await;
-    let activation = StoreDatabase::new(&fixture.db)
-        .verified_circle_activation(fixture.circle_id, successor_control.clone())
-        .await
-        .expect("read the finalized successor activation")
-        .expect("the successor activation is retained");
+    let activation = verified_circle_activation(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        fixture.circle_id,
+        successor_control.clone(),
+    )
+    .await
+    .expect("read the finalized successor activation")
+    .expect("the successor activation is retained");
     let image_slots: Vec<crate::storage::cloud::ObjectSlot> = activation
         .reference
         .objects()
@@ -4384,7 +4418,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         "0000000009000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000009000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
 
     // Hold the bootstrap unreadable for one pull: the successor is held and the
     // exclusion recorded, but the reseed cannot complete.
@@ -4404,7 +4438,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         .find(|position| {
             matches!(
                 &position.reason,
-                crate::sync::store::pull::HeldStorePositionReason::InvalidObject(detail)
+                crate::sync::store::owner::pull::HeldStorePositionReason::InvalidObject(detail)
                     if detail.contains("excluded device awaiting its successor bootstrap")
             )
         })
@@ -4414,7 +4448,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     assert!(
         matches!(
             held.coordinate,
-            crate::sync::store::pull::HeldStoreCoordinate::Commit { .. }
+            crate::sync::store::owner::pull::HeldStoreCoordinate::Commit { .. }
         ),
         "the held position names the successor commit: {held:?}"
     );
@@ -4530,7 +4564,7 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
         "0000000009000-0000-silent",
     )
     .await;
-    silent_publish_pending_write(&fixture, "0000000009000-0000-silent").await;
+    silent_publish_pending_write(&fixture).await;
 
     // Crash at the reset's projection-replacement boundary: the whole pull rolls
     // back, leaving the pre-reset state exactly as it was.
@@ -4562,21 +4596,24 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
 /// Pull the epoch close onto the silent participant's device, then publish its
 /// own device-signed close response from that device.
 async fn silent_publish_response(fixture: &SilentParticipantClose) {
-    let mut authorized =
-        crate::sync::store::Store::authorize_borrowed(&fixture.silent_storage, &fixture.silent_db)
-            .await
-            .expect("authorize silent participant Store");
+    let silent_store = crate::sync::store::Store::load(
+        StoreDatabase::new(&fixture.silent_db),
+        fixture.silent_storage.clone(),
+        fixture.silent.clone(),
+    )
+    .await
+    .expect("load silent participant Store");
+    let mut writer = silent_store
+        .authorize_writer()
+        .await
+        .expect("authorize silent participant Store");
     let (_temp, store_dir) = temp_store_dir();
-    authorized
-        .pull(
-            &store_dir,
-            &fixture.silent,
-            Some(&EncryptionService::from_key([42; 32])),
-        )
+    writer
+        .pull(&store_dir, Some(&EncryptionService::from_key([42; 32])))
         .await
         .expect("silent participant pulls the epoch close");
-    authorized
-        .publish_circle_epoch_close_responses(&fixture.silent)
+    writer
+        .publish_circle_epoch_close_responses()
         .await
         .expect("silent participant publishes its close response");
 }
@@ -4587,10 +4624,7 @@ async fn slot_race_response_first_adopts_the_response() {
 
     // The participant's own response lands first. Both devices respond.
     silent_publish_response(&fixture).await;
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
-        .await
-        .expect("authorize Owner Store")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
         .await
         .expect("publish Owner close response");
 
@@ -4634,10 +4668,15 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
     let fixture = setup_closing_with_silent_participant("circle-exclude-race-exclusion").await;
 
     // The Owner responds and then excludes the participant before it responds.
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner Store")
+        .authorize_writer()
         .await
         .expect("authorize Owner Store")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
     let silent_device_id = silent_participant_device_id(&fixture).await;
@@ -4683,10 +4722,15 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
 #[tokio::test]
 async fn interrupted_exclusion_publication_resumes_idempotently() {
     let fixture = setup_closing_with_silent_participant("circle-exclude-restart").await;
-    crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner Store")
+        .authorize_writer()
         .await
         .expect("authorize Owner Store")
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
     let silent_device_id = silent_participant_device_id(&fixture).await;
@@ -4746,11 +4790,17 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
 
     // Both participants respond; every slot holds a device response.
     silent_publish_response(&fixture).await;
-    let owner = crate::sync::store::Store::authorize_borrowed(&fixture.store.storage, &fixture.db)
+    let owner_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load Owner Store");
+    let mut owner = owner_store
+        .authorize_writer()
         .await
         .expect("authorize Owner Store");
     owner
-        .publish_circle_epoch_close_responses(&fixture.signer)
+        .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
 
@@ -4872,19 +4922,22 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("activate founder transition");
-    let device_id = local_device_id(&db).await;
-    delete_circle(&db, &store.storage, &device_id, circle_id, &signer)
+    delete_circle(&db, &store.storage, circle_id, &signer)
         .await
         .expect("delete the Circle");
 
     // A deleted Circle is terminal: every lifecycle command refuses it with the
     // typed `Deleted` reason rather than a generic missing-close error.
-    let error = crate::sync::store::Store::load(StoreDatabase::new(&db), store.storage.clone())
-        .await
-        .expect("load Store for cancellation")
-        .cancel_circle_epoch_close(&device_id, circle_id, &signer)
-        .await
-        .expect_err("cancelling a deleted Circle's close is refused");
+    let error = crate::sync::store::Store::load(
+        StoreDatabase::new(&db),
+        store.storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("load Store for cancellation")
+    .cancel_circle_epoch_close(circle_id)
+    .await
+    .expect_err("cancelling a deleted Circle's close is refused");
     assert!(
         matches!(&error, CircleOperationError::Deleted { circle_id: id }
             if *id == circle_id),

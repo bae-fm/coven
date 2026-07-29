@@ -22,7 +22,7 @@ use crate::sync::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor,
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StreamActivation, VerifiedStoreBatchCommit,
+    StreamActivation,
 };
 use crate::sync::test_helpers::{
     install_active_device_fixture, open_test_db, temp_store_dir, test_migrations,
@@ -34,6 +34,22 @@ async fn local_device_id(db: &Database) -> String {
         .await
         .expect("read local Store device id")
         .expect("local Store device is active")
+}
+
+async fn publish_circle_epoch_close_response(
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+    db: &Database,
+    signer: &UserKeypair,
+) -> Result<(), CircleOperationError> {
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    store
+        .authorize_writer()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        .publish_circle_epoch_close_responses()
+        .await
 }
 
 async fn create_test_store_in_its_own_task(
@@ -52,35 +68,43 @@ async fn create_test_store_in_its_own_task(
 
 async fn prepare_circle_operation(
     db: &Database,
-    storage: &dyn SyncStorage,
-    device_id: &str,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     metadata_stamp: &str,
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
-    let mut authorized = crate::sync::store::Store::authorize_borrowed(storage, db)
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    let mut authority = store
+        .authorize_writer()
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let mut authority = authorized.operation_authority();
-    super::prepare_circle_operation(&mut authority, device_id, metadata_stamp, name, signer).await
+    super::prepare_circle_operation(&mut authority, metadata_stamp, name).await
 }
 
 async fn publish_circle_operation(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     operation_id: &CircleOperationId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let mut authorized = crate::sync::store::Store::authorize_borrowed(storage, db)
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    let mut authority = store
+        .authorize_writer()
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let mut authority = authorized.operation_authority();
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
-        authority.history_verifier.root().store_root_hash,
+        authority.store_root().store_root_hash,
     )
     .expect("derive Circle test routing key");
-    super::publish_circle_operation(&mut authority, operation_id, signer, Some(&routing_key)).await
+    authority
+        .circle_operation()
+        .publish(operation_id, Some(&routing_key))
+        .await
 }
 
 async fn resume_circle_operations(
@@ -88,18 +112,19 @@ async fn resume_circle_operations(
     storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let store = crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone()).await?;
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
         store.store_root().store_root_hash,
     )
     .expect("derive Circle test routing key");
-    let mut authority = store
-        .authorize()
+    store
+        .authorize_writer()
         .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    authority
-        .resume_circle_operations(signer, Some(&routing_key))
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        .resume_circle_operations(Some(&routing_key))
         .await
 }
 
@@ -109,12 +134,11 @@ async fn retry_circle_operation(
     operation_id: &CircleOperationId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
         .retry_circle_operation(
             operation_id,
             Some(&crate::encryption::EncryptionService::from_key([42; 32])),
-            signer,
         )
         .await
 }
@@ -123,8 +147,9 @@ async fn discard_circle_operation(
     db: &Database,
     storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     operation_id: &CircleOperationId,
+    signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
         .discard_circle_operation(operation_id)
         .await
@@ -155,36 +180,51 @@ async fn exact_object_present(home: &InMemoryCloudHome, reference: &ExactObjectR
 async fn rename_circle(
     db: &Database,
     storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
-    device_id: &str,
     metadata_stamp: &str,
     circle_id: CircleId,
     name: &str,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
-        .rename_circle(device_id, metadata_stamp, circle_id, name, signer)
+        .rename_circle(metadata_stamp, circle_id, name)
         .await
 }
 
 async fn delete_circle(
     db: &Database,
     storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
-    device_id: &str,
     circle_id: CircleId,
     signer: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone())
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
-        .delete_circle(device_id, circle_id, signer)
+        .delete_circle(circle_id)
+        .await
+}
+
+async fn verified_circle_activation(
+    store: &TestStore,
+    db: &Database,
+    identity: &UserKeypair,
+    circle_id: CircleId,
+    control: crate::sync::circle::CircleControlCoord,
+) -> Result<
+    Option<crate::sync::store::circle_controls::VerifiedCircleReference>,
+    crate::database::DbError,
+> {
+    store
+        .bind_device(db, identity)
+        .await
+        .map_err(crate::database::DbError::Message)?
+        .verified_circle_activation_for_test(circle_id, control)
         .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn load_circle_activations(
     db: &Database,
-    storage: &dyn SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
+    storage: &Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     author: &crate::sync::store_commit::StoreDeviceRegistration,
@@ -192,27 +232,14 @@ async fn load_circle_activations(
 ) -> Result<VerifiedCircleActivations, CircleOperationError> {
     let routing_key = crate::sync::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
-        root.store_root_hash,
+        commit.store_root_hash,
     )
     .expect("derive Circle test routing key");
-    let verified = VerifiedStoreBatchCommit::parse(
-        &commit.to_bytes(),
-        root.store_root_hash,
-        commit_ref,
-        author,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let mut history_verifier = crate::sync::store::pull::MergeHistoryVerifier::new(storage, root)
+    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    super::load_circle_activations(
-        &StoreDatabase::new(db),
-        &mut history_verifier,
-        &verified,
-        identity,
-        Some(&routing_key),
-    )
-    .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        .load_circle_activations_for_test(commit_ref, commit, author, Some(&routing_key))
+        .await
 }
 
 /// Publish a valid, different Store commit and activation head at a prepared
@@ -279,9 +306,13 @@ async fn publish_competing_store_head(
         .create_protocol_object(&package_prepared)
         .await
         .expect("publish competing package");
-    let membership = crate::sync::store::pull::load_cycle_membership(storage.as_ref(), &database)
-        .await
-        .expect("load competing commit membership");
+    let membership =
+        crate::sync::store::Store::load(database.clone(), storage.clone(), signer.clone())
+            .await
+            .expect("load competing commit Store")
+            .membership_for_test()
+            .await
+            .expect("load competing commit membership");
     let predecessor = membership
         .write_grant_authority(&registration.author_pubkey)
         .expect("competing author has an active write grant");
@@ -400,15 +431,9 @@ async fn persist_merge_operation(
 ) -> (TestStore, UserKeypair, CircleOperationJournal) {
     let signer = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(db, name, &signer).await;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read Circle creator device id")
-        .expect("Circle creator has an active exact device");
     let journal = prepare_circle_operation(
         db,
         &store.storage,
-        &device_id,
         "0000000001000-0000-creator",
         "Household",
         &signer,

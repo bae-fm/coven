@@ -62,6 +62,19 @@ async fn make_remote(
     .await
 }
 
+async fn read_blob(
+    db: &Database,
+    store_dir: &StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    reference: &RowBlobRef,
+) -> Result<Vec<u8>, crate::blob::cache::BlobCacheError> {
+    let database = StoreDatabase::new(db);
+    crate::sync::store::blob::StoreBlobAccess::open(&database, store_dir, storage)
+        .await?
+        .read(reference)
+        .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn make_local(
     db: &Database,
@@ -75,8 +88,9 @@ async fn make_local(
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), crate::blob::transition::MakeLocalError> {
+    let database = StoreDatabase::new(db);
     store_make_local(
-        &StoreDatabase::new(db),
+        &database,
         storage,
         store_dir,
         hlc,
@@ -92,17 +106,21 @@ async fn make_local(
 
 async fn drain_uploads(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &TestStore,
     store_dir: &StoreDir,
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-    let store = crate::sync::store::Store::authorize_borrowed(storage, db)
+    let store = storage
+        .bind_device(db, &storage.signer)
         .await
-        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        .map_err(crate::database::DbError::Message)?;
     store
+        .authorize_writer()
+        .await
+        .map_err(|error| crate::database::DbError::Message(error.to_string()))?
         .drain_uploads(store_dir, clock, hlc, routing_encryption, observer)
         .await
 }
@@ -183,21 +201,19 @@ async fn invite_and_activate_peer(
     peer_db: &Database,
     peer: &UserKeypair,
 ) {
-    crate::sync::store::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &storage.signer,
-        &Hlc::new("peer-invitation".to_string()),
-        &crate::sync::test_helpers::pubkey_hex(peer),
-        None,
-        crate::sync::membership::MemberRole::Member,
-        &crate::encryption::EncryptionService::from_key([42; 32]),
-        "test-store",
-        "Test Store",
-        &StoreDatabase::new(observer_db),
-    )
-    .await
-    .expect("invite peer identity");
+    storage
+        .invite_member(
+            observer_db,
+            &storage.signer,
+            &Hlc::new("peer-invitation".to_string()),
+            &crate::sync::test_helpers::pubkey_hex(peer),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("invite peer identity");
     crate::sync::test_helpers::install_active_device_fixture(
         storage,
         observer_db,
@@ -305,7 +321,7 @@ async fn run_cycle(
     // this device can't adopt.
     let pending_rotation = PendingRotation::none();
     let result = run_single_sync_cycle(
-        &storage.storage,
+        storage.storage.clone(),
         &store_device_id,
         hlc,
         &SystemClock,
@@ -343,7 +359,7 @@ async fn try_run_cycle(
         .ok_or_else(|| "test database has no activated Store device".to_string())?;
     let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
-        &storage.storage,
+        storage.storage.clone(),
         &store_device_id,
         hlc,
         &SystemClock,
@@ -459,15 +475,12 @@ async fn seed_remote_release(
         .expect("build exact remote fixture source path");
     register_external_blob(db, "note_photos", photo_id, &source).await;
     storage.open_into(db).await.expect("open exact test Store");
-    crate::sync::store::ensure_active_registration(&StoreDatabase::new(db), &storage.storage)
-        .await
-        .expect("activate exact fixture writer");
     make_remote(db, store_dir, hlc, "notes", note_id, false)
         .await
         .expect("queue exact remote fixture upload");
     let outcome = drain_uploads(
         db,
-        &storage.storage,
+        storage,
         store_dir,
         &SystemClock,
         hlc,
@@ -721,7 +734,10 @@ async fn publish_fixture_position(
         .publish_pending(db, store_dir)
         .await
         .expect("publish fixture Store position"));
-    crate::sync::store::StoreDatabase::new(db)
+    storage
+        .founder_device()
+        .await
+        .expect("retain fixture Store device")
         .latest_local_store_position()
         .await
         .expect("read fixture Store position")
@@ -828,8 +844,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "B receives the release once its blobs are up and the gate flips",
     );
-    let fetched = crate::sync::store::blob::read_blob(
-        &StoreDatabase::new(&db_b),
+    let fetched = read_blob(
+        &db_b,
         &lib_b,
         Some(&storage.storage),
         &photo_ref(&db_b, "photoaaa").await,
@@ -1162,8 +1178,8 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         );
 
         // A still reads the photo from its external file (no cloud copy needed).
-        let read = crate::sync::store::blob::read_blob(
-            &StoreDatabase::new(&db_a),
+        let read = read_blob(
+            &db_a,
             &lib_a,
             Some(&storage.storage),
             &photo_ref(&db_a, "photoaaa").await,
@@ -1340,11 +1356,10 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
     let store_state_before = scoped_store_state(&db).await;
 
-    let error =
-        match drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None).await {
-            Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
-            Err(error) => error,
-        };
+    let error = match drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None).await {
+        Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
+        Err(error) => error,
+    };
 
     assert!(
         error
@@ -1383,7 +1398,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
 
     let outcome = drain_uploads(
         &db,
-        &storage.storage,
+        &storage,
         &lib,
         &SystemClock,
         &hlc,
@@ -1457,11 +1472,10 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
     let store_state_before = scoped_store_state(&db).await;
 
-    let error =
-        match drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None).await {
-            Err(error) => error,
-            Ok(_) => panic!("a scoped host completion requires routing encryption before upload"),
-        };
+    let error = match drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None).await {
+        Err(error) => error,
+        Ok(_) => panic!("a scoped host completion requires routing encryption before upload"),
+    };
 
     assert!(
         error
@@ -1498,7 +1512,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
 
     let completed = drain_uploads(
         &db,
-        &storage.storage,
+        &storage,
         &lib,
         &SystemClock,
         &hlc,
@@ -1625,8 +1639,8 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "B does not fetch the CacheLazy photo on pull",
     );
     assert_eq!(
-        crate::sync::store::blob::read_blob(
-            &StoreDatabase::new(&db_b),
+        read_blob(
+            &db_b,
             &lib_b,
             Some(&storage.storage),
             &cover_ref(&db_b, "coveraaa").await
@@ -1733,8 +1747,8 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         .await
         .expect("store host-provided cover");
 
-    let before = crate::sync::store::blob::read_blob(
-        &StoreDatabase::new(&db_a),
+    let before = read_blob(
+        &db_a,
         &lib_a,
         Some(&storage.storage),
         &cover_ref(&db_a, "coverhost").await,
@@ -1788,8 +1802,8 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
             .exists(),
         "after Remote upload the local store no longer holds the blob"
     );
-    let after = crate::sync::store::blob::read_blob(
-        &StoreDatabase::new(&db_a),
+    let after = read_blob(
+        &db_a,
         &lib_a,
         Some(&storage.storage),
         &cover_ref(&db_a, "coverhost").await,
@@ -1853,10 +1867,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 
     // Each upload drain stops after one root becomes publishable. Both flips now
     // own exact Created handoffs and durable local-store cleanup intents.
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("create pinned exact blob and flip its root");
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("create unpinned exact blob and flip its root");
 
@@ -2131,8 +2145,8 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .exists(),
         "the peer eagerly caches the host-provided blob"
     );
-    let got = crate::sync::store::blob::read_blob(
-        &StoreDatabase::new(&db_b),
+    let got = read_blob(
+        &db_b,
         &lib_b,
         Some(&storage.storage),
         &db_b
@@ -2458,7 +2472,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
 
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
     std::fs::remove_file(&src2).unwrap();
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("partial drain");
     assert_eq!(
@@ -2481,7 +2495,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     cancel_make_remote(&db, "notes", "n1")
         .await
         .expect("cancel make_remote");
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("drain cancelled make_remote cleanup");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
@@ -2644,7 +2658,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     cancel_make_remote(&db, "notes", "n1")
         .await
         .expect("cancel same-locator uploads");
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("drain exact cancellation cleanup");
 
@@ -2694,7 +2708,7 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     .unwrap();
 
     let deletes_before = storage.home.exact_delete_count();
-    let outcome = drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    let outcome = drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("drain");
 
@@ -2954,7 +2968,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // "Crash" after photoaaa uploads but before completion: remove photobbb's source so the
     // first drain uploads only photoaaa, leaving the make_remote in flight.
     std::fs::remove_file(&src2).unwrap();
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("partial drain");
     assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
@@ -2973,7 +2987,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // the drain then completes and flips.
     std::fs::write(&src2, b"second").unwrap();
     db.reset_cloud_outbox_backoff().await.unwrap();
-    drain_uploads(&db, &storage.storage, &lib, &SystemClock, &hlc, None, None)
+    drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None)
         .await
         .expect("resume drain");
     assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Remote");

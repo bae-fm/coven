@@ -65,8 +65,7 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 /// Everything the two sides of one join need: the owner's open Store over the
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
-    owner: UserKeypair,
-    owner_store: crate::sync::store::Store,
+    owner_store: TestDevice,
     owner_db: crate::database::Database,
     owner_database: crate::sync::store::StoreDatabase,
     owner_storage: Arc<crate::sync::cloud_storage::CloudSyncStorage>,
@@ -75,7 +74,6 @@ struct TransportFixture {
     owner_test_store: TestStore,
     owner_store_dir: crate::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
-    provider_admin_grant: crate::ProviderAdminGrantId,
     member_pubkey: String,
     invite_code: String,
     join_request: String,
@@ -157,23 +155,20 @@ impl TransportFixture {
         let member_pubkey = crate::join_code::decode_join_request(&join_request)
             .expect("decode join request")
             .public_key;
-        let invitation_home = GrantingCloudHome(store.home.as_ref().clone());
-        let invite = crate::sync::test_helpers::invite_store_member_for_test(
-            &store.storage,
-            &invitation_home,
-            &owner,
-            &Hlc::new("owner-device".to_string()),
-            &member_pubkey,
-            None,
-            crate::sync::membership::MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            store_id,
-            "Device Join Transport Store",
-            &owner_database,
-        )
-        .await
-        .expect("invite joiner identity");
-        let membership = store
+        let invite = store
+            .invite_member(
+                &owner_db,
+                &owner,
+                &Hlc::new("owner-device".to_string()),
+                &member_pubkey,
+                None,
+                crate::sync::membership::MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Device Join Transport Store",
+            )
+            .await
+            .expect("invite joiner identity");
+        let owner_device = store
             .open_into(&owner_db)
             .await
             .expect("load membership including joiner");
@@ -181,56 +176,40 @@ impl TransportFixture {
         let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
         let snapshot_path = snapshot_dir.path().to_path_buf();
         let snapshot_tables = tables.clone();
+        let snapshot_root = store.root.clone();
         let snapshot = owner_db
             .call(move |connection| {
-                create_snapshot(connection, &snapshot_path, &snapshot_tables, None)
-                    .map_err(|error| DbError::Message(error.to_string()))
+                create_snapshot(
+                    connection,
+                    &snapshot_root,
+                    &snapshot_path,
+                    &snapshot_tables,
+                    None,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))
             })
             .await
             .expect("create join snapshot");
         let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
-        crate::sync::test_helpers::publish_snapshot_fixture(
-            &store.storage,
-            &store.root,
-            snapshot,
-            snapshot_coverage.clone(),
-            &owner,
-            &membership,
-            &owner_db,
-        )
-        .await
-        .expect("publish join snapshot");
-        publish_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
+        owner_device
+            .publish_snapshot(snapshot, snapshot_coverage.clone())
+            .await
+            .expect("publish join snapshot");
+        owner_device
+            .publish_acknowledgement(snapshot_coverage)
             .await
             .expect("publish join snapshot acknowledgement");
-        let owner_storage = Arc::new(
-            crate::sync::cloud_storage::CloudSyncStorage::new(
-                store.home.clone(),
-                crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
-                    [42; 32],
-                )),
-                crate::sync::cloud_storage::BlobPathScheme::Hashed,
-                store_id,
-                owner.clone(),
-            )
-            .expect("construct production Store storage"),
-        );
-        let owner_store =
-            crate::sync::store::Store::load(owner_database.clone(), owner_storage.clone())
-                .await
-                .expect("open production Store owner");
+        let owner_storage = store.storage.clone();
+        let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = crate::store_dir::StoreLayout::new(app.path());
-        let provider_admin_grant = store
-            .protocol_root
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
+        let provider_binding = crate::sync::storage::SyncStorage::provider_binding(&*store.storage)
+            .await
+            .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
             Some(principal) => Arc::new(store.home.as_ref().clone().with_provider_binding(
                 crate::ResolvedProviderBinding {
-                    store: store.protocol_root.descriptor.provider.clone(),
+                    store: provider_binding.store,
                     device: crate::ProviderDeviceBinding { principal },
                 },
             )),
@@ -245,7 +224,6 @@ impl TransportFixture {
         let (owner_store_tmp, owner_store_dir) = temp_store_dir();
         let home = store.home.clone();
         Self {
-            owner,
             owner_store,
             owner_db,
             owner_database,
@@ -253,7 +231,6 @@ impl TransportFixture {
             owner_test_store: store,
             owner_store_dir,
             home,
-            provider_admin_grant,
             member_pubkey,
             invite_code: encode(&invite),
             join_request,
@@ -286,7 +263,8 @@ impl TransportFixture {
                 .expect("publish the owner's own Store write"),
             "the owner's row write produced no Store commit",
         );
-        latest_local_store_position_fixture(&self.owner_db)
+        self.owner_store
+            .latest_store_position()
             .await
             .expect("read the owner's latest Store position")
             .expect("the owner's write landed at a Store commit")
@@ -316,11 +294,7 @@ impl TransportFixture {
     async fn begin(&self) -> DeviceJoinOfferBundle {
         let offer = self
             .owner_store
-            .begin_device_join(
-                &self.owner,
-                &self.member_pubkey,
-                self.provider_admin_grant.clone(),
-            )
+            .begin_device_join(&self.member_pubkey)
             .await
             .expect("begin join");
         DeviceJoinOfferBundle::allocate(&*self.owner_storage, offer)
@@ -344,7 +318,6 @@ impl TransportFixture {
     ) -> Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         crate::sync::store::drive_device_join(
             &self.owner_store,
-            &self.owner,
             bundle,
             crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
             self.access_administrator.as_ref().map(|administrator| {
@@ -771,8 +744,7 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     let intervening = fixture.publish_owner_row("owner-writes-mid-join").await;
     let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
     let (_, activation_commit) = load_exact_materialized_commit(
-        &fixture.owner_db,
-        &*fixture.owner_storage,
+        &fixture.owner_store,
         &activation.outcome_activation.coord.stream_id.to_string(),
         activation.outcome_activation.coord.sequence(),
     )
@@ -878,7 +850,6 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
     let (owner_unwind, joiner_unwind) = tokio::join!(
         Box::pin(crate::sync::store::cancel_device_join_via_transport(
             &fixture.owner_store,
-            &fixture.owner,
             &bundle,
             timing(),
         )),
@@ -917,13 +888,10 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
-    let abandonment = crate::sync::store::abandon_device_join_via_transport(
-        &fixture.owner_store,
-        &fixture.owner,
-        &bundle,
-    )
-    .await
-    .expect("the owner abandons the attempt");
+    let abandonment =
+        crate::sync::store::abandon_device_join_via_transport(&fixture.owner_store, &bundle)
+            .await
+            .expect("the owner abandons the attempt");
     assert!(
         fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::Abandonment)
@@ -1008,7 +976,6 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
         async move {
             crate::sync::store::cancel_device_join_via_transport(
                 &fixture.owner_store,
-                &fixture.owner,
                 bundle,
                 timing,
             )
@@ -1172,7 +1139,6 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     };
     let refused = crate::sync::store::drive_device_join(
         &fixture.owner_store,
-        &fixture.owner,
         &bundle,
         crate::DeviceJoinApprovalPolicy::Ask(&refuse),
         None,
@@ -1209,7 +1175,6 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     assert_owner_waited_for(
         crate::sync::store::drive_device_join(
             &fixture.owner_store,
-            &fixture.owner,
             &bundle,
             crate::DeviceJoinApprovalPolicy::Ask(&approve),
             None,
@@ -1513,79 +1478,4 @@ async fn run_concurrent_attempts_keep_separate_namespaces() {
         .await
         .expect("read the second attempt's empty slot")
         .is_none(),);
-}
-
-struct GrantingCloudHome(crate::InMemoryCloudHome);
-
-#[async_trait::async_trait]
-impl crate::storage::cloud::CloudHome for GrantingCloudHome {
-    async fn put_object(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), crate::storage::cloud::CloudHomeError> {
-        self.0.put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, crate::storage::cloud::CloudHomeError> {
-        self.0.open_multipart(key, total_len).await
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        self.0.multipart_threshold()
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-        self.0.read(key).await
-    }
-
-    async fn read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-        self.0.read_range(key, start, end).await
-    }
-
-    async fn list(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::cloud::CloudHomeError> {
-        self.0.list(prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), crate::storage::cloud::CloudHomeError> {
-        self.0.delete(key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, crate::storage::cloud::CloudHomeError> {
-        self.0.exists(key).await
-    }
-
-    async fn set_access(
-        &self,
-        desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::storage::cloud::CloudHomeError>
-    {
-        match desired {
-            crate::storage::cloud::CloudAccessState::Present { .. } => {
-                Ok(crate::storage::cloud::CloudAccessOutcome::Present(
-                    crate::storage::cloud::CloudHomeJoinInfo::S3 {
-                        bucket: "test-bucket".to_string(),
-                        region: "us-east-1".to_string(),
-                        endpoint: None,
-                        access_key: "test-access-key".to_string(),
-                        secret_key: "test-secret-key".to_string(),
-                        key_prefix: None,
-                    },
-                ))
-            }
-            absent => self.0.set_access(absent).await,
-        }
-    }
 }

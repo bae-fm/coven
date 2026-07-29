@@ -781,6 +781,13 @@ impl CovenHandle {
         Ok(Some(Arc::new(storage)))
     }
 
+    pub(crate) fn host_write_blob_staging(
+        &self,
+    ) -> Option<crate::sync::store::HostWriteBlobStaging> {
+        let store = self.sync_manager()?.sync_loop_handle()?.store();
+        Some(store.host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir()))
+    }
+
     /// Capture the exact current blob-bearing row version. Blob operations use
     /// this row-bound value so a later row replacement cannot redirect a read.
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
@@ -795,12 +802,13 @@ impl CovenHandle {
     /// holds the database, directory, and storage.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::read_blob(
+        crate::sync::store::blob::StoreBlobAccess::open(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
-            blob,
         )
+        .await?
+        .read(blob)
         .await
     }
 
@@ -809,12 +817,13 @@ impl CovenHandle {
     /// pending-remote blobs exact-verify their authoritative local source.
     pub async fn materialize_row_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::materialize_row_blob(
+        crate::sync::store::blob::StoreBlobAccess::open(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
-            blob,
         )
+        .await?
+        .materialize(blob)
         .await
     }
 
@@ -829,12 +838,13 @@ impl CovenHandle {
     /// file, not per range — since re-opening re-proves the whole blob.
     pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::open_blob_stream(
+        crate::sync::store::blob::StoreBlobAccess::open(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
-            blob,
         )
+        .await?
+        .open_stream(blob)
         .await
     }
 
@@ -843,8 +853,14 @@ impl CovenHandle {
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::pin(&self.database, &self.store_dir, storage.as_deref(), blobs)
-            .await
+        crate::sync::store::blob::StoreBlobAccess::open(
+            &self.database,
+            &self.store_dir,
+            storage.as_deref(),
+        )
+        .await?
+        .pin(blobs)
+        .await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
@@ -1127,11 +1143,9 @@ impl CovenHandle {
             .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
             .public_key;
         let invite_code = self.invite_member(&member_pubkey, None, role).await?;
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let bundle = self
-            .device_join_store()
-            .await?
-            .begin_device_join_bundle(&signer, &member_pubkey)
+            .device_join_store()?
+            .begin_device_join_bundle(&member_pubkey)
             .await?;
         Ok(crate::sync::device_join_transport::DeviceJoinInvite::new(
             invite_code,
@@ -1151,11 +1165,9 @@ impl CovenHandle {
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let store = self.device_join_store().await?;
+        let store = self.device_join_store()?;
         Ok(crate::sync::store::drive_device_join(
             &store,
-            &signer,
             &invite.bundle,
             policy,
             access_administrator,
@@ -1180,15 +1192,11 @@ impl CovenHandle {
         invite: &crate::DeviceJoinInvite,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let store = self.device_join_store().await?;
-        Ok(crate::sync::store::cancel_device_join_via_transport(
-            &store,
-            &signer,
-            &invite.bundle,
-            timing,
+        let store = self.device_join_store()?;
+        Ok(
+            crate::sync::store::cancel_device_join_via_transport(&store, &invite.bundle, timing)
+                .await?,
         )
-        .await?)
     }
 
     /// Give up on an invited join and publish the abandonment, so a joining
@@ -1200,24 +1208,17 @@ impl CovenHandle {
         &self,
         invite: &crate::DeviceJoinInvite,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let store = self.device_join_store().await?;
-        Ok(
-            crate::sync::store::abandon_device_join_via_transport(&store, &signer, &invite.bundle)
-                .await?,
-        )
+        let store = self.device_join_store()?;
+        Ok(crate::sync::store::abandon_device_join_via_transport(&store, &invite.bundle).await?)
     }
 
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
-        provider_administrator: crate::ProviderAdminGrantId,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .begin_device_join(&signer, member_pubkey, provider_administrator)
+            .device_join_store()?
+            .begin_device_join(member_pubkey)
             .await?)
     }
 
@@ -1225,12 +1226,7 @@ impl CovenHandle {
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        Ok(self
-            .device_join_store()
-            .await?
-            .abandon_device_join(&signer, offer)
-            .await?)
+        Ok(self.device_join_store()?.abandon_device_join(offer).await?)
     }
 
     pub async fn authorize_device_provider_access(
@@ -1238,11 +1234,9 @@ impl CovenHandle {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .authorize_device_provider_access(&signer, request, access_administrator)
+            .device_join_store()?
+            .authorize_device_provider_access(request, access_administrator)
             .await?)
     }
 
@@ -1250,11 +1244,9 @@ impl CovenHandle {
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .accept_device_registration_request(&signer, request)
+            .device_join_store()?
+            .accept_device_registration_request(request)
             .await?)
     }
 
@@ -1263,8 +1255,7 @@ impl CovenHandle {
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
         Ok(self
-            .device_join_store()
-            .await?
+            .device_join_store()?
             .publish_device_provider_challenge(bootstrap)
             .await?)
     }
@@ -1273,11 +1264,9 @@ impl CovenHandle {
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .complete_device_provider_admission(&signer, readiness)
+            .device_join_store()?
+            .complete_device_provider_admission(readiness)
             .await?)
     }
 
@@ -1285,11 +1274,9 @@ impl CovenHandle {
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .finalize_device_join(&signer, completion)
+            .device_join_store()?
+            .finalize_device_join(completion)
             .await?)
     }
 
@@ -1297,11 +1284,9 @@ impl CovenHandle {
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .cancel_device_join(&signer, attempt)
+            .device_join_store()?
+            .cancel_device_join(attempt)
             .await?)
     }
 
@@ -1309,11 +1294,9 @@ impl CovenHandle {
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .close_device_provider_admission(&signer, cancellation)
+            .device_join_store()?
+            .close_device_provider_admission(cancellation)
             .await?)
     }
 
@@ -1321,18 +1304,10 @@ impl CovenHandle {
         &self,
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-        executor_grant: crate::ProviderAdminGrantId,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .revoke_device_provider_admission_writes(
-                &signer,
-                cancellation,
-                revocation_executor,
-                executor_grant,
-            )
+            .device_join_store()?
+            .revoke_device_provider_admission_writes(cancellation, revocation_executor)
             .await?)
     }
 
@@ -1340,18 +1315,10 @@ impl CovenHandle {
         &self,
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-        executor_grant: crate::ProviderAdminGrantId,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .revoke_joining_device_writes(
-                &signer,
-                cancellation,
-                revocation_executor,
-                executor_grant,
-            )
+            .device_join_store()?
+            .revoke_joining_device_writes(cancellation, revocation_executor)
             .await?)
     }
 
@@ -1359,11 +1326,9 @@ impl CovenHandle {
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         Ok(self
-            .device_join_store()
-            .await?
-            .activate_device_join_cleanup(&signer, receipt)
+            .device_join_store()?
+            .activate_device_join_cleanup(receipt)
             .await?)
     }
 
@@ -1371,8 +1336,7 @@ impl CovenHandle {
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.device_join_store()
-            .await?
+        self.device_join_store()?
             .complete_owner_device_join_cleanup(activation)
             .await?;
         Ok(())
@@ -1390,16 +1354,12 @@ impl CovenHandle {
         Ok(self.database.device_join_actions().await?)
     }
 
-    fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
+    fn device_join_store(&self) -> Result<Arc<Store>, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         let loop_handle = manager
             .sync_loop_handle()
             .ok_or(SyncError::LoopNotRunning)?;
-        Ok(loop_handle.storage().clone())
-    }
-
-    async fn device_join_store(&self) -> Result<Store, SyncError> {
-        Ok(Store::load(self.database.clone(), self.device_join_storage()?).await?)
+        Ok(loop_handle.store())
     }
 
     pub async fn invite_member(

@@ -3,9 +3,10 @@ use super::{
     publication_state::PreparedStoreWriteState, StoreDatabase,
 };
 use crate::database::{
-    load_prepared_audience_objects_on, local_store_authority_on, required_store_root_authority_on,
-    DbError, ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
+    load_prepared_audience_objects_on, required_store_root_authority_on, DbError,
+    ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
 };
+use crate::sync::membership::AuthorStreamId;
 use crate::sync::store_commit::{
     CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
@@ -313,19 +314,15 @@ impl StoreDatabase {
     /// Taking this device's turn to author its own stream is part of the read:
     /// the position returned stays this device's next position for as long as
     /// the returned [`LocalCommitBase`] is held.
-    pub(crate) async fn local_commit_base(&self) -> Result<LocalCommitBase, DbError> {
+    pub(crate) async fn local_commit_base(
+        &self,
+        stream_id: AuthorStreamId,
+    ) -> Result<LocalCommitBase, DbError> {
         let authorship = self.author_own_stream().await;
         let (predecessor, frontier) = self
             .database
             .call(move |conn| {
-                let (root, registration, _) = local_store_authority_on(conn)?;
-                let stream_id =
-                    crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-                        root.store_root_hash,
-                        &registration,
-                        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                    )
-                    .to_string();
+                let stream_id = stream_id.to_string();
                 Ok((
                     StoreDatabase::latest_position_for_device_on(conn, &stream_id)?,
                     StoreDatabase::materialized_frontier_on(conn, None)?,
@@ -341,17 +338,11 @@ impl StoreDatabase {
 
     pub(crate) async fn latest_local_store_position(
         &self,
+        stream_id: AuthorStreamId,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         self.database
             .call(move |conn| {
-                let (root, registration, _) = local_store_authority_on(conn)?;
-                let stream_id =
-                    crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-                        root.store_root_hash,
-                        &registration,
-                        crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                    )
-                    .to_string();
+                let stream_id = stream_id.to_string();
                 crate::sync::store::database::StoreDatabase::latest_position_for_device_on(
                     conn, &stream_id,
                 )

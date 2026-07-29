@@ -21,6 +21,7 @@ use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 impl StoreDatabase {
     pub(crate) async fn complete_prepared_store_write(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         accepted: StoreBatchCommitRef,
         nonactivations: Vec<crate::sync::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
@@ -70,6 +71,7 @@ impl StoreDatabase {
                 let exclusion_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 if author_exclusion_activation_for_candidate_on(
                     &tx,
+                    &root,
                     &exclusion_candidate.reference,
                     &exclusion_candidate.commit.author_registration,
                 )?

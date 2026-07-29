@@ -1,27 +1,21 @@
 use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
-use super::{
-    prepare_circle_operation_request, publish_circle_operation, CircleOperationError,
-    CircleOperationIntent,
-};
-use crate::keys::UserKeypair;
+use super::{prepare_circle_operation_request, CircleOperationError, CircleOperationIntent};
 use crate::sync::circle::{
     circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseExclusionRef,
     CircleEpochCloseResponse, CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue,
     CircleEpochCloseSettlement, PreparedCircleControl,
 };
 use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::sync::store::{operations, AuthorizedStore};
+use crate::sync::store::{AuthorizedStore, AuthorizedWriterOperation};
 use crate::sync::store_commit::CommitFrontier;
 use crate::sync::store_objects::StoreObjectError;
 
-impl AuthorizedStore<'_> {
+impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn finalize_ready_circle_epoch_closes(
         &mut self,
-        device_id: &str,
         metadata_stamp: &str,
         store_dir: &crate::store_dir::StoreDir,
         routing_encryption: &crate::encryption::EncryptionService,
-        identity: &UserKeypair,
     ) -> Result<(), CircleOperationError> {
         let journals = self.database().waiting_circle_operations().await?;
         if journals.is_empty() {
@@ -37,7 +31,7 @@ impl AuthorizedStore<'_> {
                     )));
                 }
             };
-            let identity_pubkey = crate::keys::public_key_hex(identity);
+            let identity_pubkey = crate::keys::public_key_hex(self.writer.identity);
             let (current, activation_commit_ref) = self
                 .database()
                 .circle_closing_context(journal.circle_id, &identity_pubkey)
@@ -77,9 +71,8 @@ impl AuthorizedStore<'_> {
                     cutoff,
                 )
                 .await?;
-            let mut authority = self.operation_authority();
-            let activation = authority
-                .history_verifier
+            let activation = self
+                .history_verifier_mut()
                 .commit_verifier()
                 .load_ref(&activation_commit_ref)
                 .await?;
@@ -111,9 +104,10 @@ impl AuthorizedStore<'_> {
                     ));
                 }
             };
+            let database = self.database().clone();
             let roster_chain = super::activation::load_circle_control_roster_chain(
-                authority.database,
-                authority.history_verifier.commit_verifier(),
+                &database,
+                self.history_verifier_mut().commit_verifier(),
                 &activation,
                 reference,
                 &current.control,
@@ -132,8 +126,7 @@ impl AuthorizedStore<'_> {
                     ))
                 })?;
             let prepared = Box::pin(prepare_circle_operation_request(
-                &mut authority,
-                device_id,
+                self,
                 CircleOperationRequest::FinalizeEpochClose(Box::new(
                     CircleFinalizeEpochCloseRequest {
                         operation_id: journal.operation_id.clone(),
@@ -151,7 +144,6 @@ impl AuthorizedStore<'_> {
                         bootstrap,
                     },
                 )),
-                identity,
             ))
             .await?;
             if prepared.operation_id != journal.operation_id
@@ -164,26 +156,23 @@ impl AuthorizedStore<'_> {
                 )));
             }
             journal.begin_finalization(prepared.operation().clone())?;
-            authority
-                .database
+            self.database()
                 .begin_circle_operation_finalization(journal.clone())
                 .await?;
             let routing_key = crate::sync::circle::derive_row_routing_key(
                 routing_encryption,
-                authority.history_verifier.root().store_root_hash,
+                self.history_verifier_mut().root().store_root_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            Box::pin(publish_circle_operation(
-                &mut authority,
-                &journal.operation_id,
-                identity,
-                Some(&routing_key),
-            ))
-            .await?;
+            self.circle_operation()
+                .publish(&journal.operation_id, Some(&routing_key))
+                .await?;
         }
         Ok(())
     }
+}
 
+impl AuthorizedStore<'_> {
     pub(crate) async fn load_complete_circle_epoch_close_responses(
         &self,
         control: &PreparedCircleControl,
@@ -275,26 +264,21 @@ impl AuthorizedStore<'_> {
         }
         Ok(Some(settlements))
     }
+}
 
+impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn publish_circle_epoch_close_responses(
-        &self,
-        identity: &UserKeypair,
+        &mut self,
     ) -> Result<(), CircleOperationError> {
         let controls = self.database().closing_circle_controls().await?;
         if controls.is_empty() {
             return Ok(());
         }
-        let device_id = self
-            .db()
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await?
-            .ok_or(CircleOperationError::MissingState(
-                crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-            ))?;
-        let (root, registration_ref, registration, device_signer) =
-            operations::load_local_store_authority(self.database(), &device_id, identity)
-                .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let root = self.store_root().clone();
+        let registration_ref = self.writer.registration_ref.clone();
+        let registration = self.writer.registration.clone();
+        let device_signer = self.writer.device_signer.clone();
+        let storage = self.storage();
         let frontier = CommitFrontier::from_refs(self.database().materialized_frontier().await?)
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for control in controls {
@@ -332,8 +316,7 @@ impl AuthorizedStore<'_> {
                 root.store_root_hash,
                 ProtocolObjectDomain::CircleEpochCloseResponse,
             );
-            let prepared = self
-                .storage()
+            let prepared = storage
                 .prepare_protocol_object(
                     &context,
                     participant.response_slot.clone(),
@@ -341,12 +324,11 @@ impl AuthorizedStore<'_> {
                     CircleEpochCloseResponseSlotValue::Response(response).to_bytes(),
                 )
                 .map_err(StoreObjectError::from)?;
-            match self.storage().create_protocol_object(&prepared).await {
+            match storage.create_protocol_object(&prepared).await {
                 Ok(()) | Err(StorageError::SlotCollision(_)) => {}
                 Err(error) => return Err(StoreObjectError::from(error).into()),
             }
-            let (winner_bytes, _) = self
-                .storage()
+            let (winner_bytes, _) = storage
                 .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
                 .await
                 .map_err(StoreObjectError::from)?;

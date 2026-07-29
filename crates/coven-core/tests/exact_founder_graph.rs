@@ -55,14 +55,14 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     )
     .await;
 
-    let error =
-        coven_core::sync::store::ensure_active_registration_for_test(&opened_db, &store.storage)
-            .await
-            .expect_err("an existing Store root cannot authorize another Founder registration");
-    assert!(matches!(
-        error,
-        coven_core::sync::store::StoreRegistrationError::ActivationRequired
-    ));
+    let error = match store.bind_device(&opened_db, &founder).await {
+        Ok(_) => panic!("an opened Store without a registered device authorized a writer"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(coven_core::database::LOCAL_DEVICE_ID_STATE_KEY),
+        "{error}"
+    );
     assert_eq!(store.home.exact_create_count(), creates_before);
     assert_eq!(
         table_count(

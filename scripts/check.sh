@@ -14,6 +14,9 @@ cd "$(dirname "$0")/.."
 
 step() { echo ""; echo "── $1"; }
 
+step "restricted-path Rust visibility"
+scripts/check-rust-visibility.sh
+
 step "cargo fmt --all --check"
 cargo fmt --all --check
 

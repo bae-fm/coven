@@ -801,6 +801,21 @@ pub trait ExactSlotStorage: Send + Sync {
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
 
+    async fn observe_at(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<Option<crate::sync::storage::ExactObjectRef>, CloudHomeError> {
+        match self.read_at(slot).await {
+            Ok(bytes) => Ok(Some(crate::sync::storage::ExactObjectRef::new(
+                slot.clone(),
+                bytes.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(&bytes),
+            ))),
+            Err(CloudHomeError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn read_range_at(
         &self,
         slot: &ObjectSlot,
@@ -815,6 +830,24 @@ pub trait ExactSlotStorage: Send + Sync {
     ) -> Result<(), CloudFileReadError>;
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
+
+    async fn delete_and_verify_absent(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        match self.read_at(slot).await {
+            Err(CloudHomeError::NotFound(_)) => Ok(()),
+            Ok(_) => {
+                self.delete_at(slot).await?;
+                match self.read_at(slot).await {
+                    Err(CloudHomeError::NotFound(_)) => Ok(()),
+                    Ok(_) => Err(CloudHomeError::Configuration(format!(
+                        "exact-slot adapter left {} present after deletion",
+                        slot.logical_key()
+                    ))),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[async_trait]

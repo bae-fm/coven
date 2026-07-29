@@ -11,13 +11,13 @@ use crate::sync::circle::{
 };
 use crate::sync::circle_roster::CircleMaterializedRoster;
 use crate::sync::store::circle_controls::CircleOperationError;
-#[cfg(test)]
-use crate::sync::store_commit::StoreDeviceRegistration;
+use crate::sync::store::owner::pull::StoreCommitVerifier;
 use crate::sync::store_commit::{
-    CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, ObjectHash, StoreBatchCommit,
-    StoreBatchCommitRef, StoreDeviceRegistrationRef, StreamActivation, StreamActivationId,
-    VerifiedStoreBatchCommit,
+    CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, CirclePackageRef, ObjectHash,
+    StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreProtocolError, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
+use crate::sync::store_objects::{run_blocking_object_verification, VerifiedObject};
 
 /// The local device's own exclusion from a Circle epoch close, derived strictly
 /// from the verified successor outcome at materialization. It records the exact
@@ -137,9 +137,145 @@ impl VerifiedCircleImage {
 
 #[derive(Clone)]
 pub(crate) struct CirclePackageAccess {
-    pub(crate) encryption: EncryptionService,
-    pub(crate) key_fingerprint: KeyFingerprint,
-    pub(crate) writers: BTreeSet<String>,
+    circle_id: CircleId,
+    encryption: EncryptionService,
+    key_fingerprint: KeyFingerprint,
+    writers: BTreeSet<String>,
+}
+
+pub(crate) struct OpenedCirclePackage {
+    pub(crate) object: VerifiedObject<Vec<u8>>,
+    pub(crate) blob_protection: crate::sync::storage::BlobSpoolProtection,
+}
+
+impl CirclePackageAccess {
+    #[cfg(test)]
+    pub(crate) fn authorizes_writer(&self, author_pubkey: &str) -> bool {
+        self.writers.contains(author_pubkey)
+    }
+
+    pub(crate) fn into_encryption(self) -> EncryptionService {
+        self.encryption
+    }
+
+    pub(crate) fn into_encryption_and_fingerprint(self) -> (EncryptionService, KeyFingerprint) {
+        (self.encryption, self.key_fingerprint)
+    }
+
+    pub(crate) fn from_historical(
+        circle_id: CircleId,
+        key_fingerprint: KeyFingerprint,
+        serialized_keyring: &str,
+        roster: &CircleMaterializedRoster,
+    ) -> Result<Self, CircleOperationError> {
+        if !roster.verify() {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle {circle_id} historical package roster is invalid"
+            )));
+        }
+        let keyring = MasterKeyring::from_serialized(serialized_keyring).map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "parse Circle {circle_id} historical package keyring: {error}"
+            ))
+        })?;
+        let encryption = EncryptionService::from(keyring)
+            .service_for_fingerprint(key_fingerprint.as_bytes())
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "select Circle {circle_id} historical package key: {error}"
+                ))
+            })?;
+        Ok(Self {
+            circle_id,
+            encryption,
+            key_fingerprint,
+            writers: roster.members().keys().cloned().collect(),
+        })
+    }
+
+    pub(crate) async fn open_package(
+        &self,
+        verifier: &mut StoreCommitVerifier<'_>,
+        commit_ref: &StoreBatchCommitRef,
+        reference: &CirclePackageRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<OpenedCirclePackage, CircleOperationError> {
+        if reference.circle_id != self.circle_id {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle package names {}, but access belongs to {}",
+                reference.circle_id, self.circle_id
+            )));
+        }
+        if !self.writers.contains(&author.author_pubkey) {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle package author is not a member of {} at its exact control",
+                reference.circle_id
+            )));
+        }
+        if self.key_fingerprint != reference.key_fingerprint {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle package key for {} differs from its activated control",
+                reference.circle_id
+            )));
+        }
+        let verified = verifier.load_ref(commit_ref).await?;
+        let commit = verified.value();
+        if !commit
+            .circle_packages()
+            .iter()
+            .any(|committed| committed == reference)
+        {
+            return Err(CircleOperationError::Object(
+                crate::sync::store_objects::StoreObjectError::InvalidObject {
+                    semantic_prefix: reference.package.object.slot().logical_key().to_string(),
+                    key: reference.package.object.slot().logical_key().to_string(),
+                    source: Box::new(StoreProtocolError::MissingCirclePackage(
+                        reference.circle_id,
+                    )),
+                },
+            ));
+        }
+        let semantic_prefix = crate::sync::store_commit::circle_package_semantic_prefix(
+            reference.circle_id,
+            commit.candidate_family(),
+            &verified.reference().coord.stream_id.to_string(),
+            commit.seq(),
+            reference.package.content_hash,
+        );
+        let context = crate::sync::storage::ProtocolObjectContext::circle(
+            commit.store_root_hash,
+            crate::sync::storage::ProtocolObjectDomain::CirclePackage,
+            self.encryption.clone(),
+        );
+        let bytes = verifier
+            .storage()
+            .read_protocol_object(&context, &reference.package.object, &semantic_prefix)
+            .await
+            .map_err(crate::sync::store_objects::StoreObjectError::from)?;
+        let verify_bytes = bytes.clone();
+        let expected_commit = commit.clone();
+        let expected_circle_id = reference.circle_id;
+        let value = run_blocking_object_verification(
+            &semantic_prefix,
+            &reference.package.object,
+            Box::new(move || {
+                expected_commit.verify_circle_package(expected_circle_id, &verify_bytes)?;
+                Ok(verify_bytes)
+            }),
+        )
+        .await?;
+        Ok(OpenedCirclePackage {
+            object: VerifiedObject {
+                value,
+                bytes,
+                semantic_hash: reference.package.content_hash,
+                object: reference.package.object.clone(),
+            },
+            blob_protection: crate::sync::storage::BlobSpoolProtection::Opaque(
+                self.encryption.clone(),
+            ),
+        })
+    }
 }
 
 impl VerifiedCircleReference {
@@ -196,6 +332,7 @@ fn package_access_from(
             ))
         })?;
     Ok(CirclePackageAccess {
+        circle_id,
         encryption,
         key_fingerprint,
         writers: roster.members().keys().cloned().collect(),

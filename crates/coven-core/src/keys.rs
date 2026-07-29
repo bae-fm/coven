@@ -264,6 +264,16 @@ pub fn ed25519_to_x25519_public_key(
     Ok(vk.to_montgomery().to_bytes())
 }
 
+pub(crate) fn ed25519_hex_to_x25519_public_key(
+    ed25519_pubkey_hex: &str,
+) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
+    let public_key: [u8; SIGN_PUBLICKEYBYTES] = hex::decode(ed25519_pubkey_hex)
+        .map_err(|error| KeyError::Crypto(format!("invalid public-key hex: {error}")))?
+        .try_into()
+        .map_err(|_| KeyError::Crypto("public key has the wrong length".to_string()))?;
+    ed25519_to_x25519_public_key(&public_key)
+}
+
 /// Derive an X25519 shared secret after rejecting public inputs that cannot
 /// identify a peer. Low-order public keys produce the all-zero shared secret;
 /// that result is never usable as recipient identity material.

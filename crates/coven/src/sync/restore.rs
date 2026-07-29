@@ -171,7 +171,6 @@ async fn build_cloud_home(
 pub async fn restore_from_cloud(
     store_id: &str,
     store_root: crate::sync::store_commit::StoreRootRef,
-    founder_pubkey: &str,
     serialized_keyring: Option<&str>,
     store_name: &str,
     synced_tables: &[SyncedTable],
@@ -301,7 +300,6 @@ pub async fn restore_from_cloud(
             &device_id,
             store_root,
             crate::sync::join::RestoreBootstrapContext {
-                founder_pubkey,
                 keypair,
                 authority,
                 continuation,
@@ -433,7 +431,6 @@ pub async fn restore_from_code(
     Box::pin(restore_from_cloud(
         &parsed.sid,
         parsed.store_root,
-        &parsed.founder_pubkey,
         parsed.ek.as_deref(),
         &parsed.name,
         synced_tables,

@@ -10,6 +10,28 @@ use rusqlite::OptionalExtension;
 use super::*;
 
 impl StoreDatabase {
+    pub(crate) async fn membership_head_cursors(
+        &self,
+    ) -> Result<crate::database::InitialStoreMembershipAuthority, DbError> {
+        self.sqlite()
+            .call(crate::database::InitialStoreMembershipAuthority::load_on)
+            .await
+    }
+
+    pub(crate) async fn persist_membership_head_cursors(
+        &self,
+        head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
+    ) -> Result<(), DbError> {
+        self.sqlite()
+            .call(move |conn| {
+                let transaction = conn.unchecked_transaction().map_err(DbError::from)?;
+                crate::database::InitialStoreMembershipAuthority { head_refs }
+                    .install_on(&transaction)?;
+                transaction.commit().map_err(DbError::from)
+            })
+            .await
+    }
+
     pub async fn local_store_root_ref(
         &self,
     ) -> Result<Option<crate::sync::store_commit::StoreRootRef>, DbError> {
@@ -101,6 +123,7 @@ impl StoreDatabase {
     pub(crate) async fn install_store_owner_anchor(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
+        root_bytes: Vec<u8>,
         founder_reference: StoreDeviceRegistrationRef,
         founder: StoreDeviceRegistration,
         founder_bytes: Vec<u8>,
@@ -118,6 +141,7 @@ impl StoreDatabase {
         self.sqlite()
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                install_store_root_authority_on(&tx, &root, &root_bytes)?;
                 install_store_founder_state_on(
                     &tx,
                     &root,
@@ -131,9 +155,7 @@ impl StoreDatabase {
                     crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
                     &owner,
                 )?;
-                for reference in &membership.head_refs {
-                    crate::sync::store::membership::upsert_head_cursor_on(&tx, reference)?;
-                }
+                membership.install_on(&tx)?;
                 ensure_founder_replay_baseline_on(
                     &tx,
                     schema_version,
@@ -458,7 +480,10 @@ impl StoreDatabase {
                 crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
                 &graph.root.value.descriptor.founder_pubkey,
             )?;
-            crate::sync::store::membership::upsert_head_cursor_on(&tx, &graph.membership.head_ref)?;
+            crate::database::InitialStoreMembershipAuthority {
+                head_refs: vec![graph.membership.head_ref.clone()],
+            }
+            .install_on(&tx)?;
             install_generation_zero_replay_baseline_on(
                 &tx,
                 schema_version,

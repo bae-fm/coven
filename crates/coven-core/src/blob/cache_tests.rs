@@ -36,13 +36,11 @@ async fn read_blob(
     storage: Option<&dyn SyncStorage>,
     reference: &crate::blob::RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    crate::sync::store::blob::read_blob(
-        &crate::sync::store::StoreDatabase::new(db),
-        store_dir,
-        storage,
-        reference,
-    )
-    .await
+    let database = crate::sync::store::StoreDatabase::new(db);
+    crate::sync::store::blob::StoreBlobAccess::open(&database, store_dir, storage)
+        .await?
+        .read(reference)
+        .await
 }
 
 async fn open_blob_stream(
@@ -51,13 +49,11 @@ async fn open_blob_stream(
     storage: Option<&dyn SyncStorage>,
     reference: &crate::blob::RowBlobRef,
 ) -> Result<crate::blob::cache::BlobStream, BlobCacheError> {
-    crate::sync::store::blob::open_blob_stream(
-        &crate::sync::store::StoreDatabase::new(db),
-        store_dir,
-        storage,
-        reference,
-    )
-    .await
+    let database = crate::sync::store::StoreDatabase::new(db);
+    crate::sync::store::blob::StoreBlobAccess::open(&database, store_dir, storage)
+        .await?
+        .open_stream(reference)
+        .await
 }
 
 /// Open a stream and read one range from it, for a test whose subject is which
@@ -83,13 +79,11 @@ async fn materialize_row_blob(
     storage: Option<&dyn SyncStorage>,
     reference: &crate::blob::RowBlobRef,
 ) -> Result<(), BlobCacheError> {
-    crate::sync::store::blob::materialize_row_blob(
-        &crate::sync::store::StoreDatabase::new(db),
-        store_dir,
-        storage,
-        reference,
-    )
-    .await
+    let database = crate::sync::store::StoreDatabase::new(db);
+    crate::sync::store::blob::StoreBlobAccess::open(&database, store_dir, storage)
+        .await?
+        .materialize(reference)
+        .await
 }
 
 async fn pin(
@@ -98,13 +92,11 @@ async fn pin(
     storage: Option<&dyn SyncStorage>,
     references: &[crate::blob::RowBlobRef],
 ) -> Result<(), BlobCacheError> {
-    crate::sync::store::blob::pin(
-        &crate::sync::store::StoreDatabase::new(db),
-        store_dir,
-        storage,
-        references,
-    )
-    .await
+    let database = crate::sync::store::StoreDatabase::new(db);
+    crate::sync::store::blob::StoreBlobAccess::open(&database, store_dir, storage)
+        .await?
+        .pin(references)
+        .await
 }
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
@@ -594,7 +586,11 @@ async fn install_exact_remote_blob_binding_for_row(
         ],
     )
     .await;
-    let sequence = crate::sync::store::StoreDatabase::new(db)
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain exact test producer");
+    let sequence = device
         .latest_local_store_position()
         .await
         .expect("load exact test producer position")
@@ -662,7 +658,6 @@ async fn plant_browsable_blob_row(db: &Database, blob_id: &str, cloud_path: &str
 /// this inline for opaque blobs; a browsable blob needs the same commit before
 /// it can bind.
 async fn browsable_owner_commit(
-    db: &Database,
     storage: &TestStore,
 ) -> crate::sync::store_commit::StoreBatchCommitRef {
     let source_db = open_test_db();
@@ -674,7 +669,11 @@ async fn browsable_owner_commit(
         ],
     )
     .await;
-    let sequence = crate::sync::store::StoreDatabase::new(db)
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain browsable test producer");
+    let sequence = device
         .latest_local_store_position()
         .await
         .expect("load the browsable test producer position")
@@ -1597,7 +1596,7 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
 
     let full = ramp(5000);
     plant_browsable_blob_row(&db, "browsable-track", CLOUD_PATH, &full).await;
-    let owner = browsable_owner_commit(&db, &storage).await;
+    let owner = browsable_owner_commit(&storage).await;
     let stored = create_browsable_blob_object(
         &storage,
         tmp.path(),
@@ -3144,6 +3143,10 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let lazy_decl = BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy);
     let db1 = open_test_db_with_user_and_host_blobs(photo_decl(), lazy_decl.clone());
     let storage = create_store(&db1).await;
+    let source_device = storage
+        .founder_device()
+        .await
+        .expect("retain source Store device");
     storage
         .open_into(&db1)
         .await
@@ -3170,7 +3173,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
             .expect("publish exact source write"),
         "source write publishes a Store commit",
     );
-    let blob_owner = crate::sync::store::StoreDatabase::new(&db1)
+    let blob_owner = source_device
         .latest_local_store_position()
         .await
         .expect("load source Store position")

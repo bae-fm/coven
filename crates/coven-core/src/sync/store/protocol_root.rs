@@ -14,24 +14,23 @@ use crate::sync::store_commit::{
 };
 use crate::sync::store_objects::StoreObjectError;
 
-pub(in crate::sync::store) const STORE_CREATION_ATTEMPT_STATE_KEY: &str =
-    "store_creation_attempt_v1";
+pub(super) const STORE_CREATION_ATTEMPT_STATE_KEY: &str = "store_creation_attempt_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct StoreCreationProbeIds {
+pub(super) struct StoreCreationProbeIds {
     exact_slots: crate::sync::provider::ProviderProbeId,
 }
 
 impl StoreCreationProbeIds {
-    pub(in crate::sync::store) fn exact_slots(&self) -> crate::sync::provider::ProviderProbeId {
+    pub(super) fn exact_slots(&self) -> crate::sync::provider::ProviderProbeId {
         self.exact_slots
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct StoreCreationAuthority {
+pub(super) struct StoreCreationAuthority {
     pub creation_id: StoreCreationId,
     pub founder_grant: crate::sync::membership::MembershipGrantId,
     pub provider_admin_grant: crate::sync::provider::ProviderAdminGrantId,
@@ -46,41 +45,41 @@ pub(in crate::sync::store) struct StoreCreationAuthority {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct StoreRootReservation {
+pub(super) struct StoreRootReservation {
     pub authority: StoreCreationAuthority,
     pub root_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderRegistrationReservation {
+pub(super) struct FounderRegistrationReservation {
     pub root: StoreRootReservation,
     pub registration_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct MembershipReservation {
+pub(super) struct MembershipReservation {
     pub founder: FounderRegistrationReservation,
     pub first_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct DescriptorReservation {
+pub(super) struct DescriptorReservation {
     pub membership: MembershipReservation,
     pub recovery_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderMembershipPublicationReservation {
+pub(super) struct FounderMembershipPublicationReservation {
     pub next_head_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderGraphReservation {
+pub(super) struct FounderGraphReservation {
     pub descriptor: DescriptorReservation,
     pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
@@ -91,35 +90,35 @@ pub(in crate::sync::store) struct FounderGraphReservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderStoreCommitsReservation {
+pub(super) struct FounderStoreCommitsReservation {
     pub descriptor: DescriptorReservation,
     pub store_commits: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderAcknowledgementsReservation {
+pub(super) struct FounderAcknowledgementsReservation {
     pub store_commits: FounderStoreCommitsReservation,
     pub acknowledgements: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderSnapshotsReservation {
+pub(super) struct FounderSnapshotsReservation {
     pub acknowledgements: FounderAcknowledgementsReservation,
     pub snapshots: DeviceStreamAnchor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::sync::store) struct FounderNextAckReservation {
+pub(super) struct FounderNextAckReservation {
     pub snapshots: FounderSnapshotsReservation,
     pub next_ack_slot: crate::storage::cloud::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(in crate::sync::store) enum StoreCreationAttempt {
+pub(super) enum StoreCreationAttempt {
     Initialized(StoreCreationAuthority),
     RootReserved(StoreRootReservation),
     FounderRegistrationReserved(FounderRegistrationReservation),
@@ -133,7 +132,7 @@ pub(in crate::sync::store) enum StoreCreationAttempt {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(in crate::sync) enum StoreProtocolRootError {
+pub(super) enum StoreProtocolRootError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
     #[error("Store protocol root database state: {0}")]
@@ -144,12 +143,6 @@ pub(in crate::sync) enum StoreProtocolRootError {
     Missing(ObjectHash),
     #[error("Store provider check failed: {0}")]
     Provider(String),
-    #[error("{operation}; Store founder rollback failed: {rollback}")]
-    Rollback {
-        #[source]
-        operation: Box<StoreProtocolRootError>,
-        rollback: String,
-    },
 }
 
 fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority {
@@ -206,7 +199,7 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 
 async fn durable_descriptor_reservation(
     db: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &dyn crate::sync::storage::SyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<DescriptorReservation, StoreProtocolRootError> {
@@ -369,7 +362,7 @@ async fn durable_descriptor_reservation(
 
 async fn durable_founder_graph_reservation(
     db: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &dyn crate::sync::storage::SyncStorage,
     descriptor: &DescriptorReservation,
     root: &StoreRootRef,
 ) -> Result<FounderGraphReservation, StoreProtocolRootError> {
@@ -532,9 +525,9 @@ async fn durable_founder_graph_reservation(
     }
 }
 
-async fn prepare_founder_graph(
+pub(super) async fn prepare_founder_graph(
     db: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &dyn crate::sync::storage::SyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<Box<crate::database::DurableFounderGraph>, StoreProtocolRootError> {
@@ -810,11 +803,8 @@ async fn rollback_founder_exact_objects(
     ]);
     let mut failures = Vec::new();
     for object in objects {
-        match crate::sync::store_objects::delete_exact_object(storage, &object).await {
-            Ok(())
-            | Err(StoreObjectError::Storage(crate::sync::storage::StorageError::SlotCollision(
-                _,
-            ))) => {}
+        match storage.delete_protocol_object(&object).await {
+            Ok(()) | Err(crate::sync::storage::StorageError::SlotCollision(_)) => {}
             Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
         }
     }
@@ -825,9 +815,9 @@ async fn rollback_founder_exact_objects(
     }
 }
 
-async fn rollback_founder_publication(
+pub(super) async fn rollback_founder_publication(
     db: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &dyn crate::sync::storage::SyncStorage,
     graph: &crate::database::DurableFounderGraph,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
@@ -842,91 +832,9 @@ async fn rollback_founder_publication(
         .map_err(|error| error.to_string())
 }
 
-pub(in crate::sync) async fn create_store(
-    database: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
-    founder_timestamp: &str,
-    signer: &UserKeypair,
-) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
-    let _creation = database.lock_store_creation().await;
-    let mut graph = match database
-        .local_store_founder_graph()
-        .await
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
-    {
-        Some(graph) => graph,
-        None => {
-            let graph = Box::pin(prepare_founder_graph(
-                database,
-                storage,
-                founder_timestamp,
-                signer,
-            ))
-            .await?;
-            database
-                .stage_store_founder_graph(graph)
-                .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-            database
-                .local_store_founder_graph()
-                .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
-                .ok_or_else(|| {
-                    StoreProtocolRootError::Database(
-                        "staged Store founder graph is absent".to_string(),
-                    )
-                })?
-        }
-    };
-    let rollback_allowed = match &graph.registration_state {
-        crate::database::LocalDeviceRegistrationState::Prepared
-        | crate::database::LocalDeviceRegistrationState::Created => true,
-        crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
-    };
-    if rollback_allowed {
-        Box::pin(rollback_founder_publication(database, storage, &graph))
-            .await
-            .map_err(|rollback| {
-                StoreProtocolRootError::Database(format!(
-                    "Store founder rollback before publication: {rollback}"
-                ))
-            })?;
-        graph = database
-            .local_store_founder_graph()
-            .await
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
-            .ok_or_else(|| {
-                StoreProtocolRootError::Database(
-                    "rolled-back Store founder graph is absent".to_string(),
-                )
-            })?;
-    }
-    match Box::pin(publish_store_founder_graph(
-        database,
-        storage,
-        founder_timestamp,
-        signer,
-        &graph,
-    ))
-    .await
-    {
-        Ok(root) => Ok(root),
-        Err(operation) if rollback_allowed => {
-            match Box::pin(rollback_founder_publication(database, storage, &graph)).await {
-                Ok(()) => Err(operation),
-                Err(rollback) => Err(StoreProtocolRootError::Rollback {
-                    operation: Box::new(operation),
-                    rollback,
-                }),
-            }
-        }
-        Err(operation) => Err(operation),
-    }
-}
-
-async fn publish_store_founder_graph(
+pub(super) async fn publish_store_founder_graph(
     db: &StoreDatabase,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &dyn crate::sync::storage::SyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
     graph: &crate::database::DurableFounderGraph,
@@ -967,22 +875,24 @@ async fn publish_store_founder_graph(
         .await
         .map_err(StoreObjectError::from)?;
     let opened_root =
-        crate::sync::store_objects::load_store_protocol_root(storage, &root_ref).await?;
+        load_exact_store_protocol_root(storage, &root_ref, db.sqlite().sync_routing_hash()).await?;
     if opened_root.value != store_protocol_root {
         return Err(StoreProtocolRootError::Missing(root_ref.store_root_hash));
     }
+    let commit_verifier = crate::sync::store::owner::pull::StoreCommitVerifier::from_verified_root(
+        storage,
+        &root_ref,
+        opened_root.clone(),
+    )
+    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     storage
         .create_protocol_object(&graph.registration.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let registration = crate::sync::store_objects::load_registration_ref_with_root(
-        storage,
-        &root_ref,
-        &opened_root.value,
-        &registration_ref,
-    )
-    .await?
-    .value;
+    let registration = commit_verifier
+        .load_registration(&registration_ref)
+        .await?
+        .value;
     if registration != graph.registration.value {
         return Err(StoreProtocolRootError::Database(
             "founder registration readback differs from durable bytes".to_string(),
@@ -992,14 +902,10 @@ async fn publish_store_founder_graph(
         .create_protocol_object(&graph.initial_ack.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let initial_ack = crate::sync::store_objects::load_store_ack_ref(
-        storage,
-        &root_ref,
-        &graph.initial_ack_ref,
-        &registration,
-    )
-    .await?
-    .value;
+    let initial_ack = commit_verifier
+        .load_store_ack(&graph.initial_ack_ref, &registration)
+        .await?
+        .value;
     if initial_ack != graph.initial_ack.value {
         return Err(StoreProtocolRootError::Database(
             "founder initial acknowledgement readback differs from durable bytes".to_string(),
@@ -1066,12 +972,10 @@ async fn publish_store_founder_graph(
     Ok(opened_root)
 }
 
-pub(in crate::sync) async fn open_store(
-    database: &StoreDatabase,
+pub(super) async fn load_pinned_store_protocol_root(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
 ) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
-    let db = database.sqlite();
     let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
@@ -1084,51 +988,43 @@ pub(in crate::sync) async fn open_store(
         )
         .await
         .map_err(StoreObjectError::from)?;
-    let verified = StoreProtocolRoot::parse_expected(&bytes, expected, db.sync_routing_hash())
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-    let live_binding = storage
-        .provider_binding()
-        .await
-        .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
-    if live_binding.store != verified.descriptor.provider {
-        return Err(StoreProtocolRootError::Database(
-            "live provider namespace differs from the signed Store root".to_string(),
-        ));
-    }
-    if let Some(local) = database
-        .latest_local_store_device_registration()
-        .await
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
-        .filter(|registration| registration.is_activated())
-    {
-        let registration = crate::sync::store_commit::StoreDeviceRegistration::parse_at(
-            &local.registration_bytes,
-            expected,
-            local.device_id,
-        )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-        if registration.provider != live_binding.device {
-            return Err(StoreProtocolRootError::Database(
-                "live provider principal differs from the active Store registration".to_string(),
-            ));
+    let verified = StoreProtocolRoot::parse_pinned(&bytes, expected).map_err(|source| {
+        StoreObjectError::InvalidObject {
+            semantic_prefix: crate::sync::store_commit::store_protocol_root_logical_key()
+                .to_string(),
+            key: expected.object.slot().logical_key().to_string(),
+            source: Box::new(source),
         }
-    }
-    if verified.descriptor.schema_version > db.schema_version() {
-        return Err(StoreProtocolRootError::SchemaTooNew {
-            root_schema: verified.descriptor.schema_version,
-            local: db.schema_version(),
-        });
-    }
-    database
-        .install_store_root_authority(expected.clone(), bytes.clone())
-        .await
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    })?;
     Ok(crate::sync::store_objects::VerifiedObject {
         value: verified,
         bytes,
         semantic_hash: expected.store_root_hash,
         object: expected.object.clone(),
     })
+}
+
+pub(super) async fn load_exact_store_protocol_root(
+    storage: &dyn SyncStorage,
+    expected: &StoreRootRef,
+    expected_sync_routing_hash: ObjectHash,
+) -> Result<crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+    let verified = load_pinned_store_protocol_root(storage, expected).await?;
+    if verified.value.descriptor.sync_routing_hash != expected_sync_routing_hash {
+        return Err(StoreObjectError::InvalidObject {
+            semantic_prefix: crate::sync::store_commit::store_protocol_root_logical_key()
+                .to_string(),
+            key: expected.object.slot().logical_key().to_string(),
+            source: Box::new(
+                crate::sync::store_commit::StoreProtocolError::SyncRoutingMismatch {
+                    expected: expected_sync_routing_hash,
+                    actual: verified.value.descriptor.sync_routing_hash,
+                },
+            ),
+        }
+        .into());
+    }
+    Ok(verified)
 }
 
 #[cfg(test)]
@@ -1149,19 +1045,21 @@ mod tests {
     async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "exact-founder-graph",
-            founder.clone(),
-        )
-        .expect("construct exact founder storage");
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                "exact-founder-graph",
+                founder.clone(),
+            )
+            .expect("construct exact founder storage"),
+        );
         let db = open_test_db();
 
-        let root = create_store(
-            &store_database(&db),
-            &storage,
+        let initialized = crate::sync::store::Store::create(
+            store_database(&db),
+            storage,
             "0000000000001-0000-founder",
             &founder,
         )
@@ -1173,15 +1071,13 @@ mod tests {
             .expect("read exact Store root")
             .expect("created Store root exists");
 
-        crate::sync::store::anchor_owner_membership(
-            &storage,
-            &store_database(&db),
-            &root_ref,
-            &root.value,
-            &founder,
-        )
-        .await
-        .expect("created Store founder chain is immediately readable");
+        let membership = initialized
+            .store
+            .membership_for_test()
+            .await
+            .expect("created Store founder chain is immediately readable");
+        assert!(membership.is_founded_by(&crate::keys::public_key_hex(&founder)));
+        assert_eq!(initialized.store.store_root(), &root_ref);
     }
 
     #[tokio::test]
@@ -1189,14 +1085,16 @@ mod tests {
         for failing_create in 1..=5 {
             let home = InMemoryCloudHome::new();
             let founder = UserKeypair::generate();
-            let storage = CloudSyncStorage::new(
-                Arc::new(home.clone()),
-                CloudCipher::Plaintext,
-                BlobPathScheme::Plain,
-                format!("founder-rollback-{failing_create}"),
-                founder.clone(),
-            )
-            .expect("construct founder rollback storage");
+            let storage = Arc::new(
+                CloudSyncStorage::new(
+                    Arc::new(home.clone()),
+                    CloudCipher::Plaintext,
+                    BlobPathScheme::Plain,
+                    format!("founder-rollback-{failing_create}"),
+                    founder.clone(),
+                )
+                .expect("construct founder rollback storage"),
+            );
             let db = open_test_db();
             let timestamp = "0000000000001-0000-founder";
             let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
@@ -1217,9 +1115,17 @@ mod tests {
             exact_objects.push(head.object.clone());
             home.fail_exact_create_before_call(failing_create);
 
-            create_store(&store_database(&db), &storage, timestamp, &founder)
+            assert!(
+                crate::sync::store::Store::create(
+                    store_database(&db),
+                    storage.clone(),
+                    timestamp,
+                    &founder,
+                )
                 .await
-                .expect_err("injected founder publication failure must abort creation");
+                .is_err(),
+                "injected founder publication failure must abort creation"
+            );
 
             for object in &exact_objects {
                 assert!(
@@ -1228,9 +1134,14 @@ mod tests {
                     object.slot().logical_key(),
                 );
             }
-            create_store(&store_database(&db), &storage, timestamp, &founder)
-                .await
-                .expect("retry creates the Store after complete rollback");
+            crate::sync::store::Store::create(
+                store_database(&db),
+                storage.clone(),
+                timestamp,
+                &founder,
+            )
+            .await
+            .expect("retry creates the Store after complete rollback");
         }
     }
 
@@ -1238,14 +1149,16 @@ mod tests {
     async fn failed_founder_rollback_is_resumed_before_publication_retry() {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "founder-rollback-retry",
-            founder.clone(),
-        )
-        .expect("construct founder rollback retry storage");
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                "founder-rollback-retry",
+                founder.clone(),
+            )
+            .expect("construct founder rollback retry storage"),
+        );
         let temp = tempfile::tempdir().expect("create founder rollback database directory");
         let path = temp.path().join("founder-rollback.sqlite");
         let open = || {
@@ -1272,16 +1185,29 @@ mod tests {
         home.fail_exact_create_before_call(3);
         home.fail_exact_delete_on_call(1);
 
-        let failure = create_store(&store_database(&db), &storage, timestamp, &founder)
-            .await
-            .expect_err("failed exact deletion must fail the creation call");
-        assert!(matches!(failure, StoreProtocolRootError::Rollback { .. }));
+        let failure = match crate::sync::store::Store::create(
+            store_database(&db),
+            storage.clone(),
+            timestamp,
+            &founder,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("failed exact deletion must fail the creation call"),
+        };
+        assert!(failure.to_string().contains("rollback"));
         drop(db);
         let db = open();
 
-        create_store(&store_database(&db), &storage, timestamp, &founder)
-            .await
-            .expect("retry resumes rollback before publishing the founder graph");
+        crate::sync::store::Store::create(
+            store_database(&db),
+            storage.clone(),
+            timestamp,
+            &founder,
+        )
+        .await
+        .expect("retry resumes rollback before publishing the founder graph");
     }
 
     #[tokio::test]
@@ -1313,9 +1239,9 @@ mod tests {
         let first_storage = storage.clone();
         let first_founder = founder.clone();
         let first = tokio::spawn(async move {
-            create_store(
-                &store_database(&first_db),
-                &first_storage,
+            crate::sync::store::Store::create(
+                store_database(&first_db),
+                first_storage,
                 timestamp,
                 &first_founder,
             )
@@ -1326,9 +1252,9 @@ mod tests {
         let second_storage = storage.clone();
         let second_founder = founder.clone();
         let second = tokio::spawn(async move {
-            create_store(
-                &store_database(&second_db),
-                &second_storage,
+            crate::sync::store::Store::create(
+                store_database(&second_db),
+                second_storage,
                 timestamp,
                 &second_founder,
             )
@@ -1356,14 +1282,16 @@ mod tests {
     async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "founder-rollback-slot-collision",
-            founder.clone(),
-        )
-        .expect("construct founder collision storage");
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                "founder-rollback-slot-collision",
+                founder.clone(),
+            )
+            .expect("construct founder collision storage"),
+        );
         let db = open_test_db();
         let timestamp = "0000000000001-0000-founder";
         let graph = prepare_founder_graph(&store_database(&db), &storage, timestamp, &founder)
@@ -1376,9 +1304,17 @@ mod tests {
         let competing = b"different Store root occupant".to_vec();
         home.insert_exact_object(graph.root.object.slot().logical_key(), competing.clone());
 
-        create_store(&store_database(&db), &storage, timestamp, &founder)
+        assert!(
+            crate::sync::store::Store::create(
+                store_database(&db),
+                storage.clone(),
+                timestamp,
+                &founder,
+            )
             .await
-            .expect_err("different root occupant must prevent Store creation");
+            .is_err(),
+            "different root occupant must prevent Store creation"
+        );
 
         assert_eq!(
             home.get(graph.root.object.slot().logical_key()),
@@ -1391,19 +1327,21 @@ mod tests {
     async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key([41; 32])),
-            BlobPathScheme::Hashed,
-            "opaque-founder-graph",
-            founder.clone(),
-        )
-        .expect("construct opaque founder storage");
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home),
+                CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key([41; 32])),
+                BlobPathScheme::Hashed,
+                "opaque-founder-graph",
+                founder.clone(),
+            )
+            .expect("construct opaque founder storage"),
+        );
         let db = open_test_db();
 
-        create_store(
-            &store_database(&db),
-            &storage,
+        crate::sync::store::Store::create(
+            store_database(&db),
+            storage.clone(),
             "0000000000001-0000-opaque-founder",
             &founder,
         )
@@ -1414,32 +1352,31 @@ mod tests {
             .await
             .expect("read Store root reference")
             .expect("Store root exists");
-        let root = crate::sync::store_objects::load_store_protocol_root(&storage, &root_ref)
+        let opened =
+            crate::sync::store::Store::open(store_database(&db), storage, &root_ref, &founder)
+                .await
+                .expect("open exact opaque root");
+        let registration = opened
+            .store
+            .load_founder_registration_for_test()
             .await
-            .expect("open exact opaque root");
-        let registration = crate::sync::store_objects::load_founder_registration_with_root(
-            &storage,
-            &root_ref,
-            &root.value,
-        )
-        .await
-        .expect("open exact opaque founder registration");
+            .expect("open exact opaque founder registration");
         let durable = crate::sync::store::database::StoreDatabase::new(&db)
             .latest_local_store_device_registration()
             .await
             .expect("read durable founder registration")
             .expect("founder registration exists");
-        let ack = crate::sync::store_objects::load_store_ack_ref(
-            &storage,
-            &root_ref,
-            &durable.initial_ack_ref,
-            &registration.value,
-        )
-        .await
-        .expect("open exact opaque founder acknowledgement");
+        let ack = opened
+            .store
+            .load_store_ack_for_test(&durable.initial_ack_ref, &registration.value)
+            .await
+            .expect("open exact opaque founder acknowledgement");
 
-        assert_eq!(root.value.object_hash(), root_ref.store_root_hash);
+        assert_eq!(
+            opened.store.protocol_root_for_test().object_hash(),
+            root_ref.store_root_hash
+        );
         assert_eq!(registration.value.device_id, durable.device_id);
-        assert_eq!(ack.value, durable.initial_ack.value);
+        assert_eq!(ack, durable.initial_ack.value);
     }
 }

@@ -62,12 +62,11 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .founder_device_authority()
         .await
         .expect("load founder authority");
-    let mut commit_verifier =
-        crate::sync::store::StoreCommitVerifier::new(&store.storage, &store.root)
-            .await
-            .expect("open Store commit verifier");
-    let target_commit = commit_verifier
-        .load_ref(&target_activation)
+    let target_commit = store
+        .founder_device()
+        .await
+        .expect("load founder Store")
+        .load_commit_for_test(&target_activation)
         .await
         .expect("load target commit");
     assert_eq!(target_commit.author(), &founder);

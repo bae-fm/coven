@@ -1125,15 +1125,16 @@ pub async fn create_exact_protocol_object(
     let prepared = storage
         .prepare_protocol_object(context, slot, semantic_prefix, bytes.to_vec())
         .map_err(|error| error.to_string())?;
-    crate::sync::store_objects::create_exact_object(storage, &prepared)
+    storage
+        .create_protocol_object(&prepared)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(prepared.reference().clone())
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn load_exact_materialized_commit(
-    db: &Database,
-    storage: &dyn crate::sync::storage::SyncStorage,
+    store: &crate::sync::store::Store,
     stream_id: &str,
     sequence: u64,
 ) -> Result<
@@ -1143,148 +1144,43 @@ pub async fn load_exact_materialized_commit(
     )>,
     String,
 > {
-    let store_database = crate::sync::store::StoreDatabase::new(db);
-    let Some(reference) = store_database
-        .exact_materialized_ref(stream_id, sequence)
+    store
+        .load_exact_materialized_commit(stream_id, sequence)
         .await
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(None);
-    };
-    let root = store_database
-        .local_store_root_ref()
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "materialized Store commit has no exact root authority".to_string())?;
-    let mut commit_verifier = crate::sync::store::StoreCommitVerifier::new(storage, &root)
-        .await
-        .map_err(|error| error.to_string())?;
-    let commit = commit_verifier
-        .load_ref(&reference)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(Some((reference, commit)))
 }
 
 pub async fn create_exact_test_store(
     db: &Database,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     store_id: &str,
     signer: &UserKeypair,
 ) -> Result<crate::sync::store_commit::StoreRootRef, String> {
-    let database = crate::sync::store::StoreDatabase::new(db);
-    Box::pin(crate::sync::store::protocol_root::create_store(
-        &database, storage, store_id, signer,
-    ))
+    let initialized = crate::sync::store::Store::create(
+        crate::sync::store::StoreDatabase::new(db),
+        storage.clone(),
+        store_id,
+        signer,
+    )
     .await
     .map_err(|error| error.to_string())?;
-    database
-        .local_store_root_ref()
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "created test Store has no exact root reference".to_string())
+    Ok(initialized.store.store_root().clone())
 }
 
 pub async fn open_exact_test_store_as(
     db: &Database,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    storage: &std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     root: &crate::sync::store_commit::StoreRootRef,
     identity: &UserKeypair,
 ) -> Result<(), String> {
-    let database = crate::sync::store::StoreDatabase::new(db);
-    let protocol_root = crate::sync::store::protocol_root::open_store(&database, storage, root)
-        .await
-        .map_err(|error| error.to_string())?;
-    crate::sync::store::anchor_owner_membership(
-        storage,
-        &database,
+    crate::sync::store::Store::open(
+        crate::sync::store::StoreDatabase::new(db),
+        storage.clone(),
         root,
-        &protocol_root.value,
         identity,
     )
     .await
-}
-
-pub async fn initialize_store_fixture(
-    db: &Database,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
-    store_id: &str,
-    signer: &UserKeypair,
-) -> Result<
-    (
-        crate::sync::store_commit::StoreRootRef,
-        crate::sync::membership::MembershipChain,
-    ),
-    String,
-> {
-    let database = crate::sync::store::StoreDatabase::new(db);
-    let root = create_exact_test_store(db, storage, store_id, signer).await?;
-    let protocol_root = crate::sync::store_objects::load_store_protocol_root(storage, &root)
-        .await
-        .map_err(|error| error.to_string())?
-        .value;
-    crate::sync::store::anchor_owner_membership(storage, &database, &root, &protocol_root, signer)
-        .await?;
-    let membership = crate::sync::store::load_cycle_membership(storage, &database)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok((root, membership))
-}
-
-pub async fn publish_snapshot_fixture(
-    storage: &dyn crate::sync::storage::SyncStorage,
-    root: &crate::sync::store_commit::StoreRootRef,
-    db_image: Vec<u8>,
-    coverage: crate::sync::store_commit::CommitFrontier,
-    keypair: &UserKeypair,
-    membership: &crate::sync::membership::MembershipChain,
-    db: &Database,
-) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
-    let database = crate::sync::store::StoreDatabase::new(db);
-    crate::sync::store::push_store_snapshot(
-        storage,
-        root.store_root_hash,
-        crate::sync::store::CreatedSnapshot {
-            db_image,
-            blobs: Vec::new(),
-        },
-        coverage,
-        db.schema_version(),
-        keypair,
-        "2026-07-16T00:00:00Z".to_string(),
-        membership,
-        &database,
-    )
-    .await
+    .map(|_| ())
     .map_err(|error| error.to_string())
-}
-
-pub async fn publish_store_ack_fixture(
-    db: &Database,
-    storage: &dyn crate::sync::storage::SyncStorage,
-    frontier: crate::sync::store_commit::CommitFrontier,
-    signer: &UserKeypair,
-) -> Result<(), String> {
-    Box::pin(crate::sync::store::stage_store_acknowledgement_for_test(
-        db,
-        storage,
-        frontier,
-        "2026-07-16T00:00:01Z".to_string(),
-        signer,
-    ))
-    .await
-    .map_err(|error| error.to_string())?;
-    let published = Box::pin(crate::sync::store::drain_store_acknowledgements_for_test(
-        db, storage, signer,
-    ))
-    .await
-    .map_err(|error| error.to_string())?;
-    if published != 1 {
-        return Err(format!(
-            "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
-        ));
-    }
-    Ok(())
 }
 
 pub async fn run_cycle_fixture(
@@ -1314,15 +1210,6 @@ pub async fn run_cycle_fixture(
     Ok(components)
 }
 
-pub async fn latest_local_store_position_fixture(
-    db: &Database,
-) -> Result<Option<crate::sync::store_commit::StoreBatchCommitRef>, String> {
-    crate::sync::store::StoreDatabase::new(db)
-        .latest_local_store_position()
-        .await
-        .map_err(|error| error.to_string())
-}
-
 pub fn install_active_device_fixture<'a>(
     store: &'a TestStore,
     observer_db: &'a Database,
@@ -1331,179 +1218,83 @@ pub fn install_active_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     let future = async move {
-        let observer_database = crate::sync::store::StoreDatabase::new(observer_db);
         let local_database = crate::sync::store::StoreDatabase::new(local_db);
-        let authorization = Box::new(
-            Box::pin(crate::sync::store::load_current_device_join_authorization(
-                &observer_database,
-                &store.storage,
-            ))
-            .await
-            .map_err(|error| error.to_string())?,
-        );
-        let observer_device_id = observer_db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "provider administrator device id is absent".to_string())?;
-        let (_, observer_registration, _, _) =
-            crate::sync::store::load_local_store_authority_for_test(
-                &observer_database,
-                &observer_device_id,
-                &store.signer,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let crate::sync::membership::MembershipStatus::Resolved(resolved) = authorization.status()
-        else {
-            return Err("provider administrator membership is unresolved".to_string());
-        };
-        let provider_admin = resolved.provider_admin.combined_state();
-        let provider_admin_grant = provider_admin
-            .active()
-            .into_iter()
-            .find(|grant| provider_admin.authorizes(grant, &observer_registration))
-            .ok_or_else(|| {
-                "local Store device is not an effective provider administrator".to_string()
-            })?;
+        let observer = store.bind_device(observer_db, &store.signer).await?;
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .map_err(|error| error.to_string())?;
-        let offer = Box::new(
-            Box::pin(crate::sync::store::begin_device_join(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                &pubkey_hex(identity),
-                provider_admin_grant,
-            ))
+        let offer = observer
+            .store
+            .begin_device_join(&pubkey_hex(identity))
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let access_request = Box::new(
-            Box::pin(crate::sync::store::prepare_device_provider_access_request(
-                &pending,
-                crate::sync::storage::SyncStorage::provider_binding(&store.storage)
-                    .await
-                    .map_err(|error| error.to_string())?,
-                identity,
-                *offer,
-            ))
+            .map_err(|error| format!("begin device join: {error}"))?;
+        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+            &pending,
+            &*store.storage,
+            identity,
+            offer,
+        )
+        .await
+        .map_err(|error| format!("open pending device join: {error}"))?;
+        let access_request = pending_join
+            .prepare_provider_access_request()
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let approval = Box::new(
-            Box::pin(crate::sync::store::authorize_device_provider_access(
-                &observer_database,
-                &store.storage,
-                None,
-                None,
-                &authorization,
-                &store.signer,
-                *access_request,
-            ))
+            .map_err(|error| format!("prepare provider access request: {error}"))?;
+        let approval = observer
+            .store
+            .authorize_device_provider_access(access_request, None)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let registration_request = Box::new(
-            Box::pin(crate::sync::store::prepare_device_registration_request(
-                &pending,
-                &store.storage,
-                None,
-                identity,
-                *approval,
-            ))
+            .map_err(|error| format!("authorize device provider access: {error}"))?;
+        let registration_request = pending_join
+            .prepare_registration_request(approval)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let provisional = Box::new(
-            Box::pin(crate::sync::store::accept_device_registration_request(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                *registration_request,
-            ))
+            .map_err(|error| format!("prepare device registration request: {error}"))?;
+        let provisional = observer
+            .store
+            .accept_device_registration_request(registration_request)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let provider_ready = Box::new(
-            Box::pin(crate::sync::store::publish_device_provider_challenge(
-                &observer_database,
-                &store.storage,
-                None,
-                *provisional,
-            ))
+            .map_err(|error| format!("accept device registration request: {error}"))?;
+        let provider_ready = observer
+            .store
+            .publish_device_provider_challenge(provisional)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let membership = Box::pin(store.open_into(local_db)).await?;
+            .map_err(|error| format!("publish device provider challenge: {error}"))?;
+        let mut joining =
+            crate::sync::store::JoiningStore::begin_from_pending(pending_join, local_database)
+                .await
+                .map_err(|error| format!("begin joining Store: {error}"))?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-        let bootstrap_pull = Box::pin(crate::sync::store::pull_store_commits(
-            &crate::sync::store::StoreDatabase::new(local_db),
-            local_db.synced_tables(),
-            &store.storage,
-            store.root.store_root_hash,
-            &bootstrap_store_dir,
-            &membership,
-            Some(identity),
-            Some(&routing_encryption),
-        ))
-        .await
-        .map_err(|error| error.to_string())?
-        .result;
+        let bootstrap_pull = joining
+            .pull_store_history(&bootstrap_store_dir, Some(&routing_encryption))
+            .await
+            .map_err(|error| format!("pull joining Store history: {error}"))?;
         if !bootstrap_pull.held_positions.is_empty() {
             return Err(format!(
                 "device join bootstrap pull held signed positions: {:?}",
                 bootstrap_pull.held_positions
             ));
         }
-        let readiness = Box::new(
-            Box::pin(crate::sync::store::bootstrap_joining_device(
-                &local_database,
-                &pending,
-                &store.storage,
-                None,
-                identity,
-                *provider_ready,
-                published_at,
-            ))
+        let readiness = joining
+            .bootstrap(provider_ready, published_at)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let completion = Box::new(
-            Box::pin(crate::sync::store::complete_device_provider_admission(
-                &observer_database,
-                None,
-                &store.signer,
-                *readiness,
-            ))
+            .map_err(|error| format!("bootstrap joining Store: {error}"))?;
+        let completion = observer
+            .store
+            .complete_device_provider_admission(readiness)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let activation = Box::new(
-            Box::pin(crate::sync::store::finalize_device_join(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                *completion,
-            ))
+            .map_err(|error| format!("complete device provider admission: {error}"))?;
+        let activation = observer
+            .store
+            .finalize_device_join(completion)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        Box::pin(crate::sync::store::complete_device_join(
-            &local_database,
-            &pending,
-            &store.storage,
-            *activation,
-        ))
-        .await
-        .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("finalize device join: {error}"))?;
+        joining
+            .complete(activation)
+            .await
+            .map_err(|error| format!("complete joining Store: {error}"))?;
         Ok(())
     };
     Box::pin(future)
@@ -1518,41 +1309,35 @@ pub async fn promote_active_member_fixture(
     encryption: &crate::encryption::EncryptionService,
 ) -> Result<crate::sync::circle_control::StoreMembershipStateRef, String> {
     let member_database = crate::sync::store::StoreDatabase::new(member_db);
-    let owner_store = store.loaded_store(owner_db).await?;
-    let member_store = store.loaded_store(member_db).await?;
-    let owner_device_id = owner_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Owner Store device id is absent".to_string())?;
-    let member_device_id = member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Member Store device id is absent".to_string())?;
+    let owner_store = store.bind_device(owner_db, owner).await?;
+    let member_store = store.bind_device(member_db, member).await?;
     let (member_registration, _) = member_database
         .local_blob_write_authority()
         .await
         .map_err(|error| error.to_string())?;
     let request = owner_store
-        .begin_owner_promotion(&owner_device_id, owner, member_registration)
+        .store
+        .begin_owner_promotion(member_registration)
         .await
         .map_err(|error| format!("begin Owner promotion: {error}"))?;
     let acceptance = member_store
-        .accept_owner_promotion(&member_device_id, member, request)
+        .store
+        .accept_owner_promotion(request)
         .await
         .map_err(|error| format!("accept Owner promotion: {error}"))?;
     let finalized = owner_store
-        .finalize_owner_promotion(&owner_device_id, owner, encryption, acceptance)
+        .store
+        .finalize_owner_promotion(encryption, acceptance)
         .await
         .map_err(|error| format!("finalize Owner promotion: {error}"))?;
     let (_temp, store_dir) = temp_store_dir();
     let mut authorized_member_store = member_store
-        .authorize()
+        .store
+        .authorize_writer()
         .await
         .map_err(|error| error.to_string())?;
     let pull = authorized_member_store
-        .pull(&store_dir, member, None)
+        .pull(&store_dir, Some(encryption))
         .await
         .map_err(|error| error.to_string())?;
     if !pull.held_positions.is_empty() {
@@ -1605,16 +1390,19 @@ pub fn install_cross_principal_device_fixture<'a>(
     published_at: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
     Box::pin(async move {
-        let observer_database = crate::sync::store::StoreDatabase::new(observer_db);
         let local_database = crate::sync::store::StoreDatabase::new(local_db);
-        let authorization = Box::new(Box::pin(store.open_into(observer_db)).await?);
+        let observer = store.bind_device(observer_db, &store.signer).await?;
+        let provider_binding = crate::sync::storage::SyncStorage::provider_binding(&*store.storage)
+            .await
+            .map_err(|error| error.to_string())?;
         let crate::sync::storage::StoreProviderBinding::Dropbox { namespace_id } =
-            &store.protocol_root.descriptor.provider
+            &provider_binding.store
         else {
             return Err("cross-principal test Store is not Dropbox".to_string());
         };
+        let namespace_id = namespace_id.clone();
         let peer_binding = crate::sync::storage::ResolvedProviderBinding {
-            store: store.protocol_root.descriptor.provider.clone(),
+            store: provider_binding.store.clone(),
             device: crate::sync::storage::ProviderDeviceBinding {
                 principal: crate::sync::storage::ProviderPrincipalId::Dropbox {
                     account_id: peer_account_id.to_string(),
@@ -1643,211 +1431,91 @@ pub fn install_cross_principal_device_fixture<'a>(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .map_err(|error| error.to_string())?;
-        let offer = Box::new(
-            Box::pin(crate::sync::store::begin_device_join(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                &pubkey_hex(identity),
-                store
-                    .protocol_root
-                    .descriptor
-                    .founder_provider_admin
-                    .grant_id
-                    .clone(),
-            ))
+        let offer = observer
+            .store
+            .begin_device_join(&pubkey_hex(identity))
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let access_request = Box::new(
-            Box::pin(crate::sync::store::prepare_device_provider_access_request(
-                &pending,
-                crate::sync::storage::SyncStorage::provider_binding(&peer_storage)
-                    .await
-                    .map_err(|error| error.to_string())?,
-                identity,
-                *offer,
-            ))
+            .map_err(|error| error.to_string())?;
+        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+            &pending,
+            &peer_storage,
+            identity,
+            offer,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let access_request = pending_join
+            .prepare_provider_access_request()
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let access_administrator = TestDropboxAccessAdministrator {
-            namespace_id: namespace_id.clone(),
-        };
-        let approval = Box::new(
-            Box::pin(crate::sync::store::authorize_device_provider_access(
-                &observer_database,
-                &store.storage,
-                Some(store.home.as_ref()),
-                Some(&access_administrator),
-                &authorization,
-                &store.signer,
-                *access_request,
-            ))
+            .map_err(|error| error.to_string())?;
+        let access_administrator = TestDropboxAccessAdministrator { namespace_id };
+        let approval = observer
+            .store
+            .authorize_device_provider_access(access_request, Some(&access_administrator))
             .await
-            .map_err(|error| error.to_string())?,
-        );
+            .map_err(|error| error.to_string())?;
         if !matches!(
             approval.admission,
             crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal admission".into());
         }
-        let registration_request = Box::new(
-            Box::pin(crate::sync::store::prepare_device_registration_request(
-                &pending,
-                &peer_storage,
-                Some(peer_home.as_ref()),
-                identity,
-                *approval,
-            ))
+        let registration_request = pending_join
+            .prepare_registration_request(approval)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let provisional = Box::new(
-            Box::pin(crate::sync::store::accept_device_registration_request(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                *registration_request,
-            ))
+            .map_err(|error| error.to_string())?;
+        let provisional = observer
+            .store
+            .accept_device_registration_request(registration_request)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        let provider_ready = Box::new(
-            Box::pin(crate::sync::store::publish_device_provider_challenge(
-                &observer_database,
-                &store.storage,
-                Some(store.home.as_ref()),
-                *provisional,
-            ))
+            .map_err(|error| error.to_string())?;
+        let provider_ready = observer
+            .store
+            .publish_device_provider_challenge(provisional)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        Box::pin(store.open_into(local_db)).await?;
-        let readiness = Box::new(
-            Box::pin(crate::sync::store::bootstrap_joining_device(
-                &local_database,
-                &pending,
-                &peer_storage,
-                Some(peer_home.as_ref()),
-                identity,
-                *provider_ready,
-                published_at,
-            ))
+            .map_err(|error| error.to_string())?;
+        let mut joining =
+            crate::sync::store::JoiningStore::begin_from_pending(pending_join, local_database)
+                .await
+                .map_err(|error| error.to_string())?;
+        let readiness = joining
+            .bootstrap(provider_ready, published_at)
             .await
-            .map_err(|error| error.to_string())?,
-        );
+            .map_err(|error| error.to_string())?;
         if !matches!(
             readiness.provider,
             crate::sync::store::DeviceProviderReadiness::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal readiness".into());
         }
-        let completion = Box::new(
-            Box::pin(crate::sync::store::complete_device_provider_admission(
-                &observer_database,
-                Some(store.home.as_ref()),
-                &store.signer,
-                *readiness,
-            ))
+        let completion = observer
+            .store
+            .complete_device_provider_admission(readiness)
             .await
-            .map_err(|error| error.to_string())?,
-        );
+            .map_err(|error| error.to_string())?;
         if !matches!(
             completion.admission,
             crate::sync::store::DeviceProviderAdmission::CrossPrincipal(_)
         ) {
             return Err("distinct provider principals produced same-principal completion".into());
         }
-        let activation = Box::new(
-            Box::pin(crate::sync::store::finalize_device_join(
-                &observer_database,
-                &store.storage,
-                &authorization,
-                &store.signer,
-                *completion,
-            ))
+        let activation = observer
+            .store
+            .finalize_device_join(completion)
             .await
-            .map_err(|error| error.to_string())?,
-        );
-        Box::pin(crate::sync::store::complete_device_join(
-            &local_database,
-            &pending,
-            &peer_storage,
-            *activation,
-        ))
-        .await
-        .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
+        joining
+            .complete(activation)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn invite_store_member_for_test(
-    storage: &dyn crate::sync::storage::SyncStorage,
-    cloud_home: &dyn crate::storage::cloud::CloudHome,
-    user_keypair: &UserKeypair,
-    hlc: &crate::sync::hlc::Hlc,
-    public_key_hex: &str,
-    invitee_email: Option<&str>,
-    role: crate::sync::membership::MemberRole,
-    encryption: &crate::encryption::EncryptionService,
-    store_id: &str,
-    store_name: &str,
-    database: &crate::sync::store::StoreDatabase,
-) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
-    crate::sync::store::invite_member(
-        storage,
-        cloud_home,
-        user_keypair,
-        hlc,
-        public_key_hex,
-        invitee_email,
-        role,
-        encryption,
-        store_id,
-        store_name,
-        database,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn remove_store_member_for_test(
-    storage: &dyn crate::sync::storage::SyncStorage,
-    cloud_home: &dyn crate::storage::cloud::CloudHome,
-    user_keypair: &UserKeypair,
-    hlc: &crate::sync::hlc::Hlc,
-    public_key_hex: &str,
-    current_encryption: &crate::encryption::EncryptionService,
-    custody: &dyn crate::keys::MasterKeyCustody,
-    cipher: &dyn crate::sync::cloud_storage::CloudCipherAccess,
-    pending_rotation: &crate::sync::cloud_storage::PendingRotation,
-    database: &crate::sync::store::StoreDatabase,
-) -> Result<String, crate::sync::store::MembershipOpsError> {
-    crate::sync::store::remove_member(
-        storage,
-        cloud_home,
-        user_keypair,
-        hlc,
-        public_key_hex,
-        current_encryption,
-        custody,
-        cipher,
-        pending_rotation,
-        database,
-    )
-    .await
 }
 
 pub struct TestStore {
     pub home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     pub storage: std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
     pub root: crate::sync::store_commit::StoreRootRef,
-    pub protocol_root: crate::sync::store_commit::StoreProtocolRoot,
     pub signer: UserKeypair,
     producers: tokio::sync::Mutex<TestStoreProducers>,
 }
@@ -1860,14 +1528,235 @@ impl std::ops::Deref for TestStore {
     }
 }
 
-struct TestStoreProducer {
-    db: Database,
-    device_id: String,
+#[derive(Clone)]
+pub struct TestDevice {
+    pub db: Database,
+    pub store: std::sync::Arc<crate::sync::store::Store>,
+    pub device_id: String,
+}
+
+impl std::ops::Deref for TestDevice {
+    type Target = crate::sync::store::Store;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+impl TestDevice {
+    pub async fn create(
+        db: &Database,
+        storage: std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+        founder_timestamp: &str,
+        identity: UserKeypair,
+    ) -> Result<Self, String> {
+        let initialized = crate::sync::store::Store::create(
+            crate::sync::store::StoreDatabase::new(db),
+            storage,
+            founder_timestamp,
+            &identity,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            db: db.clone(),
+            store: std::sync::Arc::new(initialized.store),
+            device_id: initialized.device_id,
+        })
+    }
+
+    pub async fn load(
+        db: &Database,
+        storage: std::sync::Arc<crate::sync::cloud_storage::CloudSyncStorage>,
+        identity: UserKeypair,
+    ) -> Result<Self, String> {
+        let store = crate::sync::store::Store::load(
+            crate::sync::store::StoreDatabase::new(db),
+            storage,
+            identity,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "loaded test device has no local device id".to_string())?;
+        Ok(Self {
+            db: db.clone(),
+            store: std::sync::Arc::new(store),
+            device_id,
+        })
+    }
+
+    pub fn store_root(&self) -> &crate::sync::store_commit::StoreRootRef {
+        self.store.store_root()
+    }
+
+    pub async fn membership(&self) -> Result<crate::sync::membership::MembershipChain, String> {
+        self.store
+            .membership_for_test()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn protocol_root(&self) -> &crate::sync::store_commit::StoreProtocolRoot {
+        self.store.protocol_root_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_wrapped_key(
+        &self,
+        recipient: &str,
+        value: crate::sync::wrapped_store_key::WrappedStoreKey,
+    ) -> Result<crate::sync::wrapped_store_key::PreparedWrappedStoreKey, String> {
+        self.store
+            .prepare_wrapped_key_for_test(recipient, value)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_membership_keyring(
+        &self,
+    ) -> Result<crate::encryption::EncryptionService, String> {
+        self.store.open_membership_keyring_for_test().await
+    }
+
+    pub async fn publish_snapshot(
+        &self,
+        db_image: Vec<u8>,
+        coverage: crate::sync::store_commit::CommitFrontier,
+    ) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
+        self.store
+            .publish_snapshot_for_test(
+                crate::sync::store::CreatedSnapshot {
+                    db_image,
+                    blobs: Vec::new(),
+                },
+                coverage,
+                "2026-07-16T00:00:00Z".to_string(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn publish_acknowledgement(
+        &self,
+        frontier: crate::sync::store_commit::CommitFrontier,
+    ) -> Result<(), String> {
+        self.store
+            .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
+            .await
+            .map_err(|error| error.to_string())?;
+        let published = self
+            .store
+            .drain_acknowledgements_for_test()
+            .await
+            .map_err(|error| error.to_string())?;
+        if published != 1 {
+            return Err(format!(
+                "snapshot acknowledgement fixture published {published} acknowledgements instead of one"
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn stage_acknowledgement(
+        &self,
+        frontier: crate::sync::store_commit::CommitFrontier,
+        sync_time: String,
+    ) -> Result<crate::sync::store_commit::StoreAck, String> {
+        self.store
+            .stage_acknowledgement_for_test(frontier, sync_time)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn drain_acknowledgements(&self) -> Result<u64, String> {
+        self.store
+            .drain_acknowledgements_for_test()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stage_acknowledgement_exact(
+        &self,
+        frontier: crate::sync::store_commit::CommitFrontier,
+        sync_time: String,
+    ) -> Result<crate::sync::store_commit::StoreAck, crate::sync::store::StoreAckError> {
+        self.store
+            .stage_acknowledgement_for_test(frontier, sync_time)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn drain_acknowledgements_exact(
+        &self,
+    ) -> Result<u64, crate::sync::store::StoreAckError> {
+        self.store.drain_acknowledgements_for_test().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stage_circle_acknowledgements(
+        &self,
+        frontier: &crate::sync::store_commit::CommitFrontier,
+        sync_time: &str,
+    ) -> Result<(), crate::sync::store::StoreAckError> {
+        self.store
+            .stage_circle_acknowledgements_for_test(frontier, sync_time)
+            .await
+    }
+
+    pub async fn load_commit(
+        &self,
+        reference: &crate::sync::store_commit::StoreBatchCommitRef,
+    ) -> Result<crate::sync::store_commit::VerifiedStoreBatchCommit, String> {
+        self.store
+            .load_commit_for_test(reference)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn load_commit_ancestry_until(
+        &self,
+        start: crate::sync::store_commit::StoreBatchCommitRef,
+        coverage: &crate::sync::store_commit::CommitFrontier,
+    ) -> Result<
+        Vec<(
+            crate::sync::store_commit::StoreBatchCommitRef,
+            crate::sync::store_commit::VerifiedStoreBatchCommit,
+        )>,
+        String,
+    > {
+        self.store
+            .load_commit_ancestry_until_for_test(start, coverage)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn export_activated_device_continuation(
+        &self,
+    ) -> Result<crate::sync::restore_code::ActivatedContinuation, String> {
+        self.store
+            .export_activated_device_continuation_for_test()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn latest_store_position(
+        &self,
+    ) -> Result<Option<crate::sync::store_commit::StoreBatchCommitRef>, String> {
+        self.store
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 struct TestStoreProducers {
-    unassigned: Option<TestStoreProducer>,
-    by_name: HashMap<String, TestStoreProducer>,
+    unassigned: Option<TestDevice>,
+    by_name: HashMap<String, TestDevice>,
 }
 
 impl TestStore {
@@ -1983,30 +1872,15 @@ impl TestStore {
             )
             .map_err(|error| error.to_string())?,
         );
-        let root = Box::pin(create_exact_test_store(db, &storage, store_id, &signer)).await?;
-        let protocol_root = Box::pin(crate::sync::store_objects::load_store_protocol_root(
-            &storage, &root,
-        ))
-        .await
-        .map_err(|error| error.to_string())?
-        .value;
+        let founder = TestDevice::create(db, storage.clone(), store_id, signer.clone()).await?;
+        let root = founder.store_root().clone();
         Ok(Self {
             home,
             storage,
             root,
-            protocol_root,
             signer,
             producers: tokio::sync::Mutex::new(TestStoreProducers {
-                unassigned: Some(TestStoreProducer {
-                    device_id: db
-                        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .ok_or_else(|| {
-                            "created Store has no activated founder device".to_string()
-                        })?,
-                    db: db.clone(),
-                }),
+                unassigned: Some(founder),
                 by_name: HashMap::new(),
             }),
         })
@@ -2035,10 +1909,6 @@ impl TestStore {
         self.root.store_root_hash
     }
 
-    pub fn protocol_root(&self) -> &crate::sync::store_commit::StoreProtocolRoot {
-        &self.protocol_root
-    }
-
     pub fn protocol_founder_pubkey(&self) -> String {
         crate::keys::public_key_hex(&self.signer)
     }
@@ -2047,31 +1917,100 @@ impl TestStore {
         self.signer.clone()
     }
 
-    pub async fn loaded_store(&self, db: &Database) -> Result<crate::sync::store::Store, String> {
-        crate::sync::store::Store::load(
+    pub async fn bind_device(
+        &self,
+        db: &Database,
+        identity: &UserKeypair,
+    ) -> Result<TestDevice, String> {
+        let store = crate::sync::store::Store::load(
             crate::sync::store::StoreDatabase::new(db),
             self.storage.clone(),
+            identity.clone(),
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "bound test device has no local device id".to_string())?;
+        Ok(TestDevice {
+            db: db.clone(),
+            store: std::sync::Arc::new(store),
+            device_id,
+        })
+    }
+
+    pub async fn invite_member(
+        &self,
+        db: &Database,
+        identity: &UserKeypair,
+        hlc: &crate::sync::hlc::Hlc,
+        member_pubkey: &str,
+        invitee_email: Option<&str>,
+        role: crate::sync::membership::MemberRole,
+        encryption: &crate::encryption::EncryptionService,
+        store_name: &str,
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
+        let device = self.bind_device(db, identity).await.map_err(|error| {
+            crate::sync::store::MembershipOpsError::Chain(
+                crate::sync::store::AnchoredChainError::LoadFailed(error),
+            )
+        })?;
+        device
+            .store
+            .invite_member(
+                hlc,
+                member_pubkey,
+                invitee_email,
+                role,
+                encryption,
+                self.storage.store_id(),
+                store_name,
+            )
+            .await
+    }
+
+    pub async fn remove_member(
+        &self,
+        db: &Database,
+        identity: &UserKeypair,
+        hlc: &crate::sync::hlc::Hlc,
+        member_pubkey: &str,
+        encryption: &crate::encryption::EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<String, crate::sync::store::MembershipOpsError> {
+        let device = self.bind_device(db, identity).await.map_err(|error| {
+            crate::sync::store::MembershipOpsError::Chain(
+                crate::sync::store::AnchoredChainError::LoadFailed(error),
+            )
+        })?;
+        let pending_rotation = self.storage.shared_pending_rotation();
+        device
+            .store
+            .remove_member(
+                hlc,
+                member_pubkey,
+                encryption,
+                custody,
+                self.storage.cipher_state(),
+                &pending_rotation,
+            )
+            .await
     }
 
     pub async fn device_id(&self, name: &str) -> Result<String, String> {
-        self.ensure_producer(name).await
+        Ok(self.ensure_producer(name).await?.device_id)
+    }
+
+    pub async fn founder_device(&self) -> Result<TestDevice, String> {
+        self.ensure_producer("founder").await
     }
 
     pub async fn next_commit_sequence(&self, name: &str) -> Result<u64, String> {
-        self.ensure_producer(name).await?;
-        let db = {
-            let producers = self.producers.lock().await;
-            producers
-                .by_name
-                .get(name)
-                .expect("ensured test producer exists")
-                .db
-                .clone()
-        };
-        crate::sync::store::StoreDatabase::new(&db)
+        self.ensure_producer(name)
+            .await?
+            .store
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
@@ -2094,22 +2033,13 @@ impl TestStore {
         ),
         String,
     > {
-        let device_id = self.ensure_producer("founder").await?;
-        let db = {
-            let producers = self.producers.lock().await;
-            producers
-                .by_name
-                .get("founder")
-                .expect("ensured founder producer exists")
-                .db
-                .clone()
-        };
-        let (reference, registration) = crate::sync::store::StoreDatabase::new(&db)
+        let device = self.ensure_producer("founder").await?;
+        let (reference, registration) = crate::sync::store::StoreDatabase::new(&device.db)
             .activated_store_device_registration_records()
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|(_, registration)| registration.device_id.to_string() == device_id)
+            .find(|(_, registration)| registration.device_id.to_string() == device.device_id)
             .ok_or_else(|| "founder device registration is not active".to_string())?;
         let device_signer = registration
             .device_signer(&self.signer)
@@ -2134,7 +2064,7 @@ impl TestStore {
                 .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
         };
         Ok(crate::sync::store::StoreDatabase::new(&db)
-            .retained_merge_materialization(reference)
+            .retained_merge_materialization(self.root.clone(), reference)
             .await
             .map_err(|error| error.to_string())?
             .history_summary()
@@ -2149,23 +2079,16 @@ impl TestStore {
         changeset: &[u8],
         schema_version: u32,
     ) -> Result<crate::sync::store_commit::StoreBatchCommitRef, String> {
-        let device_id = self.ensure_producer(name).await?;
-        let db = {
-            let producers = self.producers.lock().await;
-            producers
-                .by_name
-                .get(name)
-                .expect("ensured test producer exists")
-                .db
-                .clone()
-        };
+        let device = self.ensure_producer(name).await?;
+        let db = &device.db;
         if schema_version != db.schema_version() {
             return Err(format!(
                 "test changeset schema version {schema_version} differs from producer schema {}",
                 db.schema_version()
             ));
         }
-        let before = crate::sync::store::StoreDatabase::new(&db)
+        let before = device
+            .store
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?;
@@ -2177,43 +2100,37 @@ impl TestStore {
                 "test producer {name:?} expected sequence {expected}, got {sequence}"
             ));
         }
-        let database = crate::sync::store::StoreDatabase::new(&db);
+        let database = crate::sync::store::StoreDatabase::new(db);
         database
             .enqueue_store_changeset_for_test(changeset.to_vec())
             .await
             .map_err(|error| error.to_string())?;
         let (_tmp, store_dir) = temp_store_dir();
-        let mut authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, &db)
+        let mut writer = device
+            .store
+            .authorize_writer()
             .await
             .map_err(|error| error.to_string())?;
-        let prepared = authorization
-            .prepare_pending_store_write(
-                &device_id,
-                "2026-07-16T00:00:00Z",
-                &self.signer,
-                &store_dir,
-            )
+        let published = writer
+            .publish_pending_store_writes(&store_dir)
             .await
             .map_err(|error| error.to_string())?;
-        if !prepared {
+        if published == 0 {
             return Err("test changeset did not prepare a Store commit".to_string());
         }
-        authorization
-            .drain_store_writes()
-            .await
-            .map_err(|error| error.to_string())?;
-        crate::sync::store::StoreDatabase::new(&db)
+        device
+            .store
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "published test changeset has no Store position".to_string())
     }
 
-    async fn ensure_producer(&self, name: &str) -> Result<String, String> {
+    async fn ensure_producer(&self, name: &str) -> Result<TestDevice, String> {
         {
             let producers = self.producers.lock().await;
             if let Some(producer) = producers.by_name.get(name) {
-                return Ok(producer.device_id.clone());
+                return Ok(producer.clone());
             }
         }
 
@@ -2248,10 +2165,13 @@ impl TestStore {
                     .await
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "test producer has no activated device".to_string())?;
-                TestStoreProducer { db, device_id }
+                let device = self.bind_device(&db, &self.signer).await?;
+                if device.device_id != device_id {
+                    return Err("bound test device differs from its activated id".to_string());
+                }
+                device
             }
         };
-        let device_id = producer.device_id.clone();
         let mut producers = self.producers.lock().await;
         if producers
             .by_name
@@ -2260,27 +2180,27 @@ impl TestStore {
         {
             return Err(format!("test producer {name:?} was registered twice"));
         }
-        Ok(device_id)
+        Ok(producers
+            .by_name
+            .get(name)
+            .expect("inserted test producer exists")
+            .clone())
     }
 
-    pub async fn open_into(
-        &self,
-        db: &Database,
-    ) -> Result<crate::sync::membership::MembershipChain, String> {
-        let database = crate::sync::store::StoreDatabase::new(db);
-        let open =
-            crate::sync::store::protocol_root::open_store(&database, &self.storage, &self.root);
-        let root = open.await.map_err(|error| error.to_string())?;
-        let ensure = crate::sync::store::anchor_owner_membership(
-            &self.storage,
-            &database,
+    pub async fn open_into(&self, db: &Database) -> Result<TestDevice, String> {
+        let initialized = crate::sync::store::Store::open(
+            crate::sync::store::StoreDatabase::new(db),
+            self.storage.clone(),
             &self.root,
-            &root.value,
             &self.signer,
-        );
-        ensure.await?;
-        let load = crate::sync::store::load_cycle_membership(&self.storage, &database);
-        load.await.map_err(|error| error.to_string())
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(TestDevice {
+            db: db.clone(),
+            store: std::sync::Arc::new(initialized.store),
+            device_id: initialized.device_id,
+        })
     }
 
     pub async fn publish_pending(
@@ -2288,25 +2208,14 @@ impl TestStore {
         db: &Database,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "test Store has no activated local device".to_string())?;
-        let mut authorization = crate::sync::store::Store::authorize_borrowed(&*self.storage, db)
+        let device = self.bind_device(db, &self.signer).await?;
+        let mut writer = device
+            .store
+            .authorize_writer()
             .await
             .map_err(|error| error.to_string())?;
-        let prepared = authorization
-            .prepare_pending_store_write(
-                &device_id,
-                "2026-07-16T00:00:00Z",
-                &self.signer,
-                store_dir,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let published = authorization
-            .drain_store_writes()
+        let published = writer
+            .publish_pending_store_writes(store_dir)
             .await
             .map_err(|error| error.to_string())?;
         if published > 0 {
@@ -2315,7 +2224,7 @@ impl TestStore {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        Ok(prepared || published > 0)
+        Ok(published > 0)
     }
 }
 
@@ -2330,24 +2239,21 @@ pub async fn pull_into_result(
     ),
     crate::sync::store::StorePullError,
 > {
-    let membership = Box::new(Box::pin(store.open_into(db)).await.map_err(|error| {
+    let device = Box::pin(store.open_into(db)).await.map_err(|error| {
         crate::sync::store::StorePullError::Membership(
             crate::sync::store::StorePullMembershipError::Message(error),
         )
-    })?);
+    })?;
     let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-    let result = Box::pin(crate::sync::store::pull_store_commits(
-        &crate::sync::store::StoreDatabase::new(db),
-        db.synced_tables(),
-        &store.storage,
-        store.root.store_root_hash,
-        store_dir,
-        &membership,
-        None,
-        Some(&routing_encryption),
-    ))
-    .await?
-    .result;
+    let mut writer = device
+        .store
+        .authorize_writer()
+        .await
+        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
+    let result = writer
+        .pull(store_dir, Some(&routing_encryption))
+        .await
+        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
     let sequences = result
         .frontier
         .iter()
@@ -2521,6 +2427,31 @@ where
     S::Target: crate::sync::storage::SyncStorage,
     I: StorageInterceptor,
 {
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
+        self.inner.blob_path_scheme()
+    }
+
+    fn self_uploader(&self) -> String {
+        self.inner.self_uploader()
+    }
+
+    fn cloud_home(&self) -> &dyn crate::storage::cloud::CloudHome {
+        self.inner.cloud_home()
+    }
+
+    fn exact_slot_storage(&self) -> &dyn crate::storage::cloud::ExactSlotStorage {
+        self.inner.exact_slot_storage()
+    }
+
+    fn exact_slot_probe_clients(
+        &self,
+    ) -> (
+        &dyn crate::storage::cloud::ExactSlotStorage,
+        &dyn crate::storage::cloud::ExactSlotStorage,
+    ) {
+        self.inner.exact_slot_probe_clients()
+    }
+
     fn store_blob_protection(
         &self,
     ) -> Result<crate::sync::storage::BlobSpoolProtection, crate::sync::storage::StorageError> {

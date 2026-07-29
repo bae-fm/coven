@@ -194,8 +194,96 @@ pub(crate) struct TerminalCandidateCleanupVerification {
     pub(crate) candidate: BlockedMergeCandidate,
 }
 
+#[derive(Debug)]
 pub(crate) struct InitialStoreMembershipAuthority {
     pub head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
+}
+
+impl InitialStoreMembershipAuthority {
+    const CURSOR_STATE_KEY_PREFIX: &'static str = "membership_head_cursor/";
+
+    pub(crate) fn cursor_state_key_for_stream(
+        owner_grant: &crate::sync::membership::MembershipGrantId,
+        stream_id: crate::sync::membership::AuthorStreamId,
+    ) -> String {
+        format!("{}{owner_grant}/{stream_id}", Self::CURSOR_STATE_KEY_PREFIX)
+    }
+
+    fn cursor_state_key(reference: &crate::sync::membership::MembershipHeadRef) -> String {
+        Self::cursor_state_key_for_stream(
+            &reference.coord.author_owner_grant,
+            reference.coord.stream_id,
+        )
+    }
+
+    pub(crate) fn load_on(conn: &Connection) -> Result<Self, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT value FROM protocol_state \
+                 WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([Self::CURSOR_STATE_KEY_PREFIX], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(DbError::from)?;
+        let mut head_refs = Vec::new();
+        for row in rows {
+            let value = row.map_err(DbError::from)?;
+            let reference: crate::sync::membership::MembershipHeadRef =
+                serde_json::from_str(&value).map_err(|error| {
+                    DbError::Message(format!("membership head cursor is malformed: {error}"))
+                })?;
+            if reference.coord.seq == 0 {
+                return Err(DbError::Message(
+                    "membership head cursor has sequence zero".to_string(),
+                ));
+            }
+            head_refs.push(reference);
+        }
+        Ok(Self { head_refs })
+    }
+
+    pub(crate) fn install_on(&self, conn: &Connection) -> Result<(), DbError> {
+        for reference in &self.head_refs {
+            let key = Self::cursor_state_key(reference);
+            if let Some(existing) = get_protocol_state_on(conn, &key)? {
+                let existing: crate::sync::membership::MembershipHeadRef =
+                    serde_json::from_str(&existing).map_err(|error| {
+                        DbError::Message(format!("membership head cursor is malformed: {error}"))
+                    })?;
+                if existing.coord.stream_key() != reference.coord.stream_key() {
+                    return Err(DbError::Message(
+                        "membership head cursor key names a different stream".to_string(),
+                    ));
+                }
+                if existing.coord.seq > reference.coord.seq {
+                    continue;
+                }
+                if existing.coord.seq == reference.coord.seq {
+                    if existing == *reference {
+                        continue;
+                    }
+                    return Err(DbError::Message(
+                        "membership head cursor forks at the same sequence".to_string(),
+                    ));
+                }
+            }
+            let value = serde_json::to_string(reference).map_err(|error| {
+                DbError::Message(format!("serialize membership head cursor: {error}"))
+            })?;
+            set_protocol_state_on(conn, &key, &value)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cursor_state_key_for_test(
+        reference: &crate::sync::membership::MembershipHeadRef,
+    ) -> String {
+        Self::cursor_state_key(reference)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

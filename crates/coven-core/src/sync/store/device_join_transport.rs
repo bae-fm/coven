@@ -1,6 +1,6 @@
 //! Storage-mediated delivery for the device-join exchange.
 //!
-//! The join protocol in [`crate::sync::store::device_join`] produces nine signed
+//! The join protocol owned by [`crate::sync::store::Store`] produces nine signed
 //! artifacts plus the unwind artifacts, and hands each to the host as a
 //! [`DeviceJoinAction`] to deliver however it likes. This module is the delivery
 //! coven ships by default: each artifact travels as one create-once object in
@@ -23,7 +23,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
-use crate::keys::UserKeypair;
 use crate::storage::cloud::ObjectSlot;
 use crate::sync::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
@@ -333,43 +332,6 @@ pub struct DeviceJoinOfferBundle {
     pub version: u32,
     pub offer: DeviceJoinOffer,
     pub transport: DeviceJoinTransportParams,
-}
-
-impl Store {
-    /// Begin a join for `member_pubkey` and mint the bundle that carries it.
-    ///
-    /// The provider administrator is this store's founder grant, read from the
-    /// signed protocol root rather than taken from the caller: a host driving
-    /// the default transport has one administrator to choose from, and making
-    /// it name that grant would only give it a way to name the wrong one.
-    /// Allocating the attempt's slots needs this store's storage, which is why
-    /// minting the bundle lives here rather than above the crate boundary.
-    pub async fn begin_device_join_bundle(
-        &self,
-        identity_signer: &UserKeypair,
-        member_pubkey: &str,
-    ) -> Result<DeviceJoinOfferBundle, DeviceJoinTransportError> {
-        let authorized = self
-            .authorize()
-            .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        let provider_admin_grant = authorized
-            .protocol_root()
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
-        let offer = super::device_join::begin_device_join(
-            authorized.database(),
-            authorized.storage(),
-            authorized.membership(),
-            identity_signer,
-            member_pubkey,
-            provider_admin_grant,
-        )
-        .await?;
-        DeviceJoinOfferBundle::allocate(authorized.storage(), offer).await
-    }
 }
 
 impl DeviceJoinOfferBundle {
@@ -763,21 +725,13 @@ pub enum DeviceJoinApproval {
 /// is the joiner's own step.
 pub async fn drive_device_join(
     store: &Store,
-    identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
     policy: DeviceJoinApprovalPolicy<'_>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
     retrying_activation_conflicts(|| {
-        drive_device_join_once(
-            store,
-            identity_signer,
-            bundle,
-            &policy,
-            access_administrator,
-            timing,
-        )
+        drive_device_join_once(store, bundle, &policy, access_administrator, timing)
     })
     .await
 }
@@ -833,7 +787,6 @@ where
 
 async fn drive_device_join_once(
     store: &Store,
-    identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
     policy: &DeviceJoinApprovalPolicy<'_>,
     access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
@@ -877,11 +830,7 @@ async fn drive_device_join_once(
                 approve_access_request(store, roles, &bundle.offer, &request, policy).await?;
                 Some(
                     store
-                        .authorize_device_provider_access(
-                            identity_signer,
-                            request,
-                            access_administrator,
-                        )
+                        .authorize_device_provider_access(request, access_administrator)
                         .await?,
                 )
             }
@@ -902,20 +851,14 @@ async fn drive_device_join_once(
                 DeviceJoinStatus::AwaitingActivation { .. }
                 | DeviceJoinStatus::AwaitingCompletion { .. },
             ) => None,
-            Some(DeviceJoinStatus::AwaitingBootstrap { request }) => Some(
-                store
-                    .accept_device_registration_request(identity_signer, request)
-                    .await?,
-            ),
+            Some(DeviceJoinStatus::AwaitingBootstrap { request }) => {
+                Some(store.accept_device_registration_request(request).await?)
+            }
             _ => {
                 let request = transport
                     .await_artifact::<DeviceRegistrationRequest>(timing)
                     .await?;
-                Some(
-                    store
-                        .accept_device_registration_request(identity_signer, request)
-                        .await?,
-                )
+                Some(store.accept_device_registration_request(request).await?)
             }
         };
         if let Some(provisional) = provisional {
@@ -951,17 +894,13 @@ async fn drive_device_join_once(
         let completion = match admin_status(store, attempt_id).await? {
             Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
             Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                store
-                    .complete_device_provider_admission(identity_signer, readiness)
-                    .await?
+                store.complete_device_provider_admission(readiness).await?
             }
             _ => {
                 let readiness = transport
                     .await_artifact::<DeviceJoinReadiness>(timing)
                     .await?;
-                store
-                    .complete_device_provider_admission(identity_signer, readiness)
-                    .await?
+                store.complete_device_provider_admission(readiness).await?
             }
         };
         transport
@@ -982,17 +921,13 @@ async fn drive_device_join_once(
     let activation = match owner_status(store, attempt_id).await? {
         Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
         Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
-            store
-                .finalize_device_join(identity_signer, completion)
-                .await?
+            store.finalize_device_join(completion).await?
         }
         _ => {
             let completion = transport
                 .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
                 .await?;
-            store
-                .finalize_device_join(identity_signer, completion)
-                .await?
+            store.finalize_device_join(completion).await?
         }
     };
     transport
@@ -1006,14 +941,11 @@ async fn drive_device_join_once(
 /// its deadline.
 pub async fn abandon_device_join_via_transport(
     store: &Store,
-    identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
 ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
     let roles = driver_roles(store, &bundle.offer).await?;
     let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
-    let abandonment = store
-        .abandon_device_join(identity_signer, bundle.offer.clone())
-        .await?;
+    let abandonment = store.abandon_device_join(bundle.offer.clone()).await?;
     transport
         .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
         .await?;
@@ -1054,19 +986,15 @@ async fn owner_status(
 /// joiner, at the point it accepts that activation.
 pub async fn cancel_device_join_via_transport(
     store: &Store,
-    identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-    retrying_activation_conflicts(|| {
-        cancel_device_join_via_transport_once(store, identity_signer, bundle, timing)
-    })
-    .await
+    retrying_activation_conflicts(|| cancel_device_join_via_transport_once(store, bundle, timing))
+        .await
 }
 
 async fn cancel_device_join_via_transport_once(
     store: &Store,
-    identity_signer: &UserKeypair,
     bundle: &DeviceJoinOfferBundle,
     timing: DeviceJoinTransportTiming,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
@@ -1089,10 +1017,9 @@ async fn cancel_device_join_via_transport_once(
         }
         Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
         _ => {
-            let cancellation =
-                cancel_and_publish(store, identity_signer, &transport, attempt_id).await?;
+            let cancellation = cancel_and_publish(store, &transport, attempt_id).await?;
             let administrator_terminal = store
-                .close_device_provider_admission(identity_signer, cancellation.clone())
+                .close_device_provider_admission(cancellation.clone())
                 .await?;
             transport
                 .publish(&DeviceJoinAction::TransferProviderAdminTerminal(
@@ -1103,12 +1030,7 @@ async fn cancel_device_join_via_transport_once(
                 .await_artifact::<JoinerJoinTerminal>(timing)
                 .await?;
             store
-                .prepare_device_join_cleanup(
-                    identity_signer,
-                    cancellation,
-                    administrator_terminal,
-                    joiner_terminal,
-                )
+                .prepare_device_join_cleanup(cancellation, administrator_terminal, joiner_terminal)
                 .await?
         }
     };
@@ -1116,9 +1038,7 @@ async fn cancel_device_join_via_transport_once(
         .publish(&DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
         .await?;
 
-    let activation = store
-        .activate_device_join_cleanup(identity_signer, receipt)
-        .await?;
+    let activation = store.activate_device_join_cleanup(receipt).await?;
     transport
         .publish(&DeviceJoinAction::TransferCleanupActivation(
             activation.clone(),
@@ -1140,7 +1060,6 @@ async fn cancel_device_join_via_transport_once(
 /// wrong.
 async fn cancel_and_publish(
     store: &Store,
-    identity_signer: &UserKeypair,
     transport: &DeviceJoinTransport<'_>,
     attempt_id: DeviceJoinAttemptId,
 ) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
@@ -1151,10 +1070,7 @@ async fn cancel_and_publish(
         ) => cancellation,
         Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
             store
-                .cancel_device_join(
-                    identity_signer,
-                    bootstrap.publication_authorization.attempt.clone(),
-                )
+                .cancel_device_join(bootstrap.publication_authorization.attempt.clone())
                 .await?
         }
         other => {

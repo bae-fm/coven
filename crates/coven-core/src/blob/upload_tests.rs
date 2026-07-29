@@ -265,7 +265,7 @@ impl ExactSlotStorage for InstrumentedHome {
 struct UploadFixture {
     db: Database,
     database: StoreDatabase,
-    storage: CloudSyncStorage,
+    storage: Arc<CloudSyncStorage>,
     home: Arc<InstrumentedHome>,
 }
 
@@ -292,14 +292,16 @@ async fn upload_fixture_with_home(uploads: usize, home: Arc<InstrumentedHome>) -
     )
     .expect("open upload database");
     let owner = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
-        home.clone(),
-        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        BlobPathScheme::Hashed,
-        "upload-store",
-        owner.clone(),
-    )
-    .expect("construct exact sync storage");
+    let storage = Arc::new(
+        CloudSyncStorage::new(
+            home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            BlobPathScheme::Hashed,
+            "upload-store",
+            owner.clone(),
+        )
+        .expect("construct exact sync storage"),
+    );
     create_exact_test_store(&db, &storage, "upload-store", &owner)
         .await
         .expect("initialize exact local blob authority");

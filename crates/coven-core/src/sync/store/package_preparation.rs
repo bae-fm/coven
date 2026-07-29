@@ -1,24 +1,7 @@
 //! Audience-package and blob preparation for Store commits.
 
-use crate::sync::storage::{BlobWriteAuthority, SyncStorage};
-use crate::sync::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
-use crate::sync::store_commit::{
-    circle_package_semantic_prefix, package_semantic_prefix, CandidateFamilyId, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-};
-use crate::sync::store_objects::StoreObjectError;
-use crate::sync::{audience_package, circle, gate, remote_object, storage};
-
-use crate::database::{
-    PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
-    StoreWriteBlobFacts,
-};
-use crate::store_dir::StoreDir;
-
-mod audience_preparation;
-
-use super::{StoreDatabase, StoreError};
-pub(crate) use audience_preparation::*;
+use crate::sync::storage::PreparedExactObject;
+use crate::sync::{circle, gate};
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: circle::Audience,
@@ -35,6 +18,3 @@ pub(crate) struct PreparedPartitionBlob {
     pub(crate) spool_path: Option<std::path::PathBuf>,
     pub(crate) uploaded_verified: bool,
 }
-
-#[cfg(test)]
-mod tests;

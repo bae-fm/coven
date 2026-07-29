@@ -57,6 +57,12 @@ impl StoreDatabase {
             .latest_local_store_ack()
             .await?
             .ok_or_else(|| DbError::Message("local Store acknowledgement is absent".into()))?;
+        let announcement_stream_id =
+            crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
+                root.store_root_hash,
+                &registration_ref,
+                crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            );
         Ok(crate::sync::restore_code::ActivatedContinuation {
             identity_signing_secret: hex::encode(identity_signer.to_keypair_bytes()),
             device_signing_secret: hex::encode(device_signer.to_keypair_bytes()),
@@ -72,7 +78,9 @@ impl StoreDatabase {
                 .latest_local_store_snapshot()
                 .await?
                 .map(|snapshot| snapshot.reference),
-            latest_position: self.latest_local_store_position().await?,
+            latest_position: self
+                .latest_local_store_position(announcement_stream_id)
+                .await?,
         })
     }
 

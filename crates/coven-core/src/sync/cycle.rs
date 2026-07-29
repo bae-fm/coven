@@ -22,12 +22,9 @@ use super::cloud_storage::{
     RotationPending,
 };
 use super::hlc::Hlc;
-use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
-#[cfg(test)]
-use super::storage::SyncStorage;
 use super::store::HeldStorePosition;
-use super::store::{AuthorizedStore, Store};
+use super::store::{AuthorizedWriterOperation, Store};
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -170,10 +167,39 @@ mod sync_cycle_failure_tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredLocalBlobDisposition {
+    Drop,
+    Cache,
+    Pin,
+}
+
+impl DeferredLocalBlobDisposition {
+    pub(crate) fn as_db(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::Cache => "cache",
+            Self::Pin => "pin",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferredLocalBlobDrop {
+    pub namespace: String,
+    pub id: String,
+    pub size: u64,
+    pub plaintext_hash: crate::sync::store_commit::ObjectHash,
+    pub locator_hash: crate::sync::store_commit::ObjectHash,
+    pub disposition: DeferredLocalBlobDisposition,
+}
+
 #[derive(Clone)]
 struct PublishedBlobDropIntent {
     seq: u64,
-    drop: super::service::DeferredLocalBlobDrop,
+    drop: DeferredLocalBlobDrop,
 }
 
 pub(crate) async fn drain_published_blob_drop_intents(
@@ -263,7 +289,7 @@ async fn load_published_blob_drop_intents(
                 })?;
                 Ok(PublishedBlobDropIntent {
                     seq: row.get::<_, i64>(0)? as u64,
-                    drop: super::service::DeferredLocalBlobDrop {
+                    drop: DeferredLocalBlobDrop {
                         namespace: row.get(1)?,
                         id: row.get(2)?,
                         size: size as u64,
@@ -287,9 +313,94 @@ async fn apply_published_blob_drop_intent(
     store_dir: &StoreDir,
     intent: &PublishedBlobDropIntent,
 ) -> Result<(), String> {
-    super::service::apply_deferred_local_blob_drop(db, store_dir, &intent.drop)
+    apply_deferred_local_blob_drop(db, store_dir, &intent.drop)
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn apply_deferred_local_blob_drop(
+    db: &Database,
+    store_dir: &StoreDir,
+    deferred: &DeferredLocalBlobDrop,
+) -> Result<(), super::store::StorePreparationError> {
+    let local = crate::blob::local_files::path_if_present(
+        store_dir,
+        &deferred.namespace,
+        &deferred.id,
+        deferred.size,
+    )
+    .await
+    .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
+    match (deferred.disposition, local) {
+        (DeferredLocalBlobDisposition::Pin, Some(source)) => {
+            crate::blob::cache::populate_pinned_from_file(
+                store_dir,
+                &deferred.namespace,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
+                &source,
+            )
+            .await
+            .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
+        }
+        (DeferredLocalBlobDisposition::Cache, Some(source)) => {
+            crate::blob::cache::write_blob_from_file(
+                db,
+                store_dir,
+                &deferred.namespace,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
+                &source,
+            )
+            .await
+            .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
+        }
+        (DeferredLocalBlobDisposition::Drop, _) => {}
+        (DeferredLocalBlobDisposition::Pin, None) => {
+            let pinned = store_dir
+                .pinned_blob_path(&deferred.namespace, deferred.locator_hash)
+                .map_err(|error| {
+                    super::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
+            return recognize_applied_disposition_or_fail(&pinned, deferred).await;
+        }
+        (DeferredLocalBlobDisposition::Cache, None) => {
+            let cached = store_dir
+                .cache_blob_path(&deferred.namespace, deferred.locator_hash)
+                .map_err(|error| {
+                    super::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
+            return recognize_applied_disposition_or_fail(&cached, deferred).await;
+        }
+    }
+    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
+        .await
+        .map(|_| ())
+        .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))
+}
+
+async fn recognize_applied_disposition_or_fail(
+    destination: &std::path::Path,
+    deferred: &DeferredLocalBlobDrop,
+) -> Result<(), super::store::StorePreparationError> {
+    match crate::local_blob::exists(destination).await {
+        Ok(true) => {
+            let (size, hash) = crate::local_blob::exact_file_facts(destination)
+                .await
+                .map_err(super::store::StorePreparationError::AssetUpload)?;
+            if size == deferred.size && hash == deferred.plaintext_hash {
+                return Ok(());
+            }
+        }
+        Ok(false) => {}
+        Err(error) => return Err(super::store::StorePreparationError::AssetUpload(error)),
+    }
+    Err(super::store::StorePreparationError::AssetUpload(format!(
+        "published blob {}/{} is missing from both the local store and its {:?} destination",
+        deferred.namespace, deferred.id, deferred.disposition
+    )))
 }
 
 async fn clear_published_blob_drop_intent(
@@ -335,7 +446,7 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
 #[cfg(test)]
 pub(crate) async fn run_single_sync_cycle(
-    storage: &dyn SyncStorage,
+    storage: std::sync::Arc<dyn super::storage::SyncStorage>,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -348,14 +459,23 @@ pub(crate) async fn run_single_sync_cycle(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let authorization = Store::authorize_borrowed(storage, db).await?;
+    let store = Store::load(
+        crate::sync::store::StoreDatabase::new(db),
+        storage,
+        user_keypair.clone(),
+    )
+    .await
+    .map_err(|error| SyncCycleFailure::operation("load local Store", error))?;
+    let authorization = store
+        .authorize_writer()
+        .await
+        .map_err(|error| SyncCycleFailure::operation("authorize local Store writer", error))?;
     Box::pin(run_single_sync_cycle_with_authorization(
         device_id,
         hlc,
         clock,
         cipher,
         pending_rotation,
-        user_keypair,
         custody,
         None,
         store_dir,
@@ -373,23 +493,19 @@ async fn run_single_sync_cycle_with_authorization(
     clock: &dyn crate::clock::Clock,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
-    user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    mut authorization: AuthorizedStore<'_>,
+    mut authorization: crate::sync::store::AuthorizedWriterOperation<'_>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    authorization
-        .resume_operations(user_keypair, routing_encryption)
-        .await?;
+    authorization.resume_operations(routing_encryption).await?;
     let prepared = match Box::pin(prepare_cycle_before_pull(
         hlc,
         clock,
         cipher,
         pending_rotation,
-        user_keypair,
         custody,
         routing_encryption,
         store_dir,
@@ -402,13 +518,9 @@ async fn run_single_sync_cycle_with_authorization(
         CycleBeforePull::Continue(prepared) => prepared,
         CycleBeforePull::Complete(result) => return Ok(result),
     };
-    let store_pull = authorization
-        .pull(store_dir, user_keypair, routing_encryption)
-        .await?;
+    let store_pull = authorization.pull(store_dir, routing_encryption).await?;
     let completed = Box::pin(complete_cycle_after_pull(
-        device_id,
         hlc,
-        user_keypair,
         store_dir,
         &mut authorization,
         routing_encryption,
@@ -418,7 +530,7 @@ async fn run_single_sync_cycle_with_authorization(
     .await?;
     if completed.rotation_pending.is_none() {
         authorization
-            .publish_circle_epoch_close_responses(user_keypair)
+            .publish_circle_epoch_close_responses()
             .await
             .map_err(|error| {
                 SyncCycleFailure::operation("publish Circle epoch-close responses", error)
@@ -426,24 +538,17 @@ async fn run_single_sync_cycle_with_authorization(
         if let Some(routing_encryption) = routing_encryption {
             authorization
                 .finalize_ready_circle_epoch_closes(
-                    device_id,
                     &completed.sync_time,
                     store_dir,
                     routing_encryption,
-                    user_keypair,
                 )
                 .await
                 .map_err(|error| {
                     SyncCycleFailure::operation("finalize Circle epoch closes", error)
                 })?;
         }
-        Box::pin(authorization.stage_and_publish_ack(user_keypair, &completed.sync_time)).await?;
-        Box::pin(reclaim_cycle_packages(
-            device_id,
-            user_keypair,
-            &mut authorization,
-        ))
-        .await?;
+        Box::pin(authorization.stage_and_publish_ack(&completed.sync_time)).await?;
+        Box::pin(reclaim_cycle_packages(&mut authorization)).await?;
     }
     Ok(SyncCycleResult {
         changesets_applied: completed.store_pull.changesets_applied,
@@ -486,13 +591,12 @@ async fn prepare_cycle_before_pull(
     clock: &dyn crate::clock::Clock,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
-    user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
-    authorization: &mut AuthorizedStore<'_>,
+    authorization: &mut AuthorizedWriterOperation<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
     let database = authorization.database().clone();
     let db = database.sqlite();
@@ -508,15 +612,14 @@ async fn prepare_cycle_before_pull(
     // not also corrupt state. Adoption itself failing is not this kind of failure —
     // see `rotation_pending` below.
     authorization
-        .refresh_authorization_state(cipher, pending_rotation, user_keypair, custody)
-        .await
-        .map_err(|error| SyncCycleFailure::operation("refresh authorization state", error))?;
+        .refresh_authorization_state(cipher, pending_rotation, custody)
+        .await?;
 
     // Whether this device has adopted everything the store has committed. Read
     // once, right after the refresh that is the one place this cycle could adopt
     // a rotation, and used below to skip every write that would otherwise seal
     // new data under a generation the store has already superseded: the blob
-    // upload drain, the inline blob upload inside `service::sync`, the tombstone
+    // upload drain, Store write preparation, the tombstone
     // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
     // and delete-only tombstone GC are unaffected — the gate
     // is on sealing for the cloud, not on using the store. An unadoptable
@@ -533,17 +636,10 @@ async fn prepare_cycle_before_pull(
 
     if let Some(home) = cloud_home {
         if rotation_pending.is_none() {
-            let drained = crate::blob::delete::drain_tombstones(
-                db,
-                home,
-                cipher,
-                pending_rotation,
-                &protocol_store_id,
-                user_keypair,
-                clock,
-            )
-            .await
-            .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
+            let drained = authorization
+                .drain_tombstones(home, cipher, pending_rotation, &protocol_store_id, clock)
+                .await
+                .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
             if drained > 0 {
                 info!(count = drained, "Drained blob tombstones");
             }
@@ -553,7 +649,6 @@ async fn prepare_cycle_before_pull(
                 home,
                 cipher,
                 &protocol_store_id,
-                &hex::encode(user_keypair.public_key()),
                 clock,
                 db.blob_tombstone_grace(),
             )
@@ -564,7 +659,7 @@ async fn prepare_cycle_before_pull(
         }
     }
 
-    let local_seq = database
+    let local_seq = authorization
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
@@ -595,10 +690,7 @@ async fn prepare_cycle_before_pull(
     }
 
     if rotation_pending.is_none() {
-        let published = authorization
-            .drain_store_writes()
-            .await
-            .map_err(|error| SyncCycleFailure::operation("publish queued Store writes", error))?;
+        let published = authorization.publish_prepared_store_writes().await?;
         if published > 0 {
             info!(published, "Published queued Store writes");
         }
@@ -627,11 +719,9 @@ async fn prepare_cycle_before_pull(
 
 #[allow(clippy::too_many_arguments)]
 async fn complete_cycle_after_pull(
-    device_id: &str,
     hlc: &Hlc,
-    user_keypair: &UserKeypair,
     store_dir: &StoreDir,
-    authorization: &mut AuthorizedStore<'_>,
+    authorization: &mut AuthorizedWriterOperation<'_>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
     prepared: PreparedCycle,
     store_pull: super::store::StorePullResult,
@@ -643,31 +733,19 @@ async fn complete_cycle_after_pull(
         resume_drain_promptly,
         rotation_pending,
     } = prepared;
-    // Pull installs the membership state that decides whether this active member
-    // may register before registration is ensured.
     if rotation_pending.is_none() {
-        authorization.ensure_active_registration().await?;
-    }
-
-    if rotation_pending.is_none() {
-        loop {
-            let staged = authorization
-                .prepare_pending_store_write(device_id, &sync_time, user_keypair, store_dir)
-                .await?;
-            if !staged {
-                break;
-            }
-            let published = authorization
-                .drain_store_writes()
-                .await
-                .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
-            if published > 0 {
-                info!(published, "Published Store writes");
-            }
+        // Pull installs the membership state that decides whether this active
+        // member may write. One capability then retains that decision through
+        // preparation and publication of every pending Store write.
+        let published = authorization
+            .publish_pending_store_writes(store_dir)
+            .await?;
+        if published > 0 {
+            info!(published, "Published Store writes");
         }
     }
 
-    let local_seq = database
+    let local_seq = authorization
         .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position after publish: {error}"))?
@@ -691,9 +769,7 @@ async fn complete_cycle_after_pull(
 
     authorization
         .publish_due_snapshots(
-            device_id,
             store_dir,
-            user_keypair,
             &sync_time,
             routing_encryption,
             rotation_pending.is_some(),
@@ -710,14 +786,9 @@ async fn complete_cycle_after_pull(
 }
 
 async fn reclaim_cycle_packages(
-    device_id: &str,
-    user_keypair: &UserKeypair,
-    authorization: &mut AuthorizedStore<'_>,
+    authorization: &mut AuthorizedWriterOperation<'_>,
 ) -> Result<(), SyncCycleFailure> {
-    match authorization
-        .reclaim_packages(device_id, user_keypair)
-        .await
-    {
+    match authorization.reclaim_packages().await {
         Ok(result) if result.packages_deleted > 0 => info!(
             packages = result.packages_deleted,
             copies = result.physical_copies_deleted,
@@ -795,11 +866,12 @@ pub async fn init_sync_over_storage(
     let user_keypair = storage.user_keypair().clone();
     let store_id = storage.store_id().to_string();
     let storage = std::sync::Arc::new(storage);
+    let store_storage: std::sync::Arc<dyn super::storage::SyncStorage> = storage.clone();
     let initialized = match initialization {
         StoreInitialization::CreateStore => {
             Store::create(
                 store_database.clone(),
-                std::sync::Arc::clone(&storage),
+                store_storage.clone(),
                 &hlc.now().to_string(),
                 &user_keypair,
             )
@@ -810,7 +882,7 @@ pub async fn init_sync_over_storage(
         } => {
             Store::open(
                 store_database.clone(),
-                std::sync::Arc::clone(&storage),
+                store_storage,
                 &expected_store_root,
                 &user_keypair,
             )
@@ -843,13 +915,12 @@ pub async fn init_sync_over_storage(
     info!("Sync initialized (device: {})", initialized.device_id);
 
     Ok(SyncComponents {
-        store: initialized.store,
+        store: std::sync::Arc::new(initialized.store),
         hlc,
         store_id,
         device_id: initialized.device_id,
         cipher,
         pending_rotation,
-        user_keypair,
         routing_encryption,
     })
 }
@@ -860,7 +931,7 @@ pub async fn init_sync_over_storage(
 /// cipher, pending-rotation marker, and signing identity that initialization
 /// checked. Callers cannot replace any of them before running a cycle.
 pub struct SyncComponents {
-    store: Store,
+    store: std::sync::Arc<Store>,
     hlc: std::sync::Arc<Hlc>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
@@ -869,18 +940,28 @@ pub struct SyncComponents {
     device_id: String,
     cipher: std::sync::Arc<CloudCipherState>,
     pending_rotation: std::sync::Arc<PendingRotation>,
-    user_keypair: UserKeypair,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 }
 
 impl SyncComponents {
+    pub fn store(&self) -> std::sync::Arc<Store> {
+        self.store.clone()
+    }
+
     #[doc(hidden)]
     pub fn database(&self) -> &Database {
         self.store.database().sqlite()
     }
 
-    pub fn storage(&self) -> &std::sync::Arc<CloudSyncStorage> {
+    pub fn storage(&self) -> &std::sync::Arc<dyn super::storage::SyncStorage> {
         self.store.storage()
+    }
+
+    pub async fn discard_blocked_write(
+        &self,
+        write_id: crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, super::store::StoreError> {
+        self.store.discard_blocked_write(write_id).await
     }
 
     pub fn hlc(&self) -> &std::sync::Arc<Hlc> {
@@ -888,7 +969,7 @@ impl SyncComponents {
     }
 
     pub fn user_keypair(&self) -> &UserKeypair {
-        &self.user_keypair
+        self.store.identity()
     }
 
     pub fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -910,7 +991,7 @@ impl SyncComponents {
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
         self.store
-            .authorize()
+            .authorize_writer()
             .await
             .map_err(|error| DbError::Message(error.to_string()))?
             .drain_uploads(
@@ -935,7 +1016,6 @@ impl SyncComponents {
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .invite_member(
-                &self.user_keypair,
                 &self.hlc,
                 public_key_hex,
                 invitee_email,
@@ -957,7 +1037,6 @@ impl SyncComponents {
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .remove_member(
-                &self.user_keypair,
                 &self.hlc,
                 public_key_hex,
                 &encryption,
@@ -973,12 +1052,7 @@ impl SyncComponents {
         choice: &super::membership::MembershipConflictChoice,
     ) -> Result<(), super::store::MembershipOpsError> {
         self.store
-            .resolve_membership_conflict(
-                &self.user_keypair,
-                &self.device_id,
-                choice,
-                &self.hlc.now().to_string(),
-            )
+            .resolve_membership_conflict(choice, &self.hlc.now().to_string())
             .await?;
         Ok(())
     }
@@ -988,7 +1062,7 @@ impl SyncComponents {
         encryption: crate::encryption::EncryptionService,
         custody: &dyn MasterKeyCustody,
     ) -> Result<String, crate::keys::KeyError> {
-        super::store::apply_key_rotation(encryption, custody, &self.cipher)
+        self.cipher.adopt_key_rotation(&encryption, custody)
     }
 
     pub async fn create_circle(
@@ -996,12 +1070,7 @@ impl SyncComponents {
         name: &str,
     ) -> Result<super::circle::CircleId, super::store::CircleOperationError> {
         self.store
-            .create_circle(
-                &self.device_id,
-                &self.hlc.now().to_string(),
-                name,
-                &self.user_keypair,
-            )
+            .create_circle(&self.hlc.now().to_string(), name)
             .await
     }
 
@@ -1011,13 +1080,7 @@ impl SyncComponents {
         name: &str,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
-            .rename_circle(
-                &self.device_id,
-                &self.hlc.now().to_string(),
-                circle_id,
-                name,
-                &self.user_keypair,
-            )
+            .rename_circle(&self.hlc.now().to_string(), circle_id, name)
             .await
     }
 
@@ -1026,18 +1089,14 @@ impl SyncComponents {
         circle_id: super::circle::CircleId,
         chosen: super::circle::CircleControlCoord,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store
-            .resolve_circle_control(&self.device_id, circle_id, chosen, &self.user_keypair)
-            .await
+        self.store.resolve_circle_control(circle_id, chosen).await
     }
 
     pub async fn delete_circle(
         &self,
         circle_id: super::circle::CircleId,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store
-            .delete_circle(&self.device_id, circle_id, &self.user_keypair)
-            .await
+        self.store.delete_circle(circle_id).await
     }
 
     pub async fn add_circle_member(
@@ -1054,22 +1113,15 @@ impl SyncComponents {
         let routing_encryption = self
             .current_encryption()
             .ok_or(CircleOperationError::BrowsableStorage)?;
-        let operation_stamp = self.hlc.now().to_string();
         let mut authorization = self
             .store
-            .authorize()
+            .authorize_writer()
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authorization
-            .prepare_pending_store_write(
-                &self.device_id,
-                &operation_stamp,
-                &self.user_keypair,
-                store_dir,
-            )
+            .publish_pending_store_writes(store_dir)
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        authorization.drain_store_writes().await?;
         let bootstrap = authorization
             .capture_circle_snapshot_cut(
                 store_dir.as_ref().to_path_buf(),
@@ -1083,15 +1135,7 @@ impl SyncComponents {
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authorization
-            .add_circle_member(
-                &self.device_id,
-                circle_id,
-                member_pubkey,
-                role,
-                bootstrap,
-                &routing_key,
-                &self.user_keypair,
-            )
+            .add_circle_member(circle_id, member_pubkey, role, bootstrap, &routing_key)
             .await
     }
 
@@ -1101,12 +1145,7 @@ impl SyncComponents {
         member_pubkey: String,
     ) -> Result<super::circle::CircleOperationId, super::store::CircleOperationError> {
         self.store
-            .remove_circle_member(
-                &self.device_id,
-                circle_id,
-                member_pubkey,
-                &self.user_keypair,
-            )
+            .remove_circle_member(circle_id, member_pubkey)
             .await
     }
 
@@ -1114,9 +1153,7 @@ impl SyncComponents {
         &self,
         circle_id: super::circle::CircleId,
     ) -> Result<super::circle::CircleOperationId, super::store::CircleOperationError> {
-        self.store
-            .cancel_circle_epoch_close(&self.device_id, circle_id, &self.user_keypair)
-            .await
+        self.store.cancel_circle_epoch_close(circle_id).await
     }
 
     pub async fn exclude_circle_close_device(
@@ -1125,7 +1162,7 @@ impl SyncComponents {
         excluded_device_id: super::store_commit::StoreDeviceId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
-            .exclude_circle_close_device(circle_id, excluded_device_id, &self.user_keypair)
+            .exclude_circle_close_device(circle_id, excluded_device_id)
             .await
     }
 
@@ -1134,11 +1171,7 @@ impl SyncComponents {
         operation_id: &super::circle::CircleOperationId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
-            .retry_circle_operation(
-                operation_id,
-                self.routing_encryption.as_ref(),
-                &self.user_keypair,
-            )
+            .retry_circle_operation(operation_id, self.routing_encryption.as_ref())
             .await
     }
 
@@ -1153,9 +1186,7 @@ impl SyncComponents {
         &self,
         circle_id: super::circle::CircleId,
     ) -> Result<super::circle::CircleCloseStatus, super::store::CircleOperationError> {
-        self.store
-            .circle_close_status(circle_id, &self.user_keypair)
-            .await
+        self.store.circle_close_status(circle_id).await
     }
 
     pub async fn propose_device_exclusion(
@@ -1163,9 +1194,7 @@ impl SyncComponents {
         target: &super::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
     {
-        self.store
-            .propose_device_exclusion(&self.user_keypair, target)
-            .await
+        self.store.propose_device_exclusion(target).await
     }
 
     pub async fn cancel_device_exclusion(
@@ -1173,9 +1202,7 @@ impl SyncComponents {
         proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
     {
-        self.store
-            .cancel_device_exclusion(&self.user_keypair, proposal)
-            .await
+        self.store.cancel_device_exclusion(proposal).await
     }
 
     pub async fn finalize_device_exclusion(
@@ -1183,9 +1210,7 @@ impl SyncComponents {
         proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<super::store::StoreDeviceExclusionResult, super::store::StoreDeviceExclusionError>
     {
-        self.store
-            .finalize_device_exclusion(&self.user_keypair, proposal)
-            .await
+        self.store.finalize_device_exclusion(proposal).await
     }
 
     pub async fn get_device_exclusion_operations(
@@ -1204,14 +1229,16 @@ impl SyncComponents {
         store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
-        let authorization = self.store.authorize().await?;
+        let authorization =
+            self.store.authorize_writer().await.map_err(|error| {
+                SyncCycleFailure::operation("authorize local Store writer", error)
+            })?;
         run_single_sync_cycle_with_authorization(
             &self.device_id,
             &self.hlc,
             clock,
             &self.cipher,
             &self.pending_rotation,
-            &self.user_keypair,
             custody,
             self.routing_encryption.as_ref(),
             store_dir,

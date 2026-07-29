@@ -673,11 +673,7 @@ impl CovenHandle {
             .has_scoped_graph()
             .then(|| self.routing_encryption())
             .transpose()?;
-        let blob_staging = crate::sync::store::HostWriteBlobStaging::new(
-            tokio::runtime::Handle::current(),
-            self.blob_storage().await.map_err(|error| error.to_string()),
-            self.store_dir(),
-        );
+        let blob_staging = self.host_write_blob_staging();
         let write_id = self.db().new_write_id();
         let outcome = self
             .db()
@@ -689,7 +685,7 @@ impl CovenHandle {
                         &gates,
                         &blob_decls,
                         routing_encryption.as_ref(),
-                        Some(&blob_staging),
+                        blob_staging.as_ref(),
                         write_id,
                         |tx| f(SqlContext::new(tx, stamper, &tables, &gates)),
                     ),
@@ -754,11 +750,7 @@ impl CovenHandle {
             .has_scoped_graph()
             .then(|| self.routing_encryption())
             .transpose()?;
-        let blob_staging = crate::sync::store::HostWriteBlobStaging::new(
-            tokio::runtime::Handle::current(),
-            self.blob_storage().await.map_err(|error| error.to_string()),
-            self.store_dir(),
-        );
+        let blob_staging = self.host_write_blob_staging();
         let write_id = self.db().new_write_id();
         let deleted = batch.deleted_blobs;
         let store_dir = self.store_dir();
@@ -982,7 +974,7 @@ fn run_write_batch_on_connection<R>(
     gates: Arc<crate::sync::gate::Gates>,
     decls: Arc<crate::blob::decl::BlobDecls>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
-    blob_staging: crate::sync::store::HostWriteBlobStaging,
+    blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
     write_id: WriteId,
     sql: WriteSql<R>,
 ) -> CovenResult<WriteReceipt<R>> {
@@ -993,7 +985,7 @@ fn run_write_batch_on_connection<R>(
         &gates,
         &decls,
         routing_encryption.as_ref(),
-        Some(&blob_staging),
+        blob_staging.as_ref(),
         write_id,
         |tx| -> CovenResult<R> {
             let cleanup_intents = deleted
@@ -2511,30 +2503,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_storage_adapter_error_only_blocks_a_move_that_needs_storage() {
+    async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
         let fixture = remote_only_store_blob().await;
-        let adapter_error = || {
-            coven_core::sync::store::HostWriteBlobStaging::new(
-                tokio::runtime::Handle::current(),
-                Err("injected blob storage adapter construction failure".to_string()),
-                fixture.dir.clone(),
-            )
-        };
 
         run_scoped_file_write(
             &fixture.handle,
-            Some(adapter_error()),
+            None,
             "UPDATE files SET _updated_at = '0000000009000-0000-device-test'
              WHERE id = 'circle-file'"
                 .to_string(),
         )
         .await
-        .expect("an unused adapter error does not block ordinary SQL");
+        .expect("a write that does not move an audience needs no authorized Store");
 
         let destination_circle_value = fixture.destination_circle.to_string();
         let error = run_scoped_file_write(
             &fixture.handle,
-            Some(adapter_error()),
+            None,
             format!(
                 "UPDATE files SET audience = '{destination_circle_value}',
                  _updated_at = '0000000010000-0000-device-test'
@@ -2546,7 +2531,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("injected blob storage adapter construction failure"),
+                .contains("audience move staging is unavailable"),
             "{error}",
         );
         let audience = fixture

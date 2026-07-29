@@ -4,41 +4,29 @@ use crate::sync::store::circle_controls::CircleOperationError;
 use crate::sync::store_commit::{CircleControlRef, VerifiedStoreBatchCommit};
 
 pub(super) async fn verify_control_membership(
-    history_verifier: &mut crate::sync::store::pull::MergeHistoryVerifier<'_>,
+    history_verifier: &mut crate::sync::store::owner::pull::MergeHistoryVerifier<'_>,
     control: &PreparedCircleControl,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.access_epoch().store_membership;
-    let chain = Box::pin(
-        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_history(
-            history_verifier,
-            &state.heads,
-            &state.resolutions,
-        ),
-    )
-    .await
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let chain =
+        Box::pin(history_verifier.load_membership_at_exact_heads(&state.heads, &state.resolutions))
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     verify_loaded_control_membership(control, chain)
 }
 
 pub(super) async fn verify_control_membership_with_verified_activations(
-    commit_verifier: &crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     control: &PreparedCircleControl,
-    verified_activations: &crate::sync::store::pull::VerifiedMergeMembershipPrefix,
+    verified_activations: &crate::sync::store::owner::pull::VerifiedMergeMembershipPrefix,
 ) -> Result<Vec<(String, crate::sync::membership::MemberRole)>, CircleOperationError> {
-    let verified_root = commit_verifier.verified_root();
     let state = &control.value.access_epoch().store_membership;
-    let chain = Box::pin(
-        crate::sync::store::membership::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-            commit_verifier.storage(),
-            commit_verifier.root(),
-            verified_root,
-            &verified_root.descriptor.founder_pubkey,
-            &state.heads,
-            &state.resolutions,
-            verified_activations,
-            None,
-        ),
-    )
+    let chain = Box::pin(commit_verifier.load_membership_at_verified_prefix(
+        &state.heads,
+        &state.resolutions,
+        verified_activations,
+        None,
+    ))
     .await
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     verify_loaded_control_membership(control, chain)

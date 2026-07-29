@@ -94,12 +94,16 @@ async fn gc_tombstones_as(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    let membership = crate::sync::store::load_cycle_membership(
-        &storage.storage,
-        &crate::sync::store::StoreDatabase::new(db),
+    let membership = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(db),
+        storage.storage.clone(),
+        storage.signer.clone(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|error| error.to_string())?
+    .membership_for_test()
+    .await
+    .map_err(|error| error.to_string())?;
     let activated_uploaders = StoreDatabase::new(db)
         .activated_store_device_registration_records()
         .await
@@ -407,21 +411,19 @@ async fn storage_with_chain(db: &Database) -> (TestStore, UserKeypair, UserKeypa
     let storage = TestStore::create(db, "test-store", founder.clone())
         .await
         .expect("create exact Store membership fixture");
-    crate::sync::store::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder".to_string()),
-        &pubkey_hex(&member),
-        None,
-        MemberRole::Member,
-        &crate::encryption::EncryptionService::from_key([42; 32]),
-        "test-store",
-        "Test Store",
-        &StoreDatabase::new(db),
-    )
-    .await
-    .expect("publish exact member invitation");
+    storage
+        .invite_member(
+            db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder".to_string()),
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("publish exact member invitation");
 
     (storage, founder, member)
 }

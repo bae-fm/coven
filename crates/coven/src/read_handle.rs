@@ -173,12 +173,13 @@ impl CovenReadHandle {
     /// object and authority, so the read performs no database write or cloud listing.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::read_blob(
+        crate::sync::store::blob::StoreBlobAccess::open(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
-            blob,
         )
+        .await?
+        .read(blob)
         .await
     }
 
@@ -196,12 +197,13 @@ impl CovenReadHandle {
     /// downloads the object once per opened stream, not once per range.
     pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::sync::store::blob::open_blob_stream(
+        crate::sync::store::blob::StoreBlobAccess::open(
             &self.database,
             &self.store_dir,
             storage.as_deref(),
-            blob,
         )
+        .await?
+        .open_stream(blob)
         .await
     }
 

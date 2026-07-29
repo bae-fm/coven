@@ -5,42 +5,37 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{BlobPathScheme, CloudCipherAccess, CloudSyncStorage};
+#[cfg(test)]
+use super::cloud_storage::CloudSyncStorage;
+use super::cloud_storage::{BlobPathScheme, CloudCipherAccess};
 use super::cycle::SyncCycleFailure;
 use super::storage::SyncStorage;
-use super::store_commit::{CommitFrontier, StoreProtocolRoot, StoreRootRef};
+use super::store_commit::{CommitFrontier, StoreProtocolRoot};
 
-mod abandonment;
-mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
 mod circle_controls;
 mod database;
 #[cfg(test)]
-pub(in crate::sync) use database::record_verified_circle_activations_for_test;
+pub(super) use database::record_verified_circle_activations_for_test;
 #[doc(hidden)]
-pub use database::{HostWriteBlobStaging, StoreDatabase};
-mod device_exclusion;
-mod device_join;
+pub use database::StoreDatabase;
 mod device_join_transport;
 mod error;
 mod membership;
-mod operations;
 mod owner;
-mod owner_promotion;
+use owner::operations;
 mod package_preparation;
-mod preparation;
 #[cfg(not(any(test, feature = "test-utils")))]
 mod protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
-pub(in crate::sync) mod protocol_root;
-mod publication;
-mod pull;
-mod reclaim;
-mod registration;
+pub(super) mod protocol_root;
 mod retained_replay;
-mod snapshot;
+#[cfg(test)]
+use owner::reclaim;
+use owner::snapshot;
 
+pub use crate::blob::cache::BlobDownloadFailureCause;
 pub use circle_controls::CircleOperationError;
 pub(crate) use circle_controls::{
     CircleCurrentState, CircleOperationJournal, VerifiedCircleImage, VerifiedStreamActivations,
@@ -51,47 +46,44 @@ pub(crate) use circle_controls::{
 };
 #[cfg(test)]
 pub(crate) use database::candidate_records::select_author_exclusion_activation_locator;
-pub(crate) use database::candidate_records::{
-    load_author_exclusion_activation_locator_on, CandidateCleanupObject,
-};
+pub(crate) use database::candidate_records::CandidateCleanupObject;
 pub(crate) use database::materialization_models::{
     OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
     VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
+pub(crate) use database::reclaim::journal::{
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
+    ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
+};
 #[cfg(test)]
-pub(in crate::sync) use database::store_package_is_retained_for_replay_for_test;
+pub(super) use database::store_package_is_retained_for_replay_for_test;
 pub(crate) use database::StoreDatabaseRuntime;
-pub(crate) use device_exclusion::{
+pub use device_join_transport::{
+    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinArtifact, DeviceJoinDriveOutcome,
+    DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming,
+};
+pub use error::StoreError;
+pub(crate) use error::StorePreparationError;
+pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
+pub(crate) use owner::device_exclusion::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
-pub use device_exclusion::{
+pub use owner::device_exclusion::{
     StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo,
     StoreDeviceExclusionOperationStatus, StoreDeviceExclusionResult,
 };
 #[doc(hidden)]
-pub use device_join::{
-    accept_joiner_device_join_cleanup, close_joining_device, complete_device_join,
-    complete_joiner_device_join_cleanup, load_pending_device_join_actions,
-    load_pending_device_join_status, observe_device_join_abandonment,
-    observe_device_join_activation, prepare_device_provider_access_request,
-    prepare_device_registration_request, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
-    DeviceJoinRoleProgress, JoinerJoinProgress, OwnerJoinProgress, PreparedDeviceJoinObject,
-    ProviderAdminJoinProgress,
+pub use owner::device_join::{
+    load_pending_device_join_actions, load_pending_device_join_status, DeviceJoinJournalDatabase,
+    DeviceJoinJournalRecord, DeviceJoinRoleProgress, JoinerJoinProgress, JoiningStore,
+    OwnerJoinProgress, PendingDeviceJoinAuthority, PendingDeviceJoinClosure,
+    PendingDeviceJoinObservation, PreparedDeviceJoinObject, ProviderAdminJoinProgress,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use device_join::{
-    begin_device_join, complete_device_provider_admission, load_current_device_join_authorization,
-    publish_device_provider_challenge,
-};
-#[doc(hidden)]
-pub use device_join::{bootstrap_joining_device, materialize_joined_store_activation};
-#[cfg(test)]
-pub(crate) use device_join::{
-    close_device_provider_admission, complete_owner_device_join_cleanup,
-    load_store_device_join_actions, load_store_device_join_status,
-};
-pub use device_join::{
+pub use owner::device_join::{
     DeviceJoinAbandonment, DeviceJoinAbandonmentRef, DeviceJoinAction, DeviceJoinActivation,
     DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
     DeviceJoinCleanupReceipt, DeviceJoinCleanupReceiptRef, DeviceJoinError, DeviceJoinOffer,
@@ -105,305 +97,51 @@ pub use device_join::{
     ProviderChallengeDisposition, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap, SlotDisposition,
 };
-pub use device_join_transport::{
-    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
-    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinArtifact, DeviceJoinDriveOutcome,
-    DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming,
-};
-pub use error::StoreError;
-pub(crate) use membership::apply_key_rotation;
 #[cfg(test)]
-pub(crate) use membership::unwrap_store_keyring_for_refs;
+pub(crate) use owner::history::retained_membership_floor_is_included;
+pub(crate) use owner::operations::CircleAckActivation;
+pub(crate) use owner::operations::PreparedStoreOperationCommit;
+#[doc(hidden)]
+pub use owner::owner_promotion::OwnerPromotionError;
+pub(crate) use owner::pull::install_circle_bootstrap_image_on;
 #[cfg(test)]
-pub(crate) use membership::{
-    complete_revoke_rotation_adoption, load_exact_membership_head,
-    load_exact_membership_head_with_history, revoke_member_durable,
-    signed_wrapped_keyring_for_test,
+pub(crate) use owner::pull::prepare_merge_abandonment_history_summary;
+#[doc(hidden)]
+pub use owner::pull::StoreCommitVerifier;
+#[doc(hidden)]
+pub use owner::pull::StorePullExecution;
+pub(crate) use owner::pull::VerifiedStoreSnapshotStability;
+pub use owner::pull::{
+    BlobDownloadFailure, BlobDownloadFailures, HeldStoreCoordinate, HeldStorePosition,
+    HeldStorePositionReason, PullError, StorePullError, StorePullMembershipError, StorePullResult,
+    VerifiedStoreDeviceHead,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use membership::{invite_member, remove_member};
-#[doc(hidden)]
-pub use membership::{seed_head_watermark, unwrap_store_keyring};
-pub use membership::{AnchoredChainError, InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use operations::load_local_store_authority as load_local_store_authority_for_test;
-pub(crate) use operations::CircleAckActivation;
-pub(crate) use operations::PreparedStoreOperationCommit;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use owner::anchor_owner_membership;
-pub(crate) use owner::{AuthorizedStore, StoreInitializationError};
-#[doc(hidden)]
-pub use owner::{Store, StoreRestoreMembership};
-#[doc(hidden)]
-pub use owner_promotion::OwnerPromotionError;
-pub(crate) use pull::install_circle_bootstrap_image_on;
-#[doc(hidden)]
-pub use pull::StoreCommitVerifier;
-pub(crate) use pull::VerifiedStoreSnapshotStability;
-#[cfg(test)]
-pub(crate) use pull::{
-    cleanup_merge_candidate, download_blobs, load_merge_conflict_resolution_authorization,
-    prepare_merge_abandonment_history_summary, retained_membership_floor_is_included, BlobDownload,
-};
-#[doc(hidden)]
-pub use pull::{load_cycle_membership, pull_store_commits, StorePullExecution};
-pub(crate) use pull::{load_verified_device_join_attempt, MergeHistoryVerifier};
-pub use pull::{
-    BlobDownloadFailure, BlobDownloadFailureCause, BlobDownloadFailures, HeldStoreCoordinate,
-    HeldStorePosition, HeldStorePositionReason, PullError, StorePullError,
-    StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
-};
-pub(crate) use reclaim::journal::{
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
-    ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
-};
-pub use reclaim::{
+pub use owner::reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, CirclePackageReclaimClaim, CirclePackageReclaimTarget,
     CircleSnapshotLocator, ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimClaim,
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
     StorePackageReclaimClaim, StorePackageReclaimTarget, StoreReclaimError, StoreReclaimResult,
 };
-pub(crate) use registration::{
-    bootstrap_pending_device, ensure_active_registration, prepare_registration_for_origin,
+#[cfg(test)]
+pub(crate) use owner::snapshot::drain_outbound_store_snapshot;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use owner::snapshot::CreatedSnapshot;
+#[doc(hidden)]
+pub use owner::snapshot::{
+    bootstrap_from_snapshot, create_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,
 };
-pub use registration::{recover_owner_device, StoreRegistrationError};
+#[cfg(test)]
+pub(crate) use owner::StoreAckError;
+pub(crate) use owner::{bootstrap_pending_device, prepare_registration_for_origin};
+pub(crate) use owner::{AuthorizedStore, AuthorizedWriterOperation, StoreInitializationError};
+#[doc(hidden)]
+pub use owner::{HostWriteBlobStaging, Store, StoreRestoreMembership};
+pub use owner::{RestoringStore, StoreRegistrationError};
 pub(crate) use retained_replay::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority,
 };
-#[cfg(test)]
-pub(crate) use snapshot::drain_outbound_store_snapshot;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use snapshot::push_store_snapshot;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use snapshot::CreatedSnapshot;
-#[doc(hidden)]
-pub use snapshot::{
-    bootstrap_from_snapshot, create_snapshot, load_store_snapshot_ref, reconcile_snapshot_blobs,
-    BootstrapResult, SnapshotBlobReconcile, SnapshotError,
-};
-
-#[cfg(any(test, feature = "test-utils"))]
-async fn device_join_history_verifier<'a>(
-    database: &StoreDatabase,
-    storage: &'a dyn SyncStorage,
-) -> Result<pull::MergeHistoryVerifier<'a>, DeviceJoinError> {
-    let root = database
-        .local_store_root_ref()
-        .await
-        .map_err(|error| DeviceJoinError::Store(error.to_string()))?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    pull::MergeHistoryVerifier::new(storage, &root)
-        .await
-        .map_err(DeviceJoinError::from)
-}
-
-#[cfg(test)]
-pub(crate) async fn abandon_device_join(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    offer: DeviceJoinOffer,
-) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::abandon_device_join(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        offer,
-    )
-    .await
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn accept_device_registration_request(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    request: DeviceRegistrationRequest,
-) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::accept_device_registration_request(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        request,
-    )
-    .await
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn authorize_device_provider_access(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    administrator_exact: Option<&dyn crate::storage::cloud::ExactSlotStorage>,
-    access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    request: DeviceProviderAccessRequest,
-) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::authorize_device_provider_access(
-        database,
-        &mut history_verifier,
-        administrator_exact,
-        access_administrator,
-        authorization,
-        identity,
-        request,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn cancel_device_join(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    attempt: super::store_commit::DeviceJoinAttemptRef,
-) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::cancel_device_join(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        attempt,
-    )
-    .await
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn finalize_device_join(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    completion: DeviceProviderAdmissionCompletion,
-) -> Result<DeviceJoinActivation, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::finalize_device_join(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        completion,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_device_join_cleanup(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    executor_exact: &dyn crate::storage::cloud::ExactSlotStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    cancellation: DeviceJoinCancellation,
-    administrator_terminal: ProviderAdminJoinTerminal,
-    joiner_terminal: JoinerJoinTerminal,
-) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::prepare_device_join_cleanup(
-        database,
-        &mut history_verifier,
-        executor_exact,
-        authorization,
-        identity,
-        cancellation,
-        administrator_terminal,
-        joiner_terminal,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn activate_device_join_cleanup(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    attempt_id: super::store_commit::DeviceJoinAttemptId,
-    receipt: DeviceJoinCleanupReceipt,
-) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::activate_device_join_cleanup(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        attempt_id,
-        receipt,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn revoke_device_provider_admission_writes(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    cancellation: DeviceJoinCancellation,
-    executor: &dyn DeviceJoinWriteRevocationExecutor,
-    executor_grant: super::provider::ProviderAdminGrantId,
-) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::revoke_device_provider_admission_writes(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        cancellation,
-        executor,
-        executor_grant,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn revoke_joining_device_writes(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    authorization: &crate::sync::membership::MembershipChain,
-    identity: &UserKeypair,
-    cancellation: DeviceJoinCancellation,
-    executor: &dyn DeviceJoinWriteRevocationExecutor,
-    executor_grant: super::provider::ProviderAdminGrantId,
-) -> Result<JoinerJoinTerminal, DeviceJoinError> {
-    let mut history_verifier = device_join_history_verifier(database, storage).await?;
-    device_join::revoke_joining_device_writes(
-        database,
-        &mut history_verifier,
-        authorization,
-        identity,
-        cancellation,
-        executor,
-        executor_grant,
-    )
-    .await
-}
-
-#[cfg(feature = "test-utils")]
-#[doc(hidden)]
-pub async fn ensure_active_registration_for_test(
-    db: &Database,
-    storage: &dyn SyncStorage,
-) -> Result<(), StoreRegistrationError> {
-    registration::ensure_active_registration(&StoreDatabase::new(db), storage).await
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockedWriteDiscard {
@@ -411,108 +149,24 @@ pub enum BlockedWriteDiscard {
     RemoteResolutionRequired,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn stage_store_acknowledgement_for_test(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    frontier: CommitFrontier,
-    sync_time: String,
-    identity: &UserKeypair,
-) -> Result<super::store_commit::StoreAck, acknowledgements::StoreAckError> {
-    let mut store = Store::authorize_borrowed(storage, db)
-        .await
-        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
-    store
-        .stage_acknowledgement(frontier, sync_time, identity)
-        .await
-}
-
-#[cfg(test)]
-pub(crate) async fn exact_next_announcement_slot_for_test(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registration_ref: &super::store_commit::StoreDeviceRegistrationRef,
-    registration: &super::store_commit::StoreDeviceRegistration,
-    previous: Option<&super::store_commit::StoreBatchCommitRef>,
-) -> Result<
-    (
-        crate::storage::cloud::ObjectSlot,
-        Option<super::store_commit::StoreDeviceHeadRef>,
-    ),
-    StoreError,
-> {
-    let mut verifier = pull::StoreCommitVerifier::new(storage, root).await?;
-    let previous = match previous {
-        Some(reference) => Some(verifier.load_ref(reference).await?),
-        None => None,
-    };
-    operations::exact_next_announcement_slot(
-        storage,
-        root,
-        registration_ref,
-        registration,
-        &mut verifier,
-        previous.as_ref(),
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn prepare_store_operation_plan_for_test(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    membership: &crate::sync::membership::MembershipChain,
-    device_id: &str,
-    identity: &UserKeypair,
-) -> Result<operations::StoreOperationCommitPlan, StoreError> {
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| StoreError::InvalidOutbound("test Store root is absent".to_string()))?;
-    let mut history_verifier = pull::MergeHistoryVerifier::new(storage, &root).await?;
-    operations::prepare_plan(
-        database,
-        &mut history_verifier,
-        membership,
-        device_id,
-        identity,
-    )
-    .await
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) async fn drain_store_acknowledgements_for_test(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    identity: &UserKeypair,
-) -> Result<u64, acknowledgements::StoreAckError> {
-    let mut store = Store::authorize_borrowed(storage, db)
-        .await
-        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
-    store.drain_acknowledgements(identity).await
-}
-
 #[cfg(test)]
 pub(crate) async fn push_circle_snapshots_for_test(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<CloudSyncStorage>,
     temp_dir: std::path::PathBuf,
     schema_version: u32,
     identity: &UserKeypair,
     created_at: &str,
     store_routing: &crate::encryption::EncryptionService,
 ) -> Result<super::store_commit::CircleSnapshotMeta, snapshot::SnapshotError> {
-    let store = Store::authorize_borrowed(storage, db)
+    let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
     store
-        .author_one_circle_snapshot_for_test(
-            temp_dir,
-            schema_version,
-            identity,
-            created_at,
-            store_routing,
-        )
+        .authorize_writer()
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .author_one_circle_snapshot_for_test(temp_dir, schema_version, created_at, store_routing)
         .await
 }
 
@@ -523,24 +177,21 @@ pub(crate) async fn push_circle_snapshots_for_test(
 #[cfg(test)]
 pub(crate) async fn drive_circle_snapshot_publications_for_test(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<CloudSyncStorage>,
     temp_dir: std::path::PathBuf,
     schema_version: u32,
     identity: &UserKeypair,
     created_at: &str,
     store_routing: Option<&crate::encryption::EncryptionService>,
 ) -> Result<(), snapshot::SnapshotError> {
-    let store = Store::authorize_borrowed(storage, db)
+    let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
     store
-        .push_circle_snapshots(
-            temp_dir,
-            schema_version,
-            identity,
-            created_at,
-            store_routing,
-        )
+        .authorize_writer()
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .push_circle_snapshots(temp_dir, schema_version, created_at, store_routing)
         .await
 }
 
@@ -649,131 +300,51 @@ pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
 #[cfg(test)]
 pub(crate) async fn circle_snapshot_is_stable_for_test(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<CloudSyncStorage>,
+    identity: &UserKeypair,
     circle_id: crate::sync::circle::CircleId,
     control: &crate::sync::circle::CircleControlCoord,
     snapshot_cut: &crate::sync::store_commit::CommitFrontier,
 ) -> Result<bool, snapshot::SnapshotError> {
-    let store = Store::authorize_borrowed(storage, db)
+    let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?;
     store
+        .authorize_writer()
+        .await
+        .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
         .circle_snapshot_is_stable(circle_id, control, snapshot_cut)
-        .await
-}
-
-#[cfg(test)]
-pub(crate) async fn stage_circle_acknowledgements_for_test(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    frontier: &CommitFrontier,
-    sync_time: &str,
-    identity: &UserKeypair,
-) -> Result<(), acknowledgements::StoreAckError> {
-    let store = Store::authorize_borrowed(storage, db)
-        .await
-        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
-    store
-        .stage_circle_acknowledgements(frontier, sync_time, identity)
         .await
 }
 
 #[cfg(test)]
 pub(crate) async fn reclaim_packages_for_test(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<CloudSyncStorage>,
     identity: &UserKeypair,
 ) -> Result<reclaim::StoreReclaimResult, reclaim::StoreReclaimError> {
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local device id")
-        .expect("local device id is installed");
-    let mut store = Store::authorize_borrowed(storage, db)
+    let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
         .map_err(|error| reclaim::StoreReclaimError::Authorization(error.to_string()))?;
-    store.reclaim_packages(&device_id, identity).await
+    let mut writer = store
+        .authorize_writer()
+        .await
+        .map_err(|error| reclaim::StoreReclaimError::Authorization(error.to_string()))?;
+    writer.reclaim_packages().await
 }
 
 #[cfg(test)]
 pub(crate) async fn load_circle_acknowledgement_for_test(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<CloudSyncStorage>,
+    identity: &UserKeypair,
     reference: &super::store_commit::CircleAckRef,
     control: &super::circle::CircleControlCoord,
-) -> Result<super::store_commit::CircleAck, acknowledgements::StoreAckError> {
-    let store = Store::authorize_borrowed(storage, db)
+) -> Result<super::store_commit::CircleAck, owner::StoreAckError> {
+    let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
-        .map_err(|error| acknowledgements::StoreAckError::InvalidOutbound(error.to_string()))?;
-    acknowledgements::load_circle_acknowledgement_on(
-        store.database(),
-        store.storage(),
-        store.store_root(),
-        reference,
-        control,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn prepare_store_acknowledgement_activation_for_test(
-    db: &Database,
-    acknowledgement: super::store_commit::StoreAckRef,
-    candidate: crate::sync::store::operations::PreparedStoreOperationCommit,
-) -> Result<(), crate::database::DbError> {
-    owner::prepare_acknowledgement_activation_for_test(db, acknowledgement, candidate).await
-}
-
-#[cfg(test)]
-pub(crate) async fn verify_store_snapshots_for_acknowledgement_for_test(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    snapshots: &[crate::database::PublishedStoreSnapshot],
-) -> Result<(), pull::StorePullError> {
-    pull::verify_snapshots_for_acknowledgement(storage, root, snapshots).await
-}
-
-#[cfg(test)]
-pub(crate) fn prepare_device_join_bootstrap<'a>(
-    storage: &'a dyn SyncStorage,
-    root: &'a StoreRootRef,
-    coverage: &'a super::store_commit::StoreHistoryCut,
-    attempt_activation: &'a super::store_commit::StoreBatchCommitRef,
-    membership_state: &'a super::circle_control::StoreMembershipStateRef,
-) -> pull::StorePullFuture<'a, pull::DeviceJoinBootstrapPlan> {
-    pull::prepare_device_join_bootstrap(
-        storage,
-        root,
-        coverage,
-        attempt_activation,
-        membership_state,
-    )
-}
-
-pub(crate) struct VerifiedOwnerPromotionAcceptance;
-
-pub(in crate::sync::store) async fn find_owner_promotion_request_activation(
-    history_verifier: &mut pull::MergeHistoryVerifier<'_>,
-    request: &super::store_commit::OwnerPromotionRequest,
-) -> Result<pull::VerifiedOwnerPromotionRequestActivation, pull::StorePullError> {
-    pull::find_owner_promotion_request_activation(history_verifier, request).await
-}
-
-pub(in crate::sync::store) async fn verify_owner_promotion_acceptance_from_request_activation(
-    history_verifier: &mut pull::MergeHistoryVerifier<'_>,
-    acceptance: &super::store_commit::OwnerPromotionAcceptance,
-    verified: pull::VerifiedOwnerPromotionRequestActivation,
-) -> Result<VerifiedOwnerPromotionAcceptance, pull::StorePullError> {
-    pull::verify_acceptance_from_request_activation(history_verifier, acceptance, verified)
+        .map_err(|error| owner::StoreAckError::InvalidOutbound(error.to_string()))?;
+    store
+        .load_circle_acknowledgement_for_test(reference, control)
         .await
-        .map(|()| VerifiedOwnerPromotionAcceptance)
-}
-
-pub(crate) async fn verify_owner_promotion_acceptance_with_history(
-    history_verifier: &mut pull::MergeHistoryVerifier<'_>,
-    acceptance: &super::store_commit::OwnerPromotionAcceptance,
-) -> Result<VerifiedOwnerPromotionAcceptance, pull::StorePullError> {
-    pull::verify_owner_promotion_acceptance_with_history(history_verifier, acceptance)
-        .await
-        .map(|()| VerifiedOwnerPromotionAcceptance)
 }

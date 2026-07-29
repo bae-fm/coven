@@ -10,13 +10,13 @@ use crate::keys::{self, UserKeypair};
 use crate::sync::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleAccessDisposition, CircleMetadataHeadRef, CircleOperationId,
-    CircleRosterHeadRef, CircleSemanticSlot, CircleTransitionDraft, CircleTransitionPolicyObjects,
-    PreparedCircleTransition, StoreMembershipStateRef,
+    CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot, CircleTransitionDraft,
+    CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
 };
 use crate::sync::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
-use crate::sync::store::owner::AuthorizedStoreAuthority;
+use crate::sync::store::owner::AuthorizedWriterOperation;
 use crate::sync::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
@@ -26,58 +26,6 @@ use crate::sync::store_commit::{
     StoreDeviceRegistrationRef, StoreOperationMembershipAuthority, StoreRootRef, StreamActivation,
     StreamAnchorDomain, SuccessorLink,
 };
-
-pub(super) fn verify_prepared_objects_are_signed(
-    journal: &CircleOperationJournal,
-    reference: &crate::sync::store_commit::CircleControlRef,
-) -> Result<(), CircleOperationError> {
-    let operation = journal.operation();
-    let objects = reference.objects();
-    let mut signed = BTreeSet::<ExactObjectRef>::from([
-        operation.commit_ref.object.clone(),
-        objects.control.clone(),
-    ]);
-    signed.insert(reference.head_object().clone());
-    signed.extend(objects.roster_entries.values().cloned());
-    signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
-    signed.extend(objects.roster_resolutions.values().cloned());
-    signed.extend(
-        objects
-            .metadata_entries
-            .values()
-            .map(|metadata| metadata.object.clone()),
-    );
-    signed.extend(
-        objects
-            .metadata_heads
-            .iter()
-            .map(|head| head.object.clone()),
-    );
-    if let Some(intent) = &objects.close_intent {
-        signed.insert(intent.object.clone());
-    }
-    if let Some(outcome) = &objects.close_outcome {
-        signed.insert(outcome.object.clone());
-    }
-    if let Some(cancellation) = &objects.close_cancellation {
-        signed.insert(cancellation.object.clone());
-    }
-    for access in &objects.access {
-        signed.insert(access.leaf.object.clone());
-        signed.insert(access.envelope.object.clone());
-        if let Some(bootstrap) = &access.bootstrap {
-            signed.insert(bootstrap.object.clone());
-        }
-    }
-    for (step, prepared) in &operation.prepared_objects {
-        if step != "store-head" && !signed.contains(prepared.reference()) {
-            return Err(CircleOperationError::Journal(format!(
-                "Circle upload step {step:?} names an object outside its signed Store commit graph"
-            )));
-        }
-    }
-    Ok(())
-}
 
 pub(super) fn signed_circle_commit(
     store_root_hash: ObjectHash,
@@ -152,73 +100,6 @@ pub(super) fn prepare_circle_object_at(
         .prepare_protocol_object(context, slot, semantic_prefix, bytes)
         .map_err(crate::sync::store_objects::StoreObjectError::from)
         .map_err(CircleOperationError::from)
-}
-
-pub(crate) async fn verified_circle_bootstrap_blobs(
-    storage: &dyn SyncStorage,
-    circle_id: crate::sync::circle::CircleId,
-    snapshot: &crate::sync::store::snapshot::CreatedSnapshot,
-) -> Result<Vec<crate::blob::RowBlobRef>, CircleOperationError> {
-    let mut blobs = Vec::with_capacity(snapshot.blobs.len());
-    for captured in &snapshot.blobs {
-        let crate::sync::store::snapshot::SnapshotBlobAudience::Circle {
-            circle_id: captured_circle,
-            ..
-        } = captured.audience
-        else {
-            return Err(CircleOperationError::InvalidState(
-                "Circle bootstrap contains a Store-audience blob".to_string(),
-            ));
-        };
-        let previous = captured.fact.previous.as_ref().ok_or_else(|| {
-            CircleOperationError::InvalidState(format!(
-                "Circle bootstrap blob {}/{} has no activated exact remote binding",
-                captured.fact.blob.namespace, captured.fact.blob.id
-            ))
-        })?;
-        if captured_circle != circle_id
-            || previous.authority.remote_audience()
-                != crate::blob::locator::RemoteAudience::Circle(circle_id)
-            || previous.stored.locator().audience()
-                != crate::blob::locator::RemoteAudience::Circle(circle_id)
-        {
-            return Err(CircleOperationError::InvalidState(
-                "Circle bootstrap blob belongs to another audience".to_string(),
-            ));
-        }
-        storage
-            .verify_blob_object(&previous.stored)
-            .await
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "verify Circle bootstrap blob {}/{}: {error}",
-                    captured.fact.blob.namespace, captured.fact.blob.id
-                ))
-            })?;
-        blobs.push(
-            crate::blob::RowBlobRef::new(
-                captured.fact.table.clone(),
-                captured.fact.row_id.clone(),
-                captured.fact.row_stamp.clone(),
-                captured.fact.column.clone(),
-                captured.fact.blob.clone(),
-                captured.fact.plaintext_size,
-                captured.fact.plaintext_hash,
-                crate::blob::RowBlobAuthority::Remote(previous.authority.clone()),
-                Some(previous.stored.clone()),
-            )
-            .map_err(CircleOperationError::InvalidState)?,
-        );
-    }
-    blobs.sort_by_cached_key(|blob| {
-        serde_json::to_vec(blob).expect("row blob reference serialization cannot fail")
-    });
-    if blobs.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(CircleOperationError::InvalidState(
-            "Circle bootstrap repeats an exact row blob binding".to_string(),
-        ));
-    }
-    Ok(blobs)
 }
 
 pub(super) async fn prepare_circle_activation_objects(
@@ -1214,43 +1095,38 @@ pub(super) async fn prepare_circle_activation_objects(
     ))
 }
 pub(super) async fn prepare_circle_operation(
-    authority: &mut AuthorizedStoreAuthority<'_, '_>,
-    device_id: &str,
+    operation: &mut AuthorizedWriterOperation<'_>,
     metadata_stamp: &str,
     name: &str,
-    signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     Box::pin(prepare_circle_operation_request(
-        authority,
-        device_id,
+        operation,
         CircleOperationRequest::Create {
             name: name.to_string(),
             metadata_stamp: metadata_stamp.to_string(),
         },
-        signer,
     ))
     .await
 }
 
 pub(super) async fn prepare_circle_operation_request(
-    authority: &mut AuthorizedStoreAuthority<'_, '_>,
-    device_id: &str,
+    operation: &mut AuthorizedWriterOperation<'_>,
     request: CircleOperationRequest,
-    signer: &UserKeypair,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
-    let database = authority.database;
-    let history_verifier = &mut *authority.history_verifier;
-    let current = &*authority.membership;
-    let storage = history_verifier.storage();
+    let announcement_stream_id = operation.announcement_stream_id();
+    let authority = &mut operation.store;
+    let database = authority.database().clone();
+    let current = authority.membership.clone();
+    let root = authority.history().history_verifier_mut().root().clone();
+    let database = &database;
+    let current = &current;
+    let root = &root;
+    let storage = authority.history().history_verifier_mut().storage();
     let db = database.sqlite();
-    let (root, author_registration, author, device_signer) =
-        crate::sync::store::operations::load_local_store_authority(database, device_id, signer)
-            .await?;
-    if history_verifier.commit_verifier().root() != &root {
-        return Err(CircleOperationError::InvalidState(
-            "Circle preparation verifier belongs to another Store root".to_string(),
-        ));
-    }
+    let author_registration = &operation.writer.registration_ref;
+    let author = &operation.writer.registration;
+    let device_signer = &operation.writer.device_signer;
+    let signer = &operation.writer.identity;
     let store_root_hash = root.store_root_hash;
     let circle_device_id = author.device_id.to_string();
     let author_pubkey = keys::public_key_hex(signer);
@@ -1267,6 +1143,35 @@ pub(super) async fn prepare_circle_operation_request(
         let heads = current.head_refs().to_vec();
         let resolutions = current.resolution_refs().to_vec();
         let members = current.current_members();
+        let rotation_checked_circle = match &request {
+            CircleOperationRequest::Rename(request) => Some(request.circle_id),
+            CircleOperationRequest::AddMember(request) => Some(request.circle_id),
+            CircleOperationRequest::Create { .. }
+            | CircleOperationRequest::RemoveMember(_)
+            | CircleOperationRequest::ResolveControl(_)
+            | CircleOperationRequest::Delete(_)
+            | CircleOperationRequest::FinalizeEpochClose(_)
+            | CircleOperationRequest::CancelEpochClose(_) => None,
+        };
+        if let Some(circle_id) = rotation_checked_circle {
+            let active_store_members = current
+                .current_members()
+                .into_iter()
+                .map(|(pubkey, _)| pubkey)
+                .collect();
+            if let Some(CirclePublicationBlocked::RotationRequired {
+                circle_id,
+                removed_members,
+            }) = database
+                .circle_publication_rotation_block(circle_id, active_store_members)
+                .await?
+            {
+                return Err(CircleOperationError::RotationRequired {
+                    circle_id,
+                    removed_members,
+                });
+            }
+        }
         let state_hash = match current.status() {
             crate::sync::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
             crate::sync::membership::MembershipStatus::Conflict(_) => {
@@ -1283,7 +1188,7 @@ pub(super) async fn prepare_circle_operation_request(
                         "circle creator is not a current Store writer".to_string(),
                     )
                 })?;
-        let commit_base = database.local_commit_base().await?;
+        let commit_base = database.local_commit_base(announcement_stream_id).await?;
         // Held until this request's candidate is durably staged, so the position
         // its order extends is still this device's next one when it lands.
         let _authorship = commit_base.authorship;
@@ -1291,11 +1196,7 @@ pub(super) async fn prepare_circle_operation_request(
         let seq = base
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence() + 1);
-        let stream_id = crate::sync::store_commit::StreamActivation::device_authorized_stream_id(
-            root.store_root_hash,
-            &author_registration,
-            crate::sync::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        );
+        let stream_id = announcement_stream_id;
         let dependencies =
             crate::sync::store_commit::CommitFrontier::from_refs(commit_base.frontier)
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -1318,7 +1219,7 @@ pub(super) async fn prepare_circle_operation_request(
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let candidate_family =
-            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+            CandidateFamilyId::derive(store_root_hash, author_registration, &write_id, &order);
         // A control-conflict resolution covers the losing branches' frontiers by
         // carrying their already-published activation objects (metadata and roster
         // heads and entries) into its own commit, so activation can verify the
@@ -1407,7 +1308,7 @@ pub(super) async fn prepare_circle_operation_request(
                     })?;
                 let roster_stream = StreamActivation::grant_authorized_stream_id(
                     store_root_hash,
-                    &author_registration,
+                    author_registration,
                     owner_grant,
                     StreamAnchorDomain::CircleRoster {
                         circle_id: request.circle_id,
@@ -1425,7 +1326,7 @@ pub(super) async fn prepare_circle_operation_request(
                     &request.member_pubkey,
                     request.circle_id,
                 )?;
-                let bootstrap_blobs = verified_circle_bootstrap_blobs(
+                let bootstrap_blobs = super::verified_circle_bootstrap_blobs(
                     storage,
                     request.circle_id,
                     &request.bootstrap.snapshot,
@@ -1522,7 +1423,7 @@ pub(super) async fn prepare_circle_operation_request(
                     })?;
                 let roster_stream = StreamActivation::grant_authorized_stream_id(
                     store_root_hash,
-                    &author_registration,
+                    author_registration,
                     owner_grant,
                     StreamAnchorDomain::CircleRoster {
                         circle_id: request.circle_id,
@@ -1779,7 +1680,7 @@ pub(super) async fn prepare_circle_operation_request(
                 let mut draft = CircleTransitionDraft::finalize_epoch_close(
                     candidate_family,
                     &circle_device_id,
-                    &author_registration,
+                    author_registration,
                     &request.metadata_stamp,
                     membership_state.clone(),
                     membership_authority.clone(),
@@ -1794,7 +1695,7 @@ pub(super) async fn prepare_circle_operation_request(
                     db.id_provider(),
                     signer,
                 )?;
-                let bootstrap_blobs = verified_circle_bootstrap_blobs(
+                let bootstrap_blobs = super::verified_circle_bootstrap_blobs(
                     storage,
                     request.circle_id,
                     &request.bootstrap.snapshot,
@@ -1894,15 +1795,15 @@ pub(super) async fn prepare_circle_operation_request(
         let (creation, objects, mut prepared_objects, control_head_object, stream_activations) =
             Box::pin(prepare_circle_activation_objects(
                 storage,
-                &root,
+                root,
                 creation,
                 &history,
                 &merged_branch_objects,
                 candidate_family,
-                &author_registration,
-                &author,
+                author_registration,
+                author,
                 signer,
-                &device_signer,
+                device_signer,
             ))
             .await?;
         for (step, object) in additional_prepared {
@@ -1918,7 +1819,7 @@ pub(super) async fn prepare_circle_operation_request(
             write_id.clone(),
             coord.clone(),
             author_registration.clone(),
-            &author,
+            author,
             order,
             membership_state,
             device_state,
@@ -1927,7 +1828,7 @@ pub(super) async fn prepare_circle_operation_request(
             },
             circle_reference,
             stream_activations,
-            &device_signer,
+            device_signer,
         )?;
         let commit_context = ProtocolObjectContext::signed_plaintext(
             store_root_hash,
@@ -1952,22 +1853,23 @@ pub(super) async fn prepare_circle_operation_request(
             store_root_hash,
             coord,
             commit_prepared.reference().clone(),
-            &author,
+            author,
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let commit_ref = verified_commit.reference().clone();
-        let history_summary = crate::sync::store::pull::prepare_merge_history_successor(
-            database,
-            &root,
-            &verified_commit,
-            current,
-            None,
-            resolved_devices,
-            crate::sync::store::pull::MergeHistorySuccessorEvidence::none(),
-        )
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let history_summary = authority
+            .history()
+            .prepare_merge_history_successor(
+                &verified_commit,
+                current,
+                None,
+                resolved_devices,
+                crate::sync::store::owner::pull::MergeHistorySuccessorEvidence::none(),
+            )
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         prepared_objects.insert("store-commit".to_string(), commit_prepared);
+        let storage = authority.history().history_verifier_mut().storage();
         let head_context = ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             ProtocolObjectDomain::StoreHead,
@@ -1989,7 +1891,7 @@ pub(super) async fn prepare_circle_operation_request(
             history_summary.summary.digest(),
             SuccessorLink {
                 activation: author
-                    .store_announcement_activation(&author_registration)
+                    .store_announcement_activation(author_registration)
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
                     .activation_id(),
                 predecessor: history_summary
@@ -1997,7 +1899,7 @@ pub(super) async fn prepare_circle_operation_request(
                     .map(|reference| reference.object),
                 next_slot: next_head_slot,
             },
-            &device_signer,
+            device_signer,
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let head_prepared = storage

@@ -35,9 +35,9 @@ struct CircleOperationCandidate {
     bootstrap_blobs: Vec<ExactObjectRef>,
 }
 
-pub(in crate::sync::store) struct CircleOperationDiscardCandidate {
-    pub(in crate::sync::store) candidate: crate::database::BlockedMergeCandidate,
-    pub(in crate::sync::store) revoked_grant: Option<crate::sync::membership::MembershipGrantId>,
+pub(crate) struct CircleOperationDiscardCandidate {
+    pub(crate) candidate: crate::database::BlockedMergeCandidate,
+    pub(crate) revoked_grant: Option<crate::sync::membership::MembershipGrantId>,
 }
 
 fn circle_operation_candidate_on(
@@ -104,7 +104,7 @@ impl StoreDatabase {
     /// The candidate and block are read from one journal row in one database
     /// call, so discard never combines proof inputs from different operation
     /// states.
-    pub(in crate::sync::store) async fn circle_operation_discard_candidate(
+    pub(crate) async fn circle_operation_discard_candidate(
         &self,
         operation_id: &CircleOperationId,
     ) -> Result<CircleOperationDiscardCandidate, crate::DbError> {
@@ -139,8 +139,9 @@ impl StoreDatabase {
     /// Record the verified nonactivation across the candidate's exact object
     /// graph — bootstrap blobs included — and move the journal row into the
     /// `Discarding` state in one transaction. Restart resumes cleanup from there.
-    pub(in crate::sync::store) async fn begin_circle_operation_discard(
+    pub(crate) async fn begin_circle_operation_discard(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
@@ -156,6 +157,7 @@ impl StoreDatabase {
                 } = circle_operation_candidate_on(&tx, journal.operation())?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
+                    &root,
                     &candidate.commit.write_id,
                     &candidate,
                     &nonactivation,
@@ -175,8 +177,9 @@ impl StoreDatabase {
     /// for author-exclusion or membership-revocation proofs, whose head absence
     /// is reconciled against fresh evidence. A Merge-winner proof cleans by
     /// occupation and yields no terminal verification.
-    pub(in crate::sync::store) async fn circle_operation_discard_terminal_verifications(
+    pub(crate) async fn circle_operation_discard_terminal_verifications(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
@@ -185,7 +188,7 @@ impl StoreDatabase {
                 let journal = load_discarding_operation_on(conn, &operation_id)?;
                 let candidate = circle_operation_candidate_on(conn, journal.operation())?;
                 Ok(
-                    terminal_candidate_verification_on(conn, candidate.candidate)?
+                    terminal_candidate_verification_on(conn, &root, candidate.candidate)?
                         .into_iter()
                         .collect(),
                 )
@@ -196,8 +199,9 @@ impl StoreDatabase {
     /// Reconcile the candidate's activation head against fresh excluded-author
     /// evidence, mirroring the Merge terminal-head reconciliation but sourcing
     /// the candidate from the journal.
-    pub(in crate::sync::store) async fn reconcile_circle_operation_terminal_head(
+    pub(crate) async fn reconcile_circle_operation_terminal_head(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
         verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
@@ -227,7 +231,7 @@ impl StoreDatabase {
                         "fresh excluded-author head evidence names another candidate".to_string(),
                     ));
                 }
-                validate_terminal_candidate_authority_on(&tx, &candidate, &durable)?;
+                validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
                 let object_id = remote_object_id(candidate.head_prepared.reference());
                 let remote_exists: bool = tx
                     .query_row(
@@ -269,7 +273,7 @@ impl StoreDatabase {
     /// The candidate-exclusive objects still present in cloud storage, ordered by
     /// the signed manifest. Shared bootstrap blobs never appear here — they are
     /// asserted cleanup-complete but retire through the shared path.
-    pub(in crate::sync::store) async fn circle_operation_discard_cleanup_targets(
+    pub(crate) async fn circle_operation_discard_cleanup_targets(
         &self,
         operation_id: &CircleOperationId,
     ) -> Result<Vec<CandidateCleanupObject>, crate::DbError> {
@@ -294,7 +298,7 @@ impl StoreDatabase {
 
     /// Every Circle operation durably in the `Discarding` state, oldest first, so
     /// a restart resumes their interrupted cleanup.
-    pub(in crate::sync::store) async fn discarding_circle_operations(
+    pub(crate) async fn discarding_circle_operations(
         &self,
     ) -> Result<Vec<CircleOperationId>, crate::DbError> {
         self.database
@@ -335,7 +339,7 @@ impl StoreDatabase {
     /// Complete the discard: assert every candidate object is terminal, delete
     /// the absence-verified candidate-exclusive remote-object rows, and clear the
     /// journal row — all in one transaction so no half-cleared row survives.
-    pub(in crate::sync::store) async fn finish_circle_operation_discard(
+    pub(crate) async fn finish_circle_operation_discard(
         &self,
         operation_id: &CircleOperationId,
     ) -> Result<(), crate::DbError> {

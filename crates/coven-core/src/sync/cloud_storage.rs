@@ -67,6 +67,30 @@ pub trait CloudCipherAccess: Send + Sync {
         new_encryption: &EncryptionService,
         custody: &dyn crate::keys::MasterKeyCustody,
     ) -> Result<Option<String>, crate::keys::KeyError>;
+
+    fn adopt_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<String, crate::keys::KeyError> {
+        if let Some(fingerprint) = self.merge_key_rotation(new_encryption, custody)? {
+            return Ok(fingerprint);
+        }
+        let CloudCipher::Encrypted(live) = self.snapshot() else {
+            return Err(crate::keys::KeyError::Crypto(
+                "cannot rotate the key of a plaintext cloud home".to_string(),
+            ));
+        };
+        let retained = live
+            .merged_with(new_encryption)
+            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
+        if retained.key_count() != live.key_count() {
+            return Err(crate::keys::KeyError::Crypto(
+                "live keyring changed without retaining an adopted rotation".to_string(),
+            ));
+        }
+        Ok(live.fingerprint())
+    }
 }
 
 enum CloudCipherMode {
@@ -1640,6 +1664,26 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
 
 #[async_trait]
 impl SyncStorage for CloudSyncStorage {
+    fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.blob_path_scheme()
+    }
+
+    fn self_uploader(&self) -> String {
+        self.self_uploader()
+    }
+
+    fn cloud_home(&self) -> &dyn CloudHome {
+        self.cloud_home()
+    }
+
+    fn exact_slot_storage(&self) -> &dyn ExactSlotStorage {
+        self.exact_slot_storage()
+    }
+
+    fn exact_slot_probe_clients(&self) -> (&dyn ExactSlotStorage, &dyn ExactSlotStorage) {
+        self.exact_slot_probe_clients()
+    }
+
     fn store_blob_protection(
         &self,
     ) -> Result<crate::sync::storage::BlobSpoolProtection, StorageError> {

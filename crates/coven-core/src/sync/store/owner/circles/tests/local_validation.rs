@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::test_helpers::TestDevice;
 
 #[tokio::test]
 async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
@@ -222,21 +223,22 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     let db = open_test_db();
     let (store, signer, mut journal) =
         persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
-    crate::sync::store::stage_store_acknowledgement_for_test(
-        &db,
-        &store.storage,
-        crate::sync::store_commit::CommitFrontier::from_refs(
-            crate::sync::store::database::StoreDatabase::new(&db)
-                .materialized_frontier()
-                .await
-                .expect("read current Store frontier"),
+    let device = TestDevice::load(&db, store.storage.clone(), signer.clone())
+        .await
+        .expect("load acknowledgement Store");
+    device
+        .stage_acknowledgement(
+            crate::sync::store_commit::CommitFrontier::from_refs(
+                crate::sync::store::database::StoreDatabase::new(&db)
+                    .materialized_frontier()
+                    .await
+                    .expect("read current Store frontier"),
+            )
+            .expect("materialized Merge frontier is typed"),
+            "2026-07-19T00:00:00Z".to_string(),
         )
-        .expect("materialized Merge frontier is typed"),
-        "2026-07-19T00:00:00Z".to_string(),
-        &signer,
-    )
-    .await
-    .expect("stage a valid non-initial Store acknowledgement");
+        .await
+        .expect("stage a valid non-initial Store acknowledgement");
     let acknowledgement = crate::sync::store::database::StoreDatabase::new(&db)
         .oldest_outbound_store_ack()
         .await
@@ -303,12 +305,10 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
     resume_circle_operations(&db, &store.storage, &signer)
         .await
         .expect("publish founder Circle");
-    let device_id = local_device_id(&db).await;
     store.home.fail_exact_create_before_call(1);
     rename_circle(
         &db,
         &store.storage,
-        &device_id,
         "0000000002000-0000-creator",
         circle_id,
         "Renamed household",

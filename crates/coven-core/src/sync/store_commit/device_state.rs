@@ -116,6 +116,20 @@ pub enum StoreDeviceExclusionOutcomeRef {
     Cancelled(StoreDeviceExclusionCancellationRef),
 }
 
+#[derive(Debug)]
+pub(crate) struct VerifiedDeviceExclusionProposal {
+    pub(crate) reference: StoreDeviceExclusionProposalRef,
+    pub(crate) object: crate::sync::store_objects::VerifiedObject<StoreDeviceExclusionProposal>,
+    pub(crate) target: StoreDeviceRegistration,
+    pub(crate) owner: StoreDeviceRegistration,
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifiedDeviceExclusionOutcome {
+    pub(crate) object: crate::sync::store_objects::VerifiedObject<StoreDeviceExclusionOutcome>,
+    pub(crate) owner: StoreDeviceRegistration,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedStoreDeviceOperations {
     proposals: Vec<(
@@ -412,9 +426,7 @@ impl RetainedStoreDeviceExclusionProposal {
         Ok(retained)
     }
 
-    pub(crate) fn from_verified(
-        proposal: &crate::sync::store_objects::VerifiedDeviceExclusionProposal,
-    ) -> Self {
+    pub(crate) fn from_verified(proposal: &VerifiedDeviceExclusionProposal) -> Self {
         Self {
             reference: proposal.reference.clone(),
             canonical_proposal: proposal.object.bytes.clone(),
@@ -521,7 +533,7 @@ impl RetainedStoreDeviceExclusionOutcome {
     pub(crate) fn from_verified(
         reference: &StoreDeviceExclusionOutcomeRef,
         proposal: RetainedStoreDeviceExclusionProposal,
-        outcome: &crate::sync::store_objects::VerifiedDeviceExclusionOutcome,
+        outcome: &VerifiedDeviceExclusionOutcome,
     ) -> Result<Self, StoreProtocolError> {
         match (reference, &outcome.object.value) {
             (

@@ -1,7 +1,7 @@
 use super::*;
 
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn prepare_acknowledgement_activation(
+    pub(crate) async fn prepare_acknowledgement_activation(
         &self,
         expected: StoreAckRef,
         candidate: PreparedStoreOperationCommit,
@@ -84,7 +84,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_acknowledgement_nonactivation(
+    pub(crate) async fn begin_acknowledgement_nonactivation(
         &self,
         expected: StoreAckRef,
         nonactivation: VerifiedCandidateNonactivation,
@@ -246,7 +246,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn adopt_acknowledgement_head(
+    pub(crate) async fn adopt_acknowledgement_head(
         &self,
         expected: StoreAckRef,
         winner: StoreDeviceHead,
@@ -333,7 +333,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn acknowledgement_cleanup_target(
+    pub(crate) async fn acknowledgement_cleanup_target(
         &self,
         expected: StoreAckRef,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
@@ -364,7 +364,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn complete_nonactivating_acknowledgement(
+    pub(crate) async fn complete_nonactivating_acknowledgement(
         &self,
         expected: StoreAckRef,
     ) -> Result<(), DbError> {

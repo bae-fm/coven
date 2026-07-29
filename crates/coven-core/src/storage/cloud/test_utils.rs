@@ -1020,6 +1020,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_slot_observation_identifies_present_bytes_and_absence() {
+        let h = InMemoryCloudHome::new();
+        let slot = h
+            .allocate_slot("store-v1/test/observed.json")
+            .await
+            .unwrap();
+        assert_eq!(h.observe_at(&slot).await.unwrap(), None);
+
+        h.create_at(
+            &slot,
+            BlobBody::from_bytes(b"observed".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            h.observe_at(&slot).await.unwrap(),
+            Some(crate::sync::storage::ExactObjectRef::new(
+                slot,
+                8,
+                crate::sync::store_commit::ObjectHash::digest(b"observed"),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_slot_delete_confirms_present_and_already_absent_slots() {
+        let h = InMemoryCloudHome::new();
+        let slot = h.allocate_slot("store-v1/test/deleted.json").await.unwrap();
+        h.delete_and_verify_absent(&slot).await.unwrap();
+
+        h.create_at(
+            &slot,
+            BlobBody::from_bytes(b"delete-me".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+        h.delete_and_verify_absent(&slot).await.unwrap();
+
+        assert!(matches!(
+            h.read_at(&slot).await,
+            Err(CloudHomeError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn google_drive_exact_slots_with_one_logical_key_remain_independent() {
         let h = InMemoryCloudHome::new().with_provider_binding(
             crate::sync::storage::ResolvedProviderBinding {

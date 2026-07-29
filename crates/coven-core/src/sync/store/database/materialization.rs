@@ -31,7 +31,7 @@ impl StoreDatabase {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::sync::store_commit::StoreRootRef,
-        plan: crate::sync::store::pull::DeviceJoinBootstrapPlan,
+        plan: crate::sync::store::owner::pull::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         self.database.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -49,6 +49,12 @@ impl StoreDatabase {
                 &plan.founder_bytes,
                 &plan.genesis,
             )?;
+            crate::database::set_protocol_state_on(
+                &tx,
+                crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY,
+                &plan.founder.author_pubkey,
+            )?;
+            plan.membership.install_on(&tx)?;
 
             let frontier = crate::sync::store::database::StoreDatabase::materialized_frontier_on(&tx, None)?;
             let mut represented = BTreeSet::new();
@@ -150,7 +156,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(in crate::sync::store) async fn complete_owner_recovery(
+    pub(crate) async fn complete_owner_recovery(
         &self,
         verified_commit: VerifiedStoreBatchCommit,
         activation_head: StoreDeviceHead,
@@ -187,7 +193,7 @@ impl StoreDatabase {
 }
 
 impl StoreDatabaseTransaction<'_, '_> {
-    pub(in crate::sync::store) fn record_materialized_merge_commit(
+    pub(crate) fn record_materialized_merge_commit(
         &self,
         root: &crate::sync::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
@@ -224,7 +230,7 @@ impl StoreDatabaseTransaction<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::sync::store) fn record_verified_merge_materialization(
+    pub(crate) fn record_verified_merge_materialization(
         &self,
         materialization: VerifiedMergeMaterialization<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
@@ -260,10 +266,12 @@ impl StoreDatabaseTransaction<'_, '_> {
         let (retained_commit_ref, retained) =
             crate::sync::store::database::StoreDatabase::retain_merge_materialization_on(
                 conn,
+                &root,
                 &materialization,
             )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
             conn,
+            &root,
             materialization.commit_ref(),
             materialization.circle_activations(),
         )?;
@@ -671,7 +679,7 @@ impl StoreDatabaseTransaction<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::sync::store) fn record_verified_circle_activations(
+    pub(crate) fn record_verified_circle_activations(
         &self,
         verified_commit: &VerifiedStoreBatchCommit,
         activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
@@ -811,7 +819,7 @@ impl StoreDatabaseTransaction<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::sync::store) fn activate_store_operation_remote_objects(
+    pub(crate) fn activate_store_operation_remote_objects(
         &self,
         commit_ref: &StoreBatchCommitRef,
         object_ids: &[ObjectHash],

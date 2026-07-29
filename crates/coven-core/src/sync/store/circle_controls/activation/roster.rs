@@ -20,7 +20,7 @@ use crate::sync::store_commit::{
 
 pub(super) async fn load_circle_roster_state(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -50,7 +50,7 @@ pub(super) async fn load_circle_roster_state(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn load_circle_roster_chain(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -275,7 +275,7 @@ async fn load_circle_roster_resolutions(
 
 async fn load_exact_circle_roster_heads(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -381,7 +381,7 @@ async fn load_exact_circle_roster_heads(
 
 async fn replay_circle_roster_resolutions(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -681,7 +681,7 @@ async fn replay_circle_roster_resolutions(
 
 pub(super) async fn load_circle_authority_roster(
     database: &StoreDatabase,
-    commit_verifier: &mut crate::sync::store::pull::StoreCommitVerifier<'_>,
+    commit_verifier: &mut crate::sync::store::owner::pull::StoreCommitVerifier<'_>,
     verified_prefix: &VerifiedStreamActivationPrefix,
     commit: &StoreBatchCommit,
     circle_id: CircleId,

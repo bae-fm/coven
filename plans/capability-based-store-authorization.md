@@ -2,7 +2,11 @@
 
 ## Goal
 
-Make Store authorization a capability carried by opaque Rust types.
+Make every Store workflow executable only through the capability that owns its
+verified root, identity, device, membership, and persistence context. Move
+workflow bodies onto those capabilities, hide raw constructors, loaders, and
+accessors, then let compiler failures identify every caller that must be
+converted.
 
 Only top-level `Store` construction, opening, joining, restoring, and command
 boundaries may establish Store authority. Every lower operation receives an
@@ -13,6 +17,309 @@ authorization helper.
 
 Rust privacy must enforce the boundary. A lower module that tries to import a
 raw loader or construct a verifier must fail to compile.
+
+Restricted-path visibility (`pub(in …)`) is forbidden. It lets a child grant
+access to distant modules instead of placing the capability at the shared
+owner. Repository validation rejects the syntax. Items shared with a direct
+parent use `pub(super)`; items needed by distant siblings move to their common
+owner, and capability operations remain private methods available to that
+owner's descendants.
+
+## Binding inventory
+
+Each line records the current home and the complete target method surface for
+one owner:
+
+- `Store` — currently in `owner.rs`, with pull and restore entry points
+  elsewhere; owns `authorize_history()`, `authorize()`, `authorize_writer()`,
+  `pull()`, and `restore()`.
+- `AuthorizedStore` — currently in `owner.rs`, while blob and Circle-read
+  workflows remain elsewhere; owns `read_blob()`, `open_blob_stream()`,
+  `materialize_row_blob()`, `pin_blob()`, and `load_circle_access()`.
+- `AuthorizedStoreHistory` — currently in `owner.rs`, while its workflows are
+  spread through `abandonment.rs`, `membership/`, and `pull/`; owns
+  `load_current_membership()`, `load_membership_at()`,
+  `load_retained_outbound_authorization()`,
+  `apply_terminal_nonactivation()`, and
+  `abandon_excluded_merge_candidate()`.
+- `AuthorizedWriterOperation` — currently in `owner/writer.rs`, while its
+  workflows are spread through `operations.rs`, `acknowledgements.rs`,
+  `snapshot.rs`, and `reclaim/`; owns `prepare_plan()`,
+  `prepare_candidate()`, `publish_prepared()`,
+  `drain_prepared_store_writes()`, `stage_and_publish_ack()`, and
+  `publish_due_snapshots()`.
+- `AuthorizedCircleOperation` — not yet represented by a type; its workflow is
+  spread through `owner/circles/` and `circle_controls/`; owns
+  `resolve_local_access()`, `load_activations()`, `prepare_command()`,
+  `publish()`, and `cleanup_candidate()`.
+- `AuthorizedDeviceExclusion` — represented in `device_exclusion/mod.rs`,
+  derived from `AuthorizedWriterOperation`, and owns `propose()`, `resume()`,
+  `prepare_outcome()`, `publish_outcome()`, `publish_candidate()`,
+  `replace_candidate()`, and `complete()`.
+- `AuthorizedReclaim` — not yet represented by a type; its workflow is in
+  `reclaim/mod.rs`; owns `prepare_authorizations()`, `resume()`,
+  `verify_authorization()`, `delete_target()`, `prepare_receipt()`, and
+  `finish()`.
+- `AuthorizedJoin` — represented under `owner/device_join/` and derived from
+  `AuthorizedWriterOperation`; its remaining workflow bodies are spread through
+  the same subtree; owns
+  `prepare_access_request()`, `begin()`, `approve()`, `cancel()`,
+  `finalize()`, `drive()`, and `cleanup()`.
+- `AuthorizedOwnerPromotion` — not yet represented by a type; its workflow is
+  in `owner_promotion/`; owns `load_membership()`, `accept()`, `finalize()`,
+  `resume()`, and `cleanup()`.
+- `MergeHistoryVerifier` — currently constructible throughout
+  `sync/store/pull/history.rs` callers; becomes a private history-capability
+  implementation with `load_ref()`, `verify_refs()`,
+  `verify_owner_conflict_acceptance()`, and
+  `verify_terminal_nonactivation()`.
+- `StoreCommitVerifier` — currently constructible throughout Store code from
+  `sync/store/pull/ancestry.rs`; becomes a private history implementation with
+  `authenticate_bytes()` and `load_ref()`.
+- `StoreDatabase` — currently exposes construction and raw SQLite through
+  `sync/store/database.rs`; retains only record-specific persistence methods.
+
+The first relocation pass moves each workflow body to this owner and deletes
+the free entry point. It does not preserve forwarding functions. Constructor
+and accessor privacy is then tightened before callers are converted, making
+every remaining bypass a compiler error.
+
+## Relocation ledger
+
+This ledger is the source-first pass. Each listed function currently receives
+state already held by its target owner. Its body moves beside that owner before
+callers are repaired.
+
+- `pull::prepare_merge_history_successor(database, root, ...)` moves to
+  `AuthorizedHistoryOperation::prepare_merge_history_successor(...)`; the
+  database and verified root disappear from its arguments.
+- `pull::prepare_merge_snapshot_history_summary(database, root, ...)` moves to
+  `AuthorizedHistoryOperation::prepare_merge_snapshot_history_summary(...)`.
+- `pull::load_retained_merge_outbound_authorization(database, storage, root, ...)` and `pull::load_merge_conflict_resolution_authorization(database, storage, root, ...)` moved onto `AuthorizedHistoryOperation`; the temporary
+  retained-authority child type was removed because it carried no additional
+  proof and forced restricted-path visibility.
+- `store::blob::{read_blob, open_blob_stream, materialize_row_blob, pin}`
+  move to `AuthorizedStore`; their database, storage, and root arguments
+  disappear. `blob::cache::verify_blob_plaintext` remains a cache primitive
+  because it consumes an already-authorized exact blob reference and resolved
+  storage protection.
+- `operations::{prepare_plan, prepare_candidate, prepare_candidate_borrowed, publish_prepared, upload_commit}` move to `AuthorizedWriterOperation`.
+- `writer::preparation::prepare_store_write` and writer publication functions
+  move to `AuthorizedWriterOperation`; nested preparation helpers receive the
+  writer capability only when they interpret its authority.
+- acknowledgement staging, publication, draining, and nonactivation cleanup
+  move to `AuthorizedWriterOperation`; exact acknowledgement parsing remains a
+  closed verification helper.
+- snapshot authoring, publication, stability decisions, and retained-history
+  preparation move to `AuthorizedWriterOperation`; snapshot image encoding and
+  exact-object opening remain closed helpers.
+- reclaim preparation, verification, deletion, receipt publication, and
+  completion move to `AuthorizedReclaim`, derived from
+  `AuthorizedWriterOperation`.
+- Circle command preparation, publication, retry, discard, activation, close,
+  and recovery move to `AuthorizedCircleOperation`, derived from
+  `AuthorizedWriterOperation` or `AuthorizedStore` according to whether they
+  write.
+- membership invitation, removal, conflict resolution, and rotation move to
+  `AuthorizedOwnerOperation`; exact chain graph parsing remains private history
+  machinery.
+- device exclusion proposal, resumption, outcome publication, replacement, and
+  completion move to `AuthorizedDeviceExclusion`.
+- device join begin, approval, cancellation, finalization, drive, and cleanup
+  move to `AuthorizedJoin`; `begin()` now owns member eligibility, provider
+  administrator resolution, signing, slot allocation, and initial Store-journal
+  persistence. The initial journal value is constructed through a closed
+  `DeviceJoinJournalRecord::owner_offered` constructor. Pre-Store bootstrap
+  enters through an associated `Store` constructor.
+- Owner promotion membership loading, acceptance, finalization, resumption, and
+  cleanup move to `AuthorizedOwnerPromotion`.
+- `protocol_root::{create_store, open_store}` become private bodies of
+  `Store::create` and `Store::open`; descriptor encoding and exact-object
+  publication remain private protocol-root helpers.
+- `cycle::run_single_sync_cycle` becomes a `Store` operation which derives and
+  reuses one authorized session across pull, write, acknowledgement, snapshot,
+  and reclaim work.
+
+Functions remain dependency-taking helpers only when their inputs are already
+closed values and they do not establish, reload, choose, or interpret Store
+authority. This includes canonical encoding, hashing, signature checks,
+exact-object transport, blob-cache materialization after protection is
+resolved, and SQLite row operations.
+
+## Relocation stack
+
+Relocation proceeds depth first. Encountering an unowned workflow suspends its
+caller until the nested workflow has moved to its owner. Caller conversion
+begins only after these ownership moves are complete.
+
+The required stack order is:
+
+- Store authorization composition retains one owning
+  `AuthorizedStoreHistory` containing the Store database and history verifier;
+  `AuthorizedStore`, writer operations, and narrower operations borrow that
+  retained capability instead of reconstructing `AuthorizedHistoryOperation`
+  from its fields;
+  - delete `AuthorizedHistoryOperation::new`;
+  - make the retained history fields private;
+  - make Circle, join, reclaim, snapshot, acknowledgement, pull, and other
+    narrower Store operations borrow the retained history capability;
+  - move each database, verifier, root, membership, identity, and writer
+    reach-through to an operation on its owning capability so narrower code
+    cannot obtain or reconstruct raw authority;
+  - eliminate every `super::…::pull` reach-through from narrower operations;
+    history-dependent behavior becomes an `AuthorizedStoreHistory` operation,
+    while closed parsing and verification stays private inside the history
+    implementation;
+  - move `sync::service::prepare_store_payload` beneath
+    `AuthorizedWriterOperation`; Store payload preparation must use the bound
+    writer and cannot be reached through a generic service namespace;
+  - move resolved-membership gating beneath the retained Store capability;
+    narrower operations cannot pass `store.membership` to
+    `membership::require_resolved_membership` or otherwise re-establish that
+    the retained membership is usable;
+  - `AuthorizedCircleOperation` retains the complete `AuthorizedStore` instead
+    of separately borrowing its history, membership, and identity; Circle
+    workflows obtain resolved membership only through the Store capability;
+  - move exact membership-chain traversal, activation validation, projection,
+    owner-anchor persistence, and keyring authority selection behind
+    `AuthorizedStoreHistory`, `AuthorizedStore`, or the pre-Store join
+    capability; delete their loose verifier, database, storage, root,
+    membership, and identity entry points;
+  - reduce `sync::store::membership` to membership-domain values and closed
+    algorithms:
+    - authorization refresh belongs to `AuthorizedWriterOperation`;
+    - membership cursor persistence belongs to `StoreDatabase`, and its
+      test-only forwarding wrappers are deleted when their callers move;
+    - Store-history error translation belongs beside the private history
+      verifier rather than making membership depend on `owner::pull`;
+    - keyring-authority selection belongs to the Store, writer, or pre-Store
+      join capability that proves the selected references;
+    - member listing and conflict projection may remain pure transformations
+      over an already-authorized `MembershipChain`;
+  - search every narrower operation for direct capability construction and
+    delete every alternate assembly path;
+- immediate activation is bound beneath
+  `AuthorizedWriterOperation`:
+  - `activate_store_operation_commit` moved to
+    `AuthorizedWriterOperation::activate`;
+  - `publish_prepared` and its authority-bearing publication body moved to
+    `AuthorizedWriterOperation`;
+  - the displaced free activation and publication entry points are deleted;
+- `AuthorizedJoin::abandon` owns the complete owner-side abandonment workflow,
+  reusing its writer registration, signer, membership, journal, and writer
+  activation capability;
+- `AuthorizedJoin::accept_registration` owns owner-side registration
+  acceptance, using the retained root, current Owner authority, resolved
+  provider administrator, writer signer, journal, and activation capability;
+- `AuthorizedJoin::cancel` owns owner-side cancellation, verifies its attempt
+  and outcome through the retained history verifier, and publishes through the
+  writer capability;
+- `AuthorizedJoin::finalize` and `AuthorizedJoin::complete_cleanup` own the
+  remaining Owner-side activation and cleanup transitions; the Store boundary
+  supplies no separate identity;
+- provider-administrator continuations derive
+  `AuthorizedProviderAdministratorJoin`, which retains the exact active
+  provider-admin grants whose administrator is the local writer;
+- while binding provider challenge publication,
+  `provider::publish_cross_principal_challenge` moves beneath
+  `AuthorizedProviderAdministratorJoin` because it consumes Store history and
+  the provider publication journal;
+- while binding provider cancellation, owner discovery for a join attempt
+  moves to `StoreCommitVerifier::load_device_join_attempt_and_owner`; callers
+  cannot decode an unverified attempt and assemble its registration proof;
+- provider and joiner write revocation are signed by
+  `AuthorizedProviderAdministratorJoin`, which retains the active executor
+  grant and local writer; replacement terminal insertion moves to the bound
+  Store join journal;
+- provider access authorization, challenge publication, response completion,
+  cancellation, and both producer-revocation paths are bound to
+  `AuthorizedProviderAdministratorJoin`; none accepts a separate identity,
+  root, membership, database, or history verifier;
+- Owner cleanup receipt preparation and activation move to `AuthorizedJoin`;
+  terminal verification uses its Store database, and publication uses its
+  retained writer;
+- exact-slot observation and delete-then-confirm-absent move to
+  `ExactSlotStorage`; device-join and provider-probe callers use that single
+  storage boundary, and their duplicate free helpers are deleted;
+- `observe_device_join_abandonment` is bound to
+  `PendingDeviceJoinAuthority::observe_abandonment`;
+- `materialize_joined_store_activation` is bound to
+  `Store::materialize_joined_store_activation`;
+- both public free-function re-exports are deleted;
+- return to `AuthorizedJoin::abandon`:
+  - use the bound Store journal for reads and transitions;
+  - use its existing writer registration, device identifier, identity, and
+    signer instead of reloading them;
+  - use writer-owned operation preparation and activation;
+- bind the remaining owner-side join continuations to `AuthorizedJoin`;
+- bind provider-administrator and joiner continuations to their corresponding
+  capabilities;
+- bind the transport driver to those role capabilities rather than calling
+  free Store workflows.
+
+Completed nested bindings remain recorded here because later relocation must
+not recreate their free forms:
+
+- `Store::create` owns root-creation sequencing, while `Store::open` and
+  `Store::load` share the private `Store::open_protocol_root` operation;
+- the `StoreCreation` and `StoreOpening` operation wrappers are deleted, and
+  `protocol_root` retains only the closed algorithms those Store operations
+  invoke;
+- `create_exact_object` and `delete_exact_object` are deleted as forwarding
+  wrappers over `SyncStorage`, and `load_exact_object` is private;
+- raw Store-root loading and `StoreCommitVerifier::new` are deleted;
+- `StoreCommitVerifier` owns founder, registration, acknowledgement, recovery,
+  join, exclusion, reclaim, Store-package, and commit verification;
+- `CirclePackageAccess` owns Circle-package decryption, its epoch key,
+  fingerprint, authorized writers, and Circle identifier;
+- `store_objects` retains only generic byte checks and exact membership-object
+  algorithms whose supplied inputs contain every authority decision;
+- initial Store-journal creation is `StoreJoinJournal::begin`;
+- Store-journal lookup is `StoreJoinJournal::load`;
+- Store-journal compare-and-swap advancement is
+  `StoreJoinJournal::advance`;
+- an owner-offered initial value is
+  `DeviceJoinJournalRecord::owner_offered`;
+- Store operation planning is
+  `AuthorizedWriterOperation::prepare_plan` and reuses the writer capability's
+  root, registration, device signer, identity, and history verifier.
+- the generic `sync::service` namespace is deleted: payload preparation,
+  cleanup binding, and write-authority resolution are private writer
+  preparation details, while applying a durable deferred local-blob
+  disposition is owned by the sync cycle that drains it;
+- exact Store-announcement traversal is
+  `StoreCommitVerifier::exact_next_announcement_slot`; its traversal helper and
+  path type are private beside the verifier, and the free announcement module
+  is deleted;
+- merge-history authority verification is
+  `MergeHistoryVerifier::verify_merge_history_authority`; callers receive its
+  closed device-state and membership result rather than invoking a snapshot
+  helper;
+- device-join attempt loading and history verification are
+  `MergeHistoryVerifier::load_verified_device_join_attempt` and
+  `MergeHistoryVerifier::verify_device_join_attempt_evidence`; the duplicate
+  free loaders and re-exports are deleted;
+- pre-publication exclusion rejection is
+  `AuthorizedWriterOperation::reject_excluded_merge_candidate`, where the
+  candidate is checked against the writer operation's retained database and
+  Store root.
+- terminal candidate-head verification and author-exclusion proof construction
+  are `StoreCommitVerifier` operations; membership-revocation proof
+  construction is a `MergeHistoryVerifier` operation; retained-database lookup
+  for an author-exclusion proof is an `AuthorizedHistoryOperation`; the free
+  `terminal_authority` module is deleted.
+- current membership loading and owner-anchor installation are
+  `AuthorizedStoreHistory` operations; membership cursor reads and monotonic
+  writes are `StoreDatabase` persistence operations, and the raw cycle
+  membership loader is deleted.
+- per-cycle wrapped-key authority refresh is an
+  `AuthorizedWriterOperation::refresh_authorization_state` body; the
+  membership-module implementation and its error surface are deleted.
+- pre-Store snapshot restore enters through
+  `SnapshotBootstrapAuthority::open(...).select(...)`; the selected bootstrap
+  retains the same verified history session through founder-registration
+  loading and image installation, so restore does not reconstruct a commit
+  verifier from a verified root.
 
 ## The distinction this design preserves
 
@@ -118,6 +425,19 @@ The allowed constructors are Store-owned operations:
 Pre-Store joining and restore are not exceptions that expose raw constructors.
 They enter associated `Store` boundary functions whose result proves the exact
 authority needed by the next operation.
+
+`PendingStoreJoin` is the explicit pre-Store join capability. It retains the
+verified Store root and history, Store database, current owner-anchored
+membership, durable offer and exact attempt identifier, storage, pending
+journal, and joining identity. The journal and identity are owned values, not
+caller borrows. The host creates the empty application database before
+constructing this capability; construction installs the exact root and owner
+anchor and validates the database routing contract. Joiner continuations,
+including bootstrap history pull, cancellation closure, cleanup activation
+acceptance, and cleanup completion, consume this type until activation
+materializes a runnable `Store`; no continuation receives the database,
+membership, verifier, root, storage, journal, or identity separately, and none
+reconstructs a verifier from a raw root.
 
 ## Rust module and visibility shape
 
@@ -251,17 +571,17 @@ For each workflow:
 
 1. Identify the top-level `Store` operation and the baseline authority it
    requires.
-2. Construct `AuthorizedStore`, `AuthorizedStoreOperation`, or
+1. Construct `AuthorizedStore`, `AuthorizedStoreOperation`, or
    `AuthorizedWriterOperation` at that boundary.
-3. Change every nested function to a method on the appropriate capability or a
+1. Change every nested function to a method on the appropriate capability or a
    private helper that receives the capability.
-4. Remove loose database, storage, root, membership, registration, and verifier
+1. Remove loose database, storage, root, membership, registration, and verifier
    parameters that duplicate capability fields.
-5. Delete the raw wrapper and its re-export after its final caller moves.
-6. Search the complete call chain for another constructor or reload.
-7. Compile immediately so privacy and borrowing errors reveal incomplete
+1. Delete the raw wrapper and its re-export after its final caller moves.
+1. Search the complete call chain for another constructor or reload.
+1. Compile immediately so privacy and borrowing errors reveal incomplete
    conversions.
-8. Run the workflow's failure, restart, and sabotage tests before committing
+1. Run the workflow's failure, restart, and sabotage tests before committing
    the boundary.
 
 No forwarding facade remains after a move. The implementation moves to the

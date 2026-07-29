@@ -833,15 +833,17 @@ async fn materialize_blobs(
                         path: dest_path.display().to_string(),
                         detail,
                     })?;
-                let staged = crate::sync::store::blob::stage_remote_blob_plaintext(
+                let access = crate::sync::store::blob::StoreBlobAccess::open(
                     database,
                     store_dir,
                     Some(storage),
-                    reference,
-                    &dest_path,
                 )
                 .await
                 .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                let staged = access
+                    .stage_remote_plaintext(reference, &dest_path)
+                    .await
+                    .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
                 staged
                     .commit_new()
                     .await
@@ -872,15 +874,17 @@ async fn materialize_blobs(
                         path: format!("local/{}/{}", blob.namespace, blob.id),
                         detail: e.to_string(),
                     })?;
-                let staged = crate::sync::store::blob::stage_remote_blob_plaintext(
+                let access = crate::sync::store::blob::StoreBlobAccess::open(
                     database,
                     store_dir,
                     Some(storage),
-                    reference,
-                    &store_path,
                 )
                 .await
                 .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                let staged = access
+                    .stage_remote_plaintext(reference, &store_path)
+                    .await
+                    .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
                 match staged.commit_new().await {
                     Ok(()) => written.push(store_path.clone()),
                     Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {

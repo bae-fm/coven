@@ -9,9 +9,7 @@ use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
     STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
-use crate::sync::store::membership::{
-    MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX, OWNER_PUBKEY_STATE_KEY,
-};
+use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::store_commit::{
     CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
     RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
@@ -482,6 +480,7 @@ impl RetainedReplayBaseline {
                     self.schema_version,
                     self.routing_hash,
                     &self.exact_cut,
+                    &authority.store_root,
                 )
             }
         }
@@ -751,6 +750,7 @@ fn validate_snapshot_replay_image(
     schema_version: u32,
     routing_hash: ObjectHash,
     exact_cut: &CommitFrontier,
+    root: &StoreRootRef,
 ) -> Result<(), DbError> {
     validate_replay_image_metadata(image, schema_version, routing_hash)?;
     let mut actual = BTreeMap::new();
@@ -799,7 +799,7 @@ fn validate_snapshot_replay_image(
             "snapshot replay baseline contains materialized_commits rows".to_string(),
         ));
     }
-    crate::sync::store::database::StoreDatabase::validate_snapshot_retained_inputs_on(image)?;
+    crate::sync::store::database::StoreDatabase::validate_snapshot_retained_inputs_on(image, root)?;
     validate_replay_image_foreign_keys(image)
 }
 
@@ -857,10 +857,12 @@ fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<Strin
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,
     );
-    Ok(Some(format!(
-        "{}{}/{}",
-        MEMBERSHIP_HEAD_CURSOR_STATE_KEY_PREFIX, root.descriptor.founder_grant, stream
-    )))
+    Ok(Some(
+        crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_stream(
+            &root.descriptor.founder_grant,
+            stream,
+        ),
+    ))
 }
 
 fn generation_zero_protocol_key(founder_membership_cursor: Option<&str>, key: &str) -> bool {

@@ -150,7 +150,7 @@ impl SyncManager {
         &self,
         config: &Config,
         active_loop: Option<&Arc<SyncLoopHandle>>,
-    ) -> Result<Arc<crate::sync::cloud_storage::CloudSyncStorage>, SyncError> {
+    ) -> Result<Arc<dyn SyncStorage>, SyncError> {
         if let Some(active_loop) = active_loop {
             return Ok(active_loop.storage().clone());
         }
@@ -179,6 +179,21 @@ impl SyncManager {
         }
         .map_err(SyncError::StorageSetup)?;
         Ok(Arc::new(storage))
+    }
+
+    async fn store_for_command(
+        &self,
+        config: &Config,
+        active_loop: Option<&Arc<SyncLoopHandle>>,
+        identity: &crate::keys::UserKeypair,
+    ) -> Result<Store, SyncError> {
+        Store::load(
+            self.database.clone(),
+            self.storage_for_command(config, active_loop).await?,
+            identity.clone(),
+        )
+        .await
+        .map_err(SyncError::from)
     }
 
     /// Build the manager off the owned [`Database`]. Session initialization takes
@@ -237,19 +252,8 @@ impl SyncManager {
         write_id: coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
-        let device_id = self
-            .database
-            .sqlite()
-            .get_protocol_state(coven_core::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await?
-            .ok_or_else(|| {
-                SyncError::Protocol("local Store device identity is absent".to_string())
-            })?;
-        Store::load(self.database.clone(), Arc::clone(loop_handle.storage()))
-            .await
-            .map_err(|error| SyncError::Protocol(error.to_string()))?
-            .discard_blocked_write(&device_id, &identity, write_id)
+        loop_handle
+            .discard_blocked_write(write_id)
             .await
             .map_err(SyncError::from)
     }
@@ -656,14 +660,10 @@ impl SyncManager {
             info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
         }
-        let storage = self
-            .storage_for_command(&config, active_loop.as_ref())
-            .await?;
-
-        let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
-        Store::load(self.database.clone(), storage)
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        self.store_for_command(&config, active_loop.as_ref(), &identity)
             .await?
-            .members(user_pubkey.as_ref().map(|key| key.as_slice()))
+            .members(Some(&identity.public_key()))
             .await
             .map_err(SyncError::from)
     }
@@ -675,13 +675,10 @@ impl SyncManager {
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
-        let storage = self
-            .storage_for_command(&config, active_loop.as_ref())
-            .await?;
-        let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
-        Store::load(self.database.clone(), storage)
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        self.store_for_command(&config, active_loop.as_ref(), &identity)
             .await?
-            .membership_conflict(user_pubkey.as_ref().map(|key| key.as_slice()))
+            .membership_conflict(Some(&identity.public_key()))
             .await
             .map_err(SyncError::from)
     }
@@ -698,16 +695,13 @@ impl SyncManager {
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
-        let storage = self
-            .storage_for_command(&config, active_loop.as_ref())
-            .await?;
-
-        let restore_membership = Store::load(self.database.clone(), storage)
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let restore_membership = self
+            .store_for_command(&config, active_loop.as_ref(), &identity)
             .await?
             .restore_membership()
             .await
             .map_err(SyncError::from)?;
-        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authority = crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(
             self.database
                 .export_activated_device_continuation(&identity)
@@ -1494,14 +1488,16 @@ mod tests {
         config.cloud_home.storage = HomeStorage::Browsable;
         let home = Arc::new(InMemoryCloudHome::new());
         let attacker = crate::keys::UserKeypair::generate();
-        let attacker_storage = CloudSyncStorage::new(
-            home.clone(),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            store_id,
-            attacker.clone(),
-        )
-        .expect("build attacker storage");
+        let attacker_storage = Arc::new(
+            CloudSyncStorage::new(
+                home.clone(),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                store_id,
+                attacker.clone(),
+            )
+            .expect("build attacker storage"),
+        );
         let attacker_db = crate::sync::test_helpers::open_test_db();
         crate::sync::test_helpers::create_exact_test_store(
             &attacker_db,

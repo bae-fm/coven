@@ -1,6 +1,64 @@
 use crate::sync::store_commit::{StoreBatchCommitRef, StoreDeviceId};
 use crate::sync::store_objects::StoreObjectError;
 
+#[derive(Debug)]
+pub enum StorePreparationError {
+    Database(crate::database::DbError),
+    Gate(String),
+    AssetScan(String),
+    AssetUpload(String),
+    Storage {
+        operation: &'static str,
+        source: crate::sync::storage::StorageError,
+    },
+    LocalUserBlob {
+        namespace: String,
+        id: String,
+    },
+    MissingPreparedBlob {
+        namespace: String,
+        id: String,
+    },
+}
+
+impl std::fmt::Display for StorePreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(error) => write!(f, "database error: {error}"),
+            Self::Gate(error) => write!(f, "gate error: {error}"),
+            Self::AssetScan(error) => write!(f, "asset scan error: {error}"),
+            Self::AssetUpload(error) => write!(f, "asset upload error: {error}"),
+            Self::Storage { operation, source } => write!(f, "{operation}: {source}"),
+            Self::LocalUserBlob { namespace, id } => {
+                write!(
+                    f,
+                    "user-provided blob {namespace}/{id} still has a local external ref"
+                )
+            }
+            Self::MissingPreparedBlob { namespace, id } => {
+                write!(
+                    f,
+                    "blob {namespace}/{id} has no prepared exact publication object"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StorePreparationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(source) => Some(source),
+            Self::Storage { source, .. } => Some(source),
+            Self::Gate(_)
+            | Self::AssetScan(_)
+            | Self::AssetUpload(_)
+            | Self::LocalUserBlob { .. }
+            | Self::MissingPreparedBlob { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database: {0}")]
@@ -21,7 +79,7 @@ pub enum StoreError {
     #[error("another writer activated first; this Store operation persisted nothing")]
     ActivationConflict,
     #[error("outbound Store preparation failed: {0}")]
-    Preparation(#[source] crate::sync::service::SyncCycleError),
+    Preparation(#[source] StorePreparationError),
     #[error("outbound blob {namespace}/{id} is local and cannot be published")]
     LocalUserBlob { namespace: String, id: String },
     #[error("outbound blob {namespace}/{id} is absent from storage")]
@@ -33,7 +91,7 @@ pub enum StoreError {
         source: crate::sync::storage::StorageError,
     },
     #[error("candidate cleanup: {0}")]
-    CandidateCleanup(#[from] crate::sync::store::pull::StorePullError),
+    CandidateCleanup(#[from] crate::sync::store::owner::pull::StorePullError),
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
     #[error("Store author {device_id} was excluded before candidate activation")]

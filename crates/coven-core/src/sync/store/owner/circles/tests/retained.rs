@@ -9,21 +9,19 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     let successor = UserKeypair::generate();
     let successor_pubkey = keys::public_key_hex(&successor);
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::membership::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &successor_pubkey,
-        None,
-        MemberRole::Member,
-        &encryption,
-        "circle-merge-revoked-grant",
-        "Revocation test Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite successor member through the production membership path");
+    store
+        .invite_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &successor_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Revocation test Store",
+        )
+        .await
+        .expect("invite successor member through the production membership path");
 
     let successor_db = open_test_db();
     install_active_device_fixture(
@@ -35,11 +33,9 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     )
     .await
     .expect("activate successor exact device fixture");
-    let successor_device_id = local_device_id(&successor_db).await;
     let journal = prepare_circle_operation(
         &successor_db,
         &store.storage,
-        &successor_device_id,
         "0000000001003-0000-successor",
         "Revoked Circle",
         &successor,
@@ -53,40 +49,34 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
     let cipher = store.storage.cipher_state().clone();
-    let pending_rotation = store.storage.shared_pending_rotation();
-    crate::sync::store::membership::remove_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &successor_pubkey,
-        &encryption,
-        &custody,
-        cipher.as_ref(),
-        pending_rotation.as_ref(),
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("remove successor through the production membership path");
+    store
+        .remove_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &successor_pubkey,
+            &encryption,
+            &custody,
+        )
+        .await
+        .expect("remove successor through the production membership path");
     let rotated_encryption = match cipher.snapshot() {
         CloudCipher::Encrypted(encryption) => encryption,
         CloudCipher::Plaintext => panic!("member removal requires encrypted storage"),
     };
-    crate::sync::store::membership::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &successor_pubkey,
-        None,
-        MemberRole::Member,
-        &rotated_encryption,
-        "circle-merge-revoked-grant",
-        "Revocation test Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("re-add successor under a new exact membership grant");
+    store
+        .invite_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &successor_pubkey,
+            None,
+            MemberRole::Member,
+            &rotated_encryption,
+            "Revocation test Store",
+        )
+        .await
+        .expect("re-add successor under a new exact membership grant");
     store
         .open_into(&successor_db)
         .await
@@ -94,7 +84,6 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     let later = prepare_circle_operation(
         &successor_db,
         &store.storage,
-        &successor_device_id,
         "0000000001004-0000-successor",
         "Later Circle",
         &successor,
@@ -170,25 +159,22 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .expect("create retained Circle Store");
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
-    crate::sync::store::membership::invite_member(
-        &store.storage,
-        store.home.as_ref(),
-        &founder,
-        &crate::sync::hlc::Hlc::new("founder-device".to_string()),
-        &peer_pubkey,
-        None,
-        MemberRole::Member,
-        &EncryptionService::from_key([73; 32]),
-        "retained-circle-activation",
-        "Retained Circle activation Store",
-        &StoreDatabase::new(&db),
-    )
-    .await
-    .expect("invite retained Circle peer");
+    store
+        .invite_member(
+            &db,
+            &founder,
+            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &peer_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([73; 32]),
+            "Retained Circle activation Store",
+        )
+        .await
+        .expect("invite retained Circle peer");
     let journal = prepare_circle_operation(
         &db,
         &store.storage,
-        &local_device_id(&db).await,
         "0000000001000-0000-founder",
         "Household",
         &founder,
@@ -196,7 +182,9 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     .await
     .expect("prepare retained Circle activation");
     for object in journal.operation().prepared_objects.values() {
-        crate::sync::store_objects::create_exact_object(&store.storage, object)
+        store
+            .storage
+            .create_protocol_object(object)
             .await
             .expect("publish retained Circle activation object");
     }
@@ -206,17 +194,10 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");
-    let verified = load_circle_activations(
-        &db,
-        &store.storage,
-        &store.root,
-        commit_ref,
-        &commit,
-        &author,
-        &founder,
-    )
-    .await
-    .expect("verify retained Circle activation fixture");
+    let verified =
+        load_circle_activations(&db, &store.storage, commit_ref, &commit, &author, &founder)
+            .await
+            .expect("verify retained Circle activation fixture");
     let retained = verified
         .to_retained()
         .expect("serialize retained Circle activation");

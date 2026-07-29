@@ -184,18 +184,20 @@ impl StoreDatabase {
 
     pub(crate) async fn author_exclusion_activation_for_candidate(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
         self.database
             .call(move |conn| {
-                author_exclusion_activation_for_candidate_on(conn, &candidate, &author)
+                author_exclusion_activation_for_candidate_on(conn, &root, &candidate, &author)
             })
             .await
     }
 
     pub(crate) async fn begin_blocked_merge_candidate_nonactivation(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         write_id: WriteId,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
@@ -230,6 +232,7 @@ impl StoreDatabase {
                 let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
+                    &root,
                     &write_id,
                     &candidate,
                     &nonactivation,
@@ -243,6 +246,7 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_prepared_merge_abandonment_nonactivation(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         write_id: WriteId,
         candidate_nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
         authority_nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
@@ -299,6 +303,7 @@ impl StoreDatabase {
                     parse_prepared_merge_candidate_parts_on(&tx, authority_commit, authority_head)?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
+                    &root,
                     &write_id,
                     &candidate,
                     &candidate_nonactivation,
@@ -307,6 +312,7 @@ impl StoreDatabase {
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
+                    &root,
                     &write_id,
                     &authority,
                     &authority_nonactivation,
@@ -943,6 +949,7 @@ impl StoreDatabase {
 
     pub(crate) async fn merge_retraction_cleanup_verification(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
         self.database.call(move |conn| {
@@ -961,7 +968,7 @@ impl StoreDatabase {
                     exclusion,
                     ..
                 } => TerminalCandidateAuthority::AuthorExclusion(
-                    load_author_exclusion_activation_locator_on(conn, exclusion)?,
+                    load_author_exclusion_activation_locator_on(conn, &root, exclusion)?,
                 ),
                 crate::sync::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
                     grant_id,
@@ -981,7 +988,7 @@ impl StoreDatabase {
                         proof.clone(),
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                    validate_terminal_nonactivation_authority_on(conn, &durable)?;
+                    validate_terminal_nonactivation_authority_on(conn, &root, &durable)?;
                     TerminalCandidateAuthority::DependencyRetraction(
                         crate::sync::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                             .map_err(|error| DbError::Message(error.to_string()))?,
@@ -1024,6 +1031,7 @@ impl StoreDatabase {
 
     pub(crate) async fn confirm_merge_retraction_cleanup_nonactivation(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
         verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
@@ -1052,7 +1060,8 @@ impl StoreDatabase {
                     activation_head,
                 } = durable.proof()
                 {
-                    let locator = load_author_exclusion_activation_locator_on(conn, exclusion)?;
+                    let locator =
+                        load_author_exclusion_activation_locator_on(conn, &root, exclusion)?;
                     if locator.accepted_cut() != accepted_cut
                         || locator.activation_head() != activation_head
                     {
@@ -1109,6 +1118,7 @@ impl StoreDatabase {
 
     pub(crate) async fn merge_candidate_terminal_verifications(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         write_id: WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
         self.database.call(move |conn| {
@@ -1168,7 +1178,9 @@ impl StoreDatabase {
             }
             let mut verifications = Vec::new();
             for candidate in candidates {
-                if let Some(verification) = terminal_candidate_verification_on(conn, candidate)? {
+                if let Some(verification) =
+                    terminal_candidate_verification_on(conn, &root, candidate)?
+                {
                     verifications.push(verification);
                 }
             }
@@ -1179,6 +1191,7 @@ impl StoreDatabase {
 
     pub(crate) async fn reconcile_merge_candidate_terminal_head(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         write_id: WriteId,
         verified: crate::sync::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
@@ -1258,7 +1271,7 @@ impl StoreDatabase {
                             "fresh excluded-author head evidence names another write".to_string(),
                         )
                     })?;
-                validate_terminal_candidate_authority_on(&tx, &candidate, &durable)?;
+                validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
                 let object_id = remote_object_id(candidate.head_prepared.reference());
                 let remote_exists: bool = tx
                     .query_row(

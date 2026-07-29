@@ -359,6 +359,7 @@ impl StoreDatabase {
     /// controls are equal or `covering` is not retained.
     pub(crate) async fn circle_control_covers_strictly(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         covering: &crate::sync::circle::CircleControlCoord,
         covered: &crate::sync::circle::CircleControlCoord,
@@ -371,12 +372,13 @@ impl StoreDatabase {
         self.database
             .call(move |conn| {
                 let Some(covering_reference) =
-                    Self::verified_circle_activation_on(conn, circle_id, &covering)?
+                    Self::verified_circle_activation_on(conn, &root, circle_id, &covering)?
                 else {
                     return Ok(false);
                 };
                 Self::verified_circle_control_covers_on(
                     conn,
+                    &root,
                     circle_id,
                     &covering_reference.control,
                     &covered,
@@ -576,7 +578,7 @@ impl StoreDatabase {
             .ok_or_else(|| {
                 DbError::Message(format!("Circle {circle_id} has no active publication key"))
             })?;
-        Ok((access.encryption, access.key_fingerprint))
+        Ok(access.into_encryption_and_fingerprint())
     }
 
     /// Record this device's own exclusion from a Circle epoch close, derived from
@@ -625,6 +627,7 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_package_access(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
     ) -> Result<Option<crate::sync::store::circle_controls::CirclePackageAccess>, DbError> {
@@ -636,7 +639,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &mut retained)?;
+                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut retained)?;
                 let Some(activation) = Self::verified_circle_activation_from_cache_on(
                     conn,
                     &retained,
@@ -655,6 +658,7 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_historical_package_keyring(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
@@ -671,12 +675,13 @@ impl StoreDatabase {
                     return Ok(None);
                 };
                 let Some(historical) =
-                    Self::verified_circle_activation_on(conn, circle_id, &expected_control)?
+                    Self::verified_circle_activation_on(conn, &root, circle_id, &expected_control)?
                 else {
                     return Ok(None);
                 };
                 if !Self::verified_circle_control_covers_on(
                     conn,
+                    &root,
                     circle_id,
                     &current.control,
                     &expected_control,
@@ -712,6 +717,7 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_activation_context(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         control: crate::sync::circle::CircleControlCoord,
     ) -> Result<
@@ -728,12 +734,13 @@ impl StoreDatabase {
                 else {
                     return Ok(None);
                 };
-                let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "Circle {circle_id} activation context lost control {control:?}"
-                        ))
-                    })?;
+                let activation =
+                    Self::verified_circle_activation_on(conn, &root, circle_id, &control)?
+                        .ok_or_else(|| {
+                            DbError::Message(format!(
+                                "Circle {circle_id} activation context lost control {control:?}"
+                            ))
+                        })?;
                 Ok(Some((activation, commit)))
             })
             .await
@@ -741,6 +748,7 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_blob_opening_key(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
@@ -749,6 +757,7 @@ impl StoreDatabase {
             .call(move |conn| {
                 Self::circle_blob_opening_key_on(
                     conn,
+                    &root,
                     circle_id,
                     &expected_control,
                     expected_key_fingerprint,
@@ -759,12 +768,13 @@ impl StoreDatabase {
 
     pub(crate) fn circle_blob_opening_key_on(
         conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         expected_control: &crate::sync::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
     ) -> Result<EncryptionService, DbError> {
         let Some(authority) =
-            Self::verified_circle_activation_on(conn, circle_id, expected_control)?
+            Self::verified_circle_activation_on(conn, root, circle_id, expected_control)?
         else {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} has no retained authority for control {expected_control:?}"
@@ -801,7 +811,7 @@ impl StoreDatabase {
 
         let mut retained_key = None;
         for control in controls {
-            let activation = Self::verified_circle_activation_on(conn, circle_id, &control)?
+            let activation = Self::verified_circle_activation_on(conn, root, circle_id, &control)?
                 .ok_or_else(|| {
                     DbError::Message(format!(
                         "Circle {circle_id} activation index lost control {control:?}"
@@ -842,11 +852,12 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_activation(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         control: crate::sync::circle::CircleControlCoord,
     ) -> Result<Option<crate::sync::store::circle_controls::VerifiedCircleReference>, DbError> {
         self.database
-            .call(move |conn| Self::verified_circle_activation_on(conn, circle_id, &control))
+            .call(move |conn| Self::verified_circle_activation_on(conn, &root, circle_id, &control))
             .await
     }
 
@@ -906,6 +917,7 @@ impl StoreDatabase {
     /// with two uncovered controls is a forked lineage and fails loud.
     pub(crate) fn head_circle_control_on(
         conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         controls: &[crate::sync::circle::CircleControlCoord],
     ) -> Result<Option<crate::sync::circle::CircleControlCoord>, DbError> {
@@ -919,7 +931,7 @@ impl StoreDatabase {
             if !Self::circle_activation_commit_is_retained_on(conn, circle_id, coord)? {
                 continue;
             }
-            let reference = Self::verified_circle_activation_on(conn, circle_id, coord)?
+            let reference = Self::verified_circle_activation_on(conn, root, circle_id, coord)?
                 .ok_or_else(|| {
                     DbError::Message(format!(
                         "Circle {circle_id} control index lost control {coord:?}"
@@ -936,6 +948,7 @@ impl StoreDatabase {
                 }
                 if Self::verified_circle_control_covers_on(
                     conn,
+                    root,
                     circle_id,
                     other_control,
                     candidate,
@@ -1091,6 +1104,7 @@ impl StoreDatabase {
 
     pub(crate) fn verified_circle_activation_on(
         conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         control: &crate::sync::circle::CircleControlCoord,
     ) -> Result<Option<crate::sync::store::circle_controls::VerifiedCircleReference>, DbError> {
@@ -1100,7 +1114,7 @@ impl StoreDatabase {
             return Ok(None);
         };
         let retained =
-            Self::load_retained_merge_materialization_by_ref_on(conn, &activation_commit)?;
+            Self::load_retained_merge_materialization_by_ref_on(conn, root, &activation_commit)?;
         Self::verified_circle_activation_from_materialization(&retained, circle_id, control)
             .map(Some)
     }
@@ -1148,6 +1162,7 @@ impl StoreDatabase {
 
     pub(crate) fn verified_circle_control_covers_on(
         conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
         circle_id: crate::sync::circle::CircleId,
         current: &crate::sync::circle::PreparedCircleControl,
         prior: &crate::sync::circle::CircleControlCoord,
@@ -1172,12 +1187,13 @@ impl StoreDatabase {
             if !visited.insert(coordinate.clone()) {
                 continue;
             }
-            let predecessor = Self::verified_circle_activation_on(conn, circle_id, &coordinate)?
-                .ok_or_else(|| {
-                    DbError::Message(format!(
+            let predecessor =
+                Self::verified_circle_activation_on(conn, root, circle_id, &coordinate)?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
                         "Circle {circle_id} control lineage omits retained control {coordinate:?}"
                     ))
-                })?;
+                    })?;
             if !successor.value.causally_covers(&predecessor.control.value) {
                 return Err(DbError::Message(format!(
                     "Circle {circle_id} control lineage contains a non-causal edge"
@@ -1238,7 +1254,7 @@ impl StoreDatabase {
         Ok(state)
     }
 
-    pub(in crate::sync::store) fn circle_current_state_is_deleted_on(
+    pub(crate) fn circle_current_state_is_deleted_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
     ) -> Result<bool, DbError> {
@@ -1248,7 +1264,7 @@ impl StoreDatabase {
     /// Remove a deleted Circle's live access, roster, and metadata caches. The
     /// authority spine — control activations and retained-replay records —
     /// stays; only derived materialization goes.
-    pub(in crate::sync::store) fn remove_deleted_circle_caches_on(
+    pub(crate) fn remove_deleted_circle_caches_on(
         conn: &Connection,
         circle_id: crate::sync::circle::CircleId,
     ) -> Result<(), DbError> {

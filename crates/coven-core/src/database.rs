@@ -540,6 +540,7 @@ pub(crate) struct VerifiedSnapshotBootstrapInstall {
     store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
     founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
     stability: RetainedReplaySnapshotAuthority,
+    membership: InitialStoreMembershipAuthority,
     routing_key: Option<crate::sync::circle::RowRoutingKey>,
     circle_decisions: Vec<StagedCircleDecision>,
     /// Fail the Circle-decision step of the install transaction, after the Store
@@ -555,6 +556,7 @@ impl VerifiedSnapshotBootstrapInstall {
         store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
         founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
         stability: crate::sync::store::VerifiedStoreSnapshotStability,
+        membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,
         circle_decisions: Vec<StagedCircleDecision>,
     ) -> Result<Self, DbError> {
@@ -602,6 +604,7 @@ impl VerifiedSnapshotBootstrapInstall {
             store_root,
             founder,
             stability,
+            membership,
             routing_key,
             circle_decisions,
             #[cfg(any(test, feature = "test-utils"))]
@@ -664,6 +667,12 @@ impl VerifiedSnapshotBootstrapInstall {
             &self.founder.bytes,
             &genesis,
         )?;
+        crate::database::set_protocol_state_on(
+            conn,
+            crate::sync::store::OWNER_PUBKEY_STATE_KEY,
+            &self.store_root.value.descriptor.founder_pubkey,
+        )?;
+        self.membership.install_on(conn)?;
         conn.execute("DELETE FROM snapshot_coverage", [])
             .map_err(DbError::from)?;
         for (stream_id, reference) in self.snapshot.meta.coverage.clone().into_refs() {
@@ -688,7 +697,7 @@ impl VerifiedSnapshotBootstrapInstall {
             routing_hash,
             self.stability.clone(),
         )?;
-        self.install_circle_decisions_on(conn, synced_tables)
+        self.install_circle_decisions_on(conn, &root, synced_tables)
     }
 
     /// Apply the staged Circle decisions inside the Store install's single
@@ -700,6 +709,7 @@ impl VerifiedSnapshotBootstrapInstall {
     fn install_circle_decisions_on(
         &self,
         conn: &Connection,
+        root: &crate::sync::store_commit::StoreRootRef,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
         use crate::sync::store::StoreDatabase;
@@ -717,6 +727,7 @@ impl VerifiedSnapshotBootstrapInstall {
                 } => {
                     let activation = StoreDatabase::verified_circle_activation_on(
                         conn,
+                        root,
                         image.circle_id(),
                         image.control(),
                     )?
@@ -735,6 +746,7 @@ impl VerifiedSnapshotBootstrapInstall {
                     )?;
                     StoreDatabase::record_one_circle_bootstrap_coverage_on(
                         conn,
+                        root,
                         activation_commit,
                         image,
                         &activation.control,

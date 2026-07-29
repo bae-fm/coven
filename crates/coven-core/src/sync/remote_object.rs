@@ -1935,52 +1935,6 @@ impl RemoteObjectRecord {
             },
         }
     }
-
-    pub(crate) fn nonactivation_proofs(&self) -> Vec<&CandidateNonactivationProof> {
-        match self {
-            Self::CandidateCommit(record) => match &record.state {
-                CandidateCommitState::CleanupPending { proof }
-                | CandidateCommitState::AbsentVerified { proof } => vec![proof],
-                CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {
-                    Vec::new()
-                }
-            },
-            Self::CandidateExclusive(record) => match &record.state {
-                CandidateObjectState::Prepared { ownership }
-                | CandidateObjectState::UploadedVerified { ownership } => {
-                    nonactivation_proofs(&ownership.nonactivated)
-                }
-                CandidateObjectState::CleanupPending { former_candidates }
-                | CandidateObjectState::AbsentVerified { former_candidates } => {
-                    nonactivation_proofs(former_candidates)
-                }
-            },
-            Self::RetainedAuthority(record) => match &record.state {
-                RetainedAuthorityObjectState::Prepared { ownership } => {
-                    nonactivation_proofs(&ownership.nonactivated)
-                }
-                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
-                    nonactivation_proofs(&ownership.nonactivated)
-                }
-                RetainedAuthorityObjectState::CleanupPending { former_candidates }
-                | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
-                | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-                    nonactivation_proofs(former_candidates)
-                }
-            },
-            Self::SharedLiveSet(record) => match &record.state {
-                OwnedObjectState::Prepared { ownership } => {
-                    nonactivation_proofs(&ownership.nonactivated)
-                }
-                OwnedObjectState::UploadedVerified { ownership } => {
-                    nonactivation_proofs(&ownership.nonactivated)
-                }
-                OwnedObjectState::RetirementPending { former_candidates } => {
-                    nonactivation_proofs(former_candidates)
-                }
-            },
-        }
-    }
 }
 
 pub(crate) fn remote_object_id(object: &ExactObjectRef) -> ObjectHash {
@@ -3306,10 +3260,6 @@ impl ProtocolInertObject {
         find_nonactivation_proof(&self.former_candidates, candidate)
     }
 
-    pub(crate) fn nonactivation_proofs(&self) -> Vec<&CandidateNonactivationProof> {
-        nonactivation_proofs(&self.former_candidates)
-    }
-
     pub(crate) fn is_terminal_head_for(
         &self,
         candidate: &StoreBatchCommitRef,
@@ -3334,15 +3284,6 @@ impl ProtocolInertObject {
                 )
             ))
     }
-}
-
-fn nonactivation_proofs(
-    candidates: &[CandidateNonactivation],
-) -> Vec<&CandidateNonactivationProof> {
-    candidates
-        .iter()
-        .map(CandidateNonactivation::proof)
-        .collect()
 }
 
 impl RetainedAuthorityObjectRef {

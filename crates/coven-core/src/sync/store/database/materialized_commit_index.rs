@@ -25,6 +25,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_replay_inputs(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let cache = self.retained_merge_materialization_cache();
         self.database
@@ -34,7 +35,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)
+                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)
             })
             .await
     }
@@ -72,6 +73,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_replay_inputs_with_verified_commits(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let cache = self.retained_merge_materialization_cache();
@@ -83,7 +85,7 @@ impl StoreDatabase {
                     )
                 })?;
                 Self::cached_retained_merge_replay_inputs_with_verified_commits_on(
-                    conn, &mut cache, &verified,
+                    conn, &root, &mut cache, &verified,
                 )
             })
             .await
@@ -91,6 +93,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_materialization(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let cache = self.retained_merge_materialization_cache();
@@ -101,7 +104,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)?
+                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?
                     .into_iter()
                     .find(|materialization| materialization.commit_ref() == &reference)
                     .ok_or_else(|| {
@@ -116,6 +119,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_history_frontier(
         &self,
+        root: crate::sync::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<crate::sync::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
         let cache = self.retained_merge_materialization_cache();
@@ -127,7 +131,7 @@ impl StoreDatabase {
                             "retained Merge materialization cache lock is poisoned".to_string(),
                         )
                     })?;
-                    Self::cached_retained_merge_replay_inputs_on(conn, &mut cache)?
+                    Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?
                 };
                 references
                     .iter()
@@ -143,9 +147,9 @@ impl StoreDatabase {
                                     materialization,
                                 )
                             }
-                            None => {
-                                Self::load_retained_merge_history_checkpoint_on(conn, reference)
-                            }
+                            None => Self::load_retained_merge_history_checkpoint_on(
+                                conn, &root, reference,
+                            ),
                         }
                     })
                     .collect()
@@ -887,6 +891,7 @@ impl StoreDatabase {
 
     pub(crate) async fn activated_store_device_registration_with_authority(
         &self,
+        root: &crate::sync::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<
         (
@@ -895,9 +900,7 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
-            DbError::Message("Store root is absent while loading an activated device".to_string())
-        })?;
+        let root = root.clone();
         self.database
             .call(move |conn| {
                 let registration = load_activated_registration_on(conn, &root, &reference)?;

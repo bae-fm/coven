@@ -1266,6 +1266,26 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
 
 #[async_trait]
 pub trait SyncStorage: Send + Sync {
+    /// Return the cloud home's fixed blob path representation.
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
+
+    /// Return this installation's uploader identity.
+    fn self_uploader(&self) -> String;
+
+    /// Borrow the cloud provider used by this storage.
+    fn cloud_home(&self) -> &dyn crate::storage::cloud::CloudHome;
+
+    /// Borrow the provider's exact create-once slot operations.
+    fn exact_slot_storage(&self) -> &dyn crate::storage::cloud::ExactSlotStorage;
+
+    /// Borrow independent clients used to verify exact-slot behavior.
+    fn exact_slot_probe_clients(
+        &self,
+    ) -> (
+        &dyn crate::storage::cloud::ExactSlotStorage,
+        &dyn crate::storage::cloud::ExactSlotStorage,
+    );
+
     /// Return the cloud home's fixed Store blob opening protection. Circle blobs
     /// use their exact activated Circle key instead.
     fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError>;
@@ -1412,6 +1432,31 @@ impl<T> SyncStorage for std::sync::Arc<T>
 where
     T: SyncStorage + ?Sized,
 {
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
+        (**self).blob_path_scheme()
+    }
+
+    fn self_uploader(&self) -> String {
+        (**self).self_uploader()
+    }
+
+    fn cloud_home(&self) -> &dyn crate::storage::cloud::CloudHome {
+        (**self).cloud_home()
+    }
+
+    fn exact_slot_storage(&self) -> &dyn crate::storage::cloud::ExactSlotStorage {
+        (**self).exact_slot_storage()
+    }
+
+    fn exact_slot_probe_clients(
+        &self,
+    ) -> (
+        &dyn crate::storage::cloud::ExactSlotStorage,
+        &dyn crate::storage::cloud::ExactSlotStorage,
+    ) {
+        (**self).exact_slot_probe_clients()
+    }
+
     fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
         (**self).store_blob_protection()
     }

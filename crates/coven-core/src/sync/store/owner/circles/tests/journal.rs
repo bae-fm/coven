@@ -65,11 +65,9 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
 async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
     let db = open_test_db();
     let (store, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
-    let device_id = local_device_id(&db).await;
     let second = prepare_circle_operation(
         &db,
         &store.storage,
-        &device_id,
         "0000000002000-0000-creator",
         "Second household",
         &signer,

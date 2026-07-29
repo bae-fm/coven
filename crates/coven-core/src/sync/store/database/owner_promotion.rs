@@ -6,16 +6,17 @@ use crate::sync::remote_object::RemoteObjectRecord;
 use super::StoreDatabase;
 
 impl StoreDatabase {
-    pub(in crate::sync::store) async fn load_owner_promotion_journal(
+    pub(crate) async fn load_owner_promotion_journal(
         &self,
         promotion_id: crate::sync::store_commit::OwnerPromotionId,
-    ) -> Result<Option<crate::sync::store::owner_promotion::OwnerPromotionJournal>, DbError> {
+    ) -> Result<Option<crate::sync::store::owner::owner_promotion::OwnerPromotionJournal>, DbError>
+    {
         let key = format!("owner_promotion/{promotion_id}");
         self.database
             .call(move |conn| {
                 crate::database::get_protocol_state_on(conn, &key)?
                     .map(|value| {
-                        let journal: crate::sync::store::owner_promotion::OwnerPromotionJournal =
+                        let journal: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal =
                             serde_json::from_str(&value).map_err(|error| {
                                 DbError::Message(format!("parse Owner-promotion journal: {error}"))
                             })?;
@@ -29,17 +30,18 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn load_owner_promotion_target(
+    pub(crate) async fn load_owner_promotion_target(
         &self,
         key: String,
-    ) -> Result<Option<crate::sync::store::owner_promotion::OwnerPromotionJournal>, DbError> {
+    ) -> Result<Option<crate::sync::store::owner::owner_promotion::OwnerPromotionJournal>, DbError>
+    {
         self.database
             .call(move |conn| {
                 let value = crate::database::get_protocol_state_on(conn, &key)?;
                 let Some(value) = value else {
                     return Ok(None);
                 };
-                let journal: crate::sync::store::owner_promotion::OwnerPromotionJournal =
+                let journal: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal =
                     serde_json::from_str(&value).map_err(|error| {
                         DbError::Message(format!("parse Owner-promotion target journal: {error}"))
                     })?;
@@ -58,11 +60,11 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_owner_promotion_journal(
+    pub(crate) async fn begin_owner_promotion_journal(
         &self,
         target_key: String,
-        journal: crate::sync::store::owner_promotion::OwnerPromotionJournal,
-    ) -> Result<crate::sync::store::owner_promotion::OwnerPromotionJournal, DbError> {
+        journal: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::store::owner::owner_promotion::OwnerPromotionJournal, DbError> {
         journal
             .validate_begin()
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -107,10 +109,10 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn begin_owner_promotion_acceptance_journal(
+    pub(crate) async fn begin_owner_promotion_acceptance_journal(
         &self,
-        journal: crate::sync::store::owner_promotion::OwnerPromotionJournal,
-    ) -> Result<crate::sync::store::owner_promotion::OwnerPromotionJournal, DbError> {
+        journal: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::store::owner::owner_promotion::OwnerPromotionJournal, DbError> {
         journal
             .validate_acceptance_begin()
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -143,9 +145,9 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn advance_owner_promotion_journal(
+    pub(crate) async fn advance_owner_promotion_journal(
         &self,
-        transition: crate::sync::store::owner_promotion::OwnerPromotionJournalTransition,
+        transition: crate::sync::store::owner::owner_promotion::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
@@ -172,9 +174,9 @@ impl StoreDatabase {
     /// Store head that decides the position, so those sit in create-once slots the
     /// promoter's next attempt composes into; leaving them there would refuse every
     /// later membership publication on that stream.
-    pub(in crate::sync::store) async fn end_nonactivated_owner_promotion_candidate(
+    pub(crate) async fn end_nonactivated_owner_promotion_candidate(
         &self,
-        transition: crate::sync::store::owner_promotion::OwnerPromotionJournalTransition,
+        transition: crate::sync::store::owner::owner_promotion::OwnerPromotionJournalTransition,
         candidate: crate::sync::store_commit::StoreBatchCommitRef,
         objects: Vec<crate::sync::storage::ExactObjectRef>,
         nonactivation: crate::sync::remote_object::VerifiedCandidateNonactivation,
@@ -218,7 +220,7 @@ impl StoreDatabase {
     /// awaiting deletion. An interrupted cleanup resumes through this: the stale
     /// journal names the candidate, and each object's durable state says whether it
     /// is still there.
-    pub(in crate::sync::store) async fn owner_promotion_candidate_cleanup_targets(
+    pub(crate) async fn owner_promotion_candidate_cleanup_targets(
         &self,
         candidate: crate::sync::store_commit::StoreBatchCommitRef,
         objects: Vec<crate::sync::storage::ExactObjectRef>,
@@ -230,7 +232,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) fn advance_owner_promotion_journal_on(
+    pub(crate) fn advance_owner_promotion_journal_on(
         tx: &rusqlite::Transaction<'_>,
         journal_key: String,
         target_key: String,
@@ -267,11 +269,11 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(in crate::sync::store) async fn replace_failed_owner_promotion_journal(
+    pub(crate) async fn replace_failed_owner_promotion_journal(
         &self,
-        previous: crate::sync::store::owner_promotion::OwnerPromotionJournal,
-        replacement: crate::sync::store::owner_promotion::OwnerPromotionJournal,
-    ) -> Result<crate::sync::store::owner_promotion::OwnerPromotionJournal, DbError> {
+        previous: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal,
+        replacement: crate::sync::store::owner::owner_promotion::OwnerPromotionJournal,
+    ) -> Result<crate::sync::store::owner::owner_promotion::OwnerPromotionJournal, DbError> {
         previous
             .validate_failed_attempt_replacement(&replacement)
             .map_err(|error| DbError::Message(error.to_string()))?;

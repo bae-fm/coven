@@ -16,7 +16,7 @@ use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteSt
 use super::*;
 
 enum AudienceBlobMoveMaterialization<'a> {
-    Host(&'a super::audience_blob_staging::HostWriteBlobStaging),
+    Host(&'a crate::sync::store::HostWriteBlobStaging),
     PreparedTransition,
 }
 
@@ -478,7 +478,7 @@ impl StoreDatabase {
         gates: &Gates,
         blob_decls: &BlobDecls,
         routing_encryption: Option<&EncryptionService>,
-        blob_staging: Option<&super::audience_blob_staging::HostWriteBlobStaging>,
+        blob_staging: Option<&crate::sync::store::HostWriteBlobStaging>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -575,17 +575,17 @@ impl StoreDatabase {
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => Some(
-                    Self::stage_audience_move_blobs_on(
-                        &tx,
-                        &mut blob_facts,
-                        &partitioned.moves,
-                        &partitioned.partitions,
-                        staging,
-                    )
-                    .map_err(E::from)?,
+                    staging
+                        .stage_audience_move_blobs_on(
+                            &tx,
+                            &mut blob_facts,
+                            &partitioned.moves,
+                            &partitioned.partitions,
+                        )
+                        .map_err(E::from)?,
                 ),
                 (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
-                    Self::record_prepared_transition_local_blob_moves(
+                    crate::sync::store::HostWriteBlobStaging::record_prepared_transition_local_blob_moves(
                         &mut blob_facts,
                         &partitioned.moves,
                     )
@@ -623,7 +623,7 @@ impl StoreDatabase {
                 Err(error) => {
                     let error = match (&blob_materialization, staged_files) {
                         (Some(AudienceBlobMoveMaterialization::Host(staging)), Some(files)) => {
-                            Self::rollback_staged_audience_blobs(staging, files, error)
+                            staging.rollback_staged_audience_blobs(files, error)
                         }
                         (_, None) => error,
                         (_, Some(_)) => unreachable!("staged files require host staging"),

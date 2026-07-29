@@ -164,7 +164,7 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(in crate::sync::store) async fn set_write_status(
+    pub(crate) async fn set_write_status(
         &self,
         write_id: &WriteId,
         status: WriteStatus,
@@ -181,7 +181,7 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub(in crate::sync::store) async fn block_write_if_unresolved(
+    pub(crate) async fn block_write_if_unresolved(
         &self,
         write_id: &WriteId,
         block: crate::WriteBlock,

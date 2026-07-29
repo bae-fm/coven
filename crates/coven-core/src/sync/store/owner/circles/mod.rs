@@ -1,28 +1,87 @@
 #[cfg(test)]
 use crate::sync::store::circle_controls::VerifiedCircleActivations;
 use crate::sync::store::circle_controls::{
-    activation, load_circle_activations, read_exact_circle_object,
-    verify_control_context_for_verified_commit, CircleAuthoringState, CircleOperationError,
+    activation, read_exact_circle_object, CircleAuthoringState, CircleOperationError,
     CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
-    CircleTransitionHistory, PreparedCircleOperation, VerifiedCircleAccess, VerifiedCircleActive,
-    VerifiedCircleReference,
+    CircleTransitionHistory, PreparedCircleOperation,
 };
 
 mod close_responses;
 mod commands;
 mod preparation;
-mod publication;
 
-pub(in crate::sync::store) use preparation::verified_circle_bootstrap_blobs;
 #[cfg(test)]
 use preparation::{
     prepare_circle_activation_objects, prepare_circle_object, prepare_circle_object_at,
     signed_circle_commit,
 };
-use preparation::{
-    prepare_circle_operation, prepare_circle_operation_request, verify_prepared_objects_are_signed,
-};
-use publication::publish_circle_operation;
-
+use preparation::{prepare_circle_operation, prepare_circle_operation_request};
 #[cfg(test)]
 mod tests;
+
+pub(super) async fn verified_circle_bootstrap_blobs(
+    storage: &dyn crate::sync::storage::SyncStorage,
+    circle_id: crate::sync::circle::CircleId,
+    snapshot: &crate::sync::store::snapshot::CreatedSnapshot,
+) -> Result<Vec<crate::blob::RowBlobRef>, CircleOperationError> {
+    let mut blobs = Vec::with_capacity(snapshot.blobs.len());
+    for captured in &snapshot.blobs {
+        let crate::sync::store::snapshot::SnapshotBlobAudience::Circle {
+            circle_id: captured_circle,
+            ..
+        } = captured.audience
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle bootstrap contains a Store-audience blob".to_string(),
+            ));
+        };
+        let previous = captured.fact.previous.as_ref().ok_or_else(|| {
+            CircleOperationError::InvalidState(format!(
+                "Circle bootstrap blob {}/{} has no activated exact remote binding",
+                captured.fact.blob.namespace, captured.fact.blob.id
+            ))
+        })?;
+        if captured_circle != circle_id
+            || previous.authority.remote_audience()
+                != crate::blob::locator::RemoteAudience::Circle(circle_id)
+            || previous.stored.locator().audience()
+                != crate::blob::locator::RemoteAudience::Circle(circle_id)
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle bootstrap blob belongs to another audience".to_string(),
+            ));
+        }
+        storage
+            .verify_blob_object(&previous.stored)
+            .await
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "verify Circle bootstrap blob {}/{}: {error}",
+                    captured.fact.blob.namespace, captured.fact.blob.id
+                ))
+            })?;
+        blobs.push(
+            crate::blob::RowBlobRef::new(
+                captured.fact.table.clone(),
+                captured.fact.row_id.clone(),
+                captured.fact.row_stamp.clone(),
+                captured.fact.column.clone(),
+                captured.fact.blob.clone(),
+                captured.fact.plaintext_size,
+                captured.fact.plaintext_hash,
+                crate::blob::RowBlobAuthority::Remote(previous.authority.clone()),
+                Some(previous.stored.clone()),
+            )
+            .map_err(CircleOperationError::InvalidState)?,
+        );
+    }
+    blobs.sort_by_cached_key(|blob| {
+        serde_json::to_vec(blob).expect("row blob reference serialization cannot fail")
+    });
+    if blobs.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CircleOperationError::InvalidState(
+            "Circle bootstrap repeats an exact row blob binding".to_string(),
+        ));
+    }
+    Ok(blobs)
+}

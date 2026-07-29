@@ -44,6 +44,11 @@ restage_and_fail_if_changed() {
     fi
 }
 
+run_check "restricted-path Rust visibility" scripts/check-rust-visibility.sh || {
+    echo "Move the item under its owner and use private or pub(super) access"
+    exit 1
+}
+
 run_check "cargo fmt" cargo fmt --all || { echo "cargo fmt failed"; exit 1; }
 restage_and_fail_if_changed "cargo fmt"
 

@@ -329,21 +329,19 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("create exact revocation test Store");
     let encryption = EncryptionService::from_key([42; 32]);
-    crate::sync::store::invite_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &owner,
-        &Hlc::with_wall_clock("owner".to_string(), || 2_000),
-        &pubkey_hex(&member),
-        None,
-        MemberRole::Member,
-        &encryption,
-        "test-store",
-        "Test Store",
-        &crate::sync::store::StoreDatabase::new(&owner_db),
-    )
-    .await
-    .expect("invite exact member identity");
+    storage
+        .invite_member(
+            &owner_db,
+            &owner,
+            &Hlc::with_wall_clock("owner".to_string(), || 2_000),
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &encryption,
+            "Test Store",
+        )
+        .await
+        .expect("invite exact member identity");
 
     let receiver_db = open_test_db();
     storage
@@ -373,45 +371,42 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     )
     .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
-    let mut authorization =
-        crate::sync::store::Store::authorize_borrowed(&*storage.storage, &member_db)
-            .await
-            .expect("authorize member while their grant is active");
+    let member_store = crate::sync::store::Store::load(
+        crate::sync::store::StoreDatabase::new(&member_db),
+        storage.storage.clone(),
+        member.clone(),
+    )
+    .await
+    .expect("load member Store");
+    let mut writer = member_store
+        .authorize_writer()
+        .await
+        .expect("authorize member writer while their grant is active");
     assert!(
-        authorization
-            .prepare_pending_store_write(
-                &member_device_id,
-                "0000000003000-0000-member",
-                &member,
-                &member_store_dir,
-            )
+        writer
+            .prepare_pending_store_write(&member_store_dir)
             .await
             .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",
     );
-    authorization
+    writer
         .drain_store_writes()
         .await
         .expect("publish member commit while grant is active");
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let cipher = storage.cipher_state().clone();
-    let pending_rotation = storage.shared_pending_rotation();
-    crate::sync::store::remove_member(
-        &storage.storage,
-        storage.home.as_ref(),
-        &owner,
-        &Hlc::with_wall_clock("owner".to_string(), || 4_000),
-        &pubkey_hex(&member),
-        &encryption,
-        &custody,
-        cipher.as_ref(),
-        pending_rotation.as_ref(),
-        &crate::sync::store::StoreDatabase::new(&owner_db),
-    )
-    .await
-    .expect("remove exact member identity");
+    storage
+        .remove_member(
+            &owner_db,
+            &owner,
+            &Hlc::with_wall_clock("owner".to_string(), || 4_000),
+            &pubkey_hex(&member),
+            &encryption,
+            &custody,
+        )
+        .await
+        .expect("remove exact member identity");
 
     let (updated, _result) = pull_into(&receiver_db, &storage, &temp_store_dir().1).await;
 
@@ -790,7 +785,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let hlc = db.hlc();
 
     let result = run_single_sync_cycle(
-        &storage.storage,
+        storage.storage.clone(),
         &device_id,
         &hlc,
         &SystemClock,

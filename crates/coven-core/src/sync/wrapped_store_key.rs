@@ -68,7 +68,38 @@ pub enum WrappedKeyError {
     MalformedSealed,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WrappedKeyringError {
+    #[error("{0}")]
+    Authentication(#[from] WrappedKeyError),
+    #[error("decrypt sealed Store keyring: {0}")]
+    Decryption(#[from] crate::keys::KeyError),
+    #[error("decode Store keyring payload: {0}")]
+    Payload(#[from] crate::encryption::EncryptionError),
+    #[error(
+        "wrapped Store-key ref declares generation {reference}, but its keyring declares {payload}"
+    )]
+    GenerationMismatch { reference: u64, payload: u64 },
+}
+
 impl WrappedStoreKey {
+    pub fn seal_keyring(
+        store_id: &str,
+        recipient_pubkey: &str,
+        recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+        encryption: &crate::encryption::EncryptionService,
+        owner: &UserKeypair,
+    ) -> Result<Self, crate::encryption::EncryptionError> {
+        let payload = encryption.to_keyring_payload()?;
+        Ok(Self::signed(
+            store_id,
+            recipient_pubkey,
+            encryption.current_generation(),
+            keys::seal_box_encrypt(&payload, recipient_x25519_pk),
+            owner,
+        ))
+    }
+
     /// Wrap `sealed` (a sealed box of the store key, already encrypted to
     /// `recipient_pubkey`) and sign the binding with `owner`: fills `signature`
     /// with the owner's detached signature over the canonical payload.
@@ -130,6 +161,26 @@ impl WrappedStoreKey {
         // Verified as the owner's bytes; an un-decodable sealed field is a corrupt
         // object, a distinct failure.
         hex::decode(&self.sealed).map_err(|_| WrappedKeyError::MalformedSealed)
+    }
+
+    pub(crate) fn verify_and_open_keyring<'a>(
+        &self,
+        store_id: &str,
+        recipient_pubkey: &str,
+        expected_owners: impl IntoIterator<Item = &'a str>,
+        expected_generation: u64,
+        recipient: &UserKeypair,
+    ) -> Result<crate::encryption::EncryptionService, WrappedKeyringError> {
+        let sealed = self.verify_and_unwrap(store_id, recipient_pubkey, expected_owners)?;
+        let plaintext = keys::seal_box_decrypt(&sealed, &recipient.to_x25519_secret_key())?;
+        let keyring = crate::encryption::EncryptionService::from_keyring_payload(plaintext)?;
+        if keyring.current_generation() != expected_generation {
+            return Err(WrappedKeyringError::GenerationMismatch {
+                reference: expected_generation,
+                payload: keyring.current_generation(),
+            });
+        }
+        Ok(keyring)
     }
 }
 
@@ -232,46 +283,6 @@ impl PreparedWrappedStoreKey {
     }
 }
 
-pub async fn prepare_wrapped_store_key(
-    storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
-    recipient_pubkey: &str,
-    value: WrappedStoreKey,
-) -> Result<PreparedWrappedStoreKey, StorageError> {
-    crate::store_dir::validate_path_token(&value.author_pubkey)?;
-    crate::store_dir::validate_path_token(recipient_pubkey)?;
-    if value.generation == 0 {
-        return Err(StorageError::InvalidContent(
-            "wrapped Store-key generation must be positive".to_string(),
-        ));
-    }
-    let bytes = serde_json::to_vec(&value)
-        .map_err(|error| StorageError::Parse(format!("serialize wrapped Store key: {error}")))?;
-    let wrap_hash = ObjectHash::digest(&bytes);
-    let semantic_prefix = format!(
-        "keys/{}/{}/{}/{}",
-        value.author_pubkey, recipient_pubkey, value.generation, wrap_hash
-    );
-    let context = ProtocolObjectContext::recipient_sealed(
-        store_root_hash,
-        ProtocolObjectDomain::StoreWrappedKey,
-    );
-    let slot = storage
-        .allocate_protocol_slot(&context, &semantic_prefix, ".json")
-        .await?;
-    let object = storage.prepare_protocol_object(&context, slot, &semantic_prefix, bytes)?;
-    let reference = WrappedStoreKeyRef {
-        owner_pubkey: value.author_pubkey,
-        recipient_pubkey: recipient_pubkey.to_string(),
-        generation: value.generation,
-        wrap_hash,
-        object: object.reference().clone(),
-    };
-    let prepared = PreparedWrappedStoreKey { reference, object };
-    prepared.validate()?;
-    Ok(prepared)
-}
-
 pub async fn load_wrapped_store_key(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -292,22 +303,7 @@ pub async fn load_wrapped_store_key(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-
-    fn test_storage(signer: &UserKeypair) -> CloudSyncStorage {
-        CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "wrapped-key-test",
-            signer.clone(),
-        )
-        .expect("test storage supports immutable exact objects")
-    }
 
     #[test]
     fn wrapped_key_round_trips_and_returns_sealed_bytes() {
@@ -483,49 +479,101 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn wrapped_ref_generation_must_match_its_decrypted_keyring() {
+        let owner = UserKeypair::generate();
+        let recipient = UserKeypair::generate();
+        let recipient_pubkey = keys::public_key_hex(&recipient);
+        let keyring = crate::encryption::EncryptionService::from_key([7; 32]);
+        let sealed = keys::seal_box_encrypt(
+            &keyring.to_keyring_payload().expect("serialize keyring"),
+            &recipient.to_x25519_public_key(),
+        );
+        let wrapped = WrappedStoreKey::signed(
+            "wrapped-generation-store",
+            &recipient_pubkey,
+            2,
+            sealed,
+            &owner,
+        );
+
+        assert!(matches!(
+            wrapped.verify_and_open_keyring(
+                "wrapped-generation-store",
+                &recipient_pubkey,
+                std::iter::once(keys::public_key_hex(&owner).as_str()),
+                2,
+                &recipient,
+            ),
+            Err(WrappedKeyringError::GenerationMismatch {
+                reference: 2,
+                payload: 1,
+            }),
+        ));
+    }
+
     #[tokio::test]
     async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {
         let owner = UserKeypair::generate();
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
-        let storage = test_storage(&owner);
-        let root = ObjectHash::digest(b"wrapped key exact root");
-        let first = prepare_wrapped_store_key(
-            &storage,
-            root,
-            &recipient_pubkey,
-            WrappedStoreKey::signed("store", &recipient_pubkey, 3, vec![1; 32], &owner),
+        let db = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "wrapped-key-exact-objects",
+            owner.clone(),
         )
         .await
-        .expect("prepare first exact wrap");
-        let second = prepare_wrapped_store_key(
-            &storage,
-            root,
-            &recipient_pubkey,
-            WrappedStoreKey::signed("store", &recipient_pubkey, 3, vec![2; 32], &owner),
-        )
-        .await
-        .expect("prepare second exact wrap");
+        .expect("create exact wrapped-key Store");
+        let device = store
+            .bind_device(&db, &owner)
+            .await
+            .expect("bind exact wrapped-key Store");
+        let store_id = store.root.store_root_id.to_string();
+        let first = device
+            .prepare_wrapped_key(
+                &recipient_pubkey,
+                WrappedStoreKey::signed(&store_id, &recipient_pubkey, 3, vec![1; 32], &owner),
+            )
+            .await
+            .expect("prepare first exact wrap");
+        let second = device
+            .prepare_wrapped_key(
+                &recipient_pubkey,
+                WrappedStoreKey::signed(&store_id, &recipient_pubkey, 3, vec![2; 32], &owner),
+            )
+            .await
+            .expect("prepare second exact wrap");
 
         assert_ne!(first.reference, second.reference);
-        storage
+        store
+            .storage
             .create_protocol_object(&first.object)
             .await
             .expect("create first exact wrap");
-        storage
+        store
+            .storage
             .create_protocol_object(&second.object)
             .await
             .expect("create second exact wrap");
         assert_eq!(
-            load_wrapped_store_key(&storage, root, &first.reference)
-                .await
-                .expect("load first exact wrap"),
+            load_wrapped_store_key(
+                &*store.storage,
+                store.root.store_root_hash,
+                &first.reference,
+            )
+            .await
+            .expect("load first exact wrap"),
             first.validate().expect("validate first prepared wrap"),
         );
         assert_eq!(
-            load_wrapped_store_key(&storage, root, &second.reference)
-                .await
-                .expect("load second exact wrap"),
+            load_wrapped_store_key(
+                &*store.storage,
+                store.root.store_root_hash,
+                &second.reference,
+            )
+            .await
+            .expect("load second exact wrap"),
             second.validate().expect("validate second prepared wrap"),
         );
     }
@@ -535,25 +583,43 @@ mod tests {
         let owner = UserKeypair::generate();
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
-        let storage = test_storage(&owner);
-        let root = ObjectHash::digest(b"wrapped key relocation root");
-        let prepared = prepare_wrapped_store_key(
-            &storage,
-            root,
-            &recipient_pubkey,
-            WrappedStoreKey::signed("store", &recipient_pubkey, 1, vec![3; 32], &owner),
+        let db = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "wrapped-key-relocation",
+            owner.clone(),
         )
         .await
-        .expect("prepare exact wrap");
-        storage
+        .expect("create relocation Store");
+        let device = store
+            .bind_device(&db, &owner)
+            .await
+            .expect("bind relocation Store");
+        let prepared = device
+            .prepare_wrapped_key(
+                &recipient_pubkey,
+                WrappedStoreKey::signed(
+                    &store.root.store_root_id.to_string(),
+                    &recipient_pubkey,
+                    1,
+                    vec![3; 32],
+                    &owner,
+                ),
+            )
+            .await
+            .expect("prepare exact wrap");
+        store
+            .storage
             .create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrap");
         let mut relocated = prepared.reference;
         relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
 
-        assert!(load_wrapped_store_key(&storage, root, &relocated)
-            .await
-            .is_err());
+        assert!(
+            load_wrapped_store_key(&*store.storage, store.root.store_root_hash, &relocated)
+                .await
+                .is_err()
+        );
     }
 }

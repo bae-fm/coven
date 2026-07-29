@@ -8,11 +8,10 @@ use crate::database::DbError;
 use crate::encryption::EncryptionService;
 use crate::join_code::encode;
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{no_progress, BlobBody, CloudHomeJoinInfo, ExactSlotStorage};
+use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::hlc::Hlc;
 use crate::sync::store::create_snapshot;
 use crate::sync::test_helpers::*;
-use async_trait::async_trait;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -45,23 +44,20 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let member_pubkey = crate::join_code::decode_join_request(&join_request)
         .expect("decode join request")
         .public_key;
-    let invitation_home = GrantingCloudHome(store.home.as_ref().clone());
-    let invite = crate::sync::test_helpers::invite_store_member_for_test(
-        &store.storage,
-        &invitation_home,
-        &owner,
-        &Hlc::new("owner-device".to_string()),
-        &member_pubkey,
-        None,
-        crate::sync::membership::MemberRole::Member,
-        &EncryptionService::from_key([42; 32]),
-        store_id,
-        "Device Join Client Store",
-        &owner_database,
-    )
-    .await
-    .expect("invite joiner identity");
-    let membership = store
+    let invite = store
+        .invite_member(
+            &owner_db,
+            &owner,
+            &Hlc::new("owner-device".to_string()),
+            &member_pubkey,
+            None,
+            crate::sync::membership::MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Device Join Client Store",
+        )
+        .await
+        .expect("invite joiner identity");
+    let owner_device = store
         .open_into(&owner_db)
         .await
         .expect("load membership including joiner");
@@ -69,43 +65,30 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
     let snapshot_path = snapshot_dir.path().to_path_buf();
     let snapshot_tables = tables.clone();
+    let snapshot_root = store.root.clone();
     let snapshot = owner_db
         .call(move |connection| {
-            create_snapshot(connection, &snapshot_path, &snapshot_tables, None)
-                .map_err(|error| DbError::Message(error.to_string()))
+            create_snapshot(
+                connection,
+                &snapshot_root,
+                &snapshot_path,
+                &snapshot_tables,
+                None,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
         .expect("create join snapshot");
     let snapshot_coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
-    crate::sync::test_helpers::publish_snapshot_fixture(
-        &store.storage,
-        &store.root,
-        snapshot,
-        snapshot_coverage.clone(),
-        &owner,
-        &membership,
-        &owner_db,
-    )
-    .await
-    .expect("publish join snapshot");
-    publish_store_ack_fixture(&owner_db, &store.storage, snapshot_coverage, &owner)
+    owner_device
+        .publish_snapshot(snapshot, snapshot_coverage.clone())
+        .await
+        .expect("publish join snapshot");
+    owner_device
+        .publish_acknowledgement(snapshot_coverage)
         .await
         .expect("publish join snapshot acknowledgement");
-    let owner_store_storage = Arc::new(
-        crate::sync::cloud_storage::CloudSyncStorage::new(
-            store.home.clone(),
-            crate::sync::cloud_storage::CloudCipher::Encrypted(EncryptionService::from_key(
-                [42; 32],
-            )),
-            crate::sync::cloud_storage::BlobPathScheme::Hashed,
-            store_id,
-            owner.clone(),
-        )
-        .expect("construct production Store storage"),
-    );
-    let owner_store = crate::sync::store::Store::load(owner_database.clone(), owner_store_storage)
-        .await
-        .expect("open production Store owner");
+    let owner_store = owner_device.store;
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = crate::store_dir::StoreLayout::new(app.path());
@@ -127,16 +110,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .with_test_bootstrap_home(store.home.clone())
     };
     let offer = owner_store
-        .begin_device_join(
-            &owner,
-            &member_pubkey,
-            store
-                .protocol_root
-                .descriptor
-                .founder_provider_admin
-                .grant_id
-                .clone(),
-        )
+        .begin_device_join(&member_pubkey)
         .await
         .expect("begin join");
 
@@ -160,7 +134,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         )],
     );
     let approval = owner_store
-        .authorize_device_provider_access(&owner, access_request, None)
+        .authorize_device_provider_access(access_request, None)
         .await
         .expect("authorize provider access");
     let registration_request = new_client()
@@ -175,7 +149,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         registration_request,
     );
     let provisional = owner_store
-        .accept_device_registration_request(&owner, registration_request)
+        .accept_device_registration_request(registration_request)
         .await
         .expect("accept registration request");
     let provider_ready = owner_store
@@ -198,13 +172,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     .expect("resume bootstrap after lost response");
     assert_eq!(readiness_retry, readiness);
     let completion = owner_store
-        .complete_device_provider_admission(&owner, readiness)
+        .complete_device_provider_admission(readiness)
         .await
         .expect("complete provider admission");
     store.home.fail_exact_create_before_call(1);
-    let interrupted = owner_store
-        .finalize_device_join(&owner, completion.clone())
-        .await;
+    let interrupted = owner_store.finalize_device_join(completion.clone()).await;
     assert!(
         interrupted.is_err(),
         "the outcome create interruption surfaces"
@@ -229,7 +201,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             role: crate::DeviceJoinRole::Owner,
         }));
     let activation = owner_store
-        .finalize_device_join(&owner, completion)
+        .finalize_device_join(completion)
         .await
         .expect("resume finalization from the durable completion");
     let activation_slot = activation.outcome_activation.object.slot();
@@ -286,77 +258,4 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .resume_device_joins()
         .expect("enumerate completed joins")
         .is_empty());
-}
-
-struct GrantingCloudHome(crate::InMemoryCloudHome);
-
-#[async_trait]
-impl crate::storage::cloud::CloudHome for GrantingCloudHome {
-    async fn put_object(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<(), crate::storage::cloud::CloudHomeError> {
-        self.0.put_object(key, data).await
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, crate::storage::cloud::CloudHomeError> {
-        self.0.open_multipart(key, total_len).await
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        self.0.multipart_threshold()
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-        self.0.read(key).await
-    }
-
-    async fn read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-        self.0.read_range(key, start, end).await
-    }
-
-    async fn list(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::cloud::CloudHomeError> {
-        self.0.list(prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), crate::storage::cloud::CloudHomeError> {
-        self.0.delete(key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, crate::storage::cloud::CloudHomeError> {
-        self.0.exists(key).await
-    }
-
-    async fn set_access(
-        &self,
-        desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::storage::cloud::CloudHomeError>
-    {
-        match desired {
-            crate::storage::cloud::CloudAccessState::Present { .. } => Ok(
-                crate::storage::cloud::CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
-                    bucket: "test-bucket".to_string(),
-                    region: "us-east-1".to_string(),
-                    endpoint: None,
-                    access_key: "test-access-key".to_string(),
-                    secret_key: "test-secret-key".to_string(),
-                    key_prefix: None,
-                }),
-            ),
-            absent => self.0.set_access(absent).await,
-        }
-    }
 }

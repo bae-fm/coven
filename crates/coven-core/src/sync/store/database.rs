@@ -1,5 +1,4 @@
 mod acknowledgements;
-mod audience_blob_staging;
 mod candidate_lifecycle;
 pub(super) mod candidate_records;
 mod circle_acknowledgements;
@@ -9,6 +8,7 @@ mod circle_operations;
 mod circle_snapshot_publication;
 mod device_continuation;
 mod device_exclusion;
+mod device_join;
 mod device_join_challenges;
 mod device_registration_journal;
 mod host_write_capture;
@@ -22,7 +22,7 @@ mod preparation;
 mod prepared_remote_objects;
 mod publication;
 pub(super) mod publication_state;
-mod reclaim;
+pub(super) mod reclaim;
 mod retained_merge_replay;
 mod snapshot_publication;
 mod store_acknowledgements;
@@ -46,7 +46,6 @@ use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 use materialization_models::OwnedVerifiedMergeMaterialization;
 
-pub use audience_blob_staging::HostWriteBlobStaging;
 pub(crate) use retained_merge_replay::RetainedMergeMaterializationCache;
 
 #[derive(Clone)]
@@ -80,26 +79,24 @@ pub(crate) struct StoreDatabaseRuntime {
 }
 
 impl StoreDatabaseRuntime {
-    pub(crate) fn new(
-        retained_merge_materializations: Vec<OwnedVerifiedMergeMaterialization>,
-    ) -> Result<Self, DbError> {
-        Ok(Self {
+    pub(crate) fn new() -> Self {
+        Self {
             membership_load: Default::default(),
             membership_mutation: Default::default(),
             store_creation: Default::default(),
             device_exclusion: Default::default(),
             snapshot_publication: Default::default(),
             retained_merge_materializations: std::sync::Arc::new(std::sync::Mutex::new(
-                RetainedMergeMaterializationCache::from_verified(retained_merge_materializations)?,
+                RetainedMergeMaterializationCache::default(),
             )),
             own_stream_authorship: Default::default(),
-        })
+        }
     }
 }
 
 /// This device's exclusive turn to author its own next Store commit, held from
 /// reading the position through publishing the head that takes it.
-pub(in crate::sync::store) type OwnStreamAuthorship = tokio::sync::OwnedMutexGuard<()>;
+pub(super) type OwnStreamAuthorship = tokio::sync::OwnedMutexGuard<()>;
 
 #[derive(Clone)]
 pub struct StoreDatabase {
@@ -107,14 +104,12 @@ pub struct StoreDatabase {
     runtime: StoreDatabaseRuntime,
 }
 
-pub(in crate::sync::store) struct StoreDatabaseTransaction<'transaction, 'connection> {
+pub(super) struct StoreDatabaseTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
 }
 
 impl<'transaction, 'connection> StoreDatabaseTransaction<'transaction, 'connection> {
-    pub(in crate::sync::store) fn new(
-        transaction: &'transaction rusqlite::Transaction<'connection>,
-    ) -> Self {
+    pub(super) fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
         Self { transaction }
     }
 }
@@ -136,27 +131,23 @@ impl StoreDatabase {
         &self.database
     }
 
-    pub(in crate::sync::store) async fn lock_membership_load(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) fn device_join_journal(&self) -> device_join::StoreJoinJournal<'_> {
+        device_join::StoreJoinJournal::new(&self.database)
+    }
+
+    pub(super) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.membership_load.clone().lock_owned().await
     }
 
-    pub(in crate::sync::store) async fn lock_membership_mutation(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(super) async fn lock_membership_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.membership_mutation.clone().lock_owned().await
     }
 
-    pub(in crate::sync::store) async fn lock_store_creation(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(super) async fn lock_store_creation(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.store_creation.clone().lock_owned().await
     }
 
-    pub(in crate::sync::store) async fn lock_device_exclusion(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(super) async fn lock_device_exclusion(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.device_exclusion.clone().lock_owned().await
     }
 
@@ -167,7 +158,7 @@ impl StoreDatabase {
     /// pair. Never taken twice in one call chain: a composer holds it until its
     /// candidate is either activated or durably persisted, and a publisher of an
     /// already-persisted candidate takes it for that publication alone.
-    pub(in crate::sync::store) async fn author_own_stream(&self) -> OwnStreamAuthorship {
+    pub(super) async fn author_own_stream(&self) -> OwnStreamAuthorship {
         self.runtime
             .own_stream_authorship
             .clone()
@@ -175,16 +166,97 @@ impl StoreDatabase {
             .await
     }
 
-    pub(in crate::sync::store) async fn lock_snapshot_publication(
-        &self,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(super) async fn lock_snapshot_publication(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.runtime.snapshot_publication.clone().lock_owned().await
     }
 
-    pub(in crate::sync::store) fn retained_merge_materialization_cache(
+    pub(super) fn retained_merge_materialization_cache(
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<RetainedMergeMaterializationCache>> {
         self.runtime.retained_merge_materializations.clone()
+    }
+
+    pub(super) async fn begin_store_creation_attempt(
+        &self,
+        initialized: crate::sync::store::protocol_root::StoreCreationAttempt,
+    ) -> Result<crate::sync::store::protocol_root::StoreCreationAttempt, DbError> {
+        let value = serde_json::to_string(&initialized).map_err(|error| {
+            DbError::Message(format!("serialize Store creation attempt: {error}"))
+        })?;
+        self.sqlite()
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO NOTHING",
+                    (
+                        crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                        &value,
+                    ),
+                )
+                .map_err(DbError::from)?;
+                let actual = crate::database::required_protocol_state_on(
+                    &tx,
+                    crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                )?;
+                tx.commit().map_err(DbError::from)?;
+                serde_json::from_str(&actual).map_err(|error| {
+                    DbError::Message(format!("parse Store creation attempt: {error}"))
+                })
+            })
+            .await
+    }
+
+    pub(super) async fn load_store_creation_attempt(
+        &self,
+    ) -> Result<Option<crate::sync::store::protocol_root::StoreCreationAttempt>, DbError> {
+        self.sqlite()
+            .call(move |conn| {
+                crate::database::get_protocol_state_on(
+                    conn,
+                    crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                )?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        DbError::Message(format!("parse Store creation attempt: {error}"))
+                    })
+                })
+                .transpose()
+            })
+            .await
+    }
+
+    pub(super) async fn advance_store_creation_attempt(
+        &self,
+        previous: crate::sync::store::protocol_root::StoreCreationAttempt,
+        next: crate::sync::store::protocol_root::StoreCreationAttempt,
+    ) -> Result<(), DbError> {
+        let previous = serde_json::to_string(&previous).map_err(|error| {
+            DbError::Message(format!("serialize Store creation predecessor: {error}"))
+        })?;
+        let next = serde_json::to_string(&next).map_err(|error| {
+            DbError::Message(format!("serialize Store creation successor: {error}"))
+        })?;
+        self.sqlite()
+            .call(move |conn| {
+                let changed = conn
+                    .execute(
+                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                        (
+                            &next,
+                            crate::sync::store::protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                            &previous,
+                        ),
+                    )
+                    .map_err(DbError::from)?;
+                if changed != 1 {
+                    return Err(DbError::Message(
+                        "Store creation attempt advance lost its exact predecessor".to_string(),
+                    ));
+                }
+                Ok(())
+            })
+            .await
     }
 
     #[cfg(test)]
@@ -198,7 +270,7 @@ impl StoreDatabase {
 }
 
 #[cfg(test)]
-pub(in crate::sync) fn record_verified_circle_activations_for_test(
+pub(crate) fn record_verified_circle_activations_for_test(
     connection: &rusqlite::Connection,
     commit: &crate::sync::store_commit::VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
@@ -210,12 +282,17 @@ pub(in crate::sync) fn record_verified_circle_activations_for_test(
 }
 
 #[cfg(test)]
-pub(in crate::sync) async fn store_package_is_retained_for_replay_for_test(
+pub(crate) async fn store_package_is_retained_for_replay_for_test(
     database: &Database,
     package: crate::sync::store_commit::StorePackageRef,
     activation: crate::sync::store_commit::StoreBatchCommitRef,
 ) -> Result<bool, DbError> {
-    StoreDatabase::new(database)
-        .store_package_is_retained_for_replay(package, activation)
+    let database = StoreDatabase::new(database);
+    let root = database
+        .local_store_root_ref()
+        .await?
+        .ok_or_else(|| DbError::Message("test Store root is not installed".to_string()))?;
+    database
+        .store_package_is_retained_for_replay(root, package, activation)
         .await
 }

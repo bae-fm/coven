@@ -14,8 +14,8 @@ use crate::sync::storage::{
     ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding,
 };
 use crate::sync::store_commit::{
-    DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
+    DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
 };
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";
@@ -1786,55 +1786,14 @@ pub async fn prepare_cross_principal_challenge(
     Ok(challenge)
 }
 
-pub(crate) async fn publish_cross_principal_challenge(
-    history_verifier: &mut crate::sync::store::MergeHistoryVerifier<'_>,
+pub(crate) async fn settle_cross_principal_challenge(
     administrator: &dyn ExactSlotStorage,
     publication_journal: &dyn DeviceJoinChallengePublicationJournal,
     authorization: &DeviceJoinChallengePublicationAuthorization,
     challenge: &CrossPrincipalProbeChallenge,
     context: &CrossPrincipalChallengeContext,
     store: &StoreProviderBinding,
-    attempt_owner: &StoreDeviceRegistration,
-    administrator_signing_pubkey: &str,
 ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
-    challenge.verify(context, store, administrator_signing_pubkey)?;
-    if authorization.attempt.attempt_id != context.attempt_id {
-        return invalid("challenge publication authorization names another join attempt");
-    }
-    let attempt = crate::sync::store::load_verified_device_join_attempt(
-        history_verifier,
-        &authorization.attempt,
-        attempt_owner,
-    )
-    .await
-    .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    if attempt.value.store_root != context.root
-        || attempt.value.attempt_id != context.attempt_id
-        || attempt.value.owner_registration != context.owner_registration
-    {
-        return invalid("activated join attempt differs from the challenge publication context");
-    }
-    let activation = history_verifier
-        .commit_verifier()
-        .load_ref(&authorization.attempt_activation)
-        .await
-        .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    if activation.author() != attempt_owner {
-        return invalid("join attempt activation author differs from the attempt owner");
-    }
-    if !activation
-        .device_join_attempt_decisions()
-        .iter()
-        .any(|decision| {
-            matches!(
-                decision,
-                DeviceJoinAttemptDecisionRef::Attempt(reference)
-                    if reference == &authorization.attempt
-            )
-        })
-    {
-        return invalid("activation commit does not activate the authorized join attempt");
-    }
     let live = administrator
         .provider_binding()
         .await
@@ -2021,7 +1980,10 @@ pub async fn complete_cross_principal_probe(
         record.progress,
         CrossPrincipalCompletionProgress::ReadsVerified { .. }
     ) {
-        cleanup_exact_slot(administrator, &response.peer_object.slot).await?;
+        administrator
+            .delete_and_verify_absent(&response.peer_object.slot)
+            .await
+            .map_err(StorageError::from)?;
         advance_cross_completion(
             journal,
             &mut durable,
@@ -2036,7 +1998,10 @@ pub async fn complete_cross_principal_probe(
         record.progress,
         CrossPrincipalCompletionProgress::PeerAbsent { .. }
     ) {
-        cleanup_exact_slot(administrator, &challenge.administrator_object.slot).await?;
+        administrator
+            .delete_and_verify_absent(&challenge.administrator_object.slot)
+            .await
+            .map_err(StorageError::from)?;
         advance_cross_completion(
             journal,
             &mut durable,
@@ -2253,7 +2218,10 @@ pub async fn probe_exact_slots(
     }
     let accepted = ExactObjectRef::new(slot.clone(), full.len() as u64, ObjectHash::digest(&full));
     if matches!(record.progress, ExactProbeProgress::ReadsVerified { .. }) {
-        cleanup_exact_slot(first, &slot).await?;
+        first
+            .delete_and_verify_absent(&slot)
+            .await
+            .map_err(StorageError::from)?;
         advance_exact(
             journal,
             &mut durable,
@@ -2321,7 +2289,10 @@ pub async fn probe_exact_slots(
         record.progress,
         ExactProbeProgress::LostResponseReadVerified { .. }
     ) {
-        cleanup_exact_slot(first, &lost_slot).await?;
+        first
+            .delete_and_verify_absent(&lost_slot)
+            .await
+            .map_err(StorageError::from)?;
         advance_exact(
             journal,
             &mut durable,
@@ -2472,24 +2443,6 @@ fn require_occupied_rejection(
     match result {
         Err(CloudHomeError::AlreadyExists(_)) => Ok(()),
         Ok(()) => invalid("settled exact probe contender unexpectedly created a second object"),
-        Err(error) => Err(ProviderProbeError::Storage(StorageError::from(error))),
-    }
-}
-
-async fn cleanup_exact_slot(
-    storage: &dyn ExactSlotStorage,
-    slot: &ObjectSlot,
-) -> Result<(), ProviderProbeError> {
-    match storage.read_at(slot).await {
-        Err(CloudHomeError::NotFound(_)) => Ok(()),
-        Ok(_) => {
-            storage.delete_at(slot).await.map_err(StorageError::from)?;
-            match storage.read_at(slot).await {
-                Err(CloudHomeError::NotFound(_)) => Ok(()),
-                Ok(_) => invalid("exact-slot probe object remains after deletion"),
-                Err(error) => Err(ProviderProbeError::Storage(StorageError::from(error))),
-            }
-        }
         Err(error) => Err(ProviderProbeError::Storage(StorageError::from(error))),
     }
 }

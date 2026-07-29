@@ -63,18 +63,20 @@ impl FacadeFixture {
         let store = TestStore::create(handle.db(), store_id, owner.clone())
             .await
             .expect("create the owner's Store");
-        let membership = store
-            .open_into(handle.db())
+        let owner_device = store
+            .bind_device(handle.db(), &owner)
             .await
-            .expect("load the owner's membership");
+            .expect("bind the owner's Store");
         let snapshot_tmp = tempfile::tempdir().expect("snapshot directory");
         let snapshot_path = snapshot_tmp.path().to_path_buf();
         let snapshot_tables = tables.clone();
+        let snapshot_root = store.root.clone();
         let snapshot = handle
             .db()
             .call(move |connection| {
                 crate::sync::store::create_snapshot(
                     connection,
+                    &snapshot_root,
                     &snapshot_path,
                     &snapshot_tables,
                     None,
@@ -84,18 +86,12 @@ impl FacadeFixture {
             .await
             .expect("create the join snapshot");
         let coverage = crate::sync::store_commit::CommitFrontier(BTreeMap::new());
-        publish_snapshot_fixture(
-            &store.storage,
-            &store.root,
-            snapshot,
-            coverage.clone(),
-            &owner,
-            &membership,
-            handle.db(),
-        )
-        .await
-        .expect("publish the join snapshot");
-        publish_store_ack_fixture(handle.db(), &store.storage, coverage, &owner)
+        owner_device
+            .publish_snapshot(snapshot, coverage.clone())
+            .await
+            .expect("publish the join snapshot");
+        owner_device
+            .publish_acknowledgement(coverage)
             .await
             .expect("publish the snapshot acknowledgement");
 
