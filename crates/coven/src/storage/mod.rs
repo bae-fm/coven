@@ -22,8 +22,6 @@ pub use cloud::cloudkit::{
 };
 pub use cloud::s3::S3CloudHome;
 pub use cloud::setup::generate_restore_code;
-#[cfg(feature = "oauth-providers")]
-pub use cloud::setup::{sign_in_dropbox, sign_in_google_drive, sign_in_onedrive};
 #[cfg(any(test, feature = "test-utils"))]
 pub use cloud::test_utils::InMemoryCloudHome;
 

@@ -113,7 +113,12 @@ fn store_sync(
 ) -> StoreSync {
     StoreSync::new(
         config_provider,
-        StoreSecurity::new(keys, master_keys, identity),
+        StoreSecurity::new(
+            keys,
+            master_keys,
+            identity,
+            crate::oauth::OAuthClients::empty(),
+        ),
         StoreDatabase::from_database(database),
         store_dir.clone(),
         Arc::new(SystemClock),
@@ -161,7 +166,12 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         &join_info,
         &CloudCipher::Plaintext,
     );
-    let security = StoreSecurity::new(keys, Arc::new(NoKeyCustody), established_identity_custody());
+    let security = StoreSecurity::new(
+        keys,
+        Arc::new(NoKeyCustody),
+        established_identity_custody(),
+        crate::oauth::OAuthClients::empty(),
+    );
     let sync = StoreSync::new(
         Arc::new(move || config.clone()),
         security.clone(),
@@ -471,6 +481,7 @@ fn cipher_resolution_reads_current_custody_each_time() {
         StoreKeys::new(store_id.to_string()),
         custody.clone(),
         established_identity_custody(),
+        crate::oauth::OAuthClients::empty(),
     );
 
     let fingerprint_a = match security

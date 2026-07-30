@@ -28,18 +28,16 @@ fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<()
 /// tokens to the keyring. Returns the folder id for the host to persist in its
 /// own config (coven never writes the host's config).
 ///
-/// Drives coven's localhost-callback OAuth flow (`authorize_provider`),
-/// which binds a TCP port and opens the system browser. Gated on
-/// `oauth-providers`.
+/// Drives coven's localhost-callback OAuth flow, which binds a TCP port and
+/// opens the system browser. Gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
-pub async fn sign_in_google_drive(
+pub(crate) async fn sign_in_google_drive(
+    oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let oauth_config = super::google_drive::GoogleDriveCloudHome::oauth_config()
-        .map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Google Drive authorization failed: {e}")))?;
@@ -127,14 +125,13 @@ pub async fn sign_in_google_drive(
 ///
 /// Uses the localhost-callback flow; gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
-pub async fn sign_in_dropbox(
+pub(crate) async fn sign_in_dropbox(
+    oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let oauth_config =
-        super::dropbox::DropboxCloudHome::oauth_config().map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Dropbox authorization failed: {e}")))?;
@@ -179,13 +176,12 @@ pub async fn sign_in_dropbox(
 ///
 /// Uses the localhost-callback flow; gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
-pub async fn sign_in_onedrive(
+pub(crate) async fn sign_in_onedrive(
+    oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(String, String), SetupError> {
-    let oauth_config = super::onedrive::OneDriveCloudHome::oauth_config()
-        .map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("OneDrive authorization failed: {e}")))?;
@@ -508,6 +504,7 @@ pub(crate) fn build_cloud_cipher(
 pub(crate) async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
+    oauth_clients: &crate::oauth::OAuthClients,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
     cipher: Option<CloudCipher>,
@@ -516,9 +513,14 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     blob_chunking: BlobChunking,
 ) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_config(config)?;
-    let cloud_home =
-        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops.clone())
-            .await?;
+    let cloud_home = super::create_cloud_home_with_cloudkit(
+        config,
+        key_service,
+        oauth_clients,
+        clock,
+        cloudkit_ops.clone(),
+    )
+    .await?;
     create_sync_storage_with_home(
         config,
         custody,

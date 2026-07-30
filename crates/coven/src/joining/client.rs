@@ -285,6 +285,7 @@ fn require_join_oauth(
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
+    oauth_clients: &crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -293,7 +294,7 @@ async fn build_cloud_home_for_join(
     use crate::storage::cloud::*;
 
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (&lib_ks, &oauth_tokens, &clock);
+    let _ = (&lib_ks, oauth_clients, &oauth_tokens, &clock);
 
     match join_info {
         CloudHomeJoinInfo::S3 {
@@ -319,22 +320,30 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::GoogleDrive)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Ok(Arc::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
+                oauth_config,
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::Dropbox)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Ok(Arc::new(dropbox::DropboxCloudHome::new(
                 folder_path.clone(),
+                oauth_config,
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::OneDrive {
@@ -342,13 +351,17 @@ async fn build_cloud_home_for_join(
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::OneDrive)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Ok(Arc::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
+                oauth_config,
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(not(feature = "oauth-providers"))]
         CloudHomeJoinInfo::GoogleDrive { .. }
@@ -399,6 +412,7 @@ pub struct DeviceJoinClient {
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
+    oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -422,6 +436,7 @@ impl DeviceJoinClient {
         custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
         key_custody: crate::custody::KeyCustody,
         identity_custody: IdentityCustody,
+        oauth_clients: crate::oauth::OAuthClients,
         oauth_tokens: Option<crate::oauth::OAuthTokens>,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         clock: crate::clock::ClockRef,
@@ -450,6 +465,7 @@ impl DeviceJoinClient {
             custom_s3_exact_slots,
             custody,
             identity_custody,
+            oauth_clients,
             oauth_tokens,
             cloudkit_ops,
             clock,
@@ -811,6 +827,7 @@ impl DeviceJoinClient {
         build_cloud_home_for_join(
             &self.code.join_info,
             &StoreKeys::new(self.code.store_id.clone()),
+            &self.oauth_clients,
             self.oauth_tokens.clone(),
             self.cloudkit_ops.clone(),
             self.clock.clone(),

@@ -29,6 +29,7 @@ use crate::sync::session::SyncedTable;
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
     pub custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    pub oauth_clients: crate::oauth::OAuthClients,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -62,13 +63,14 @@ async fn build_cloud_home(
     let RestoreSource {
         join_info,
         custom_s3_exact_slots,
+        oauth_clients,
         oauth_tokens,
         cloudkit_ops,
     } = source;
 
     // Consumed only by the oauth provider arms below.
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (store_id, &clock, &oauth_tokens);
+    let _ = (store_id, &clock, &oauth_clients, &oauth_tokens);
 
     let home: Arc<dyn CloudHome> = match &join_info {
         CloudHomeJoinInfo::S3 {
@@ -111,23 +113,31 @@ async fn build_cloud_home(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Google Drive")?;
+            let oauth_config = oauth_clients
+                .config_for(crate::CloudProvider::GoogleDrive)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Arc::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
+                oauth_config,
                 tokens,
                 ks,
                 clock,
-            )?)
+            ))
         }
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Dropbox")?;
+            let oauth_config = oauth_clients
+                .config_for(crate::CloudProvider::Dropbox)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Arc::new(dropbox::DropboxCloudHome::new(
                 folder_path.clone(),
+                oauth_config,
                 tokens,
                 ks,
                 clock,
-            )?)
+            ))
         }
 
         #[cfg(feature = "oauth-providers")]
@@ -136,13 +146,17 @@ async fn build_cloud_home(
             folder_id,
         } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "OneDrive")?;
+            let oauth_config = oauth_clients
+                .config_for(crate::CloudProvider::OneDrive)
+                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
             Arc::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
+                oauth_config,
                 tokens,
                 ks,
                 clock,
-            )?)
+            ))
         }
 
         #[cfg(not(feature = "oauth-providers"))]
@@ -351,6 +365,7 @@ pub async fn restore_from_code(
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
+    oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     layout: &StoreLayout,
@@ -418,6 +433,7 @@ pub async fn restore_from_code(
     let source = RestoreSource {
         join_info: parsed.provider.clone(),
         custom_s3_exact_slots,
+        oauth_clients,
         oauth_tokens,
         cloudkit_ops,
     };
@@ -466,7 +482,6 @@ mod tests {
     #[tokio::test]
     async fn restore_dropbox_build_cloud_home_persists_oauth_tokens() {
         crate::keys::test_keyring::install();
-        crate::oauth::install_test_client_creds();
 
         let store_id = "restore-dropbox-persist-test";
         let tokens = OAuthTokens {
@@ -479,6 +494,7 @@ mod tests {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
             custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::for_tests(),
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
         };
@@ -529,6 +545,7 @@ mod build_cloud_home_tests {
                 key_prefix: Some("prefix/".to_string()),
             },
             custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,
         };
@@ -559,6 +576,7 @@ mod build_cloud_home_tests {
                 zone_name: "zone".to_string(),
             },
             custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,
         };

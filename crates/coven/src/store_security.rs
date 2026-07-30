@@ -14,6 +14,7 @@ pub(crate) struct StoreSecurity {
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
+    oauth_clients: crate::oauth::OAuthClients,
 }
 
 impl StoreSecurity {
@@ -21,11 +22,13 @@ impl StoreSecurity {
         keys: StoreKeys,
         master_keys: Arc<dyn MasterKeyCustody>,
         identity: Arc<dyn DeviceIdentityCustody>,
+        oauth_clients: crate::oauth::OAuthClients,
     ) -> Self {
         Self {
             keys,
             master_keys,
             identity,
+            oauth_clients,
         }
     }
 
@@ -145,6 +148,7 @@ impl StoreSecurity {
         crate::storage::cloud::create_cloud_home_with_cloudkit(
             config,
             &self.keys,
+            &self.oauth_clients,
             clock,
             cloudkit_ops,
         )
@@ -162,6 +166,7 @@ impl StoreSecurity {
         crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             config,
             &self.keys,
+            &self.oauth_clients,
             self.master_keys.as_ref(),
             self.identity.as_ref(),
             cipher,

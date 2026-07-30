@@ -92,6 +92,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             None,
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
+            crate::oauth::OAuthClients::empty(),
             None,
             None,
             Arc::new(SystemClock),

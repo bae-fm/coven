@@ -3,8 +3,8 @@
 //! Provides PKCE-based authorization code flow with a localhost callback server.
 //! Used by Google Drive, Dropbox, and OneDrive cloud home backends.
 
+#[cfg(feature = "oauth-providers")]
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 #[cfg(any(test, feature = "oauth-providers"))]
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -38,108 +38,118 @@ pub(crate) struct OAuthConfig {
 }
 
 /// OAuth client credentials for one provider — the consuming app's registered
-/// OAuth application. coven ships no app credentials of its own; the host
-/// registers them at startup via [`set_oauth_client_creds`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// OAuth application. coven ships no app credentials of its own.
+#[cfg(feature = "oauth-providers")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OAuthClientCreds {
     pub client_id: String,
     /// None for public (PKCE-only) clients.
     pub client_secret: Option<String>,
 }
 
-/// Registering OAuth client credentials a second time with values that differ
-/// from the first registration — a startup contradiction the host must resolve,
-/// not a value coven may silently pick between.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "OAuth client credentials are already registered; cannot re-register with different values"
-)]
-pub struct OAuthClientCredsConflict;
-
-static OAUTH_CLIENT_CREDS: OnceLock<HashMap<String, OAuthClientCreds>> = OnceLock::new();
-
-/// Register the host's OAuth client credentials, keyed by provider name
-/// (`"google_drive"`, `"dropbox"`, `"onedrive"`). Call once at startup, before
-/// any OAuth flow. Providers absent from the map get empty credentials.
-/// Re-registering the same map is a no-op; a differing map is a startup
-/// contradiction and returns [`OAuthClientCredsConflict`].
-pub fn set_oauth_client_creds(
-    creds: HashMap<String, OAuthClientCreds>,
-) -> Result<(), OAuthClientCredsConflict> {
-    if let Err(attempted) = OAUTH_CLIENT_CREDS.set(creds) {
-        let registered = OAUTH_CLIENT_CREDS
-            .get()
-            .expect("OnceLock::set failed only when a value is already stored");
-        if *registered != attempted {
-            return Err(OAuthClientCredsConflict);
-        }
-    }
-    Ok(())
+/// The consuming app's OAuth clients. Each [`CovenBuilder`](crate::CovenBuilder)
+/// retains its own value, so unrelated apps in one process never share
+/// credentials.
+#[derive(Clone, Debug)]
+pub struct OAuthClients {
+    #[cfg(feature = "oauth-providers")]
+    credentials: HashMap<crate::config::CloudProvider, OAuthClientCreds>,
 }
 
-/// A provider's OAuth client credentials were requested before the host
-/// registered them via [`set_oauth_client_creds`]: either no registration ran at
-/// all, or the registered map has no entry for this provider. Surfaced at the
-/// OAuth-flow boundary so a mis-configured host gets a typed error naming the
-/// startup step, not an empty `client_id` that fails deep inside a provider flow.
+/// An OAuth client set is missing a provider or names a provider that does not
+/// use OAuth.
 #[cfg(feature = "oauth-providers")]
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthClientCredsError {
-    #[error(
-        "no OAuth client credentials are registered; the host must call set_oauth_client_creds at startup before any OAuth flow"
-    )]
-    NotRegistered,
-    #[error(
-        "no OAuth client credentials registered for provider {0:?}; the host must include it in the set_oauth_client_creds map at startup"
-    )]
-    MissingProvider(String),
+    #[error("no OAuth client credentials configured for provider {0:?}")]
+    MissingProvider(crate::config::CloudProvider),
+    #[error("provider {0:?} does not use OAuth")]
+    UnsupportedProvider(crate::config::CloudProvider),
 }
 
-/// The credentials registered for a provider. `Err` when the host never ran
-/// [`set_oauth_client_creds`], or ran it without an entry for this provider.
-#[cfg(feature = "oauth-providers")]
-pub(crate) fn oauth_client_creds(
-    provider: &str,
-) -> Result<OAuthClientCreds, OAuthClientCredsError> {
-    let registered = OAUTH_CLIENT_CREDS
-        .get()
-        .ok_or(OAuthClientCredsError::NotRegistered)?;
-    registered
-        .get(provider)
-        .cloned()
-        .ok_or_else(|| OAuthClientCredsError::MissingProvider(provider.to_string()))
-}
+impl OAuthClients {
+    /// Construct the OAuth clients this app can use.
+    #[cfg(feature = "oauth-providers")]
+    pub fn new(
+        credentials: HashMap<crate::config::CloudProvider, OAuthClientCreds>,
+    ) -> Result<Self, OAuthClientCredsError> {
+        if let Some(provider) = credentials.keys().find(|provider| !provider.needs_oauth()) {
+            return Err(OAuthClientCredsError::UnsupportedProvider(
+                (*provider).clone(),
+            ));
+        }
+        Ok(Self { credentials })
+    }
 
-/// Register a consistent set of client credentials for the OAuth provider
-/// backends' tests, which construct provider homes and so read creds. Idempotent
-/// — every caller registers the same map, so the process-global `OnceLock` is set
-/// once and later calls are no-ops.
-#[cfg(all(test, feature = "oauth-providers"))]
-pub(crate) fn install_test_client_creds() {
-    let creds = HashMap::from([
-        (
-            "google_drive".to_string(),
-            OAuthClientCreds {
-                client_id: "test-client".to_string(),
-                client_secret: None,
-            },
-        ),
-        (
-            "dropbox".to_string(),
-            OAuthClientCreds {
-                client_id: "test-client".to_string(),
-                client_secret: None,
-            },
-        ),
-        (
-            "onedrive".to_string(),
-            OAuthClientCreds {
-                client_id: "test-client".to_string(),
-                client_secret: None,
-            },
-        ),
-    ]);
-    set_oauth_client_creds(creds).expect("register consistent test client credentials");
+    /// No OAuth providers configured. Suitable for apps using only S3,
+    /// CloudKit, or local storage.
+    pub fn empty() -> Self {
+        Self {
+            #[cfg(feature = "oauth-providers")]
+            credentials: HashMap::new(),
+        }
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    fn credentials_for(
+        &self,
+        provider: &crate::config::CloudProvider,
+    ) -> Result<OAuthClientCreds, OAuthClientCredsError> {
+        if !provider.needs_oauth() {
+            return Err(OAuthClientCredsError::UnsupportedProvider(provider.clone()));
+        }
+        self.credentials
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| OAuthClientCredsError::MissingProvider(provider.clone()))
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    pub(crate) fn config_for(
+        &self,
+        provider: crate::config::CloudProvider,
+    ) -> Result<OAuthConfig, OAuthClientCredsError> {
+        use crate::config::CloudProvider;
+        use crate::storage::cloud::{dropbox, google_drive, onedrive};
+
+        let credentials = self.credentials_for(&provider)?;
+        match provider {
+            CloudProvider::GoogleDrive => Ok(google_drive::GoogleDriveCloudHome::oauth_config(
+                credentials,
+            )),
+            CloudProvider::Dropbox => Ok(dropbox::DropboxCloudHome::oauth_config(credentials)),
+            CloudProvider::OneDrive => Ok(onedrive::OneDriveCloudHome::oauth_config(credentials)),
+            provider => Err(OAuthClientCredsError::UnsupportedProvider(provider)),
+        }
+    }
+
+    #[cfg(all(test, feature = "oauth-providers"))]
+    pub(crate) fn for_tests() -> Self {
+        Self::new(HashMap::from([
+            (
+                crate::config::CloudProvider::GoogleDrive,
+                OAuthClientCreds {
+                    client_id: "test-client".to_string(),
+                    client_secret: None,
+                },
+            ),
+            (
+                crate::config::CloudProvider::Dropbox,
+                OAuthClientCreds {
+                    client_id: "test-client".to_string(),
+                    client_secret: None,
+                },
+            ),
+            (
+                crate::config::CloudProvider::OneDrive,
+                OAuthClientCreds {
+                    client_id: "test-client".to_string(),
+                    client_secret: None,
+                },
+            ),
+        ]))
+        .expect("test clients contain only OAuth providers")
+    }
 }
 
 /// Tokens returned from an OAuth authorization or refresh.
@@ -638,79 +648,105 @@ pub(crate) async fn refresh(
     Ok(tokens)
 }
 
-/// The OAuth config for a provider that uses OAuth, or an error for providers
-/// (S3, CloudKit) that don't.
-///
-/// Reads each provider's config from its cloud backend; gated on
-/// `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
-fn oauth_config_for_provider(
-    provider: crate::config::CloudProvider,
-) -> Result<OAuthConfig, OAuthError> {
-    use crate::config::CloudProvider;
-    use crate::storage::cloud::{dropbox, google_drive, onedrive};
-
-    match provider {
-        CloudProvider::GoogleDrive => Ok(google_drive::GoogleDriveCloudHome::oauth_config()?),
-        CloudProvider::Dropbox => Ok(dropbox::DropboxCloudHome::oauth_config()?),
-        CloudProvider::OneDrive => Ok(onedrive::OneDriveCloudHome::oauth_config()?),
-        other => Err(OAuthError::Denied(format!("{other:?} does not use OAuth"))),
+impl OAuthClients {
+    /// Run the desktop OAuth flow for one of this app's configured providers.
+    pub async fn authorize(
+        &self,
+        provider: crate::config::CloudProvider,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<OAuthTokens, OAuthError> {
+        authorize(&self.config_for(provider)?, cancel, clock).await
     }
-}
 
-/// Run an OAuth authorization flow for the given cloud provider (desktop: opens
-/// a browser and captures the redirect on coven's localhost callback server).
-///
-/// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive support
-/// OAuth; other providers return an error.
-///
-/// Uses `authorize`'s localhost-callback flow; gated on `oauth-providers`.
-#[cfg(feature = "oauth-providers")]
-pub async fn authorize_provider(
-    provider: crate::config::CloudProvider,
-    cancel: tokio::sync::watch::Receiver<bool>,
-    clock: &dyn crate::clock::Clock,
-) -> Result<OAuthTokens, OAuthError> {
-    authorize(&oauth_config_for_provider(provider)?, cancel, clock).await
-}
+    /// Build an authorization request for a host-managed redirect flow.
+    pub fn build_authorize_request(
+        &self,
+        provider: crate::config::CloudProvider,
+        redirect_uri: &str,
+    ) -> Result<AuthorizeRequest, OAuthError> {
+        build_authorize_url(&self.config_for(provider)?, redirect_uri)
+    }
 
-/// Build an OAuth authorization request for `provider` redirecting to
-/// `redirect_uri`, for hosts that capture the redirect themselves (a mobile OS
-/// auth session). Pair the returned request, callback `code`, callback `state`,
-/// and same `redirect_uri` with [`exchange_code_for_provider`].
-///
-/// The provider configuration and this function are gated on `oauth-providers`.
-#[cfg(feature = "oauth-providers")]
-pub fn build_authorize_request_for_provider(
-    provider: crate::config::CloudProvider,
-    redirect_uri: &str,
-) -> Result<AuthorizeRequest, OAuthError> {
-    build_authorize_url(&oauth_config_for_provider(provider)?, redirect_uri)
-}
+    /// Exchange the result of [`Self::build_authorize_request`] for tokens.
+    pub async fn exchange_code(
+        &self,
+        provider: crate::config::CloudProvider,
+        code: &str,
+        callback_state: Option<&str>,
+        request: &AuthorizeRequest,
+        redirect_uri: &str,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<OAuthTokens, OAuthError> {
+        exchange_authorize_request(
+            &self.config_for(provider)?,
+            code,
+            callback_state,
+            request,
+            redirect_uri,
+            clock,
+        )
+        .await
+    }
 
-/// Exchange an authorization `code` captured by the host for `provider`'s
-/// tokens. `redirect_uri`, `request`, and `callback_state` must match the
-/// originating [`build_authorize_request_for_provider`] call.
-///
-/// Gated on `oauth-providers`.
-#[cfg(feature = "oauth-providers")]
-pub async fn exchange_code_for_provider(
-    provider: crate::config::CloudProvider,
-    code: &str,
-    callback_state: Option<&str>,
-    request: &AuthorizeRequest,
-    redirect_uri: &str,
-    clock: &dyn crate::clock::Clock,
-) -> Result<OAuthTokens, OAuthError> {
-    exchange_authorize_request(
-        &oauth_config_for_provider(provider)?,
-        code,
-        callback_state,
-        request,
-        redirect_uri,
-        clock,
-    )
-    .await
+    /// Authorize Google Drive, prepare this store's folder, and retain the
+    /// resulting tokens in the store key service.
+    pub async fn sign_in_google_drive(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        store_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<String, crate::storage::cloud::setup::SetupError> {
+        let config = self
+            .config_for(crate::config::CloudProvider::GoogleDrive)
+            .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
+        crate::storage::cloud::setup::sign_in_google_drive(
+            config,
+            key_service,
+            store_name,
+            cancel,
+            clock,
+        )
+        .await
+    }
+
+    /// Authorize Dropbox, prepare this store's folder, and retain the resulting
+    /// tokens in the store key service.
+    pub async fn sign_in_dropbox(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        store_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<String, crate::storage::cloud::setup::SetupError> {
+        let config = self
+            .config_for(crate::config::CloudProvider::Dropbox)
+            .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
+        crate::storage::cloud::setup::sign_in_dropbox(
+            config,
+            key_service,
+            store_name,
+            cancel,
+            clock,
+        )
+        .await
+    }
+
+    /// Authorize OneDrive, prepare this store's folder, and retain the
+    /// resulting tokens in the store key service.
+    pub async fn sign_in_onedrive(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<(String, String), crate::storage::cloud::setup::SetupError> {
+        let config = self
+            .config_for(crate::config::CloudProvider::OneDrive)
+            .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
+        crate::storage::cloud::setup::sign_in_onedrive(config, key_service, cancel, clock).await
+    }
 }
 
 #[cfg(all(test, feature = "oauth-providers"))]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::store_dir::StoreDir;
 
 /// Cloud home provider selection.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CloudProvider {
     S3,
     GoogleDrive,

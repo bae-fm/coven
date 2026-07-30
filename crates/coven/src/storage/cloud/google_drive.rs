@@ -158,19 +158,18 @@ enum DriveSlotState {
 impl GoogleDriveCloudHome {
     pub(crate) fn new(
         folder_id: String,
+        config: OAuthConfig,
         tokens: OAuthTokens,
         key_service: StoreKeys,
         clock: ClockRef,
-    ) -> Result<Self, CloudHomeError> {
-        let config =
-            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             folder_id,
             drive_api: DRIVE_API.to_string(),
             upload_api: UPLOAD_API.to_string(),
             ids: std::sync::Arc::new(UuidProvider),
             session: OAuthSession::new(tokens, key_service, clock, config, "Google Drive"),
-        })
+        }
     }
 
     #[cfg(test)]
@@ -186,9 +185,8 @@ impl GoogleDriveCloudHome {
         self
     }
 
-    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
-        let creds = crate::oauth::oauth_client_creds("google_drive")?;
-        Ok(OAuthConfig {
+    pub(crate) fn oauth_config(creds: crate::oauth::OAuthClientCreds) -> OAuthConfig {
+        OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
@@ -200,7 +198,7 @@ impl GoogleDriveCloudHome {
             ],
             redirect_port: 19284,
             extra_auth_params: vec![("access_type".to_string(), "offline".to_string())],
-        })
+        }
     }
 
     /// The Drive HTTP client (shared, owned by the session).
@@ -1566,9 +1564,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn home() -> GoogleDriveCloudHome {
-        crate::oauth::install_test_client_creds();
+        let config = crate::oauth::OAuthClients::for_tests()
+            .config_for(crate::config::CloudProvider::GoogleDrive)
+            .expect("Google Drive test client");
         GoogleDriveCloudHome::new(
             "folder123".to_string(),
+            config,
             OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
@@ -1577,7 +1578,6 @@ mod tests {
             StoreKeys::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
-        .expect("build test Google Drive home")
     }
 
     #[derive(Clone, Debug)]

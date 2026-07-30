@@ -276,6 +276,7 @@ impl TransportFixture {
             None,
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
+            crate::oauth::OAuthClients::empty(),
             None,
             None,
             Arc::new(SystemClock),

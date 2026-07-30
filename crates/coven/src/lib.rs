@@ -102,11 +102,8 @@ pub use migration::{Migration, MigrationStep};
 #[cfg(any(test, feature = "oauth-providers"))]
 pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]
-pub use oauth::{
-    authorize_provider, build_authorize_request_for_provider, exchange_code_for_provider,
-    OAuthClientCredsError,
-};
-pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
+pub use oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
+pub use oauth::{OAuthClients, OAuthTokens};
 pub use protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
@@ -125,6 +122,8 @@ pub use restoration::{
     OwnerRecoveryAuthority, RestoreAuthority, RestoreCode, RestoreCodeError, RestoreCodeInfo,
     RestoreSource,
 };
+#[cfg(feature = "oauth-providers")]
+pub use storage::fetch_account_email;
 #[cfg(any(test, feature = "test-utils"))]
 pub use storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
@@ -140,8 +139,6 @@ pub use storage::{
     ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, S3CloudHome,
     S3EndpointBinding, StoreProviderBinding, UploadProgress,
 };
-#[cfg(feature = "oauth-providers")]
-pub use storage::{fetch_account_email, sign_in_dropbox, sign_in_google_drive, sign_in_onedrive};
 pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{
     BlobDecl, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,

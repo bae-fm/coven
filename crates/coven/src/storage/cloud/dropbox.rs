@@ -43,19 +43,18 @@ pub(crate) struct DropboxCloudHome {
 impl DropboxCloudHome {
     pub(crate) fn new(
         folder_path: String,
+        config: OAuthConfig,
         tokens: OAuthTokens,
         key_service: StoreKeys,
         clock: ClockRef,
-    ) -> Result<Self, CloudHomeError> {
-        let config =
-            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             folder_path,
             api_base: API_BASE.to_string(),
             content_base: CONTENT_BASE.to_string(),
             session: OAuthSession::new(tokens, key_service, clock, config, "Dropbox"),
             namespace_id: OnceLock::new(),
-        })
+        }
     }
 
     #[cfg(test)]
@@ -75,9 +74,8 @@ impl DropboxCloudHome {
         }
     }
 
-    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
-        let creds = crate::oauth::oauth_client_creds("dropbox")?;
-        Ok(OAuthConfig {
+    pub(crate) fn oauth_config(creds: crate::oauth::OAuthClientCreds) -> OAuthConfig {
+        OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://www.dropbox.com/oauth2/authorize".to_string(),
@@ -91,7 +89,7 @@ impl DropboxCloudHome {
             scopes: vec![],
             redirect_port: 19284,
             extra_auth_params: vec![("token_access_type".to_string(), "offline".to_string())],
-        })
+        }
     }
 
     fn client(&self) -> &reqwest::Client {
@@ -1359,9 +1357,12 @@ mod tests {
     }
 
     fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
-        crate::oauth::install_test_client_creds();
+        let config = crate::oauth::OAuthClients::for_tests()
+            .config_for(crate::config::CloudProvider::Dropbox)
+            .expect("Dropbox test client");
         DropboxCloudHome::new(
             folder_path.to_string(),
+            config,
             OAuthTokens {
                 access_token: String::new(),
                 refresh_token: None,
@@ -1370,7 +1371,6 @@ mod tests {
             StoreKeys::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
-        .expect("build test Dropbox home")
     }
 
     #[derive(Clone, Debug)]
@@ -1767,8 +1767,9 @@ mod tests {
 
     #[test]
     fn oauth_config_uses_dropbox_urls() {
-        crate::oauth::install_test_client_creds();
-        let config = DropboxCloudHome::oauth_config().expect("build Dropbox oauth config");
+        let config = crate::oauth::OAuthClients::for_tests()
+            .config_for(crate::config::CloudProvider::Dropbox)
+            .expect("build Dropbox oauth config");
         assert_eq!(config.auth_url, "https://www.dropbox.com/oauth2/authorize");
         assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");
         assert!(config.client_secret.is_none());

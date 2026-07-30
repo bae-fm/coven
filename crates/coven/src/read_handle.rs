@@ -71,12 +71,14 @@ impl CovenReadHandle {
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
         identity_custody: Arc<dyn DeviceIdentityCustody>,
+        oauth_clients: crate::oauth::OAuthClients,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
-        let security = StoreSecurity::new(key_service, key_custody, identity_custody);
+        let security =
+            StoreSecurity::new(key_service, key_custody, identity_custody, oauth_clients);
         let rows = ReadStoreRows::new(database.clone());
         let blobs = ReadStoreBlobs::new(
             database.clone(),

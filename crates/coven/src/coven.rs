@@ -135,6 +135,7 @@ impl Coven {
             key_service: StoreKeys::new(current.store_id),
             key_custody: KeyCustody::Keyring,
             identity_custody: IdentityCustody::Keyring,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
             cloudkit_ops: None,
             observer: None,
         }
@@ -152,6 +153,7 @@ pub struct CovenBuilder {
     key_service: StoreKeys,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
+    oauth_clients: crate::oauth::OAuthClients,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     blob_chunking: crate::storage::BlobChunking,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -297,6 +299,12 @@ impl CovenBuilder {
         self
     }
 
+    /// The OAuth applications this app uses for consumer cloud providers.
+    pub fn oauth_clients(mut self, clients: crate::oauth::OAuthClients) -> Self {
+        self.oauth_clients = clients;
+        self
+    }
+
     pub fn apply_cloudkit_ops(
         mut self,
         ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -372,6 +380,7 @@ impl CovenBuilder {
             self.key_service,
             key_custody,
             identity_custody,
+            self.oauth_clients,
             self.clock,
             self.cloudkit_ops,
             self.observer,
@@ -431,6 +440,7 @@ impl CovenBuilder {
             self.key_service,
             key_custody,
             identity_custody,
+            self.oauth_clients,
             self.clock,
             self.cloudkit_ops,
             self.blob_chunking,

@@ -728,6 +728,7 @@ pub(crate) fn test_store_security(
         crate::keys::StoreKeys::new(store_id.to_string()),
         master_keys,
         identity,
+        crate::oauth::OAuthClients::empty(),
     )
 }
 

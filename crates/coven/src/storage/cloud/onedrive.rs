@@ -48,18 +48,17 @@ impl OneDriveCloudHome {
     pub(crate) fn new(
         drive_id: String,
         folder_id: String,
+        config: OAuthConfig,
         tokens: OAuthTokens,
         key_service: StoreKeys,
         clock: ClockRef,
-    ) -> Result<Self, CloudHomeError> {
-        let config =
-            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             drive_id,
             folder_id,
             graph_api: GRAPH_API.to_string(),
             session: OAuthSession::new(tokens, key_service, clock, config, "OneDrive"),
-        })
+        }
     }
 
     #[cfg(test)]
@@ -68,9 +67,8 @@ impl OneDriveCloudHome {
         self
     }
 
-    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
-        let creds = crate::oauth::oauth_client_creds("onedrive")?;
-        Ok(OAuthConfig {
+    pub(crate) fn oauth_config(creds: crate::oauth::OAuthClientCreds) -> OAuthConfig {
+        OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
@@ -84,7 +82,7 @@ impl OneDriveCloudHome {
             ],
             redirect_port: 19284,
             extra_auth_params: vec![],
-        })
+        }
     }
 
     fn client(&self) -> &reqwest::Client {
@@ -777,10 +775,13 @@ mod tests {
     }
 
     fn home() -> OneDriveCloudHome {
-        crate::oauth::install_test_client_creds();
+        let config = crate::oauth::OAuthClients::for_tests()
+            .config_for(crate::config::CloudProvider::OneDrive)
+            .expect("OneDrive test client");
         OneDriveCloudHome::new(
             "drive123".to_string(),
             "folder456".to_string(),
+            config,
             OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
@@ -789,7 +790,6 @@ mod tests {
             StoreKeys::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
-        .expect("build test OneDrive home")
     }
 
     #[derive(Clone, Debug)]
@@ -1072,8 +1072,9 @@ mod tests {
 
     #[test]
     fn oauth_config_uses_consumers_endpoint() {
-        crate::oauth::install_test_client_creds();
-        let config = OneDriveCloudHome::oauth_config().expect("build OneDrive oauth config");
+        let config = crate::oauth::OAuthClients::for_tests()
+            .config_for(crate::config::CloudProvider::OneDrive)
+            .expect("build OneDrive oauth config");
         assert!(config.auth_url.contains("/consumers/"));
         assert!(config.token_url.contains("/consumers/"));
         assert!(config.scopes.contains(&"Files.ReadWrite".to_string()));

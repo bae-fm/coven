@@ -172,9 +172,15 @@ async fn neither_owner_nor_zone_builds_a_private_home() {
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
-    let home = create_cloud_home_with_cloudkit(&config, &key_service, clock, Some(ops.clone()))
-        .await
-        .expect("private CloudKit config builds a home");
+    let home = create_cloud_home_with_cloudkit(
+        &config,
+        &key_service,
+        &crate::oauth::OAuthClients::empty(),
+        clock,
+        Some(ops.clone()),
+    )
+    .await
+    .expect("private CloudKit config builds a home");
     home.list("").await.expect("list against the built home");
 
     assert_eq!(
@@ -190,9 +196,15 @@ async fn both_owner_and_zone_build_a_shared_home() {
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
-    let home = create_cloud_home_with_cloudkit(&config, &key_service, clock, Some(ops.clone()))
-        .await
-        .expect("shared CloudKit config builds a home");
+    let home = create_cloud_home_with_cloudkit(
+        &config,
+        &key_service,
+        &crate::oauth::OAuthClients::empty(),
+        clock,
+        Some(ops.clone()),
+    )
+    .await
+    .expect("shared CloudKit config builds a home");
     home.list("").await.expect("list against the built home");
 
     assert_eq!(
@@ -212,7 +224,14 @@ async fn mixed_owner_zone_is_a_configuration_error() {
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
-    let result = create_cloud_home_with_cloudkit(&config, &key_service, clock, Some(ops)).await;
+    let result = create_cloud_home_with_cloudkit(
+        &config,
+        &key_service,
+        &crate::oauth::OAuthClients::empty(),
+        clock,
+        Some(ops),
+    )
+    .await;
     match result {
         Ok(_) => panic!("mixed owner/zone must not build a home"),
         Err(CloudHomeError::Configuration(message)) => {

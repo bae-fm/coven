@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use coven::{
-    create_cloud_home, CloudHomeError, CloudProvider, Config, StoreDir, StoreKeys, SystemClock,
+    create_cloud_home, CloudHomeError, CloudProvider, Config, OAuthClients, StoreDir, StoreKeys,
+    SystemClock,
 };
 
 #[tokio::test]
@@ -24,7 +25,14 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     config.cloud_home.s3_bucket = None;
 
     let key_service = StoreKeys::new("lib-cfg".to_string());
-    let error = match create_cloud_home(&config, &key_service, Arc::new(SystemClock)).await {
+    let error = match create_cloud_home(
+        &config,
+        &key_service,
+        &OAuthClients::empty(),
+        Arc::new(SystemClock),
+    )
+    .await
+    {
         Ok(_) => panic!("a provider with no bucket must not build a cloud home"),
         Err(error) => error,
     };

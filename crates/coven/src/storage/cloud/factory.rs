@@ -29,21 +29,23 @@ fn parse_oauth_tokens(
 pub async fn create_cloud_home(
     config: &crate::config::Config,
     key_service: &crate::keys::StoreKeys,
+    oauth_clients: &crate::oauth::OAuthClients,
     clock: crate::clock::ClockRef,
 ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
-    create_cloud_home_with_cloudkit(config, key_service, clock, None).await
+    create_cloud_home_with_cloudkit(config, key_service, oauth_clients, clock, None).await
 }
 
 pub(crate) async fn create_cloud_home_with_cloudkit(
     config: &crate::config::Config,
     key_service: &crate::keys::StoreKeys,
+    oauth_clients: &crate::oauth::OAuthClients,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
 ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
     use crate::config::CloudProvider;
 
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = &clock;
+    let _ = (&clock, oauth_clients);
 
     match config.cloud_home.provider {
         Some(CloudProvider::S3) | None => {
@@ -94,12 +96,16 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
                     )
                 })?;
             let tokens = parse_oauth_tokens(key_service, "Google Drive")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::GoogleDrive)
+                .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
             Ok(Box::new(super::google_drive::GoogleDriveCloudHome::new(
                 folder_id,
+                oauth_config,
                 tokens,
                 key_service.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(feature = "oauth-providers")]
         Some(CloudProvider::Dropbox) => {
@@ -111,12 +117,16 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
                     CloudHomeError::Configuration("Dropbox folder path not configured".to_string())
                 })?;
             let tokens = parse_oauth_tokens(key_service, "Dropbox")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::Dropbox)
+                .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
             Ok(Box::new(super::dropbox::DropboxCloudHome::new(
                 folder_path,
+                oauth_config,
                 tokens,
                 key_service.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(feature = "oauth-providers")]
         Some(CloudProvider::OneDrive) => {
@@ -131,13 +141,17 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
                     CloudHomeError::Configuration("OneDrive folder ID not configured".to_string())
                 })?;
             let tokens = parse_oauth_tokens(key_service, "OneDrive")?;
+            let oauth_config = oauth_clients
+                .config_for(CloudProvider::OneDrive)
+                .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
             Ok(Box::new(super::onedrive::OneDriveCloudHome::new(
                 drive_id,
                 folder_id,
+                oauth_config,
                 tokens,
                 key_service.clone(),
                 clock,
-            )?))
+            )))
         }
         #[cfg(not(feature = "oauth-providers"))]
         Some(CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive) => {
