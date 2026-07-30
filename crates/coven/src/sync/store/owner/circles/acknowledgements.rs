@@ -12,6 +12,121 @@ pub(crate) struct CircleAcknowledgementWriter<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
 }
 
+pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
+    database: &'operation crate::database::StoreDatabase,
+    history:
+        &'operation crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+}
+
+impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
+    pub(super) fn new(
+        database: &'operation crate::database::StoreDatabase,
+        history: &'operation crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+    ) -> Self {
+        Self { database, history }
+    }
+
+    pub(crate) async fn load(
+        &self,
+        reference: &crate::protocol::store_commit::CircleAckRef,
+        control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<CircleAck, StoreAckError> {
+        let access = self
+            .database
+            .circle_package_access(
+                self.history.root().clone(),
+                reference.circle_id,
+                control.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                StoreAckError::InvalidOutbound(format!(
+                    "Circle {} acknowledgement key is not resolvable from retained controls",
+                    reference.circle_id
+                ))
+            })?;
+        let author = self
+            .database
+            .activated_store_device_registration(reference.registration.clone())
+            .await?;
+        let context = ProtocolObjectContext::circle(
+            self.history.root().store_root_hash,
+            ProtocolObjectDomain::CircleAcknowledgement,
+            access.into_encryption(),
+        );
+        let semantic_prefix = circle_ack_slot_prefix(
+            reference.circle_id,
+            &author.device_id.to_string(),
+            reference.sequence,
+        );
+        let bytes = self
+            .history
+            .storage()
+            .read_protocol_object(&context, &reference.object, &semantic_prefix)
+            .await
+            .map_err(StoreObjectError::from)?;
+        CircleAck::parse_at(&bytes, self.history.root(), reference, &author)
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) async fn load_under_retained_controls(
+        &self,
+        reference: &crate::protocol::store_commit::CircleAckRef,
+        preferred: &crate::protocol::circle::CircleControlCoord,
+        retained: &[crate::protocol::circle::CircleControlCoord],
+    ) -> Result<CircleAck, StoreAckError> {
+        let mut last_error = None;
+        for control in std::iter::once(preferred)
+            .chain(retained.iter().filter(|control| *control != preferred))
+        {
+            match self.load(reference, control).await {
+                Ok(acknowledgement) => return Ok(acknowledgement),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            StoreAckError::InvalidOutbound(format!(
+                "Circle {} acknowledgement has no retained control to resolve its epoch key",
+                reference.circle_id
+            ))
+        }))
+    }
+
+    pub(crate) async fn stable_dominating(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        current_control: &crate::protocol::circle::CircleControlCoord,
+        snapshot_cut: &CommitFrontier,
+    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, StoreAckError> {
+        let devices = self
+            .database
+            .active_circle_access_devices(circle_id)
+            .await?;
+        if devices.is_empty() {
+            return Ok(None);
+        }
+        let mut acknowledgements = Vec::new();
+        for device_id in devices {
+            let Some(reference) = self
+                .database
+                .activated_circle_ack(circle_id, device_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let acknowledgement = self.load(&reference, current_control).await?;
+            if !acknowledgement.store_cut.covers(snapshot_cut) {
+                return Ok(None);
+            }
+            acknowledgements.push(reference);
+        }
+        acknowledgements.sort();
+        Ok(Some(acknowledgements))
+    }
+}
+
 impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
     pub(super) fn new(writer: &'operation mut AuthorizedWriterOperation<'storage>) -> Self {
         Self { writer }

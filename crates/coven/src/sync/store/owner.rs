@@ -2,7 +2,6 @@ use super::*;
 use crate::database::BlockedWriteDiscard;
 use crate::protocol::store_commit::StoreRootRef;
 
-mod acknowledgements;
 mod circle_bootstrap;
 mod circles;
 pub(super) mod device_exclusion;
@@ -19,6 +18,7 @@ mod verification;
 mod verified_history;
 pub(super) mod writer;
 
+use circles::VerifiedCircleHistory;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 use history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use host_write::HostWriteBlobStaging;
@@ -1412,7 +1412,9 @@ impl Store {
         self.authorize_history()
             .await
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
-            .load_circle_acknowledgement(reference, control)
+            .circles()
+            .acknowledgements()
+            .load(reference, control)
             .await
     }
 
@@ -1734,28 +1736,6 @@ impl<'storage> AuthorizedStore<'storage> {
 
     fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
         &mut self.history
-    }
-
-    pub(super) async fn load_circle_acknowledgement_under_retained_controls(
-        &self,
-        reference: &crate::protocol::store_commit::CircleAckRef,
-        preferred: &crate::protocol::circle::CircleControlCoord,
-        retained: &[crate::protocol::circle::CircleControlCoord],
-    ) -> Result<crate::protocol::store_commit::CircleAck, StoreAckError> {
-        self.history
-            .load_circle_acknowledgement_under_retained_controls(reference, preferred, retained)
-            .await
-    }
-
-    pub(super) async fn stable_circle_acknowledgements_dominating(
-        &self,
-        circle_id: crate::protocol::circle::CircleId,
-        current_control: &crate::protocol::circle::CircleControlCoord,
-        snapshot_cut: &crate::protocol::store_commit::CommitFrontier,
-    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, StoreAckError> {
-        self.history
-            .stable_circle_acknowledgements_dominating(circle_id, current_control, snapshot_cut)
-            .await
     }
 
     pub(crate) fn db(&self) -> &StoreDatabase {

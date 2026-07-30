@@ -74,8 +74,8 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                         .join(frontier.clone())
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
                 })?;
-            let bootstrap = self
-                .writer
+            let bootstrap = super::AuthorizedCircleWriter::new(self.writer)
+                .snapshots()
                 .capture_circle_snapshot_at_cutoff(
                     store_dir.as_ref().to_path_buf(),
                     routing_encryption,

@@ -1339,8 +1339,7 @@ impl AuthorizedReclaim<'_, '_> {
             // stream and which of its generations every active-access device has
             // acknowledged. Read it once.
             let streams = Box::pin(load_circle_snapshot_streams(
-                &database,
-                self.writer.history_verifier_mut(),
+                self.writer.history(),
                 circle_id,
                 &control,
                 registrations,
@@ -1428,16 +1427,15 @@ struct CircleSnapshotStream {
 /// a device's stream may span epochs that rotated away and a single-epoch key
 /// cannot decrypt the older ones.
 async fn load_circle_snapshot_streams(
-    database: &StoreDatabase,
-    history_verifier: &MergeHistoryVerifier<'_>,
+    history: &mut AuthorizedStoreHistory<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Vec<CircleSnapshotStream>, StoreReclaimError> {
-    let storage = history_verifier.storage();
-    let root = history_verifier.root();
+    let database = history.database().clone();
+    let root = history.root().clone();
     let encryption = database
-        .circle_package_access(root.clone(), circle_id, current_control.clone())
+        .circle_package_access(root, circle_id, current_control.clone())
         .await?
         .ok_or_else(|| {
             StoreReclaimError::Authorization(format!(
@@ -1453,15 +1451,16 @@ async fn load_circle_snapshot_streams(
         // reader held it) is not current-epoch coverage; skip the stream — reclaim
         // is best-effort and idempotent, so a later cycle retries once coverage is
         // resolvable. Only a decryptable stream contributes coverage evidence.
-        let generations = match super::snapshot::load_circle_snapshot_stream_refs(
-            storage,
-            root,
-            circle_id,
-            encryption.clone(),
-            registration_ref,
-            registration,
-        )
-        .await
+        let generations = match history
+            .circles()
+            .snapshots()
+            .load_stream_refs(
+                circle_id,
+                encryption.clone(),
+                registration_ref,
+                registration,
+            )
+            .await
         {
             Ok(stream) => stream,
             Err(error) => {
@@ -1484,7 +1483,7 @@ async fn load_circle_snapshot_streams(
 /// Every Circle snapshot generation, across every active device's stream, whose
 /// cut every device holding active Circle access has acknowledged.
 async fn stable_circle_snapshots(
-    history: &AuthorizedStoreHistory<'_>,
+    history: &mut AuthorizedStoreHistory<'_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     streams: &[CircleSnapshotStream],
@@ -1493,11 +1492,9 @@ async fn stable_circle_snapshots(
     for stream in streams {
         for (reference, meta) in &stream.generations {
             if let Some(acknowledgements) = history
-                .stable_circle_acknowledgements_dominating(
-                    circle_id,
-                    current_control,
-                    &meta.bootstrap.coverage,
-                )
+                .circles()
+                .acknowledgements()
+                .stable_dominating(circle_id, current_control, &meta.bootstrap.coverage)
                 .await
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
             {
@@ -1541,10 +1538,8 @@ async fn choose_circle_snapshot(
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Option<SelectedCircleSnapshot>, StoreReclaimError> {
-    let database = history.database().clone();
     let streams = Box::pin(load_circle_snapshot_streams(
-        &database,
-        history.history_verifier_mut(),
+        history,
         circle_id,
         current_control,
         registrations,
@@ -1622,11 +1617,10 @@ impl AuthorizedReclaim<'_, '_> {
         for acknowledgement in database.activated_circle_acks(circle_id).await? {
             let ack = match self
                 .writer
-                .load_circle_acknowledgement_under_retained_controls(
-                    &acknowledgement,
-                    current_control,
-                    &retained_controls,
-                )
+                .history()
+                .circles()
+                .acknowledgements()
+                .load_under_retained_controls(&acknowledgement, current_control, &retained_controls)
                 .await
             {
                 Ok(ack) => ack,
@@ -2208,8 +2202,7 @@ async fn verify_circle_snapshot_image_reclaim_claim(
         .await?;
     let author_stream = [(claim.target.snapshot_author.clone(), author)];
     let streams = Box::pin(load_circle_snapshot_streams(
-        &database,
-        history.history_verifier_mut(),
+        history,
         circle_id,
         &current_control,
         &author_stream,
@@ -2257,7 +2250,9 @@ async fn verify_circle_snapshot_image_reclaim_claim(
         ));
     }
     if history
-        .stable_circle_acknowledgements_dominating(
+        .circles()
+        .acknowledgements()
+        .stable_dominating(
             circle_id,
             &current_control,
             &superseding.1.bootstrap.coverage,
@@ -2484,16 +2479,17 @@ async fn verify_circle_package_snapshot_coverage_claim(
         .history_verifier_mut()
         .load_registration(&claim.covering_snapshot.author_registration)
         .await?;
-    let stream = super::snapshot::load_circle_snapshot_stream_refs(
-        history.storage(),
-        &root,
-        circle_id,
-        access.into_encryption(),
-        &claim.covering_snapshot.author_registration,
-        &author.value,
-    )
-    .await
-    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+    let stream = history
+        .circles()
+        .snapshots()
+        .load_stream_refs(
+            circle_id,
+            access.into_encryption(),
+            &claim.covering_snapshot.author_registration,
+            &author.value,
+        )
+        .await
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     let (_, snapshot) = stream
         .into_iter()
         .find(|(reference, _)| *reference == claim.covering_snapshot.snapshot)
@@ -2508,7 +2504,9 @@ async fn verify_circle_package_snapshot_coverage_claim(
     }
     let cut = &snapshot.bootstrap.coverage;
     let expected = history
-        .stable_circle_acknowledgements_dominating(circle_id, &current_control, cut)
+        .circles()
+        .acknowledgements()
+        .stable_dominating(circle_id, &current_control, cut)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
         .ok_or_else(|| {
@@ -2577,11 +2575,9 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
     let retained_controls = database.retained_circle_control_coords(circle_id).await?;
     let acknowledgement_ref = claim.proof.acknowledgement();
     let acknowledgement = history
-        .load_circle_acknowledgement_under_retained_controls(
-            acknowledgement_ref,
-            &current_control,
-            &retained_controls,
-        )
+        .circles()
+        .acknowledgements()
+        .load_under_retained_controls(acknowledgement_ref, &current_control, &retained_controls)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     // The recipient's signed acknowledgement is the sole authority for the coverage

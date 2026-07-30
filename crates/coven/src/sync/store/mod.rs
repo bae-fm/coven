@@ -149,6 +149,8 @@ pub(crate) async fn push_circle_snapshots_for_test(
         .authorize_writer()
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .circles()
+        .snapshots()
         .author_one_circle_snapshot_for_test(temp_dir, schema_version, created_at, store_routing)
         .await
 }
@@ -174,6 +176,8 @@ pub(crate) async fn drive_circle_snapshot_publications_for_test(
         .authorize_writer()
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .circles()
+        .snapshots()
         .push_circle_snapshots(temp_dir, schema_version, created_at, store_routing)
         .await
 }
@@ -192,6 +196,8 @@ pub(crate) async fn load_circle_snapshot_metas_for_test(
         .authorize_writer()
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .circles()
+        .snapshots()
         .load_circle_snapshot_metas_for_test(circle_id, encryption)
         .await
 }
@@ -217,6 +223,8 @@ pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
         .authorize_writer()
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .circles()
+        .snapshots()
         .verify_standalone_circle_snapshot_image_for_test(
             circle_id,
             epoch_encryption,
@@ -241,6 +249,8 @@ pub(crate) async fn circle_snapshot_is_stable_for_test(
         .authorize_writer()
         .await
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
+        .circles()
+        .snapshots()
         .circle_snapshot_is_stable(circle_id, control, snapshot_cut)
         .await
 }

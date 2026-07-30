@@ -480,14 +480,10 @@ async fn stage_restore_circle_decisions(
         )
         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
         let store_database = crate::database::StoreDatabase::from_database(query_db);
-        super::select_staged_circle_decisions(
-            history_verifier,
-            &store_database,
-            store_frontier,
-            restorer_identity,
-            routing_key,
-        )
-        .await
+        crate::sync::store::owner::VerifiedCircleHistory::new(&store_database, history_verifier)
+            .snapshots()
+            .select_staged_decisions(store_frontier, restorer_identity, routing_key)
+            .await
     }
     .await;
     query_image.finish(staged)

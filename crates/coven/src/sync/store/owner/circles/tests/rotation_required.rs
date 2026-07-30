@@ -758,12 +758,14 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         .bind_device(&fixture.db, &fixture.signer)
         .await
         .expect("load the successor bootstrap Store");
-    let authorized = loaded_store
+    let mut authorized = loaded_store
         .authorize_writer()
         .await
         .expect("authorize the successor bootstrap cut");
     let (image_temp, image_dir) = temp_store_dir();
     let cut = authorized
+        .circles()
+        .snapshots()
         .capture_circle_snapshot_at_cutoff(
             image_dir.as_ref().to_path_buf(),
             &EncryptionService::from_key([42; 32]),
@@ -3196,16 +3198,22 @@ async fn owner_circle_snapshot_stream(
         .activated_store_device_registration(registration_ref.clone())
         .await
         .expect("read the local activated registration");
-    crate::sync::store::snapshot::load_circle_snapshot_stream_refs(
-        &fixture.store.storage,
-        &fixture.store.root,
-        fixture.circle_id,
-        encryption,
-        &registration_ref,
-        &registration,
-    )
-    .await
-    .expect("walk the owner's Circle snapshot stream")
+    device
+        .store
+        .authorize_writer()
+        .await
+        .expect("authorize Circle snapshot stream reader")
+        .history()
+        .circles()
+        .snapshots()
+        .load_stream_refs(
+            fixture.circle_id,
+            encryption,
+            &registration_ref,
+            &registration,
+        )
+        .await
+        .expect("walk the owner's Circle snapshot stream")
 }
 
 /// Whether the exact Circle snapshot image ciphertext is still readable in cloud

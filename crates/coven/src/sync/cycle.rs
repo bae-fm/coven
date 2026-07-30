@@ -1013,6 +1013,8 @@ impl SyncComponents {
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let bootstrap = authorization
+            .circles()
+            .snapshots()
             .capture_circle_snapshot_cut(
                 store_dir.as_ref().to_path_buf(),
                 &routing_encryption,

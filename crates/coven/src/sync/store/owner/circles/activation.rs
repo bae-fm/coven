@@ -1551,6 +1551,16 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         super::packages::CirclePackageReader::new(self.database, self.history)
     }
 
+    pub(crate) fn acknowledgements(
+        &mut self,
+    ) -> super::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+        super::acknowledgements::CircleAcknowledgementReader::new(self.database, self.history)
+    }
+
+    pub(crate) fn snapshots(&mut self) -> super::snapshots::CircleSnapshotReader<'_, 'storage> {
+        super::snapshots::CircleSnapshotReader::new(self.database, self.history)
+    }
+
     pub(crate) async fn load_activations(
         &mut self,
         verified: &VerifiedStoreBatchCommit,

@@ -17,6 +17,7 @@ mod commands;
 mod packages;
 mod preparation;
 mod publication;
+mod snapshots;
 
 pub(super) use activation::VerifiedCircleHistory;
 pub(crate) use packages::CirclePackageReadError;
@@ -56,6 +57,10 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         &mut self,
     ) -> acknowledgements::CircleAcknowledgementWriter<'_, 'storage> {
         acknowledgements::CircleAcknowledgementWriter::new(self.writer)
+    }
+
+    pub(crate) fn snapshots(&mut self) -> snapshots::CircleSnapshotWriter<'_, 'storage> {
+        snapshots::CircleSnapshotWriter::new(self.writer)
     }
 }
 
