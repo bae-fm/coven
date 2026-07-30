@@ -396,6 +396,28 @@ impl GoogleDriveCloudHome {
         Ok(())
     }
 
+    async fn create_file_with_media(
+        &self,
+        key: &str,
+        encoded: &str,
+        media_body: Bytes,
+    ) -> Result<(), CloudHomeError> {
+        let file_id = self.create_file_for_key(key, encoded).await?;
+        let upload_error = match self
+            .upload_file_media(key, &file_id, media_body, "create")
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match self.delete_created_file(key, &file_id).await {
+            Ok(()) => Err(upload_error),
+            Err(delete_error) => Err(CloudHomeError::Transport(format!(
+                "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
+            ))),
+        }
+    }
+
     async fn delete_created_file(&self, key: &str, file_id: &str) -> Result<(), CloudHomeError> {
         let resp = self
             .session
@@ -863,34 +885,6 @@ where
     }
 }
 
-async fn create_file_with_media<Create, CreateFut, Upload, UploadFut, Delete, DeleteFut>(
-    key: &str,
-    create_metadata: Create,
-    upload_media: Upload,
-    delete_created_file: Delete,
-) -> Result<(), CloudHomeError>
-where
-    Create: FnOnce() -> CreateFut,
-    CreateFut: std::future::Future<Output = Result<String, CloudHomeError>>,
-    Upload: FnOnce(String) -> UploadFut,
-    UploadFut: std::future::Future<Output = Result<(), CloudHomeError>>,
-    Delete: FnOnce(String) -> DeleteFut,
-    DeleteFut: std::future::Future<Output = Result<(), CloudHomeError>>,
-{
-    let file_id = create_metadata().await?;
-    let upload_result = upload_media(file_id.clone()).await;
-    let upload_error = match upload_result {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    match delete_created_file(file_id).await {
-        Ok(()) => Err(upload_error),
-        Err(delete_error) => Err(CloudHomeError::Transport(format!(
-            "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
-        ))),
-    }
-}
-
 /// A Drive resumable sink. New objects use a resumable-create session, which
 /// keeps the file absent until the final part commits; `finish` then resolves
 /// concurrent same-name creates by the create token. Existing objects use a
@@ -1242,16 +1236,8 @@ impl CloudHome for GoogleDriveCloudHome {
             self.upload_file_media(key, &file_id, media_body, "update")
                 .await?;
         } else {
-            create_file_with_media(
-                key,
-                || self.create_file_for_key(key, &encoded),
-                |file_id| {
-                    let body = media_body.clone();
-                    async move { self.upload_file_media(key, &file_id, body, "create").await }
-                },
-                |file_id| async move { self.delete_created_file(key, &file_id).await },
-            )
-            .await?;
+            self.create_file_with_media(key, &encoded, media_body)
+                .await?;
         }
         Ok(())
     }
@@ -2044,6 +2030,124 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct MediaCreateEndpointState {
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        create_token: Arc<Mutex<Option<String>>>,
+        metadata_status: StatusCode,
+        upload_status: StatusCode,
+        delete_status: StatusCode,
+    }
+
+    async fn media_create_endpoint(
+        State(state): State<MediaCreateEndpointState>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().map(str::to_string);
+        let body = to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("read request body")
+            .to_vec();
+        state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .push(RecordedRequest {
+                method: method.clone(),
+                path: path.clone(),
+                query,
+                body: body.clone(),
+            });
+
+        match (method.as_str(), path.as_str()) {
+            ("GET", "/files") => {
+                let token = state
+                    .create_token
+                    .lock()
+                    .expect("lock create token")
+                    .clone();
+                let response = match token {
+                    Some(token) => serde_json::json!({
+                        "files": [{
+                            "id": "created-file-id",
+                            "appProperties": {
+                                (CREATE_TOKEN_PROPERTY): token,
+                            },
+                        }],
+                    }),
+                    None => serde_json::json!({"files": []}),
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(response.to_string()))
+                    .expect("build file list response")
+            }
+            ("POST", "/files") if state.metadata_status.is_success() => {
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&body).expect("parse create metadata");
+                let token = metadata["appProperties"][CREATE_TOKEN_PROPERTY]
+                    .as_str()
+                    .expect("create token")
+                    .to_string();
+                *state.create_token.lock().expect("lock create token") = Some(token);
+                Response::builder()
+                    .status(state.metadata_status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"created-file-id"}"#))
+                    .expect("build metadata response")
+            }
+            ("POST", "/files") => Response::builder()
+                .status(state.metadata_status)
+                .body(Body::from("metadata failed"))
+                .expect("build metadata failure"),
+            ("PATCH", "/files/created-file-id") => Response::builder()
+                .status(state.upload_status)
+                .body(Body::from("media upload failed"))
+                .expect("build media response"),
+            ("DELETE", "/files/created-file-id") => Response::builder()
+                .status(state.delete_status)
+                .body(Body::from("delete failed"))
+                .expect("build delete response"),
+            _ => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("unexpected request: {method} {path}")))
+                .expect("build unexpected response"),
+        }
+    }
+
+    async fn media_create_test_home(
+        metadata_status: StatusCode,
+        upload_status: StatusCode,
+        delete_status: StatusCode,
+    ) -> (
+        GoogleDriveCloudHome,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = MediaCreateEndpointState {
+            requests: requests.clone(),
+            create_token: Arc::new(Mutex::new(None)),
+            metadata_status,
+            upload_status,
+            delete_status,
+        };
+        let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
+            Router::new()
+                .fallback(media_create_endpoint)
+                .with_state(state),
+        )
+        .await;
+        (
+            home().with_endpoints(endpoint.clone(), endpoint),
+            requests,
+            shutdown,
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn absent_mutable_multipart_body_failure_cancels_the_create_session() {
         let (home, requests, deletes, server) = mutable_create_test_home().await;
@@ -2689,63 +2793,75 @@ mod tests {
 
     #[tokio::test]
     async fn create_file_with_media_does_not_delete_on_metadata_failure() {
-        let delete_called = std::cell::Cell::new(false);
-        let err = create_file_with_media(
-            "objects/a",
-            || async { Err(CloudHomeError::Transport("metadata failed".to_string())) },
-            |_| async { Ok(()) },
-            |_| async {
-                delete_called.set(true);
-                Ok(())
-            },
+        let (home, requests, shutdown) = media_create_test_home(
+            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
+            StatusCode::NO_CONTENT,
         )
-        .await
-        .expect_err("metadata failure");
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("metadata failure");
         let msg = err.to_string();
 
-        assert!(!delete_called.get(), "delete ran without a created file id");
+        assert!(
+            !requests
+                .lock()
+                .expect("lock requests")
+                .iter()
+                .any(|request| request.method == "DELETE"),
+            "delete ran without a created file id"
+        );
         assert!(
             msg.contains("metadata failed"),
             "missing metadata failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[tokio::test]
     async fn create_file_with_media_deletes_created_id_on_media_failure() {
-        let deleted_id = std::cell::RefCell::new(None);
-        let err = create_file_with_media(
-            "objects/a",
-            || async { Ok("created-file-id".to_string()) },
-            |file_id| async move {
-                assert_eq!(file_id, "created-file-id");
-                Err(CloudHomeError::Transport("media upload failed".to_string()))
-            },
-            |file_id| async {
-                deleted_id.replace(Some(file_id));
-                Ok(())
-            },
+        let (home, requests, shutdown) = media_create_test_home(
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::NO_CONTENT,
         )
-        .await
-        .expect_err("media failure");
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("media failure");
         let msg = err.to_string();
 
-        assert_eq!(deleted_id.into_inner().as_deref(), Some("created-file-id"));
+        assert!(
+            requests
+                .lock()
+                .expect("lock requests")
+                .iter()
+                .any(|request| request.method == "DELETE"
+                    && request.path == "/files/created-file-id"),
+            "created file was not deleted"
+        );
         assert!(
             msg.contains("media upload failed"),
             "missing media failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[tokio::test]
     async fn create_file_with_media_reports_upload_and_rollback_failures() {
-        let err = create_file_with_media(
-            "objects/a",
-            || async { Ok("created-file-id".to_string()) },
-            |_| async { Err(CloudHomeError::Transport("media upload failed".to_string())) },
-            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
+        let (home, _requests, shutdown) = media_create_test_home(
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
         )
-        .await
-        .expect_err("upload and rollback error");
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("upload and rollback error");
         let msg = err.to_string();
 
         assert!(
@@ -2756,5 +2872,6 @@ mod tests {
             msg.contains("delete failed"),
             "missing delete failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 }
