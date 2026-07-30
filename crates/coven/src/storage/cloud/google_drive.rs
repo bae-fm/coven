@@ -863,27 +863,6 @@ where
     }
 }
 
-async fn finish_create_media_upload<F, Fut>(
-    key: &str,
-    upload_result: Result<(), CloudHomeError>,
-    delete_created_file: F,
-) -> Result<(), CloudHomeError>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), CloudHomeError>>,
-{
-    let upload_error = match upload_result {
-        Ok(()) => return Ok(()),
-        Err(e) => e,
-    };
-    match delete_created_file().await {
-        Ok(()) => Err(upload_error),
-        Err(delete_error) => Err(CloudHomeError::Transport(format!(
-            "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
-        ))),
-    }
-}
-
 async fn create_file_with_media<Create, CreateFut, Upload, UploadFut, Delete, DeleteFut>(
     key: &str,
     create_metadata: Create,
@@ -900,7 +879,16 @@ where
 {
     let file_id = create_metadata().await?;
     let upload_result = upload_media(file_id.clone()).await;
-    finish_create_media_upload(key, upload_result, || delete_created_file(file_id)).await
+    let upload_error = match upload_result {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    match delete_created_file(file_id).await {
+        Ok(()) => Err(upload_error),
+        Err(delete_error) => Err(CloudHomeError::Transport(format!(
+            "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
+        ))),
+    }
 }
 
 /// A Drive resumable sink. New objects use a resumable-create session, which
@@ -2749,30 +2737,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_media_upload_error_rolls_back_created_file() {
-        let rollback_called = std::cell::Cell::new(false);
-        let upload_error = CloudHomeError::Transport("media upload failed".to_string());
-        let err = finish_create_media_upload("objects/a", Err(upload_error), || async {
-            rollback_called.set(true);
-            Ok(())
-        })
-        .await
-        .expect_err("upload error");
-        let msg = err.to_string();
-
-        assert!(rollback_called.get(), "rollback did not run");
-        assert!(
-            msg.contains("media upload failed"),
-            "missing upload failure: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn create_media_upload_error_reports_upload_and_rollback_failures() {
-        let upload_error = CloudHomeError::Transport("media upload failed".to_string());
-        let err = finish_create_media_upload("objects/a", Err(upload_error), || async {
-            Err(CloudHomeError::Transport("delete failed".to_string()))
-        })
+    async fn create_file_with_media_reports_upload_and_rollback_failures() {
+        let err = create_file_with_media(
+            "objects/a",
+            || async { Ok("created-file-id".to_string()) },
+            |_| async { Err(CloudHomeError::Transport("media upload failed".to_string())) },
+            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
+        )
         .await
         .expect_err("upload and rollback error");
         let msg = err.to_string();
