@@ -78,7 +78,6 @@ pub(crate) use audience::{
     validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
     PartitionedAudienceWrite, RoutingChanges, StoreAudienceTransitions,
 };
-pub(crate) use model::write_gate;
 pub(crate) use model::Gates;
 #[cfg(test)]
 pub(crate) use model::{from_tables_call_count, reset_from_tables_call_count};

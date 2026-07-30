@@ -272,7 +272,7 @@ impl StoreDatabase {
                     routing_encryption.as_ref(),
                     write_id,
                     |transaction| {
-                        crate::sync::gate::write_gate(
+                        write_gate(
                             transaction,
                             &root_table,
                             gate_column,
@@ -344,7 +344,7 @@ impl StoreDatabase {
                                 "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
                             )));
                         }
-                        crate::sync::gate::write_gate(
+                        write_gate(
                             transaction,
                             &root_table,
                             &gate_column,
@@ -429,6 +429,27 @@ impl StoreDatabase {
             })
             .await
     }
+}
+
+/// Set a gated root's locality and stamp the row inside the caller's prepared
+/// blob-transition transaction.
+fn write_gate(
+    transaction: &rusqlite::Transaction<'_>,
+    root_table: &str,
+    gate_column: &str,
+    remote: bool,
+    stamp: &str,
+    root_id: &str,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        &format!(
+            "UPDATE {} SET {} = ?1, _updated_at = ?2 WHERE id = ?3",
+            crate::sync::session::quote_ident(root_table),
+            crate::sync::session::quote_ident(gate_column),
+        ),
+        (remote as i64, stamp, root_id),
+    )?;
+    Ok(())
 }
 
 fn same_row_blob_version(left: &RowBlobRef, right: &RowBlobRef) -> bool {

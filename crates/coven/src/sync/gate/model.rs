@@ -572,30 +572,6 @@ impl Gates {
     }
 }
 
-/// Write a gated root's gate column on (`true`) or off (`false`), stamping
-/// `_updated_at` so the flip sorts causally and is captured into this cycle's
-/// changeset. The single place the transition commits flip a gate — make_remote
-/// completion (on) and make_local (off) — so the write shape lives here once. Runs on
-/// the caller's connection/transaction.
-pub(crate) fn write_gate(
-    conn: &Connection,
-    root_table: &str,
-    gate_col: &str,
-    on: bool,
-    stamp: &str,
-    root_id: &str,
-) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        &format!(
-            "UPDATE {} SET {} = ?1, _updated_at = ?2 WHERE id = ?3",
-            quote_ident(root_table),
-            quote_ident(gate_col),
-        ),
-        (on as i64, stamp, root_id),
-    )?;
-    Ok(())
-}
-
 /// The SQL form of [`truthy`]: a predicate that is true for `expr` exactly when
 /// [`truthy`] would return true for the same value. [`truthy`] owns the single
 /// definition of gate-truth; this realizes it in SQL — the `CAST` collapses to 0
