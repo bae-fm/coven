@@ -82,6 +82,7 @@ pub(crate) fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> Clou
 /// requested range is silent corruption. OAuth REST transports gate on the status
 /// directly with this. The AWS SDK S3 backend verifies the equivalent invariant
 /// by asserting the body length equals the requested byte count.
+#[cfg(feature = "oauth-providers")]
 pub(crate) fn is_range_success(status: u16) -> bool {
     status == 206
 }
@@ -138,6 +139,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "oauth-providers")]
     #[test]
     fn range_status_requires_partial_content() {
         assert!(is_range_success(206));
