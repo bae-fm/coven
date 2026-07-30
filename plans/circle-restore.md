@@ -227,8 +227,9 @@ who could produce a validly-signed reference to a bad image — which
 authoring already prevents; they are the verifier's own concern, exercised
 by its own tests. The restore path's job is to run the verifier on every
 storage-hosted candidate and fail the whole restore with no database exposed
-when it rejects — which `remove_incomplete_database` guarantees on any
-failure.
+when it rejects. The staged database-image owner retains the exact image and
+its SQLite sidecars until installation commits; any rejection finishes through
+that owner and reports cleanup failure instead of exposing the database.
 
 **Resolved by moving membership-head deserialization off the async poll stack.**
 `post_close_circle_store_snapshot_restores_and_converges` stack-overflowed

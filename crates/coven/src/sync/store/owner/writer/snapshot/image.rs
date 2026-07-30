@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::database::Database;
 use crate::migration::Migration;
@@ -96,43 +96,151 @@ pub enum SnapshotError {
     BootstrapState(String),
     #[error("snapshot publication state: {0}")]
     PublicationState(String),
-    #[error("snapshot bootstrap failed and its incomplete database could not be removed: {cleanup} (bootstrap error: {cause})")]
-    BootstrapCleanup {
+    #[error(
+        "could not remove staged snapshot database {path}: {cleanup}",
+        path = .path.display()
+    )]
+    StagedDatabaseCleanup { path: PathBuf, cleanup: String },
+    #[error(
+        "snapshot operation failed and staged database {path} could not be removed: {cleanup} \
+         (operation error: {cause})",
+        path = .path.display()
+    )]
+    StagedDatabaseCleanupAfterFailure {
+        path: PathBuf,
         cleanup: String,
         cause: Box<SnapshotError>,
     },
 }
 
-fn prepare_snapshot_path(temp_dir: &Path) -> Result<std::path::PathBuf, SnapshotError> {
-    let snapshot_path = temp_dir.join("snapshot.db");
-    match std::fs::remove_file(&snapshot_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(SnapshotError::Io(e)),
-    }
-    Ok(snapshot_path)
+/// One uncommitted SQLite image and its sidecar files.
+///
+/// The path remains armed until the caller explicitly commits the image or
+/// finishes the operation through this value. Normal failures therefore report
+/// cleanup failure to the initiating operation instead of leaving a plaintext
+/// image behind while returning success.
+#[derive(Debug)]
+struct StagedDatabaseImage {
+    path: PathBuf,
+    armed: bool,
 }
 
-fn cleanup_snapshot_path(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!(error = %e, path = %path.display(), "failed to remove temp snapshot");
+impl StagedDatabaseImage {
+    fn prepare(path: PathBuf) -> Result<Self, SnapshotError> {
+        let mut staged = Self { path, armed: true };
+        if let Err(cleanup) = staged.remove_files() {
+            staged.armed = false;
+            return Err(SnapshotError::StagedDatabaseCleanup {
+                path: staged.path.clone(),
+                cleanup: cleanup.to_string(),
+            });
+        }
+        Ok(staged)
+    }
+
+    fn create(path: PathBuf, plaintext: &[u8]) -> Result<Self, SnapshotError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Self { path, armed: false }.write_new(plaintext)
+    }
+
+    fn replace(path: PathBuf, plaintext: &[u8]) -> Result<Self, SnapshotError> {
+        Self::prepare(path)?.write_new(plaintext)
+    }
+
+    fn write_new(mut self, plaintext: &[u8]) -> Result<Self, SnapshotError> {
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                self.armed = false;
+                return Err(SnapshotError::Io(error));
+            }
+        };
+        self.armed = true;
+        if let Err(error) = std::io::Write::write_all(&mut file, plaintext) {
+            drop(file);
+            return self.finish(Err(SnapshotError::Io(error)));
+        }
+        drop(file);
+        Ok(self)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn read_and_discard(self) -> Result<Vec<u8>, SnapshotError> {
+        let outcome = std::fs::read(&self.path).map_err(SnapshotError::Io);
+        self.finish(outcome)
+    }
+
+    fn canonicalize(mut self) -> Result<Self, SnapshotError> {
+        match std::fs::canonicalize(&self.path) {
+            Ok(path) => {
+                self.path = path;
+                Ok(self)
+            }
+            Err(error) => self.finish(Err(SnapshotError::Io(error))),
         }
     }
-}
 
-fn read_and_remove_snapshot(path: &Path) -> Result<Vec<u8>, SnapshotError> {
-    let bytes = std::fs::read(path)?;
-    cleanup_snapshot_path(path);
-    Ok(bytes)
-}
-
-fn write_snapshot_db(target_path: &Path, plaintext: &[u8]) -> Result<(), SnapshotError> {
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    fn finish<T>(mut self, outcome: Result<T, SnapshotError>) -> Result<T, SnapshotError> {
+        let cleanup = self.remove_files();
+        self.armed = false;
+        match (outcome, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(cause), Ok(())) => Err(cause),
+            (Ok(_), Err(cleanup)) => Err(SnapshotError::StagedDatabaseCleanup {
+                path: self.path.clone(),
+                cleanup: cleanup.to_string(),
+            }),
+            (Err(cause), Err(cleanup)) => Err(SnapshotError::StagedDatabaseCleanupAfterFailure {
+                path: self.path.clone(),
+                cleanup: cleanup.to_string(),
+                cause: Box::new(cause),
+            }),
+        }
     }
-    std::fs::write(target_path, plaintext)?;
-    Ok(())
+
+    fn commit(mut self) -> PathBuf {
+        self.armed = false;
+        std::mem::take(&mut self.path)
+    }
+
+    fn remove_files(&self) -> std::io::Result<()> {
+        for candidate in [
+            self.path.clone(),
+            PathBuf::from(format!("{}-wal", self.path.display())),
+            PathBuf::from(format!("{}-shm", self.path.display())),
+        ] {
+            match std::fs::remove_file(candidate) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedDatabaseImage {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = self.remove_files() {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "could not remove abandoned staged snapshot database"
+            );
+        }
+    }
 }
 
 /// SHA-256 of a snapshot DB image, hex-encoded for durable bootstrap state.
@@ -153,7 +261,7 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
 /// ```
 pub(crate) struct BootstrapResult<'storage> {
     store_id: String,
-    target_path: PathBuf,
+    database_image: StagedDatabaseImage,
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     founder_registration:
@@ -172,7 +280,7 @@ impl std::fmt::Debug for BootstrapResult<'_> {
         formatter
             .debug_struct("BootstrapResult")
             .field("store_id", &self.store_id)
-            .field("target_path", &self.target_path)
+            .field("target_path", &self.database_image.path)
             .field("db_hash", &self.db_hash)
             .field("snapshot", &self.snapshot.reference)
             .field("coverage", &self.coverage)
@@ -207,7 +315,7 @@ impl<'storage> BootstrapResult<'storage> {
     /// a partially installed union is never exposed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_database(
-        mut self,
+        self,
         store_id: &str,
         target_path: &Path,
         synced_tables: Vec<SyncedTable>,
@@ -218,34 +326,48 @@ impl<'storage> BootstrapResult<'storage> {
         migrations: &[Migration],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
-        let bound_path = self.target_path.clone();
+        let BootstrapResult {
+            store_id: bound_store_id,
+            database_image,
+            db_hash,
+            mut history_verifier,
+            founder_registration,
+            restorer_identity,
+            snapshot,
+            coverage,
+            stability,
+            membership,
+            #[cfg(test)]
+            fail_circle_install,
+        } = self;
+        let bound_path = database_image.path().to_path_buf();
         let result = async {
-            if store_id != self.store_id {
+            if store_id != bound_store_id {
                 return Err(SnapshotError::BootstrapStoreMismatch {
-                    bound: self.store_id,
+                    bound: bound_store_id,
                     requested: store_id.to_string(),
                 });
             }
             let requested = std::fs::canonicalize(target_path)?;
-            if requested != self.target_path {
+            if requested != bound_path {
                 return Err(SnapshotError::BootstrapDestinationMismatch {
-                    bound: self.target_path,
+                    bound: bound_path.clone(),
                     requested,
                 });
             }
             let database_bytes = std::fs::read(&requested)?;
-            if snapshot_db_hash(&database_bytes) != self.db_hash {
+            if snapshot_db_hash(&database_bytes) != db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
-            let root = self.history_verifier.root().clone();
-            let store_frontier = self.coverage.clone();
+            let root = history_verifier.root().clone();
+            let store_frontier = coverage.clone();
             let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
-                self.snapshot,
-                self.history_verifier.verified_root_object().clone(),
-                self.founder_registration,
-                self.stability,
+                snapshot,
+                history_verifier.verified_root_object().clone(),
+                founder_registration,
+                stability,
                 crate::database::InitialStoreMembershipAuthority {
-                    head_refs: self.membership.head_refs().to_vec(),
+                    head_refs: membership.head_refs().to_vec(),
                 },
                 routing_encryption,
                 Vec::new(),
@@ -270,9 +392,9 @@ impl<'storage> BootstrapResult<'storage> {
                         &device_id,
                         &clock,
                         migrations,
-                        &mut self.history_verifier,
+                        &mut history_verifier,
                         &store_frontier,
-                        &self.restorer_identity,
+                        &restorer_identity,
                         Some(&routing_key),
                     )
                     .await?
@@ -281,7 +403,7 @@ impl<'storage> BootstrapResult<'storage> {
             };
             let install = install.with_circle_decisions(decisions);
             #[cfg(test)]
-            let install = if self.fail_circle_install {
+            let install = if fail_circle_install {
                 install.fail_circle_install_for_test()
             } else {
                 install
@@ -300,23 +422,21 @@ impl<'storage> BootstrapResult<'storage> {
             Ok(crate::sync::store::RestoringStore::from_authorized_history(
                 crate::sync::store::owner::history::AuthorizedStoreHistory {
                     database: crate::database::StoreDatabase::from_database(db),
-                    history_verifier: self.history_verifier,
+                    history_verifier,
                 },
-                self.membership,
-                self.restorer_identity,
+                membership,
+                restorer_identity,
                 requested,
             ))
         }
         .await;
         match result {
-            Ok(database) => Ok(database),
-            Err(cause) => match remove_incomplete_database(&bound_path) {
-                Ok(()) => Err(cause),
-                Err(cleanup) => Err(SnapshotError::BootstrapCleanup {
-                    cleanup: cleanup.to_string(),
-                    cause: Box::new(cause),
-                }),
-            },
+            Ok(database) => {
+                let committed_path = database_image.commit();
+                debug_assert_eq!(committed_path, bound_path);
+                Ok(database)
+            }
+            Err(cause) => database_image.finish(Err(cause)),
         }
     }
 }
@@ -342,8 +462,11 @@ async fn stage_restore_circle_decisions(
     routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
 ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
     let query_path = raw_image_path.with_extension("restore-select.db");
-    remove_incomplete_database(&query_path)?;
-    std::fs::copy(raw_image_path, &query_path)?;
+    let query_image = StagedDatabaseImage::prepare(query_path)?;
+    if let Err(error) = std::fs::copy(raw_image_path, query_image.path()) {
+        return query_image.finish(Err(SnapshotError::Io(error)));
+    }
+    let query_path = query_image.path().to_path_buf();
     let staged = async {
         let (query_db, _stamper) = Database::open_initialized_store(
             &query_path,
@@ -367,23 +490,7 @@ async fn stage_restore_circle_decisions(
         .await
     }
     .await;
-    remove_incomplete_database(&query_path)?;
-    staged
-}
-
-fn remove_incomplete_database(path: &Path) -> std::io::Result<()> {
-    for candidate in [
-        path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
-    ] {
-        match std::fs::remove_file(candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
+    query_image.finish(staged)
 }
 
 /// Create a snapshot of the database as bytes ready for storage.
@@ -497,44 +604,41 @@ fn create_snapshot_for_audience_with_host_blobs(
         None
     };
 
-    let snapshot_path = prepare_snapshot_path(temp_dir)?;
+    let snapshot_image = StagedDatabaseImage::prepare(temp_dir.join("snapshot.db"))?;
+    let snapshot_path = snapshot_image.path();
     let path_str = snapshot_path
         .to_str()
         .expect("temp path should be valid UTF-8");
 
     // VACUUM INTO creates a clean, defragmented copy of the live database.
     if let Err(e) = conn.execute("VACUUM INTO ?1", [path_str]) {
-        cleanup_snapshot_path(&snapshot_path);
-        return Err(SnapshotError::VacuumFailed(e.to_string()));
+        return snapshot_image.finish(Err(SnapshotError::VacuumFailed(e.to_string())));
     }
 
     // The copy is a whole-DB byte image, so it still holds every local-only
     // table's data. Strip those before reading: open the copy as its own
     // connection and DELETE from every table outside the synced set.
     if let Err(e) =
-        clear_local_only_tables(&snapshot_path, root, tables, routing_key.as_ref(), audience)
+        clear_local_only_tables(snapshot_path, root, tables, routing_key.as_ref(), audience)
     {
-        cleanup_snapshot_path(&snapshot_path);
-        return Err(e);
+        return snapshot_image.finish(Err(e));
     }
 
-    let blobs = match snapshot_blob_facts(conn, &snapshot_path, temp_dir, tables) {
+    let blobs = match snapshot_blob_facts(conn, snapshot_path, temp_dir, tables) {
         Ok(blobs) => blobs,
         Err(error) => {
-            cleanup_snapshot_path(&snapshot_path);
-            return Err(error);
+            return snapshot_image.finish(Err(error));
         }
     };
     if matches!(audience, crate::protocol::circle::Audience::Circle(_)) {
-        if let Err(error) = strip_circle_snapshot_transport_state(&snapshot_path) {
-            cleanup_snapshot_path(&snapshot_path);
-            return Err(error);
+        if let Err(error) = strip_circle_snapshot_transport_state(snapshot_path) {
+            return snapshot_image.finish(Err(error));
         }
     }
 
     // Read the cleared snapshot file. The storage implementation seals it at the
     // final cloud key so the AEAD context can bind that key.
-    let plaintext = read_and_remove_snapshot(&snapshot_path)?;
+    let plaintext = snapshot_image.read_and_discard()?;
     let plaintext_size = plaintext.len();
 
     info!(plaintext_size, "created snapshot");
@@ -651,8 +755,8 @@ pub(crate) fn install_snapshot_blob_graph(
         return Ok(image);
     }
     let path = store_dir.as_ref().join("snapshot-closure.db");
-    cleanup_snapshot_path(&path);
-    write_snapshot_db(&path, &image)?;
+    let staged_image = StagedDatabaseImage::replace(path, &image)?;
+    let path = staged_image.path().to_path_buf();
     let result = (|| {
         let mut conn = Connection::open(&path).map_err(|error| {
             SnapshotError::ClearFailed(format!("open snapshot closure image: {error}"))
@@ -690,8 +794,7 @@ pub(crate) fn install_snapshot_blob_graph(
         })?;
         std::fs::read(&path).map_err(SnapshotError::Io)
     })();
-    cleanup_snapshot_path(&path);
-    result
+    staged_image.finish(result)
 }
 
 pub(crate) fn verify_circle_bootstrap_image(
@@ -1150,18 +1253,18 @@ pub(crate) async fn bootstrap_from_snapshot<'storage>(
     let founder_registration = selected.founder_registration().await?;
     let (history_verifier, snapshot, plaintext, stability, membership) = selected.into_parts();
     let coverage = snapshot.meta.coverage.clone();
-    write_snapshot_db(target_path, &plaintext)?;
-    let target_path = std::fs::canonicalize(target_path)?;
+    let database_image =
+        StagedDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
     info!(
         num_positions = coverage.position_count(),
         db_size = plaintext.len(),
-        path = %target_path.display(),
+        path = %database_image.path().display(),
         "bootstrapped from snapshot"
     );
 
     Ok(BootstrapResult {
         store_id: store_id.to_string(),
-        target_path,
+        database_image,
         db_hash: snapshot_db_hash(&plaintext),
         history_verifier,
         founder_registration,
@@ -1195,6 +1298,76 @@ mod tests {
     use crate::database::StoreDatabase;
     use crate::keys::UserKeypair;
     use crate::protocol::store_commit::CommitFrontier;
+
+    #[test]
+    fn staged_database_cleanup_reports_a_target_that_remains() {
+        let directory = tempfile::tempdir().expect("snapshot cleanup directory");
+        let path = directory.path().join("snapshot.db");
+        std::fs::create_dir(&path).expect("create unremovable snapshot target");
+
+        let error = StagedDatabaseImage::prepare(path.clone())
+            .expect_err("an unremovable staged database must fail");
+
+        assert!(
+            matches!(
+                error,
+                SnapshotError::StagedDatabaseCleanup {
+                    path: ref failed_path,
+                    ..
+                } if *failed_path == path
+            ),
+            "{error}"
+        );
+        std::fs::remove_dir(path).expect("remove cleanup obstruction");
+    }
+
+    #[test]
+    fn staged_database_cleanup_preserves_the_operation_failure() {
+        let directory = tempfile::tempdir().expect("snapshot cleanup directory");
+        let path = directory.path().join("snapshot.db");
+        let staged =
+            StagedDatabaseImage::prepare(path.clone()).expect("prepare staged database image");
+        std::fs::create_dir(&path).expect("create cleanup obstruction");
+
+        let error = staged
+            .finish::<()>(Err(SnapshotError::VacuumFailed(
+                "injected operation failure".to_string(),
+            )))
+            .expect_err("operation and cleanup failures must both surface");
+
+        assert!(
+            matches!(
+                error,
+                SnapshotError::StagedDatabaseCleanupAfterFailure {
+                    path: ref failed_path,
+                    ref cause,
+                    ..
+                } if *failed_path == path
+                    && matches!(
+                        cause.as_ref(),
+                        SnapshotError::VacuumFailed(message)
+                            if message == "injected operation failure"
+                    )
+            ),
+            "{error}"
+        );
+        std::fs::remove_dir(path).expect("remove cleanup obstruction");
+    }
+
+    #[test]
+    fn staged_database_creation_refuses_an_existing_target() {
+        let directory = tempfile::tempdir().expect("snapshot creation directory");
+        let path = directory.path().join("snapshot.db");
+        std::fs::write(&path, b"existing database").expect("write existing database");
+
+        let result = StagedDatabaseImage::create(path.clone(), b"replacement database");
+
+        assert!(result.is_err(), "creation must refuse an existing database");
+        assert_eq!(
+            std::fs::read(path).expect("read preserved database"),
+            b"existing database"
+        );
+    }
 
     fn open_scoped_snapshot_test_db() -> Database {
         crate::sync::test_helpers::open_test_db_schema(
