@@ -152,7 +152,7 @@ pub enum CloudKitScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudKitProviderIdentity {
     pub container_id: String,
-    pub environment: coven_core::sync::storage::CloudKitEnvironment,
+    pub environment: crate::storage::CloudKitEnvironment,
     pub owner_name: String,
     pub zone_name: String,
     pub current_user_record_name: String,
@@ -1321,8 +1321,8 @@ fn read_exact_cloudkit_range(
 impl ExactSlotStorage for CloudKitCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<coven_core::sync::storage::ResolvedProviderBinding, CloudHomeError> {
-        use coven_core::sync::storage::{
+    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+        use crate::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -1372,9 +1372,9 @@ impl ExactSlotStorage for CloudKitCloudHome {
 
     async fn cross_principal_evidence(
         &self,
-    ) -> Result<coven_core::sync::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
-        use coven_core::sync::provider::{CloudKitAcceptedShare, CrossPrincipalProviderEvidence};
-        use coven_core::sync::store_commit::ObjectHash;
+    ) -> Result<crate::protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
+        use crate::protocol::provider::{CloudKitAcceptedShare, CrossPrincipalProviderEvidence};
+        use crate::protocol::store_commit::ObjectHash;
 
         let CloudKitScope::Shared {
             owner_name,
@@ -1389,9 +1389,8 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let scope = self.scope.clone();
         let accepted = blocking(move || ops.accepted_read_write_share(&scope)).await?;
         let binding = self.provider_binding().await?;
-        let coven_core::sync::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant {
-            record_name,
-        } = binding.device.principal
+        let crate::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant { record_name } =
+            binding.device.principal
         else {
             return Err(CloudHomeError::Configuration(
                 "CloudKit adapter returned a non-CloudKit principal".to_string(),
@@ -1416,7 +1415,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         ))?;
         Ok(CrossPrincipalProviderEvidence::CloudKit(
             CloudKitAcceptedShare {
-                share: coven_core::sync::storage::ExactObjectRef::new(
+                share: crate::storage::ExactObjectRef::new(
                     share_slot,
                     accepted.canonical_record.len() as u64,
                     ObjectHash::digest(&accepted.canonical_record),
@@ -1772,7 +1771,7 @@ mod tests {
             };
             Ok(CloudKitProviderIdentity {
                 container_id: "iCloud.example.coven".to_string(),
-                environment: coven_core::sync::storage::CloudKitEnvironment::Development,
+                environment: crate::storage::CloudKitEnvironment::Development,
                 owner_name: owner_name.to_string(),
                 zone_name: zone_name.to_string(),
                 current_user_record_name: "current-user".to_string(),
@@ -2150,7 +2149,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
-        use coven_core::sync::storage::{ProviderPrincipalId, StoreProviderBinding};
+        use crate::storage::{ProviderPrincipalId, StoreProviderBinding};
         let (home, _) = make_cloud_home_with_ops();
 
         let binding = ExactSlotStorage::provider_binding(&home)
@@ -2161,7 +2160,7 @@ mod tests {
             binding.store,
             StoreProviderBinding::CloudKit {
                 container_id: "iCloud.example.coven".to_string(),
-                environment: coven_core::sync::storage::CloudKitEnvironment::Development,
+                environment: crate::storage::CloudKitEnvironment::Development,
                 owner_name: "private-owner".to_string(),
                 zone_name: "private-zone".to_string(),
             }

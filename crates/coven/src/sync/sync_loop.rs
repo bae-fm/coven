@@ -23,14 +23,14 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
-use crate::keys::MasterKeyCustody;
 use crate::store_dir::StoreDir;
+use crate::store_security::StoreSecurity;
 
-use super::cloud_storage::BlobPathScheme;
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
-use super::storage::SyncStorage;
+use crate::storage::BlobPathScheme;
+use crate::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -105,7 +105,7 @@ pub(crate) struct SyncLoopHandle {
 
 struct SyncLoopInner {
     components: SyncComponents,
-    custody: Arc<dyn MasterKeyCustody>,
+    security: StoreSecurity,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, held so it releases only when the loop's
@@ -171,7 +171,7 @@ enum SyncCommand {
 impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
-        custody: Arc<dyn MasterKeyCustody>,
+        security: StoreSecurity,
         clock: ClockRef,
         config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -186,7 +186,7 @@ impl SyncLoopHandle {
         Self {
             inner: Arc::new(SyncLoopInner {
                 components,
-                custody,
+                security,
                 observer,
                 _open_guard: open_guard,
             }),
@@ -305,7 +305,7 @@ impl SyncLoopHandle {
                             .cloud_home()
                             .probe()
                             .await
-                            .map_err(crate::sync::storage::StorageError::from);
+                            .map_err(crate::storage::StorageError::from);
                         let (decision, status) = match reachable {
                             Err(error) => {
                                 let status = storage_check_failure_status(&error);
@@ -451,8 +451,8 @@ impl SyncLoopHandle {
 
     pub(crate) async fn discard_blocked_write(
         &self,
-        write_id: coven_core::WriteId,
-    ) -> Result<Vec<coven_core::WriteId>, crate::sync::store::StoreError> {
+        write_id: crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::sync::store::StoreError> {
         self.inner.components.discard_blocked_write(write_id).await
     }
 
@@ -484,9 +484,9 @@ impl SyncLoopHandle {
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: super::membership::MemberRole,
+        role: crate::protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<crate::joining::InviteCode, super::store::MembershipOpsError> {
         self.inner
             .components
             .invite_member(public_key_hex, invitee_email, role, store_name)
@@ -499,7 +499,7 @@ impl SyncLoopHandle {
     ) -> Result<String, super::store::MembershipOpsError> {
         self.inner
             .components
-            .remove_member(public_key_hex, self.inner.custody.as_ref())
+            .remove_member(public_key_hex, &self.inner.security)
             .await
     }
 
@@ -520,7 +520,7 @@ impl SyncLoopHandle {
     ) -> Result<String, crate::keys::KeyError> {
         self.inner
             .components
-            .adopt_key_rotation(encryption, self.inner.custody.as_ref())
+            .adopt_key_rotation(encryption, &self.inner.security)
     }
 
     pub(crate) async fn drain_uploads(
@@ -787,7 +787,7 @@ fn reply_circle_command<T>(
     }
 }
 
-fn storage_check_failure_status(error: &crate::sync::storage::StorageError) -> SyncLoopStatus {
+fn storage_check_failure_status(error: &crate::storage::StorageError) -> SyncLoopStatus {
     if error.is_transport() {
         SyncLoopStatus::Offline
     } else {
@@ -798,7 +798,7 @@ fn storage_check_failure_status(error: &crate::sync::storage::StorageError) -> S
 }
 
 async fn current_success_status(
-    db: &crate::database::Database,
+    db: &crate::database::StoreDatabase,
     success: SyncLoopSuccess,
 ) -> Result<SyncLoopStatus, String> {
     let writes: Vec<_> = db
@@ -834,7 +834,7 @@ async fn run_single_cycle(
         .components
         .run_cycle(
             clock,
-            Some(inner.custody.as_ref()),
+            Some(&inner.security),
             store_dir,
             inner.observer.as_deref(),
         )
@@ -863,19 +863,19 @@ mod tests {
 
     #[test]
     fn storage_configuration_failure_is_terminal() {
-        let status = storage_check_failure_status(
-            &crate::sync::storage::StorageError::Configuration("missing bucket".to_string()),
-        );
+        let status = storage_check_failure_status(&crate::storage::StorageError::Configuration(
+            "missing bucket".to_string(),
+        ));
 
         assert!(matches!(status, SyncLoopStatus::Failed { .. }));
     }
 
     fn database() -> crate::database::Database {
-        coven_core::database::Database::open(
+        crate::database::Database::open(
             std::path::Path::new(":memory:"),
             Vec::new(),
             chrono::Duration::days(30),
-            coven_core::blob::TransferLimits::one_at_a_time(),
+            crate::blob::TransferLimits::one_at_a_time(),
             "status-test".to_string(),
             &[],
         )
@@ -907,6 +907,7 @@ mod tests {
     #[tokio::test]
     async fn successful_cycle_projects_durable_blocked_state() {
         let db = database();
+        let store_database = crate::database::StoreDatabase::new(&db);
         insert_write_status(
             &db,
             "blocked-write",
@@ -916,7 +917,7 @@ mod tests {
             }),
         )
         .await;
-        let blocked = current_success_status(&db, success())
+        let blocked = current_success_status(&store_database, success())
             .await
             .expect("project blocked state");
         assert!(matches!(
@@ -936,7 +937,7 @@ mod tests {
         .expect("remove blocked projection fixture");
 
         assert!(matches!(
-            current_success_status(&db, success())
+            current_success_status(&store_database, success())
                 .await
                 .expect("project synchronized state"),
             SyncLoopStatus::Synchronized(_)

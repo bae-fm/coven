@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Check coven-core and coven's lib target alone, with the feature sets a
-# production host actually enables.
+# Check coven's library target alone, with the feature sets a production host
+# actually enables.
 #
 # `cargo clippy --all-targets --all-features` (the main CI gate) always turns
 # on every optional feature, including `test-utils` — a host never enables
@@ -17,8 +17,6 @@
 # code, this is where it goes dead.
 #
 set -eu
-
-cargo check -p coven-core --lib
 
 cargo check -p coven --lib
 # oauth-providers is off by default but a real (if optional) host

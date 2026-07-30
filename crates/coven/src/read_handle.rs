@@ -9,7 +9,7 @@
 //! It is opened with [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only)
 //! and exposes reads only: SQL queries against the connection coven owns, and blob
 //! reads (local store, pinned/evictable cache, or a cloud fetch into the cache).
-//! There is no write, sync-manager, migration, or stamp API on it — those are absent
+//! There is no write, sync-connection, migration, or stamp API on it — those are absent
 //! by construction, so a reader cannot mutate the synced state a concurrent writer
 //! owns. Its connection is `SQLITE_OPEN_READONLY`, so even the raw
 //! [`sql_read`](CovenReadHandle::sql_read) closure's `&Connection` refuses DML at
@@ -25,15 +25,16 @@ use std::sync::Arc;
 use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
-use crate::config::Config;
-use crate::coven::{CovenError, CovenResult};
+use crate::coven::CovenResult;
 use crate::database::Database;
+use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
+use crate::read_store_rows::ReadStoreRows;
+use crate::store_blobs::ReadStoreBlobs;
 use crate::store_dir::StoreDir;
-use crate::sync::storage::SyncStorage;
-use crate::sync::store::StoreDatabase;
-use crate::sync::sync_manager::ConfigProvider;
+use crate::store_security::StoreSecurity;
+use crate::store_sync::ConfigProvider;
 
 /// A read-only handle over one coven store, for a same-store secondary reader.
 ///
@@ -56,16 +57,9 @@ use crate::sync::sync_manager::ConfigProvider;
 /// home-less full handle does — there is no sync loop to reuse.
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    database: StoreDatabase,
-    store_dir: StoreDir,
-    config_provider: ConfigProvider,
-    key_service: StoreKeys,
-    key_custody: Arc<dyn MasterKeyCustody>,
-    identity_custody: Arc<dyn DeviceIdentityCustody>,
-    clock: ClockRef,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    /// How this installation chunks blobs and how wide its range requests are.
-    blob_chunking: crate::sync::cloud_storage::BlobChunking,
+    rows: ReadStoreRows,
+    blobs: ReadStoreBlobs,
+    security: StoreSecurity,
 }
 
 impl CovenReadHandle {
@@ -79,23 +73,25 @@ impl CovenReadHandle {
         identity_custody: Arc<dyn DeviceIdentityCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: crate::sync::cloud_storage::BlobChunking,
+        blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
-        Self {
-            database: StoreDatabase::from_database(db),
+        let database = StoreDatabase::from_database(db);
+        let security = StoreSecurity::new(key_service, key_custody, identity_custody);
+        let rows = ReadStoreRows::new(database.clone());
+        let blobs = ReadStoreBlobs::new(
+            database.clone(),
             store_dir,
             config_provider,
-            key_service,
-            key_custody,
-            identity_custody,
+            security.clone(),
             clock,
             cloudkit_ops,
             blob_chunking,
+        );
+        Self {
+            rows,
+            blobs,
+            security,
         }
-    }
-
-    fn config(&self) -> Config {
-        (self.config_provider)()
     }
 
     /// Run a pure read against the connection coven owns and await the result.
@@ -113,41 +109,7 @@ impl CovenReadHandle {
         F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let outcome = self
-            .database
-            .sqlite()
-            .call(move |conn| Ok(f(conn)))
-            .await
-            .map_err(CovenError::from)?;
-        outcome
-    }
-
-    /// The read [`SyncStorage`] for a cloud miss, or `None` for a home-less store.
-    ///
-    /// A read-only handle holds no sync manager, so — unlike the full handle — it
-    /// always builds storage from the current [`Config`]: `None` when no provider is
-    /// configured (a home-less store holds only Local blobs, which never reach the
-    /// cloud-miss path), `Some` built from config otherwise. A provider configured
-    /// but unbuildable (missing credentials) surfaces its setup error.
-    async fn blob_storage(
-        &self,
-    ) -> Result<Option<Arc<dyn SyncStorage>>, crate::storage::cloud::setup::StorageSetupError> {
-        let config = self.config();
-        if config.cloud_home.provider.is_none() {
-            return Ok(None);
-        }
-        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-            &config,
-            &self.key_service,
-            self.key_custody.as_ref(),
-            self.identity_custody.as_ref(),
-            None,
-            self.clock.clone(),
-            self.cloudkit_ops.clone(),
-            self.blob_chunking,
-        )
-        .await?;
-        Ok(Some(Arc::new(storage)))
+        self.rows.read(f).await
     }
 
     /// Capture the exact current blob-bearing row version from this reader's
@@ -157,7 +119,7 @@ impl CovenReadHandle {
         table: &str,
         row_id: &str,
     ) -> Result<RowBlobRef, crate::database::DbError> {
-        self.database.sqlite().row_blob_ref(table, row_id).await
+        self.blobs.row_blob_ref(table, row_id).await
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served from
@@ -172,15 +134,7 @@ impl CovenReadHandle {
     /// read-only handle. The supplied [`RowBlobRef`] already carries the exact stored
     /// object and authority, so the read performs no database write or cloud listing.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .read(blob)
-        .await
+        self.blobs.read(blob).await
     }
 
     /// Open an exact row blob's plaintext for ranged reading, for streaming or
@@ -196,15 +150,7 @@ impl CovenReadHandle {
     /// state touched — so a File Provider serving ranges through a read-only handle
     /// downloads the object once per opened stream, not once per range.
     pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .open_stream(blob)
-        .await
+        self.blobs.open_stream(blob).await
     }
 
     /// Open a payload
@@ -220,19 +166,13 @@ impl CovenReadHandle {
     /// payload, an unreadable version, or a generation this store's keyring lacks
     /// each surface their own typed error.
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        crate::handle::app_data_cipher(self.key_custody.as_ref())?.open_app_data(sealed, aad)
+        self.security.open_app_data(sealed, aad)
     }
 
     /// Whether every blob in `blobs` is pinned for offline — present in coven's kept
     /// cache folder (`storage/pinned/`). An empty set is vacuously pinned. A read; it
     /// stats the folder, never writes.
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        for blob in blobs {
-            if !crate::blob::cache::is_pinned(self.database.sqlite(), &self.store_dir, blob).await?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        self.blobs.all_pinned(blobs).await
     }
 }

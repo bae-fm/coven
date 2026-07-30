@@ -12,9 +12,9 @@ use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 #[cfg(feature = "oauth-providers")]
 use crate::oauth::OAuthTokens;
-use crate::sync::cloud_storage::BlobChunking;
-use crate::sync::cloud_storage::BlobPathScheme;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::storage::BlobChunking;
+use crate::storage::BlobPathScheme;
+use crate::storage::CloudCipher;
 use std::sync::Arc;
 
 #[cfg(feature = "oauth-providers")]
@@ -262,13 +262,13 @@ pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
-    store_root: crate::sync::store_commit::StoreRootRef,
+    store_root: crate::protocol::store_commit::StoreRootRef,
     founder_pubkey: String,
-    membership_floor: crate::join_code::MembershipFloor,
-    authority: crate::sync::restore_code::RestoreAuthority,
+    membership_floor: crate::joining::MembershipFloor,
+    authority: crate::restoration::RestoreAuthority,
 ) -> Result<String, SetupError> {
+    use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
     use crate::storage::cloud::CloudHomeJoinInfo;
-    use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
 
     let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
         SetupError("No cloud provider configured. Set up sync first.".to_string())
@@ -514,7 +514,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
     blob_chunking: BlobChunking,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
+) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_config(config)?;
     let cloud_home =
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops.clone())
@@ -540,7 +540,7 @@ pub(crate) fn create_sync_storage_with_home(
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
     blob_chunking: BlobChunking,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
+) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
     let cipher = match cipher {
         Some(c) => c,
@@ -554,7 +554,7 @@ pub(crate) fn create_sync_storage_with_home(
     // `KeyError::NoDeviceIdentity` rather than forging one.
     let keypair = crate::keys::require_identity(identity_custody)?;
 
-    Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
+    Ok(crate::storage::CloudSyncStorage::new(
         home,
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
@@ -573,87 +573,89 @@ pub struct SetupError(pub String);
 mod tests {
     use super::*;
     use crate::config::HomeStorage;
+    use crate::restoration::decode_restore_code;
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::store_dir::StoreDir;
-    use crate::sync::restore_code::decode_restore_code;
 
-    fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipHeadRef> {
-        let coord = crate::sync::membership::MembershipCoord {
+    fn membership_floor(
+        author_pubkey: String,
+    ) -> Vec<crate::protocol::membership::MembershipHeadRef> {
+        let coord = crate::protocol::membership::MembershipCoord {
             author_pubkey,
-            author_owner_grant: crate::sync::membership::MembershipGrantId(
-                crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
+            author_owner_grant: crate::protocol::membership::MembershipGrantId(
+                crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
             ),
             stream_id: "0000000000000000000000000000000000000000000000000000000000000001"
                 .parse()
                 .expect("canonical test author stream id"),
             seq: 1,
-            entry_hash: crate::sync::store_commit::ObjectHash::digest(
+            entry_hash: crate::protocol::store_commit::ObjectHash::digest(
                 b"restore test founder entry",
             ),
         };
         let stored = b"restore setup membership head";
-        vec![crate::sync::membership::MembershipHeadRef {
+        vec![crate::protocol::membership::MembershipHeadRef {
             coord,
-            head_hash: crate::sync::store_commit::ObjectHash::digest(
+            head_hash: crate::protocol::store_commit::ObjectHash::digest(
                 b"restore setup membership head semantic bytes",
             ),
-            object: crate::sync::storage::ExactObjectRef::new(
+            object: crate::storage::ExactObjectRef::new(
                 crate::storage::cloud::ObjectSlot::logical(
                     "store-v1/membership/heads/restore-setup/1.json".to_string(),
                 )
                 .expect("valid test membership-head slot"),
                 stored.len() as u64,
-                crate::sync::store_commit::ObjectHash::digest(stored),
+                crate::protocol::store_commit::ObjectHash::digest(stored),
             ),
         }]
     }
 
-    fn store_root() -> crate::sync::store_commit::StoreRootRef {
+    fn store_root() -> crate::protocol::store_commit::StoreRootRef {
         let stored = b"restore setup Store root";
-        crate::sync::store_commit::StoreRootRef {
-            store_root_id: crate::sync::store_commit::ObjectHash::digest(
+        crate::protocol::store_commit::StoreRootRef {
+            store_root_id: crate::protocol::store_commit::ObjectHash::digest(
                 b"restore setup Store root identity",
             ),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(stored),
-            object: crate::sync::storage::ExactObjectRef::new(
+            store_root_hash: crate::protocol::store_commit::ObjectHash::digest(stored),
+            object: crate::storage::ExactObjectRef::new(
                 crate::storage::cloud::ObjectSlot::logical(
                     "store-v1/protocol/root/restore-setup.json".to_string(),
                 )
                 .expect("valid test Store-root slot"),
                 stored.len() as u64,
-                crate::sync::store_commit::ObjectHash::digest(stored),
+                crate::protocol::store_commit::ObjectHash::digest(stored),
             ),
         }
     }
 
-    fn restore_authority() -> crate::sync::restore_code::RestoreAuthority {
-        let owner_grant = crate::sync::membership::MembershipGrantId(
-            crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
+    fn restore_authority() -> crate::restoration::RestoreAuthority {
+        let owner_grant = crate::protocol::membership::MembershipGrantId(
+            crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
         );
         let root = store_root();
         let owner_pubkey = hex::encode([7u8; 32]);
-        let anchor = crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery {
+        let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
             first_slot: crate::storage::cloud::ObjectSlot::logical(
                 "store-v1/recovery/restore-setup/first.json".to_string(),
             )
             .expect("valid recovery slot"),
         };
-        let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
             &root,
             &owner_pubkey,
             &owner_grant,
             &anchor,
         )
         .expect("valid recovery activation");
-        crate::sync::restore_code::RestoreAuthority::OwnerRecovery(
-            crate::sync::restore_code::OwnerRecoveryAuthority {
+        crate::restoration::RestoreAuthority::OwnerRecovery(
+            crate::restoration::OwnerRecoveryAuthority {
                 owner_identity_secret: hex::encode(
                     crate::keys::UserKeypair::generate().to_keypair_bytes(),
                 ),
                 owner_grant: owner_grant.clone(),
-                recovery: crate::sync::store_commit::OwnerRecoveryCursor {
+                recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
                     owner_grant,
-                    position: crate::sync::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                    position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                         activation,
                     },
                 },
@@ -771,7 +773,7 @@ mod tests {
             custody.as_ref(),
             store_root(),
             hex::encode([7u8; 32]),
-            crate::join_code::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect("generate restore code");
@@ -807,7 +809,7 @@ mod tests {
             custody.as_ref(),
             store_root(),
             hex::encode([7u8; 32]),
-            crate::join_code::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect_err("a share-joined CloudKit config must not generate a restore code");
@@ -834,7 +836,7 @@ mod tests {
             custody.as_ref(),
             store_root(),
             hex::encode([7u8; 32]),
-            crate::join_code::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect("a private CloudKit config generates a restore code");

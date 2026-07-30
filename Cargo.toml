@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/coven-core",
     "crates/coven",
 ]
 resolver = "2"
@@ -19,21 +18,9 @@ too_many_arguments = "allow"
 new_without_default = "allow"
 large_enum_variant = "allow"
 
-# Debug (unoptimized) builds of the async Circle/membership operations spend
-# several times more stack per `poll` frame than optimized builds — each poll
-# reserves scratch sized to its whole generator, and these operations compose
-# many large generators into one deep, non-recursive call graph. Release builds
-# of the same flows fit in well under 512 KiB of stack; unoptimized they needed
-# ~2 MiB, over the 2 MiB default thread stack on Linux (whose usable per-thread
-# stack is slightly smaller than macOS), so CI's debug `cargo test` overflowed
-# deterministically. Optimizing coven-core's test build collapses the poll-frame
-# scratch (the flows fit in <512 KiB again) and speeds its crypto-heavy tests.
-[profile.test.package.coven-core]
-opt-level = 1
-
-# The coven crate's device-join drivers stack the same deep async frames on
-# top of coven-core's; unoptimized poll-frame layout overflows CI's default
-# test-thread stack just as it did for coven-core.
+# Debug builds of the async Circle/membership operations reserve more stack per
+# `poll` frame than optimized builds. Optimize Coven's test build so the complete
+# composed flows fit within the test runner's thread stack.
 [profile.test.package.coven]
 opt-level = 1
 

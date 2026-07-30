@@ -1120,8 +1120,8 @@ impl CloudHome for DropboxCloudHome {
 impl ExactSlotStorage for DropboxCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<coven_core::sync::storage::ResolvedProviderBinding, CloudHomeError> {
-        use coven_core::sync::storage::{
+    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+        use crate::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -1627,7 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_uses_the_folder_identity_and_current_account() {
-        use coven_core::sync::storage::{ProviderPrincipalId, StoreProviderBinding};
+        use crate::storage::{ProviderPrincipalId, StoreProviderBinding};
         let (home, requests, shutdown) = binding_and_close_test_home().await;
 
         let binding = ExactSlotStorage::provider_binding(&home)

@@ -438,9 +438,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
     std::fs::rename(&temp_path, path)
         .map_err(|e| KeyError::Persistence(format!("install passphrase envelope file: {e}")))?;
     // fsync the parent directory so the rename that installed the envelope is
-    // itself durable — the same discipline coven's `sync_parent_dir` and
-    // coven-core's `local_blob::sync_parent_dir` keep, both of which propagate
-    // these errors rather than swallowing them.
+    // itself durable — the same discipline `local_blob::sync_parent_dir`
+    // keeps, propagating these errors rather than swallowing them.
     std::fs::File::open(parent)
         .map_err(|e| KeyError::Persistence(format!("open the parent dir to fsync it: {e}")))?
         .sync_all()

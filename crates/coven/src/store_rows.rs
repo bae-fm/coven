@@ -1,0 +1,230 @@
+use crate::database::{HostWriteError, HostWriteOperation};
+use crate::{SqlContext, WriteBatch, WriteReceipt};
+
+use crate::database::StoreDatabase;
+use crate::store_dir::StoreDir;
+use crate::store_security::StoreSecurity;
+use crate::store_sync::StoreSync;
+use crate::sync::hlc::UpdatedAtStamper;
+use crate::{CovenError, CovenResult};
+
+#[derive(Clone)]
+pub(crate) struct StoreRows {
+    database: StoreDatabase,
+    read_database: StoreDatabase,
+    store_dir: StoreDir,
+    stamper: UpdatedAtStamper,
+    security: StoreSecurity,
+    sync: StoreSync,
+}
+
+impl StoreRows {
+    pub(crate) fn new(
+        database: StoreDatabase,
+        read_database: StoreDatabase,
+        store_dir: StoreDir,
+        stamper: UpdatedAtStamper,
+        security: StoreSecurity,
+        sync: StoreSync,
+    ) -> Self {
+        Self {
+            database,
+            read_database,
+            store_dir,
+            stamper,
+            security,
+            sync,
+        }
+    }
+
+    pub(crate) async fn sql<F, R>(&self, sql: F) -> CovenResult<WriteReceipt<R>>
+    where
+        F: for<'context, 'connection> FnOnce(SqlContext<'context, 'connection>) -> CovenResult<R>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.execute(HostWriteOperation::new(WriteBatch::new(), sql))
+            .await
+    }
+
+    pub(crate) async fn read<F, R>(&self, read: F) -> CovenResult<R>
+    where
+        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.read_database
+            .read(read)
+            .await
+            .map_err(CovenError::from)?
+    }
+
+    pub(crate) async fn write<F, S, R>(&self, build: F, sql: S) -> CovenResult<WriteReceipt<R>>
+    where
+        F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
+        S: for<'context, 'connection> FnOnce(SqlContext<'context, 'connection>) -> CovenResult<R>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        let mut batch = WriteBatch::new();
+        build(&mut batch)?;
+        self.execute(HostWriteOperation::new(batch, sql)).await
+    }
+
+    async fn execute<R>(
+        &self,
+        operation: HostWriteOperation<R, CovenError>,
+    ) -> CovenResult<WriteReceipt<R>>
+    where
+        R: Send + 'static,
+    {
+        let routing_encryption = self.routing_encryption()?;
+        let blob_staging = self.host_write_blob_staging();
+        self.database
+            .execute_host_write(
+                operation,
+                self.store_dir.clone(),
+                self.stamper.clone(),
+                routing_encryption,
+                blob_staging,
+            )
+            .await
+            .map_err(map_host_write_error)
+    }
+
+    pub(crate) fn routing_encryption(
+        &self,
+    ) -> Result<Option<crate::encryption::EncryptionService>, crate::database::DbError> {
+        self.security
+            .routing_encryption(self.database.has_scoped_graph())
+    }
+
+    fn host_write_blob_staging(&self) -> Option<crate::sync::store::HostWriteBlobStaging> {
+        self.sync.host_write_blob_staging()
+    }
+
+    pub(crate) async fn pending_writes(
+        &self,
+    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+        self.database.pending_writes().await
+    }
+
+    pub(crate) async fn blocked_writes(
+        &self,
+    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+        self.database.blocked_writes().await
+    }
+
+    pub(crate) async fn retry_blocked_write(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::CovenError> {
+        let retried = self
+            .database
+            .retry_blocked_write(write_id)
+            .await
+            .map_err(crate::CovenError::from)?;
+        self.sync.trigger();
+        Ok(retried)
+    }
+
+    pub(crate) async fn discard_blocked_write(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::CovenError> {
+        let outcome = self
+            .database
+            .discard_blocked_write(write_id)
+            .await
+            .map_err(crate::CovenError::from)?;
+        if let crate::database::BlockedWriteDiscard::Discarded(discarded) = outcome {
+            return Ok(discarded);
+        }
+        self.sync
+            .discard_blocked_write(write_id.clone())
+            .await
+            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))
+    }
+
+    pub(crate) async fn write_status(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<crate::WriteStatus, crate::database::DbError> {
+        self.database.write_status(write_id).await
+    }
+
+    pub(crate) async fn subscribe_write_status(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<tokio::sync::watch::Receiver<crate::WriteStatus>, crate::database::DbError> {
+        self.database.subscribe_write_status(write_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_changeset_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<u8>, crate::database::DbError> {
+        self.database.write_changeset_for_test(write_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_blob_lease_count_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<i64, crate::database::DbError> {
+        self.database
+            .write_blob_lease_count_for_test(write_id)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_sql_with_blob_staging_for_test(
+        &self,
+        blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
+        sql: String,
+    ) -> CovenResult<WriteReceipt<()>> {
+        let operation = HostWriteOperation::new(WriteBatch::new(), move |context| {
+            context.execute_batch(&sql)?;
+            Ok(())
+        });
+        self.database
+            .execute_host_write(
+                operation,
+                self.store_dir.clone(),
+                self.stamper.clone(),
+                self.routing_encryption()?,
+                blob_staging,
+            )
+            .await
+            .map_err(map_host_write_error)
+    }
+}
+
+fn map_host_write_error(error: HostWriteError<CovenError>) -> CovenError {
+    match error {
+        HostWriteError::Host(error) => error,
+        HostWriteError::Database(error) => CovenError::Database(error),
+        HostWriteError::Blob(error) => CovenError::Blob(error),
+        HostWriteError::UnsafeBlobPath(error) => CovenError::UnsafeBlobPath(error),
+        HostWriteError::MalformedPath(error) => CovenError::MalformedPath(error),
+        HostWriteError::WriteClosurePanicked => CovenError::WriteClosurePanicked,
+        HostWriteError::WriteRollbackFailed { write, rollback } => {
+            CovenError::WriteRollbackFailed {
+                write: Box::new(map_host_write_error(*write)),
+                rollback,
+            }
+        }
+        HostWriteError::BlobStillReferenced { namespace, id } => {
+            CovenError::BlobStillReferenced { namespace, id }
+        }
+        HostWriteError::BlobAlreadyReferenced { namespace, id } => {
+            CovenError::BlobAlreadyReferenced { namespace, id }
+        }
+        HostWriteError::BlobOwnedByPendingWrite { namespace, id } => {
+            CovenError::BlobOwnedByPendingWrite { namespace, id }
+        }
+        HostWriteError::Io(error) => CovenError::Io(error),
+    }
+}

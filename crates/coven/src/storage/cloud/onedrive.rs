@@ -650,8 +650,8 @@ impl CloudHome for OneDriveCloudHome {
 impl ExactSlotStorage for OneDriveCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<coven_core::sync::storage::ResolvedProviderBinding, CloudHomeError> {
-        use coven_core::sync::storage::{
+    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+        use crate::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };

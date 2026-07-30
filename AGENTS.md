@@ -10,3 +10,11 @@ development states unless the user explicitly requests them.
 Delete superseded paths and update every caller, test, fixture, and document to
 the single current shape. The application-facing schema migration system is a
 product capability; it does not authorize preserving obsolete coven internals.
+
+## Ownership and Composition
+
+Objects do not expose or hand their retained dependencies to callers. An object
+uses the dependencies it owns to perform its capabilities, and callers use that
+object as the capability. Compose the object graph through owner methods; do not
+unpack an owner into a database, storage provider, key, runtime, or other
+internal so another layer can perform its work.

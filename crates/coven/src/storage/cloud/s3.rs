@@ -467,16 +467,16 @@ impl S3PartSink {
     }
 }
 
-fn s3_access_key_id_hash(access_key_id: &str) -> coven_core::sync::store_commit::ObjectHash {
+fn s3_access_key_id_hash(access_key_id: &str) -> crate::protocol::store_commit::ObjectHash {
     const DOMAIN: &[u8] = b"coven.s3-access-key-id.v1\0";
     let mut material = Vec::with_capacity(DOMAIN.len() + access_key_id.len());
     material.extend_from_slice(DOMAIN);
     material.extend_from_slice(access_key_id.as_bytes());
-    coven_core::sync::store_commit::ObjectHash::digest(&material)
+    crate::protocol::store_commit::ObjectHash::digest(&material)
 }
 
 fn custom_s3_origin(endpoint: &str) -> Result<String, CloudHomeError> {
-    coven_core::sync::provider::canonical_custom_s3_origin(endpoint)
+    crate::protocol::provider::canonical_custom_s3_origin(endpoint)
         .map_err(|error| CloudHomeError::Configuration(error.to_string()))
 }
 
@@ -484,8 +484,8 @@ fn aws_caller_identity(
     account_id: &str,
     arn: &str,
     user_id: &str,
-) -> Result<(String, coven_core::sync::storage::AwsPrincipal), CloudHomeError> {
-    use coven_core::sync::storage::AwsPrincipal;
+) -> Result<(String, crate::storage::AwsPrincipal), CloudHomeError> {
+    use crate::storage::AwsPrincipal;
 
     if account_id.len() != 12 || !account_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(CloudHomeError::Configuration(
@@ -993,8 +993,8 @@ impl CloudHome for S3CloudHome {
 impl ExactSlotStorage for S3CloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<coven_core::sync::storage::ResolvedProviderBinding, CloudHomeError> {
-        use coven_core::sync::storage::{
+    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+        use crate::storage::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding,
             StoreProviderBinding,
         };
@@ -1340,7 +1340,7 @@ mod tests {
             if entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(coven_core::local_blob::TEMP_BLOB_PREFIX)
+                .starts_with(crate::local_blob::TEMP_BLOB_PREFIX)
             {
                 temps.push(entry.path());
             }
@@ -1955,9 +1955,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_key_id() {
-        use coven_core::sync::storage::{
-            ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
-        };
+        use crate::storage::{ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding};
 
         let home = test_home(
             "bucket-a".to_string(),
@@ -2018,7 +2016,7 @@ mod tests {
 
     #[test]
     fn sts_identity_accepts_stable_aws_principals_and_rejects_federated_users() {
-        use coven_core::sync::storage::AwsPrincipal;
+        use crate::storage::AwsPrincipal;
 
         assert_eq!(
             aws_caller_identity(

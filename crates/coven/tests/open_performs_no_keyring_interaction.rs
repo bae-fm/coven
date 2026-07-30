@@ -70,7 +70,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     Coven::builder(config)
         .synced_tables(vec![SyncedTable::new(
             "notes",
-            coven_core::RowIdentity::SharedKey,
+            coven::RowIdentity::SharedKey,
         )])
         .migrations(vec![notes_migration()])
         .open()
@@ -86,7 +86,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     let invalid = Coven::builder(invalid_config)
         .synced_tables(vec![SyncedTable::new(
             "notes",
-            coven_core::RowIdentity::IndependentUuid,
+            coven::RowIdentity::IndependentUuid,
         )])
         .migrations(vec![notes_migration()])
         .open();

@@ -1,7 +1,7 @@
+use coven::InMemoryCloudHome;
 use coven::{
     Config, Coven, CovenError, HomeStorage, Migration, RowIdentity, StoreDir, SyncedTable,
 };
-use coven_core::InMemoryCloudHome;
 
 fn config(store_dir: StoreDir, storage: HomeStorage) -> Config {
     let mut config = Config::with_defaults(

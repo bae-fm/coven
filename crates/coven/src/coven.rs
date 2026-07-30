@@ -5,11 +5,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::Connection;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::blob::local_files::LocalBlobError;
-use crate::blob::{BlobRef, BlobTransitionObserver};
+use crate::blob::BlobTransitionObserver;
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
@@ -19,14 +18,10 @@ use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
 use crate::migration::{Migration, MigrationError};
 use crate::store_dir::PathTokenError;
-use crate::sync::hlc::UpdatedAtStamper;
+use crate::store_sync::ConfigProvider;
 use crate::sync::session::SyncedTable;
-use crate::sync::sync_manager::ConfigProvider;
-use coven_core::{WriteId, WriteReceipt};
 
 pub type CovenResult<T> = Result<T, CovenError>;
-
-const LOCAL_STAGE_MARKER: &str = ".coven-stage-";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
@@ -128,7 +123,7 @@ impl Coven {
             synced_tables: None,
             migrations: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            blob_chunking: crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            blob_chunking: crate::storage::BlobChunking::DEFAULT,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
             clock: Arc::new(SystemClock),
@@ -153,7 +148,7 @@ pub struct CovenBuilder {
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    blob_chunking: crate::sync::cloud_storage::BlobChunking,
+    blob_chunking: crate::storage::BlobChunking,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
@@ -230,13 +225,13 @@ impl CovenBuilder {
 
     /// How this installation seals and reads blobs: the plaintext chunk size a
     /// blob is sealed at, and how many stored bytes one ranged read spans.
-    /// Defaults to [`BlobChunking::DEFAULT`](crate::sync::cloud_storage::BlobChunking::DEFAULT).
+    /// Defaults to [`BlobChunking::DEFAULT`](crate::storage::BlobChunking::DEFAULT).
     ///
     /// The chunk size applies to blobs this installation seals from here on. A
     /// blob already in the cloud records the size it was sealed at in its own
     /// header, and readers honor that, so changing this setting migrates
     /// nothing and installations set differently read each other's blobs.
-    pub fn blob_chunking(mut self, chunking: crate::sync::cloud_storage::BlobChunking) -> Self {
+    pub fn blob_chunking(mut self, chunking: crate::storage::BlobChunking) -> Self {
         self.blob_chunking = chunking;
         self
     }
@@ -449,418 +444,16 @@ fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResul
     Ok(())
 }
 
-/// Host SQL inside one journaled write transaction.
-///
-/// The context exposes SQL operations, but never the underlying SQLite
-/// connection or transaction. In particular, a host cannot remove coven's SQL
-/// authorizer and address its attached gate baseline:
-///
-/// ```compile_fail
-/// # use coven::{CovenError, CovenHandle};
-/// # async fn cannot_remove_guard(handle: &CovenHandle) -> Result<(), CovenError> {
-/// handle.sql(|sql| {
-///     sql.tx().authorizer(
-///         None::<fn(coven::rusqlite::hooks::AuthContext<'_>)
-///             -> coven::rusqlite::hooks::Authorization>,
-///     )?;
-///     Ok(())
-/// }).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub struct SqlContext<'ctx, 'conn> {
-    tx: &'ctx rusqlite::Transaction<'conn>,
-    stamper: UpdatedAtStamper,
-    /// The declared tables and gates, carried so a blob registration can
-    /// resolve the row's binding against the same schema this write runs under.
-    tables: &'ctx [SyncedTable],
-    gates: &'ctx crate::sync::gate::Gates,
-}
-
-impl<'ctx, 'conn> SqlContext<'ctx, 'conn> {
-    pub(crate) fn new(
-        tx: &'ctx rusqlite::Transaction<'conn>,
-        stamper: UpdatedAtStamper,
-        tables: &'ctx [SyncedTable],
-        gates: &'ctx crate::sync::gate::Gates,
-    ) -> Self {
-        Self {
-            tx,
-            stamper,
-            tables,
-            gates,
-        }
-    }
-
-    /// The declared table by name, refused if it declares no blob.
-    fn blob_table(&self, table: &str) -> Result<&SyncedTable, DbError> {
-        let declared = self
-            .tables
-            .iter()
-            .find(|candidate| candidate.name() == table)
-            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
-        if declared.blob().is_none() {
-            return Err(DbError::Message(format!(
-                "synced table {table:?} has no blob declaration"
-            )));
-        }
-        Ok(declared)
-    }
-
-    /// Execute one SQL statement with bound parameters.
-    pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
-    where
-        P: rusqlite::Params,
-    {
-        self.tx.execute(sql, params)
-    }
-
-    /// Execute one or more semicolon-separated SQL statements.
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.tx.execute_batch(sql)
-    }
-
-    /// Query exactly one row and map it to a host value.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
-    where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        self.tx.query_row(sql, params, map)
-    }
-
-    /// Query any number of rows and collect their mapped host values.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
-    where
-        P: rusqlite::Params,
-        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        let mut statement = self.tx.prepare(sql)?;
-        let values = statement.query_map(params, map)?.collect();
-        values
-    }
-
-    pub fn stamp(&self) -> String {
-        self.stamper.stamp()
-    }
-
-    /// Point a row's blob at a file the user owns, without copying it.
-    ///
-    /// Call this in the same write that inserted or updated the row: the
-    /// registration binds to the row's *current* version, so registering from a
-    /// later write would bind a version the next row change invalidates. The
-    /// row must already carry the blob's id, size, and content hash in the
-    /// columns its table declared — those are what the binding is derived from,
-    /// and a read verifies the file against them.
-    ///
-    /// Only tables declared [`Provenance::UserProvided`](crate::Provenance)
-    /// take external files. On a host-provided table coven keeps its own copy,
-    /// so nothing would ever read the registration; that is refused rather than
-    /// written and ignored.
-    ///
-    /// coven reads the file but never owns it: it is not copied, and if the
-    /// user moves, truncates, or rewrites it, the next read fails loud instead
-    /// of serving different bytes.
-    pub fn register_external_blob(
-        &self,
-        table: &str,
-        row_id: &str,
-        path: &std::path::Path,
-    ) -> Result<(), DbError> {
-        let declared = self.blob_table(table)?;
-        let reference = Database::row_blob_ref_on(self.tx, self.gates, declared, row_id)?;
-        if reference.blob().provenance != crate::Provenance::UserProvided {
-            return Err(DbError::Message(format!(
-                "table {table:?} declares host-provided blobs, which coven copies; \
-                 an external file registration on it would never be read"
-            )));
-        }
-        Database::register_external_blob_on(self.tx, &reference, path)
-    }
-
-    /// Queue the cloud object behind a blob for removal.
-    ///
-    /// Deleting a row removes coven's local copy, but the object already
-    /// uploaded to the cloud outlives it — this is what tombstones it. The
-    /// removal is durable and retried, so it survives a crash between the row
-    /// delete and the transfer that carries it out.
-    ///
-    /// Takes the reference rather than a row id because the row is usually
-    /// gone by the time this is called: capture it with
-    /// [`CovenHandle::row_blob_ref`](crate::CovenHandle::row_blob_ref) before
-    /// the write, then enqueue in the same write that deletes the row, so the
-    /// tombstone and the deletion commit together.
-    ///
-    /// A blob with no cloud object — never uploaded, or already local-only —
-    /// has nothing to tombstone, and is refused rather than queueing a removal
-    /// for an object that was never there.
-    pub fn enqueue_blob_delete(&self, blob: &crate::RowBlobRef) -> Result<(), DbError> {
-        let stored = blob.stored().ok_or_else(|| {
-            DbError::Message(format!(
-                "blob {:?} in {:?} has no cloud object to remove",
-                blob.blob().id,
-                blob.blob().namespace
-            ))
-        })?;
-        Database::enqueue_delete_on(self.tx, stored, &self.stamp())
-    }
-
-    /// Drop the external-file registration for a row's blob.
-    ///
-    /// Idempotent: a row with no registration is left alone. Like
-    /// [`register_external_blob`](Self::register_external_blob) this binds to
-    /// the row's current version, so it belongs in the write that changed the
-    /// row.
-    pub fn clear_external_blob(&self, table: &str, row_id: &str) -> Result<(), DbError> {
-        let declared = self.blob_table(table)?;
-        let reference = Database::row_blob_ref_on(self.tx, self.gates, declared, row_id)?;
-        Database::clear_external_blob_on(self.tx, &reference)
-    }
-}
-
-type WriteSql<R> =
-    Box<dyn for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send>;
-
-pub struct WriteBatch {
-    new_blobs: Vec<NewBlob>,
-    deleted_blobs: Vec<BlobRef>,
-}
-
-impl WriteBatch {
-    fn new() -> Self {
-        Self {
-            new_blobs: Vec::new(),
-            deleted_blobs: Vec::new(),
-        }
-    }
-
-    pub fn put_blob(
-        &mut self,
-        namespace: impl Into<String>,
-        id: impl Into<String>,
-        bytes: impl Into<Vec<u8>>,
-    ) {
-        self.new_blobs.push(NewBlob {
-            namespace: namespace.into(),
-            id: id.into(),
-            bytes: bytes.into(),
-        });
-    }
-
-    pub fn delete_blob(&mut self, blob: BlobRef) {
-        self.deleted_blobs.push(blob);
-    }
-}
-
-struct NewBlob {
-    namespace: String,
-    id: String,
-    bytes: Vec<u8>,
-}
-
-#[derive(Clone)]
-pub(crate) struct StagedBlob {
-    pub namespace: String,
-    pub id: String,
-    pub staged: PathBuf,
-    pub final_path: PathBuf,
-}
-
-impl CovenHandle {
-    pub async fn sql<F, R>(&self, f: F) -> CovenResult<WriteReceipt<R>>
-    where
-        F: for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let stamper = self.stamper();
-        let tables = self.db().synced_tables().to_vec();
-        let gates = self.db().gates();
-        let blob_decls = self.db().blob_decls();
-        let routing_encryption = gates
-            .has_scoped_graph()
-            .then(|| self.routing_encryption())
-            .transpose()?;
-        let blob_staging = self.host_write_blob_staging();
-        let write_id = self.db().new_write_id();
-        let outcome = self
-            .db()
-            .call(move |conn| {
-                Ok(
-                    crate::sync::store::StoreDatabase::run_store_write_transaction_on(
-                        conn,
-                        &tables,
-                        &gates,
-                        &blob_decls,
-                        routing_encryption.as_ref(),
-                        blob_staging.as_ref(),
-                        write_id,
-                        |tx| f(SqlContext::new(tx, stamper, &tables, &gates)),
-                    ),
-                )
-            })
-            .await
-            .map_err(CovenError::from)?;
-        outcome
-    }
-
-    /// Run a pure read against this handle's read-only companion connection and
-    /// await the result.
-    ///
-    /// Unlike [`sql`](Self::sql), this attaches no changeset session and opens no
-    /// journaled transaction: a read pays nothing for capture it would produce
-    /// nothing for, and runs on a separate `SQLITE_OPEN_READONLY` connection thread
-    /// (concurrent with the writer, not queued behind it). The connection is
-    /// read-only, so an `INSERT`/`UPDATE`/`DELETE`/DDL in the closure is refused by
-    /// SQLite — a read cannot silently escape the sync journal because it cannot
-    /// write at all. The closure receives the `&Connection` directly, so a host
-    /// closure written against
-    /// [`CovenReadHandle::sql_read`](crate::CovenReadHandle::sql_read) runs
-    /// unchanged here.
-    ///
-    /// Read-your-writes holds for committed writes: a `sql_read` issued after an
-    /// awaited [`sql`](Self::sql) or [`write`](Self::write) sees that data (the WAL
-    /// reader reads the last committed state). It may not see another task's write
-    /// that has not yet committed.
-    pub async fn sql_read<F, R>(&self, f: F) -> CovenResult<R>
-    where
-        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let outcome = self
-            .read_db()
-            .call(move |conn| Ok(f(conn)))
-            .await
-            .map_err(CovenError::from)?;
-        outcome
-    }
-
-    pub async fn write<F, S, R>(&self, f: F, sql: S) -> CovenResult<WriteReceipt<R>>
-    where
-        F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
-        S: for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let mut batch = WriteBatch::new();
-        f(&mut batch)?;
-        let sql: WriteSql<R> = Box::new(sql);
-        let staged = self.stage_blobs(batch.new_blobs).await?;
-        let staged_paths = staged
-            .iter()
-            .map(|blob| blob.staged.clone())
-            .collect::<Vec<_>>();
-        let tables = self.db().synced_tables().to_vec();
-        let db = self.db().clone();
-        let stamper = self.stamper();
-        let gates = self.db().gates();
-        let blob_decls = self.db().blob_decls();
-        let routing_encryption = gates
-            .has_scoped_graph()
-            .then(|| self.routing_encryption())
-            .transpose()?;
-        let blob_staging = self.host_write_blob_staging();
-        let write_id = self.db().new_write_id();
-        let deleted = batch.deleted_blobs;
-        let store_dir = self.store_dir();
-        let outcome = match db
-            .call(move |conn| {
-                Ok(run_write_batch_on_connection(
-                    conn,
-                    stamper,
-                    store_dir,
-                    staged,
-                    deleted,
-                    tables,
-                    gates,
-                    blob_decls,
-                    routing_encryption,
-                    blob_staging,
-                    write_id,
-                    sql,
-                ))
-            })
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                remove_staged_paths(&staged_paths).await;
-                return Err(CovenError::from(error));
-            }
-        };
-        match outcome {
-            Ok(receipt) => {
-                if let Err(error) =
-                    crate::blob::local_cleanup::drain(self.db(), &self.store_dir()).await
-                {
-                    warn!(
-                        error = %error,
-                        "failed to drain local blob cleanup intents after write commit"
-                    );
-                }
-                Ok(receipt)
-            }
-            Err(error) => {
-                remove_staged_paths(&staged_paths).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn stage_blobs(&self, blobs: Vec<NewBlob>) -> CovenResult<Vec<StagedBlob>> {
-        let mut staged = Vec::new();
-        for blob in blobs {
-            let final_path = self
-                .store_dir()
-                .local_blob_path(&blob.namespace, &blob.id)?;
-            let staged_path = local_stage_temp_path(&final_path)?;
-            if let Err(e) = crate::local_blob::write_atomic(&staged_path, &blob.bytes).await {
-                remove_staged_files(&staged).await;
-                return Err(CovenError::Blob(e));
-            }
-            staged.push(StagedBlob {
-                namespace: blob.namespace,
-                id: blob.id,
-                staged: staged_path,
-                final_path,
-            });
-        }
-        Ok(staged)
-    }
-}
-
-fn local_stage_temp_path(final_path: &Path) -> CovenResult<PathBuf> {
-    let file_name = final_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            CovenError::MalformedPath(format!(
-                "local blob path has no file name: {}",
-                final_path.display()
-            ))
-        })?;
-    Ok(final_path.with_file_name(format!(
-        "{file_name}{LOCAL_STAGE_MARKER}{}",
-        uuid::Uuid::new_v4()
-    )))
-}
-
-/// Remove temp debris a crashed prior process left in the blob folders, before the
-/// handle serves any read. Two temp conventions:
-///
-/// - Every atomic write (`write_atomic`/`copy_atomic`) in any blob folder — the local
-///   store, `cache/`, `pinned/` — leaves a `.tmp.<uuid>` sibling until its
-///   fsync-then-rename commits it. A crash orphans that temp. Only those older than
-///   this open (`process_start`) are crash leftovers; a temp a concurrent write is
-///   mid-producing is newer and is left in place so the sweep can never delete a live
-///   write's rename target.
-/// - `storage/local/` additionally holds write staging (`.coven-stage-<uuid>`). Open
-///   holds the exclusive store lock, so every staging temp here is a crash leftover
-///   — all are removed, no age check.
 fn remove_orphaned_local_blob_temps(
     store_dir: &crate::store_dir::StoreDir,
     process_start: std::time::SystemTime,
 ) -> CovenResult<()> {
     let storage = store_dir.storage_dir();
-    remove_orphaned_temps_in_dir(&storage.join("local"), &is_local_stage_temp, None)?;
+    remove_orphaned_temps_in_dir(
+        &storage.join("local"),
+        &crate::local_blob::is_staged_blob_path,
+        None,
+    )?;
     for folder in ["local", "cache", "pinned"] {
         remove_orphaned_temps_in_dir(
             &storage.join(folder),
@@ -928,202 +521,11 @@ fn remove_orphaned_temps_in_dir(
     Ok(())
 }
 
-fn is_local_stage_temp(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains(LOCAL_STAGE_MARKER))
-}
-
-async fn remove_staged_files(staged: &[StagedBlob]) {
-    let paths = staged
-        .iter()
-        .map(|blob| blob.staged.clone())
-        .collect::<Vec<_>>();
-    remove_staged_paths(&paths).await;
-}
-
-async fn remove_staged_paths(paths: &[PathBuf]) {
-    for path in paths {
-        remove_staged_path(path).await;
-    }
-}
-
-async fn remove_staged_path(path: &Path) {
-    if let Err(error) = crate::local_blob::remove_file(path).await {
-        warn!(
-            path = %path.display(),
-            error = %error,
-            "failed to remove staged local blob"
-        );
-    }
-}
-
-fn sync_parent_dir(path: &Path) -> CovenResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        CovenError::MalformedPath(format!("path has no parent directory: {}", path.display()))
-    })?;
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-fn run_write_batch_on_connection<R>(
-    conn: &Connection,
-    stamper: UpdatedAtStamper,
-    store_dir: crate::store_dir::StoreDir,
-    staged: Vec<StagedBlob>,
-    deleted: Vec<BlobRef>,
-    tables: Vec<SyncedTable>,
-    gates: Arc<crate::sync::gate::Gates>,
-    decls: Arc<crate::blob::decl::BlobDecls>,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
-    blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
-    write_id: WriteId,
-    sql: WriteSql<R>,
-) -> CovenResult<WriteReceipt<R>> {
-    let mut moved = Vec::new();
-    let result = crate::sync::store::StoreDatabase::run_store_write_transaction_on(
-        conn,
-        &tables,
-        &gates,
-        &decls,
-        routing_encryption.as_ref(),
-        blob_staging.as_ref(),
-        write_id,
-        |tx| -> CovenResult<R> {
-            let cleanup_intents = deleted
-                .iter()
-                .map(|blob| {
-                    decls
-                        .row_for_blob_in_namespace(tx, &blob.namespace, &blob.id)
-                        .map_err(|error| CovenError::Blob(error.to_string()))
-                        .map(|row| match row {
-                            Some((table, row_id)) => {
-                                crate::blob::local_cleanup::LocalBlobCleanupIntent::for_row(
-                                    &blob.namespace,
-                                    &blob.id,
-                                    table,
-                                    row_id,
-                                )
-                            }
-                            None => crate::blob::local_cleanup::LocalBlobCleanupIntent::local(
-                                &blob.namespace,
-                                &blob.id,
-                            ),
-                        })
-                })
-                .collect::<CovenResult<Vec<_>>>()?;
-            for blob in &staged {
-                match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
-                    Ok(Some(_)) => {
-                        return Err(CovenError::BlobAlreadyReferenced {
-                            namespace: blob.namespace.clone(),
-                            id: blob.id.clone(),
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(CovenError::Blob(e.to_string())),
-                }
-                let leased = tx
-                    .query_row(
-                        "SELECT EXISTS(\
-                             SELECT 1 FROM store_write_blob_leases \
-                             WHERE namespace = ?1 AND blob_id = ?2\
-                         )",
-                        (&blob.namespace, &blob.id),
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map_err(CovenError::from)?;
-                if leased {
-                    return Err(CovenError::BlobOwnedByPendingWrite {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                    });
-                }
-                if let Some(parent) = blob.final_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        CovenError::Blob(format!(
-                            "create local blob parent {}: {e}",
-                            parent.display()
-                        ))
-                    })?;
-                }
-                std::fs::rename(&blob.staged, &blob.final_path).map_err(|e| {
-                    CovenError::Blob(format!(
-                        "install staged blob {} -> {}: {e}",
-                        blob.staged.display(),
-                        blob.final_path.display()
-                    ))
-                })?;
-                moved.push(blob.clone());
-                sync_parent_dir(&blob.final_path).map_err(|e| {
-                    CovenError::Blob(format!(
-                        "sync local blob parent after installing {}: {e}",
-                        blob.final_path.display()
-                    ))
-                })?;
-            }
-
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sql(SqlContext::new(tx, stamper, &tables, &gates))
-            })) {
-                Ok(Ok(value)) => {
-                    for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
-                        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-                        if crate::blob::local_cleanup::logical_blob_is_referenced_on(
-                            tx,
-                            &decls,
-                            &blob.namespace,
-                            &blob.id,
-                        )? {
-                            return Err(CovenError::BlobStillReferenced {
-                                namespace: blob.namespace.clone(),
-                                id: blob.id.clone(),
-                            });
-                        }
-                        crate::blob::local_cleanup::record_obsolete_copy_intents_on(
-                            tx, &decls, intent,
-                        )?;
-                    }
-                    Ok(value)
-                }
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err(CovenError::WriteClosurePanicked),
-            }
-        },
-    );
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            let mut rollback_failures = Vec::new();
-            for blob in moved.iter().rev() {
-                match std::fs::remove_file(&blob.final_path) {
-                    Ok(()) => {}
-                    Err(rollback) if rollback.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(rollback) => rollback_failures.push(format!(
-                        "{}/{} at {}: {rollback}",
-                        blob.namespace,
-                        blob.id,
-                        blob.final_path.display()
-                    )),
-                }
-            }
-            if rollback_failures.is_empty() {
-                Err(error)
-            } else {
-                Err(CovenError::WriteRollbackFailed {
-                    write: Box::new(error),
-                    rollback: rollback_failures.join("; "),
-                })
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::blob::{BlobScope, CacheFill, Provenance};
+    use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
     use crate::config::Config;
     use crate::keys::test_keyring;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -1131,12 +533,13 @@ mod tests {
         BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
         ExactSlotStorage, ObjectSlot, UploadProgress,
     };
+    use crate::storage::CloudCipher;
     use crate::store_dir::StoreDir;
-    use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::session::BlobDecl;
-    use crate::sync::test_helpers::{pull_into, query_text, row_exists, TestStore};
+    use crate::sync::test_helpers::TestStore;
+    use crate::{WriteId, WriteReceipt};
     use async_trait::async_trait;
-    use rusqlite::params;
+    use rusqlite::{params, OptionalExtension};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -1151,6 +554,32 @@ mod tests {
         )
     }
 
+    async fn query_handle_text(handle: &CovenHandle, sql: &str) -> String {
+        let sql = sql.to_string();
+        handle
+            .sql_read(move |connection| {
+                connection
+                    .query_row(&sql, [], |row| row.get(0))
+                    .map_err(CovenError::from)
+            })
+            .await
+            .expect("query text through the host read capability")
+    }
+
+    async fn handle_row_exists(handle: &CovenHandle, sql: &str) -> bool {
+        let sql = sql.to_string();
+        handle
+            .sql_read(move |connection| {
+                connection
+                    .query_row(&sql, [], |_| Ok(true))
+                    .optional()
+                    .map(|value| value.unwrap_or(false))
+                    .map_err(CovenError::from)
+            })
+            .await
+            .expect("query row existence through the host read capability")
+    }
+
     fn media_files_decl() -> BlobDecl {
         BlobDecl::new(
             "media-files",
@@ -1161,18 +590,17 @@ mod tests {
     }
 
     fn files_table() -> SyncedTable {
-        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
-            .carries_blob(media_files_decl())
+        SyncedTable::new("files", crate::RowIdentity::SharedKey).carries_blob(media_files_decl())
     }
 
     fn remote_root_files_table() -> SyncedTable {
-        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
+        SyncedTable::new("files", crate::RowIdentity::SharedKey)
             .remote_root()
             .carries_blob(media_files_decl())
     }
 
     fn scoped_files_table() -> SyncedTable {
-        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
+        SyncedTable::new("files", crate::RowIdentity::SharedKey)
             .scoped_by("audience")
             .carries_blob(media_files_decl())
     }
@@ -1207,7 +635,7 @@ mod tests {
     }
 
     fn gated_roots_table() -> SyncedTable {
-        SyncedTable::new("roots", coven_core::RowIdentity::SharedKey).gated_by("shared")
+        SyncedTable::new("roots", crate::RowIdentity::SharedKey).gated_by("shared")
     }
 
     fn gated_roots_migration() -> Migration {
@@ -1355,20 +783,12 @@ mod tests {
             .expect("flip root visible");
         let write_id = published.write_id.clone();
         let changeset = handle
-            .db()
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT changeset FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(crate::database::DbError::from)
-            })
+            .write_changeset_for_test(&write_id)
             .await
             .expect("load gated changeset");
-        let rows = coven_core::changeset::walk(&changeset).expect("walk gated changeset");
+        let rows = crate::changeset::walk(&changeset).expect("walk gated changeset");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].op, coven_core::changeset::ChangeOp::Insert);
+        assert_eq!(rows[0].op, crate::changeset::ChangeOp::Insert);
         assert_eq!(rows[0].pk(), Some("root-1"));
         assert_eq!(rows[0].col(1), Some("Private"));
         assert_eq!(rows[0].col(2), Some("1"));
@@ -1471,8 +891,8 @@ mod tests {
     }
 
     async fn run_test_cycle(storage: &TestStore, handle: &CovenHandle) {
-        storage
-            .publish_pending(handle.db(), &handle.store_dir())
+        handle
+            .publish_test_store(storage)
             .await
             .expect("publish pending Store write");
     }
@@ -1481,7 +901,8 @@ mod tests {
         handle: &CovenHandle,
         keypair: &crate::keys::UserKeypair,
     ) -> TestStore {
-        TestStore::create(handle.db(), "lib-test", keypair.clone())
+        handle
+            .create_test_store("lib-test", keypair.clone())
             .await
             .expect("create exact test Store")
     }
@@ -1516,10 +937,10 @@ mod tests {
         run_test_cycle(&storage, &reopened).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, &peer.store_dir()).await;
+        peer.pull_test_store(&storage).await;
         assert_eq!(
-            query_text(
-                peer.db(),
+            query_handle_text(
+                &peer,
                 "SELECT id FROM files WHERE id = 'file-before-reopen'"
             )
             .await,
@@ -1544,7 +965,7 @@ mod tests {
                 })
                 .await
                 .expect("write before reopen");
-            assert_eq!(receipt.status, coven_core::WriteStatus::Pending);
+            assert_eq!(receipt.status, crate::WriteStatus::Pending);
             write_ids.push(receipt.write_id);
         }
         drop(handle);
@@ -1558,14 +979,14 @@ mod tests {
             .subscribe_write_status(&write_ids[0])
             .await
             .expect("subscribe after restart");
-        assert_eq!(*first_status.borrow(), coven_core::WriteStatus::Pending);
+        assert_eq!(*first_status.borrow(), crate::WriteStatus::Pending);
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&reopened, &keypair).await;
         run_test_cycle(&storage, &reopened).await;
 
         first_status.changed().await.expect("published status");
         let first_sequence = match &*first_status.borrow() {
-            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("first host transaction is not published: {status:?}"),
         };
         assert_eq!(
@@ -1573,7 +994,7 @@ mod tests {
                 .write_status(&write_ids[1])
                 .await
                 .expect("second status after first publication"),
-            coven_core::WriteStatus::Pending,
+            crate::WriteStatus::Pending,
         );
         run_test_cycle(&storage, &reopened).await;
         let second_sequence = match reopened
@@ -1581,7 +1002,7 @@ mod tests {
             .await
             .expect("second status")
         {
-            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("second host transaction is not published: {status:?}"),
         };
         assert_eq!(second_sequence, first_sequence + 1);
@@ -1592,9 +1013,9 @@ mod tests {
             .is_empty());
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, &peer.store_dir()).await;
-        assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
-        assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-b'").await);
+        peer.pull_test_store(&storage).await;
+        assert!(handle_row_exists(&peer, "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
+        assert!(handle_row_exists(&peer, "SELECT 1 FROM files WHERE id = 'file-pending-b'").await);
     }
 
     #[tokio::test]
@@ -1612,30 +1033,21 @@ mod tests {
             .expect("local transaction");
 
         assert_eq!(receipt.value, "saved");
-        assert_eq!(receipt.status, coven_core::WriteStatus::LocalOnly);
+        assert_eq!(receipt.status, crate::WriteStatus::LocalOnly);
         assert_eq!(
             handle
                 .write_status(&receipt.write_id)
                 .await
                 .expect("durable local status"),
-            coven_core::WriteStatus::LocalOnly
+            crate::WriteStatus::LocalOnly
         );
         assert!(handle
             .pending_writes()
             .await
             .expect("pending writes")
             .is_empty());
-        let local_write_id = receipt.write_id.clone();
         let lease_count = handle
-            .db()
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM store_write_blob_leases WHERE write_id = ?1",
-                    [local_write_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(crate::database::DbError::from)
-            })
+            .write_blob_lease_count_for_test(&receipt.write_id)
             .await
             .expect("count local-only blob leases");
         assert_eq!(lease_count, 0);
@@ -1648,7 +1060,7 @@ mod tests {
                 .write_status(&receipt.write_id)
                 .await
                 .expect("local status after sync"),
-            coven_core::WriteStatus::LocalOnly
+            crate::WriteStatus::LocalOnly
         );
         assert!(handle
             .pending_writes()
@@ -1676,13 +1088,13 @@ mod tests {
             .await
             .expect("mixed transaction");
 
-        assert_eq!(receipt.status, coven_core::WriteStatus::Pending);
+        assert_eq!(receipt.status, crate::WriteStatus::Pending);
         let pending = handle.pending_writes().await.expect("pending mixed write");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].write_id, receipt.write_id);
         assert_eq!(
             pending[0].affected_rows,
-            vec![coven_core::AffectedRow {
+            vec![crate::AffectedRow {
                 table: "files".to_string(),
                 primary_key: "shared-1".to_string(),
             }]
@@ -1696,26 +1108,20 @@ mod tests {
                 .write_status(&receipt.write_id)
                 .await
                 .expect("published mixed write"),
-            coven_core::WriteStatus::Published(_)
+            crate::WriteStatus::Published(_)
         ));
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, &peer.store_dir()).await;
-        assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'shared-1'").await);
+        peer.pull_test_store(&storage).await;
+        assert!(handle_row_exists(&peer, "SELECT 1 FROM files WHERE id = 'shared-1'").await);
         assert!(
-            !row_exists(
-                peer.db(),
+            !handle_row_exists(
+                &peer,
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_notes'"
             )
             .await
         );
-        assert!(
-            row_exists(
-                handle.db(),
-                "SELECT 1 FROM local_notes WHERE id = 'local-1'"
-            )
-            .await
-        );
+        assert!(handle_row_exists(&handle, "SELECT 1 FROM local_notes WHERE id = 'local-1'").await);
     }
 
     #[tokio::test]
@@ -1739,13 +1145,9 @@ mod tests {
         run_test_cycle(&storage, &handle).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, &peer.store_dir()).await;
+        peer.pull_test_store(&storage).await;
         assert!(
-            row_exists(
-                peer.db(),
-                "SELECT 1 FROM files WHERE id = 'file-delete-reopen'"
-            )
-            .await,
+            handle_row_exists(&peer, "SELECT 1 FROM files WHERE id = 'file-delete-reopen'").await,
             "the peer receives the insert before the delete",
         );
 
@@ -1761,13 +1163,9 @@ mod tests {
         let reopened = open_files_handle_in(dir);
         run_test_cycle(&storage, &reopened).await;
 
-        pull_into(peer.db(), &storage, &peer.store_dir()).await;
+        peer.pull_test_store(&storage).await;
         assert!(
-            !row_exists(
-                peer.db(),
-                "SELECT 1 FROM files WHERE id = 'file-delete-reopen'"
-            )
-            .await,
+            !handle_row_exists(&peer, "SELECT 1 FROM files WHERE id = 'file-delete-reopen'").await,
             "the delete changeset reaches the peer after reopening",
         );
     }
@@ -1790,9 +1188,7 @@ mod tests {
         let storage = merge_test_storage(&handle, &keypair).await;
         storage.home.fail_exact_create_before_call(1);
 
-        let first = storage
-            .publish_pending(handle.db(), &handle.store_dir())
-            .await;
+        let first = handle.publish_test_store(&storage).await;
         assert!(
             first
                 .as_ref()
@@ -1804,7 +1200,7 @@ mod tests {
                 .write_status(&receipt.write_id)
                 .await
                 .expect("write status after failed append"),
-            coven_core::WriteStatus::Publishing,
+            crate::WriteStatus::Publishing,
         );
 
         run_test_cycle(&storage, &handle).await;
@@ -1814,7 +1210,7 @@ mod tests {
                     .write_status(&receipt.write_id)
                     .await
                     .expect("write status after retry"),
-                coven_core::WriteStatus::Published(_)
+                crate::WriteStatus::Published(_)
             ),
             "the pending write is published as an immutable Store commit after retry",
         );
@@ -2057,7 +1453,7 @@ mod tests {
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
-        let temp = local_stage_temp_path(&final_path).expect("stage temp path");
+        let temp = crate::local_blob::staged_blob_path(&final_path).expect("stage temp path");
         write_raw_file(&temp, b"interrupted write").await;
 
         let _handle = Coven::builder(config(dir.clone()))
@@ -2080,7 +1476,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_inserts_row_and_host_provided_blob() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         let bytes = b"piece-bytes".to_vec();
         let hash = crate::blob::content_hash(&bytes);
         handle
@@ -2103,8 +1500,7 @@ mod tests {
             )
             .await
             .expect("write row and blob");
-        let path = handle
-            .store_dir()
+        let path = dir
             .local_blob_path("media-files", "blobaaaa")
             .expect("local path");
         assert_eq!(
@@ -2115,9 +1511,9 @@ mod tests {
 
     #[tokio::test]
     async fn orphaned_final_blob_is_replaced_by_next_write() {
-        let (_tmp, handle) = open_files_handle();
-        let path = handle
-            .store_dir()
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        let path = dir
             .local_blob_path("media-files", "orphaaaa")
             .expect("local path");
         write_raw_file(&path, b"orphaned bytes").await;
@@ -2154,7 +1550,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_blob_rejects_id_already_referenced_by_a_row() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         handle
             .write(
                 |w| {
@@ -2206,8 +1603,7 @@ mod tests {
             result,
             Err(CovenError::BlobAlreadyReferenced { .. })
         ));
-        let path = handle
-            .store_dir()
+        let path = dir
             .local_blob_path("media-files", "dupeaaaa")
             .expect("dupe path");
         assert_eq!(
@@ -2298,7 +1694,7 @@ mod tests {
         dir: StoreDir,
         handle: CovenHandle,
         store: TestStore,
-        encryption: coven_core::EncryptionService,
+        encryption: crate::EncryptionService,
         destination_circle: crate::CircleId,
         source_object: ObjectSlot,
     }
@@ -2307,7 +1703,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let signer = crate::keys::UserKeypair::generate();
-        let encryption = coven_core::EncryptionService::from_key([42; 32]);
+        let encryption = crate::EncryptionService::from_key([42; 32]);
         let handle = Coven::builder(config(dir.clone()))
             .synced_tables(vec![scoped_files_table()])
             .migrations(vec![scoped_files_migration()])
@@ -2315,13 +1711,14 @@ mod tests {
             .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
             .open()
             .expect("open scoped blob store");
-        let store = TestStore::create(handle.db(), "lib-test", signer)
+        let store = handle
+            .create_test_store("lib-test", signer)
             .await
             .expect("create exact test Store");
         let authority =
             rusqlite::Connection::open(dir.db_path()).expect("open Circle authority database");
         let (destination_circle, _) =
-            coven_core::sync::test_helpers::install_test_active_circle(&authority, "blob-circle");
+            crate::sync::test_helpers::install_test_active_circle(&authority, "blob-circle");
         drop(authority);
 
         let bytes = b"remote-only-circle-blob".to_vec();
@@ -2352,8 +1749,8 @@ mod tests {
             )
             .await
             .expect("write Store blob");
-        store
-            .publish_pending(handle.db(), &dir)
+        handle
+            .publish_test_store(&store)
             .await
             .expect("publish Store blob");
         let source_object = handle
@@ -2393,38 +1790,6 @@ mod tests {
             }
             Err(error) => panic!("read outbound blob spools: {error}"),
         }
-    }
-
-    async fn run_scoped_file_write(
-        handle: &CovenHandle,
-        blob_staging: Option<coven_core::sync::store::HostWriteBlobStaging>,
-        sql: String,
-    ) -> Result<WriteReceipt<()>, coven_core::DbError> {
-        let tables = handle.db().synced_tables().to_vec();
-        let gates = handle.db().gates();
-        let blob_decls = handle.db().blob_decls();
-        let routing_encryption = handle
-            .routing_encryption()
-            .expect("resolve routing encryption");
-        let write_id = handle.db().new_write_id();
-        handle
-            .db()
-            .call(move |conn| {
-                coven_core::sync::store::StoreDatabase::run_store_write_transaction_on(
-                    conn,
-                    &tables,
-                    &gates,
-                    &blob_decls,
-                    Some(&routing_encryption),
-                    blob_staging.as_ref(),
-                    write_id,
-                    |tx| {
-                        tx.execute_batch(&sql)?;
-                        Ok::<_, coven_core::DbError>(())
-                    },
-                )
-            })
-            .await
     }
 
     #[tokio::test]
@@ -2478,16 +1843,17 @@ mod tests {
     async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
         let fixture = remote_only_store_blob().await;
         let destination_circle_value = fixture.destination_circle.to_string();
-        let result = run_scoped_file_write(
-            &fixture.handle,
-            None,
-            format!(
-                "UPDATE files SET audience = '{destination_circle_value}',
+        let result = fixture
+            .handle
+            .execute_sql_with_blob_staging_for_test(
+                None,
+                format!(
+                    "UPDATE files SET audience = '{destination_circle_value}',
                  _updated_at = '0000000009000-0000-device-test'
                  WHERE id = 'circle-file'"
-            ),
-        )
-        .await;
+                ),
+            )
+            .await;
 
         let error = result.expect_err("a blob audience move cannot omit materialization");
         assert!(
@@ -2515,28 +1881,30 @@ mod tests {
     async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
         let fixture = remote_only_store_blob().await;
 
-        run_scoped_file_write(
-            &fixture.handle,
-            None,
-            "UPDATE files SET _updated_at = '0000000009000-0000-device-test'
-             WHERE id = 'circle-file'"
-                .to_string(),
-        )
-        .await
-        .expect("a write that does not move an audience needs no authorized Store");
+        fixture
+            .handle
+            .execute_sql_with_blob_staging_for_test(
+                None,
+                "UPDATE files SET _updated_at = '0000000009000-0000-device-test'
+                 WHERE id = 'circle-file'"
+                    .to_string(),
+            )
+            .await
+            .expect("a write that does not move an audience needs no authorized Store");
 
         let destination_circle_value = fixture.destination_circle.to_string();
-        let error = run_scoped_file_write(
-            &fixture.handle,
-            None,
-            format!(
-                "UPDATE files SET audience = '{destination_circle_value}',
-                 _updated_at = '0000000010000-0000-device-test'
-                 WHERE id = 'circle-file'"
-            ),
-        )
-        .await
-        .expect_err("a remote-only move must surface its adapter error");
+        let error = fixture
+            .handle
+            .execute_sql_with_blob_staging_for_test(
+                None,
+                format!(
+                    "UPDATE files SET audience = '{destination_circle_value}',
+                     _updated_at = '0000000010000-0000-device-test'
+                     WHERE id = 'circle-file'"
+                ),
+            )
+            .await
+            .expect_err("a remote-only move must surface its adapter error");
         assert!(
             error
                 .to_string()
@@ -2688,7 +2056,7 @@ mod tests {
                 .await
                 .expect("load blob after failed Local move")
                 .authority(),
-            coven_core::blob::RowBlobAuthority::Remote(_)
+            crate::blob::RowBlobAuthority::Remote(_)
         ));
 
         rusqlite::Connection::open(fixture.dir.db_path())
@@ -2738,7 +2106,7 @@ mod tests {
             .handle
             .invite_member(
                 &crate::keys::public_key_hex(
-                    &coven_core::sync::test_helpers::test_circle_owner_keypair(),
+                    &crate::sync::test_helpers::test_circle_owner_keypair(),
                 ),
                 None,
                 crate::MemberRole::Member,
@@ -2786,8 +2154,8 @@ mod tests {
             .await
             .expect("remove source after the move commits");
         fixture
-            .store
-            .publish_pending(fixture.handle.db(), &fixture.dir)
+            .handle
+            .publish_test_store(&fixture.store)
             .await
             .expect("publish the move from its durable destination spool");
         assert!(
@@ -2796,8 +2164,8 @@ mod tests {
         );
         assert!(
             !fixture
-                .store
-                .publish_pending(fixture.handle.db(), &fixture.dir)
+                .handle
+                .publish_test_store(&fixture.store)
                 .await
                 .expect("retry completed move publication"),
             "a completed move has nothing left to publish",
@@ -2831,8 +2199,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let signer = crate::keys::UserKeypair::generate();
-        let keyring =
-            coven_core::MasterKeyring::from(coven_core::EncryptionService::from_key([42; 32]));
+        let keyring = crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
         let open = || {
             Coven::builder(config(dir.clone()))
                 .synced_tables(vec![remote_root_files_table()])
@@ -2843,13 +2210,14 @@ mod tests {
                 .expect("open remote-root store")
         };
         let handle = open();
-        let store = TestStore::create(handle.db(), "lib-test", signer.clone())
+        let store = handle
+            .create_test_store("lib-test", signer.clone())
             .await
             .expect("create exact test Store");
         handle
             .connect_sync_with_test_home(
                 store.home.clone(),
-                CloudCipher::Encrypted(coven_core::EncryptionService::from_key([42; 32])),
+                CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
             )
             .await
             .expect("connect exact test Store");
@@ -2892,8 +2260,8 @@ mod tests {
             loop {
                 let current = status.borrow().clone();
                 match current {
-                    coven_core::WriteStatus::Published(_) => break,
-                    coven_core::WriteStatus::Pending | coven_core::WriteStatus::Publishing => {
+                    crate::WriteStatus::Published(_) => break,
+                    crate::WriteStatus::Pending | crate::WriteStatus::Publishing => {
                         status.changed().await.expect("write status remains open")
                     }
                     other => panic!("materialized write did not publish: {other:?}"),
@@ -2935,7 +2303,8 @@ mod tests {
 
     #[tokio::test]
     async fn sql_failure_removes_staged_blob() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         let err = handle
             .write(
                 |w| {
@@ -2947,8 +2316,7 @@ mod tests {
             .await
             .expect_err("write fails");
         assert!(err.to_string().contains("sql failed"));
-        let path = handle
-            .store_dir()
+        let path = dir
             .local_blob_path("media-files", "blobbbbb")
             .expect("local path");
         assert!(!path.exists());
@@ -2989,8 +2357,9 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_deletes_old_blob_after_sql_drops_reference() {
-        let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldaaaa", b"old")
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        crate::blob::local_files::store(&dir, "media-files", "oldaaaa", b"old")
             .await
             .expect("store old");
         handle
@@ -3010,7 +2379,7 @@ mod tests {
             .await
             .expect("seed row");
         publish_current_writes(&handle).await;
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldaaaa", b"old")
+        crate::blob::local_files::store(&dir, "media-files", "oldaaaa", b"old")
             .await
             .expect("restore published blob locally");
         let old_ref = BlobRef {
@@ -3039,13 +2408,11 @@ mod tests {
             )
             .await
             .expect("replace blob");
-        assert!(!handle
-            .store_dir()
+        assert!(!dir
             .local_blob_path("media-files", "oldaaaa")
             .expect("old path")
             .exists());
-        assert!(handle
-            .store_dir()
+        assert!(dir
             .local_blob_path("media-files", "newaaaa")
             .expect("new path")
             .exists());
@@ -3053,6 +2420,7 @@ mod tests {
 
     async fn queue_replacement_before_sync(
         handle: &CovenHandle,
+        store_dir: &StoreDir,
     ) -> (WriteId, WriteId, std::path::PathBuf) {
         let first = handle
             .write(
@@ -3071,8 +2439,7 @@ mod tests {
             )
             .await
             .expect("queue first blob write");
-        let first_path = handle
-            .store_dir()
+        let first_path = store_dir
             .local_blob_path("media-files", "ownedaaa")
             .expect("first blob path");
         let first_blob = BlobRef {
@@ -3120,7 +2487,7 @@ mod tests {
             .await
             .expect("first status")
         {
-            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("first replacement write is not published: {status:?}"),
         };
         assert_eq!(
@@ -3128,7 +2495,7 @@ mod tests {
                 .write_status(second_write)
                 .await
                 .expect("second status after first publication"),
-            coven_core::WriteStatus::Pending,
+            crate::WriteStatus::Pending,
             "one Store publication consumes one pending host transaction",
         );
 
@@ -3138,7 +2505,7 @@ mod tests {
             .await
             .expect("second status")
         {
-            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
+            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("second replacement write is not published: {status:?}"),
         };
         assert_eq!(
@@ -3172,8 +2539,10 @@ mod tests {
     }
 
     async fn run_pending_write_owns_blob_bytes_until_its_publication() {
-        let (_tmp, handle) = open_files_handle();
-        let (first_write, second_write, first_path) = queue_replacement_before_sync(&handle).await;
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        let (first_write, second_write, first_path) =
+            queue_replacement_before_sync(&handle, &dir).await;
 
         assert_eq!(
             std::fs::read(&first_path).expect("first write still owns its bytes"),
@@ -3223,7 +2592,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
-        let (first_write, second_write, first_path) = queue_replacement_before_sync(&handle).await;
+        let (first_write, second_write, first_path) =
+            queue_replacement_before_sync(&handle, &dir).await;
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
@@ -3237,8 +2607,9 @@ mod tests {
 
     #[tokio::test]
     async fn author_delete_drops_all_local_blob_copies() {
-        let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldcccc", b"old")
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        crate::blob::local_files::store(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("store old");
         handle
@@ -3267,15 +2638,13 @@ mod tests {
             .expect("published row has exact storage")
             .locator()
             .locator_hash();
-        let pinned = handle
-            .store_dir()
+        let pinned = dir
             .pinned_blob_path("media-files", locator_hash)
             .expect("pinned path");
-        let cached = handle
-            .store_dir()
+        let cached = dir
             .cache_blob_path("media-files", locator_hash)
             .expect("cache path");
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldcccc", b"old")
+        crate::blob::local_files::store(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("restore published blob locally");
         write_raw_file(&pinned, b"old").await;
@@ -3307,8 +2676,7 @@ mod tests {
             .await
             .expect("delete blob");
 
-        assert!(!handle
-            .store_dir()
+        assert!(!dir
             .local_blob_path("media-files", "oldcccc")
             .expect("local path")
             .exists());
@@ -3318,8 +2686,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
-        let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldddddd", b"old")
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        crate::blob::local_files::store(&dir, "media-files", "oldddddd", b"old")
             .await
             .expect("store old");
         handle
@@ -3348,11 +2717,10 @@ mod tests {
             .expect("published row has exact storage")
             .locator()
             .locator_hash();
-        let pinned = handle
-            .store_dir()
+        let pinned = dir
             .pinned_blob_path("media-files", locator_hash)
             .expect("pinned path");
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldddddd", b"old")
+        crate::blob::local_files::store(&dir, "media-files", "oldddddd", b"old")
             .await
             .expect("restore published blob locally");
         std::fs::create_dir_all(&pinned).expect("create pinned blocker");
@@ -3387,8 +2755,7 @@ mod tests {
             cleanup_intent_count(&handle, "media-files", "oldddddd").await,
             2
         );
-        assert!(handle
-            .store_dir()
+        assert!(dir
             .local_blob_path("media-files", "oldddddd")
             .expect("local path")
             .exists());
@@ -3413,8 +2780,7 @@ mod tests {
             cleanup_intent_count(&handle, "media-files", "oldddddd").await,
             0
         );
-        assert!(!handle
-            .store_dir()
+        assert!(!dir
             .local_blob_path("media-files", "oldddddd")
             .expect("local path")
             .exists());
@@ -3422,7 +2788,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         let blob_id = "shared01";
         handle
             .sql(move |sql| {
@@ -3440,21 +2807,17 @@ mod tests {
             .await
             .expect("seed two rows sharing the blob");
 
-        let local = handle
-            .store_dir()
+        let local = dir
             .local_blob_path("media-files", blob_id)
             .expect("local path");
         write_raw_file(&local, b"live").await;
 
         let (_source_tmp, source) = open_files_handle();
         let storage = Arc::new(
-            TestStore::create(
-                source.db(),
-                "lib-test",
-                crate::keys::UserKeypair::generate(),
-            )
-            .await
-            .expect("create remote exact test Store"),
+            source
+                .create_test_store("lib-test", crate::keys::UserKeypair::generate())
+                .await
+                .expect("create remote exact test Store"),
         );
         source
             .write(
@@ -3473,8 +2836,8 @@ mod tests {
             )
             .await
             .expect("insert remote row");
-        storage
-            .publish_pending(source.db(), &source.store_dir())
+        source
+            .publish_test_store(storage.as_ref())
             .await
             .expect("publish remote insert");
         let remote_reference = source
@@ -3486,12 +2849,10 @@ mod tests {
             .expect("published row has exact storage")
             .locator()
             .locator_hash();
-        let pinned = handle
-            .store_dir()
+        let pinned = dir
             .pinned_blob_path("media-files", locator_hash)
             .expect("pinned path");
-        let cached = handle
-            .store_dir()
+        let cached = dir
             .cache_blob_path("media-files", locator_hash)
             .expect("cache path");
         write_raw_file(&pinned, b"live").await;
@@ -3503,8 +2864,8 @@ mod tests {
             })
             .await
             .expect("delete remote row");
-        storage
-            .publish_pending(source.db(), &source.store_dir())
+        source
+            .publish_test_store(storage.as_ref())
             .await
             .expect("publish remote delete");
 
@@ -3513,38 +2874,19 @@ mod tests {
                 .write_status(&delete.write_id)
                 .await
                 .expect("remote delete status"),
-            coven_core::WriteStatus::Published(_)
+            crate::WriteStatus::Published(_)
         ));
         let (device_id, sequence) = source
-            .db()
-            .call(|conn| {
-                conn.query_row(
-                    "SELECT device_id, seq FROM materialized_commits ORDER BY seq DESC LIMIT 1",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .map_err(coven_core::database::DbError::from)
-            })
+            .latest_materialized_commit_coordinate_for_test()
             .await
             .expect("load remote delete stream coordinate");
-        let sequence = u64::try_from(sequence).expect("remote delete sequence is non-negative");
 
-        let (commit_reached, resume_pull) = handle.db().arm_test_pause(
-            coven_core::database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id,
-                seq: sequence,
-            },
-        );
+        let (commit_reached, resume_pull) =
+            handle.arm_pull_after_remote_commit_for_test(device_id, sequence);
         let pull_handle = handle.clone();
         let pull_storage = storage.clone();
-        let pull = tokio::spawn(async move {
-            pull_into(
-                pull_handle.db(),
-                pull_storage.as_ref(),
-                &pull_handle.store_dir(),
-            )
-            .await
-        });
+        let pull =
+            tokio::spawn(async move { pull_handle.pull_test_store(pull_storage.as_ref()).await });
 
         commit_reached.notified().await;
         handle
@@ -3565,13 +2907,9 @@ mod tests {
         pull.await.expect("pull task");
 
         assert!(
-            !row_exists(
-                handle.db(),
-                "SELECT 1 FROM files WHERE id = 'remote-deletes'"
-            )
-            .await
+            !handle_row_exists(&handle, "SELECT 1 FROM files WHERE id = 'remote-deletes'").await
         );
-        assert!(row_exists(handle.db(), "SELECT 1 FROM files WHERE id = 'still-live'").await);
+        assert!(handle_row_exists(&handle, "SELECT 1 FROM files WHERE id = 'still-live'").await);
         assert!(local.exists(), "the live blob's local copy survives");
         assert!(
             !pinned.exists(),
@@ -3589,8 +2927,9 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_is_rejected_while_sql_still_references_old_blob() {
-        let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldbbbb", b"old")
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        crate::blob::local_files::store(&dir, "media-files", "oldbbbb", b"old")
             .await
             .expect("store old");
         handle
@@ -3637,13 +2976,11 @@ mod tests {
             result,
             Err(CovenError::BlobStillReferenced { .. })
         ));
-        assert!(handle
-            .store_dir()
+        assert!(dir
             .local_blob_path("media-files", "oldbbbb")
             .expect("old path")
             .exists());
-        assert!(!handle
-            .store_dir()
+        assert!(!dir
             .local_blob_path("media-files", "newbbbb")
             .expect("new path")
             .exists());
@@ -3651,7 +2988,8 @@ mod tests {
 
     #[tokio::test]
     async fn sql_panic_removes_moved_blob() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         let result: CovenResult<WriteReceipt<()>> = handle
             .write(
                 |w| {
@@ -3662,8 +3000,7 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(CovenError::WriteClosurePanicked)));
-        assert!(!handle
-            .store_dir()
+        assert!(!dir
             .local_blob_path("media-files", "panicccc")
             .expect("panic path")
             .exists());
@@ -3671,9 +3008,9 @@ mod tests {
 
     #[tokio::test]
     async fn write_surfaces_a_failed_installed_blob_rollback() {
-        let (_tmp, handle) = open_files_handle();
-        let final_path = handle
-            .store_dir()
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
+        let final_path = dir
             .local_blob_path("media-files", "rollback-failure")
             .expect("rollback failure path");
         let obstructed_path = final_path.clone();
@@ -3707,7 +3044,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
-        let (_tmp, handle) = open_files_handle();
+        let (tmp, handle) = open_files_handle();
+        let dir = StoreDir::new(tmp.path());
         let winner = handle.clone();
         let loser = handle.clone();
 
@@ -3753,8 +3091,7 @@ mod tests {
         assert!(winner_result.is_ok() || loser_result.is_ok());
         assert!(winner_result.is_err() || loser_result.is_err());
 
-        let path = handle
-            .store_dir()
+        let path = dir
             .local_blob_path("media-files", "raceblob")
             .expect("race path");
         assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
@@ -3867,7 +3204,7 @@ mod tests {
     impl ExactSlotStorage for GateCloudHome {
         async fn provider_binding(
             &self,
-        ) -> Result<crate::sync::storage::ResolvedProviderBinding, CloudHomeError> {
+        ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
             self.gate().await;
             ExactSlotStorage::provider_binding(&self.inner).await
         }
@@ -4101,7 +3438,8 @@ mod tests {
         let stale_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
         let fresh_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
         let committed_local = local_ns.join("blob0bbb");
-        let stale_local_stage = local_ns.join(temp_name(&format!("blob{LOCAL_STAGE_MARKER}")));
+        let stale_local_stage = crate::local_blob::staged_blob_path(&local_ns.join("blob"))
+            .expect("local staging path");
 
         write_with_mtime(&stale_cache_temp, stale);
         write_with_mtime(&fresh_cache_temp, fresh);
@@ -4403,7 +3741,7 @@ mod tests {
         let dest = dir
             .cache_blob_path(
                 "media-files",
-                coven_core::sync::store_commit::ObjectHash::digest(b"raceblob"),
+                crate::protocol::store_commit::ObjectHash::digest(b"raceblob"),
             )
             .expect("cache path");
         if let Some(parent) = dest.parent() {

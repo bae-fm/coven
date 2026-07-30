@@ -12,9 +12,9 @@ name = "coven"
 path = "src/lib.rs"
 
 [dependencies]
-coven-core = { path = "../coven-core", version = "1.0.0-rc.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 serde_urlencoded = "0.7"
 thiserror = "1.0"
 async-trait = "0.1"
@@ -22,17 +22,25 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
 argon2 = "0.5"
 zeroize = { version = "1.9", features = ["derive"] }
 chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+crypto_box = { version = "0.9", features = ["seal"] }
+x25519-dalek = "3.0.0"
 rand = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
+url = "2.5.8"
+fallible-streaming-iterator = "0.1.9"
 keyring-core = "0.7"
 bytes = "1.11"
 futures-util = "0.3"
 tracing = "0.1.41"
 tokio = { version = "1.0", features = ["full"] }
-rusqlite = { version = "0.40", features = ["session", "bundled"] }
+tempfile = { version = "3.27.0", optional = true }
+rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata"] }
 axum = "0.7"
 open = { version = "5.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
@@ -56,13 +64,13 @@ android-native-keyring-store = "0.5"
 windows-native-keyring-store = "0.5"
 
 [dev-dependencies]
-coven-core = { path = "../coven-core", version = "1.0.0-rc.1", features = ["test-utils"] }
-ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 keyring-core = "0.7"
-tempfile = "3.8"
+tempfile = "3.27.0"
+tokio = { version = "1.0", features = ["test-util"] }
 
 [features]
-test-utils = ["coven-core/test-utils"]
+test-utils = ["dep:tempfile"]
+invariant-tests = []
 oauth-providers = ["dep:open"]
 
 [lints]
@@ -78,3 +86,8 @@ workspace = true
 [[test]]
 name = "apple_keyring"
 required-features = ["test-utils"]
+
+[[test]]
+name = "exact_outbound_blob"
+path = "tests/exact_outbound_blob.rs"
+required-features = ["invariant-tests"]

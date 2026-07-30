@@ -4,64 +4,61 @@
 //! coven owns the store's data — SQL rows and blobs, on disk first, cloud
 //! optional. A host (a desktop/mobile app) talks to coven through this one
 //! handle and never assembles coven's internals by hand or hands them back to
-//! coven on every call. The handle holds the [`Database`], the [`StoreDir`],
-//! the keys, and — once a cloud provider is connected — the [`SyncManager`]; the
-//! caller passes only descriptors (a [`BlobRef`], SQL, a config) and coven does
-//! its own plumbing.
+//! coven on every call. The handle delegates to retained owners for rows,
+//! blobs, sync, security, membership, joining, recovery, and Circles; the
+//! caller passes only descriptors (a [`BlobRef`], SQL, or a config).
 //!
-//! The stack runs on Tokio with a [`SyncManager`] and is `Send + Sync`
-//! throughout.
+//! The stack runs on Tokio and is `Send + Sync` throughout.
 //!
 //! ## What it owns
 //!
-//! - **Rows** — the [`Database`] (coven already owns the connection). The host
-//!   runs its app SQL through [`sql`](CovenHandle::sql) and row+blob batches
-//!   through [`write`](CovenHandle::write).
-//! - **Blobs** — the [`StoreDir`] the blob engine reads/writes, plus the
-//!   credentials to build a read [`SyncStorage`] on a cloud miss. Whole read, open
-//!   a ranged stream, store, register external, pin/unpin, the locality
-//!   transitions, and the upload drain are methods here.
-//! - **Sync** — built lazily by [`connect_sync`](CovenHandle::connect_sync) when a
-//!   cloud provider is connected. A store with no cloud home never builds a
-//!   [`SyncManager`] and only ever holds Local blobs.
+//! - **Rows** — SQL execution and row-and-blob writes.
+//! - **Blobs** — exact row-bound reads, cache policy, locality transitions, and
+//!   upload visibility.
+//! - **Sync** — connection lifecycle, status, and explicit synchronization.
+//! - **Security** — key custody, device identity, host secrets, and app-data
+//!   sealing.
+//! - **Membership, joining, recovery, and Circles** — their complete host
+//!   workflows, each behind its retained domain owner.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-
-use tokio::sync::watch;
-use tracing::{debug, error, info};
+use std::sync::Arc;
 
 use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
-use crate::config::Config;
 use crate::coven::StoreOpenGuard;
-use crate::database::{Database, DbError};
-use crate::encryption::{EncryptionService, MasterKeyring, SealError};
+use crate::database::{Database, DbError, StoreDatabase};
+use crate::encryption::SealError;
 use crate::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
 };
+use crate::protocol::membership::MemberInfo;
+use crate::protocol::membership::MemberRole;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
-use crate::store_dir::StoreDir;
 #[cfg(any(test, feature = "test-utils"))]
-use crate::sync::cloud_storage::CloudCipher;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
-use crate::sync::membership::MemberRole;
-use crate::sync::storage::{StorageError, SyncStorage};
-use crate::sync::store::{Store, StoreDatabase};
+use crate::storage::CloudCipher;
+use crate::storage::StorageError;
+use crate::store_blobs::StoreBlobs;
+use crate::store_circles::StoreCircles;
+use crate::store_dir::StoreDir;
+use crate::store_joining::StoreJoining;
+use crate::store_membership::StoreMembership;
+use crate::store_recovery::StoreRecovery;
+use crate::store_rows::StoreRows;
+use crate::store_security::StoreSecurity;
+use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
 use crate::sync::sync_loop::SyncLoopStatus;
-use crate::sync::sync_manager::MemberInfo;
-use crate::sync::sync_manager::{ConfigProvider, SyncError, SyncManager};
+use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails
 /// (missing credentials or cloud configuration) the read surfaces that as a
-/// configuration fault, not a disk I/O error. `BlobCacheError` lives in
-/// `coven-core` and cannot name `coven`'s `StorageSetupError`, so the typed error
-/// is rendered to its message at this crate boundary.
+/// configuration fault, not a disk I/O error. The cache error preserves the
+/// setup failure's message at this API boundary.
 impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
     fn from(e: crate::storage::cloud::setup::StorageSetupError) -> Self {
         BlobCacheError::StorageSetup(e.to_string())
@@ -78,31 +75,12 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
 /// Shared by [`CovenHandle`] and [`CovenReadHandle`](crate::CovenReadHandle) so
 /// both resolve the identical keyring the identical way; a payload one seals, the
 /// other opens.
-pub(crate) fn app_data_cipher(
-    custody: &dyn MasterKeyCustody,
-) -> Result<EncryptionService, SealError> {
-    let keyring = custody.unlock()?.ok_or(SealError::Locked)?;
-    Ok(EncryptionService::from(keyring))
-}
-
-pub(crate) fn routing_encryption_from_custody(
-    custody: &dyn MasterKeyCustody,
-) -> Result<EncryptionService, DbError> {
-    let keyring = custody
-        .unlock()
-        .map_err(|error| DbError::Message(format!("unlock Store key for row routing: {error}")))?
-        .ok_or_else(|| {
-            DbError::Message("Merge scoped write requires an established Store key".to_string())
-        })?;
-    Ok(EncryptionService::from(keyring))
-}
-
 /// The handle over one coven store.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
 /// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
-/// reference-counted lock), so a clone drives the same database, sync manager,
-/// and storage as the original.
+/// reference-counted lock), so a clone drives the same retained owners as the
+/// original.
 ///
 /// # Using the handle
 ///
@@ -138,78 +116,20 @@ pub(crate) fn routing_encryption_from_custody(
 /// ```
 #[derive(Clone)]
 pub struct CovenHandle {
-    database: StoreDatabase,
-
-    /// A read-only companion connection on the same WAL database, opened at
-    /// [`open`](crate::CovenBuilder::open) after the writer's migrations completed.
-    /// Backs [`sql_read`](Self::sql_read): a pure read runs here on its own
-    /// connection thread, concurrent with the writer's thread rather than queued
-    /// behind it, and attaches no changeset session. `Database` is `Clone` (clones
-    /// share one connection thread), so every [`CovenHandle`] clone shares this one
-    /// reader — many readers coexist with the single writer under WAL, each seeing
-    /// the last committed state.
-    read_db: Database,
-    stamper: crate::sync::hlc::UpdatedAtStamper,
-    store_dir: StoreDir,
-
-    /// Supplies the host's current config on demand. coven reads it fresh each
-    /// call so a host with reactive config sees changes without rebuilding the
-    /// handle. The same provider the [`SyncManager`] reads from.
-    config_provider: ConfigProvider,
-    key_service: StoreKeys,
-
-    /// The store's master-key custody, resolved once at
-    /// [`open`](crate::CovenBuilder::open) from the builder's
-    /// [`KeyCustody`](crate::KeyCustody) selection. Every master-key read and
-    /// write in the handle and the sync engine goes through this — coven never
-    /// touches a crypto type directly.
-    key_custody: Arc<dyn MasterKeyCustody>,
-
-    /// This store's device-identity custody, resolved once at
-    /// [`open`](crate::CovenBuilder::open) from the builder's
-    /// [`IdentityCustody`](crate::IdentityCustody) selection. Every read of
-    /// this store's signing identity in the handle and the sync engine goes
-    /// through this.
-    identity_custody: Arc<dyn DeviceIdentityCustody>,
-    clock: ClockRef,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    /// How this installation chunks blobs and how wide its range requests are.
-    blob_chunking: crate::sync::cloud_storage::BlobChunking,
-
-    /// Host bookkeeping for blob transitions (upload progress, materialize
-    /// progress, completion). Passed to the [`SyncManager`] and to the upload
-    /// drain. `None` for a host that doesn't surface transition progress.
-    observer: Option<Arc<dyn BlobTransitionObserver>>,
-
-    /// Holds the store-directory lock for this handle and every clone,
-    /// and is cloned into each [`SyncManager`] so a running sync loop keeps the
-    /// lock alive until its own thread exits — the lock's lifetime tracks the
-    /// last writer, not the host's drop timing.
-    open_guard: Arc<StoreOpenGuard>,
-
-    /// Built lazily by [`connect_sync`](Self::connect_sync) when a provider is
-    /// connected; `None` for a home-less, all-Local store. Shared behind a lock
-    /// so a connect/disconnect mutates it in place without rebuilding the handle.
-    sync: Arc<RwLock<Option<Arc<SyncManager>>>>,
-
-    /// Serializes async lifecycle replacement so concurrent connects/restarts
-    /// cannot each start a loop and race to install the survivor.
-    sync_lifecycle: Arc<tokio::sync::Mutex<()>>,
-
-    /// The current sync-status value this handle owns. Every [`SyncManager`] it builds
-    /// clones this sender into its sync loop, so a
-    /// [`subscribe_sync_status`](Self::subscribe_sync_status) receiver keeps
-    /// receiving across a reconnect — which drops the old manager and loop and
-    /// builds new ones, but reuses this same channel. A subscription created
-    /// before any provider is connected is valid and starts receiving once a loop
-    /// runs.
-    sync_status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+    rows: StoreRows,
+    blobs: StoreBlobs,
+    security: StoreSecurity,
+    sync: StoreSync,
+    membership: StoreMembership,
+    joining: StoreJoining,
+    recovery: StoreRecovery,
+    circles: StoreCircles,
 }
 
 impl CovenHandle {
     /// Build the handle over an already-open [`Database`] and the store's
-    /// directory. Does no I/O and builds no sync manager — a home-less store is
-    /// fully usable (rows + Local blobs) without one. Call
+    /// directory. Does no I/O and opens no sync connection — a home-less store
+    /// is fully usable (rows + Local blobs). Call
     /// [`connect_sync`](Self::connect_sync) when a cloud provider is connected.
     ///
     /// `config_provider` is read fresh on every call that needs the current
@@ -230,72 +150,192 @@ impl CovenHandle {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
-        blob_chunking: crate::sync::cloud_storage::BlobChunking,
+        blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
-        Self {
-            database: StoreDatabase::from_database(db),
-            read_db,
-            stamper,
-            store_dir,
+        let database = StoreDatabase::from_database(db);
+        let read_database = StoreDatabase::from_database(read_db);
+        let security = StoreSecurity::new(
+            key_service.clone(),
+            key_custody.clone(),
+            identity_custody.clone(),
+        );
+        let sync = StoreSync::new(
             config_provider,
-            key_service,
-            key_custody,
-            identity_custody,
+            security.clone(),
+            database.clone(),
+            store_dir.clone(),
             clock,
             cloudkit_ops,
-            blob_chunking,
             observer,
             open_guard,
-            sync: Arc::new(RwLock::new(None)),
-            sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
-            sync_status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            blob_chunking,
+        );
+        let rows = StoreRows::new(
+            database.clone(),
+            read_database,
+            store_dir.clone(),
+            stamper,
+            security.clone(),
+            sync.clone(),
+        );
+        let blobs = StoreBlobs::new(database.clone(), store_dir.clone(), sync.clone());
+        let membership = StoreMembership::new(security.clone(), sync.clone());
+        let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
+        let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());
+        let circles = StoreCircles::new(
+            database.clone(),
+            membership.clone(),
+            security.clone(),
+            sync.clone(),
+        );
+        Self {
+            rows,
+            blobs,
+            security,
+            sync,
+            membership,
+            joining,
+            recovery,
+            circles,
         }
-    }
-
-    fn config(&self) -> Config {
-        (self.config_provider)()
     }
 
     // =========================================================================
     // Rows
     // =========================================================================
 
-    /// The owned [`Database`]. Public row access goes through
-    /// [`CovenHandle::sql`] and [`CovenHandle::write`]; coven internals use this
-    /// to reach row-level helpers.
-    pub(crate) fn db(&self) -> &Database {
-        self.database.sqlite()
+    #[cfg(test)]
+    pub(crate) async fn create_test_store(
+        &self,
+        store_id: &str,
+        signer: crate::keys::UserKeypair,
+    ) -> Result<crate::sync::test_helpers::TestStore, String> {
+        self.sync.create_test_store(store_id, signer).await
     }
 
-    /// The read-only companion [`Database`] backing [`sql_read`](Self::sql_read).
-    /// A pure read runs against this connection, concurrent with the writer.
-    pub(crate) fn read_db(&self) -> &Database {
-        &self.read_db
+    #[cfg(test)]
+    pub(crate) async fn publish_test_store(
+        &self,
+        store: &crate::sync::test_helpers::TestStore,
+    ) -> Result<bool, String> {
+        self.sync.publish_test_store(store).await
     }
 
-    pub(crate) fn stamper(&self) -> crate::sync::hlc::UpdatedAtStamper {
-        self.stamper.clone()
+    #[cfg(test)]
+    pub(crate) async fn pull_test_store(
+        &self,
+        store: &crate::sync::test_helpers::TestStore,
+    ) -> (
+        std::collections::BTreeMap<String, u64>,
+        crate::sync::store::StorePullResult,
+    ) {
+        self.sync
+            .pull_test_store(store)
+            .await
+            .expect("pull exact test Store")
     }
 
-    pub(crate) fn store_dir(&self) -> StoreDir {
-        self.store_dir.clone()
+    #[cfg(test)]
+    pub(crate) async fn write_changeset_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<u8>, crate::database::DbError> {
+        self.rows.write_changeset_for_test(write_id).await
     }
 
-    pub(crate) fn routing_encryption(&self) -> Result<EncryptionService, DbError> {
-        routing_encryption_from_custody(self.key_custody.as_ref())
+    #[cfg(test)]
+    pub(crate) async fn write_blob_lease_count_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<i64, crate::database::DbError> {
+        self.rows.write_blob_lease_count_for_test(write_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_sql_with_blob_staging_for_test(
+        &self,
+        blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
+        sql: String,
+    ) -> crate::CovenResult<crate::WriteReceipt<()>> {
+        self.rows
+            .execute_sql_with_blob_staging_for_test(blob_staging, sql)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn latest_materialized_commit_coordinate_for_test(
+        &self,
+    ) -> Result<(String, u64), crate::database::DbError> {
+        self.sync
+            .latest_materialized_commit_coordinate_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_pull_after_remote_commit_for_test(
+        &self,
+        device_id: String,
+        sequence: u64,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        self.sync
+            .arm_pull_after_remote_commit_for_test(device_id, sequence)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_test_join_snapshot(
+        &self,
+        store: &crate::sync::test_helpers::TestStore,
+        owner: &crate::keys::UserKeypair,
+        snapshot_path: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.joining
+            .prepare_test_join_snapshot(store, owner, snapshot_path)
+            .await
+    }
+
+    pub async fn sql<F, R>(&self, sql: F) -> crate::CovenResult<crate::WriteReceipt<R>>
+    where
+        F: for<'context, 'connection> FnOnce(
+                crate::SqlContext<'context, 'connection>,
+            ) -> crate::CovenResult<R>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.rows.sql(sql).await
+    }
+
+    pub async fn sql_read<F, R>(&self, read: F) -> crate::CovenResult<R>
+    where
+        F: FnOnce(&rusqlite::Connection) -> crate::CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.rows.read(read).await
+    }
+
+    pub async fn write<F, S, R>(
+        &self,
+        build: F,
+        sql: S,
+    ) -> crate::CovenResult<crate::WriteReceipt<R>>
+    where
+        F: FnOnce(&mut crate::WriteBatch) -> crate::CovenResult<()> + Send + 'static,
+        S: for<'context, 'connection> FnOnce(
+                crate::SqlContext<'context, 'connection>,
+            ) -> crate::CovenResult<R>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.rows.write(build, sql).await
     }
 
     // =========================================================================
     // Sync lifecycle
     // =========================================================================
-
-    /// The connected [`SyncManager`], or `None` for a home-less store or one
-    /// whose provider has not been connected yet. The host reaches sync-engine
-    /// operations not surfaced as handle methods (membership, invite/remove,
-    /// status) through this.
-    pub(crate) fn sync_manager(&self) -> Option<Arc<SyncManager>> {
-        self.sync.read().unwrap().clone()
-    }
 
     /// Subscribe to the sync loop's [`SyncLoopStatus`] stream. The channel is
     /// owned by this handle, not the loop, so the receiver keeps working across a
@@ -307,12 +347,12 @@ impl CovenHandle {
     /// may be coalesced; `Synchronized.row_changes` is a refresh hint rather than a
     /// complete change stream.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncLoopStatus> {
-        self.sync_status_tx.subscribe()
+        self.sync.subscribe_status()
     }
 
     /// Writes that have shared rows and have not reached a published position.
-    pub async fn pending_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
-        self.db()
+    pub async fn pending_writes(&self) -> Result<Vec<crate::PendingWrite>, crate::CovenError> {
+        self.rows
             .pending_writes()
             .await
             .map_err(crate::CovenError::from)
@@ -320,8 +360,8 @@ impl CovenHandle {
 
     /// Writes stopped by a semantic publication fault and awaiting an explicit
     /// retry or discard decision.
-    pub async fn blocked_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
-        self.db()
+    pub async fn blocked_writes(&self) -> Result<Vec<crate::PendingWrite>, crate::CovenError> {
+        self.rows
             .blocked_writes()
             .await
             .map_err(crate::CovenError::from)
@@ -331,47 +371,26 @@ impl CovenHandle {
     /// sync loop is woken after the durable transition.
     pub async fn retry_blocked_write(
         &self,
-        write_id: &coven_core::WriteId,
-    ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let retried = self
-            .database
-            .retry_blocked_write(write_id)
-            .await
-            .map_err(crate::CovenError::from)?;
-        self.sync_now();
-        Ok(retried)
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::CovenError> {
+        self.rows.retry_blocked_write(write_id).await
     }
 
     /// Atomically discard a blocked write and reverse every later unpublished
     /// shared write whose working-row state depends on it.
     pub async fn discard_blocked_write(
         &self,
-        write_id: &coven_core::WriteId,
-    ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        let outcome = self
-            .database
-            .discard_blocked_write(write_id)
-            .await
-            .map_err(crate::CovenError::from)?;
-        if let coven_core::sync::store::BlockedWriteDiscard::Discarded(discarded) = outcome {
-            return Ok(discarded);
-        }
-
-        self.sync_manager()
-            .ok_or_else(|| {
-                crate::CovenError::CandidateResolution("sync is not connected".to_string())
-            })?
-            .discard_blocked_write(write_id.clone())
-            .await
-            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::CovenError> {
+        self.rows.discard_blocked_write(write_id).await
     }
 
     /// Read the current durable status of one write.
     pub async fn write_status(
         &self,
-        write_id: &coven_core::WriteId,
-    ) -> Result<coven_core::WriteStatus, crate::CovenError> {
-        self.db()
+        write_id: &crate::WriteId,
+    ) -> Result<crate::WriteStatus, crate::CovenError> {
+        self.rows
             .write_status(write_id)
             .await
             .map_err(crate::CovenError::from)
@@ -381,100 +400,42 @@ impl CovenHandle {
     /// reconstructed from SQLite before the receiver is returned.
     pub async fn subscribe_write_status(
         &self,
-        write_id: &coven_core::WriteId,
-    ) -> Result<tokio::sync::watch::Receiver<coven_core::WriteStatus>, crate::CovenError> {
-        self.db()
+        write_id: &crate::WriteId,
+    ) -> Result<tokio::sync::watch::Receiver<crate::WriteStatus>, crate::CovenError> {
+        self.rows
             .subscribe_write_status(write_id)
             .await
             .map_err(crate::CovenError::from)
     }
 
-    /// Build the sync manager for a connected cloud provider, start its sync
-    /// loop, and install it. Returns the started manager, or an error if the cloud
-    /// home fails to build — in which case nothing is installed, so the handle
-    /// never holds a manager that reports success with nothing started.
+    /// Build the connected cloud storage, start its sync loop, and install the
+    /// connection. If the cloud home fails to build, no connection is installed.
     ///
     /// The at-rest cipher is resolved from the handle's custody per start: an
     /// opaque home unlocks the master keyring (failing with
     /// [`SyncError::MasterKeyNotEstablished`] if none is established), a
-    /// browsable one never consults custody. Reconnecting a provider rebuilds
-    /// the manager — the [`Database`] keeps the seeded register clock across
-    /// the rebuild, so only the cloud home + loop are replaced.
+    /// browsable one never consults custody. Reconnecting a provider replaces
+    /// the cloud home and loop while retaining the Store database and clock.
     pub async fn connect_sync(&self) -> Result<(), SyncError> {
-        self.build_and_install_sync(self.cloudkit_ops.clone(), |manager| async move {
-            manager.start_sync().await
-        })
-        .await?;
-        info!("coven handle: sync manager connected");
-        Ok(())
+        self.sync.connect().await
     }
 
     pub async fn connect_sync_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
-        self.build_and_install_sync(Some(cloudkit_ops), |manager| async move {
-            manager.start_sync().await
-        })
-        .await?;
-        info!("coven handle: sync manager connected with CloudKit driver");
-        Ok(())
+        self.sync.connect_with_cloudkit(cloudkit_ops).await
     }
 
-    /// Build a [`SyncManager`], start its loop via `start`, and install it — the
-    /// shared construct-and-install both [`connect_sync`](Self::connect_sync) and
-    /// the test-only
-    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) run.
-    ///
-    /// Start before installing: a failed start (the cloud home fails to build, or a
-    /// test home's bootstrap fails) returns its error with nothing installed, so the
-    /// handle is left home-less rather than holding a manager whose loop never
-    /// started.
-    async fn build_and_install_sync<F, Fut>(
-        &self,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        start: F,
-    ) -> Result<Arc<SyncManager>, SyncError>
-    where
-        F: FnOnce(Arc<SyncManager>) -> Fut,
-        Fut: std::future::Future<Output = Result<(), SyncError>>,
-    {
-        let _lifecycle = self.sync_lifecycle.lock().await;
-        let previous = self.sync.write().unwrap().take();
-        if let Some(manager) = previous {
-            manager.stop_sync()?;
-        }
-
-        let manager = Arc::new(SyncManager::new(
-            self.config_provider.clone(),
-            self.key_service.clone(),
-            self.key_custody.clone(),
-            self.identity_custody.clone(),
-            self.db().clone(),
-            self.clock.clone(),
-            cloudkit_ops,
-            self.observer.clone(),
-            self.open_guard.clone(),
-            self.sync_status_tx.clone(),
-            self.blob_chunking,
-        ));
-        Box::pin(start(manager.clone())).await?;
-        *self.sync.write().unwrap() = Some(manager.clone());
-        Ok(manager)
-    }
-
-    /// Test-only: connect a started sync manager over an injected [`CloudHome`]
+    /// Test-only: connect a started sync loop over an injected [`CloudHome`]
     /// instead of one built from [`Config`], so a host's integration tests drive
     /// the real make-Remote / make-Local / upload-drain and read paths over a mock
     /// cloud with no live provider.
     ///
-    /// The test counterpart of [`connect_sync`](Self::connect_sync): it stands the
-    /// manager over `home`/`cipher` through
-    /// `SyncManager::start_sync_with_home`, starts the loop, and installs it with
-    /// the same start-before-install discipline — a failed connect leaves the
-    /// handle home-less rather than holding a manager whose loop never started.
-    /// The injected `cipher` is the at-rest protection directly — the manager's
-    /// custody is never consulted on this path.
+    /// The test counterpart of [`connect_sync`](Self::connect_sync): it builds
+    /// storage over `home`/`cipher`, starts the loop, and installs the connection
+    /// only after startup succeeds. The injected `cipher` is the at-rest
+    /// protection directly; custody is never consulted on this path.
     ///
     /// The read path needs no separate hook: `blob_storage`
     /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
@@ -487,12 +448,7 @@ impl CovenHandle {
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
-        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
-            manager.start_sync_with_home(home, cipher).await
-        })
-        .await?;
-        info!("coven handle: sync manager connected over an injected test cloud home");
-        Ok(())
+        self.sync.connect_with_test_home(home, cipher).await
     }
 
     /// Test-only: connect over an injected [`CloudHome`] while resolving the
@@ -501,8 +457,8 @@ impl CovenHandle {
     /// cipher like [`connect_sync_with_test_home`](Self::connect_sync_with_test_home).
     ///
     /// Where that method injects the cipher and never touches custody, this drives
-    /// `SyncManager::start_sync_with_test_home_custody`, which unlocks the master
-    /// keyring through the store's custody exactly as `start_sync` would — so a
+    /// the same connection path as production, which unlocks the master keyring
+    /// through the store's custody exactly as `start_sync` would — so a
     /// test can establish a key, connect over a mock home, and prove the traffic
     /// is sealed under that key. An opaque home with no key established fails
     /// [`SyncError::MasterKeyNotEstablished`] before the loop starts.
@@ -511,33 +467,19 @@ impl CovenHandle {
         &self,
         home: Arc<dyn CloudHome>,
     ) -> Result<(), SyncError> {
-        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
-            manager.start_sync_with_test_home_custody(home).await
-        })
-        .await?;
-        info!(
-            "coven handle: sync manager connected over an injected test cloud home with custody-resolved cipher"
-        );
-        Ok(())
+        self.sync.connect_with_test_home_custody(home).await
     }
 
-    /// Start (or restart) the sync loop of the installed sync manager. A no-op
+    /// Start (or restart) the sync loop of the installed connection. A no-op
     /// when no provider is connected — a home-less store has nothing to start.
-    /// Errors if the installed manager's cloud home fails to build.
+    /// Errors if the connected cloud home fails to build.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
-        let _lifecycle = self.sync_lifecycle.lock().await;
-        match self.sync_manager() {
-            Some(manager) => manager.start_sync().await,
-            None => {
-                debug!("start_sync: no provider connected; nothing to start");
-                Ok(())
-            }
-        }
+        self.sync.start().await
     }
 
-    /// Stop the sync loop after the in-flight cycle, keeping the installed
-    /// manager so [`start_sync`](Self::start_sync) can resume it. A no-op when no
-    /// provider is connected.
+    /// Stop the sync loop after the in-flight cycle while keeping the provider
+    /// connected so [`start_sync`](Self::start_sync) can resume it. A no-op when
+    /// no provider is connected.
     ///
     /// The material a running loop resolved from custody (the master keyring,
     /// the device signing identity) is cached only inside that loop for as
@@ -547,56 +489,37 @@ impl CovenHandle {
     /// custody now serves, so a host's lock flow that stops sync as part of
     /// locking, then later reconnects, never resumes on stale material.
     pub fn stop_sync(&self) {
-        match self.sync_manager() {
-            Some(manager) => {
-                if let Err(stop_error) = manager.stop_sync() {
-                    error!("stop_sync failed: {stop_error}");
-                }
-            }
-            None => debug!("stop_sync: no provider connected; nothing to stop"),
-        }
+        self.sync.stop()
     }
 
-    /// Disconnect the provider entirely: stop the loop and drop the installed
-    /// sync manager. The store becomes home-less until the next
+    /// Disconnect the provider entirely: stop the loop and drop the connection.
+    /// The store becomes home-less until the next
     /// [`connect_sync`](Self::connect_sync).
     ///
-    /// Carries the same purge as [`stop_sync`](Self::stop_sync) (dropping the
-    /// manager cannot leave more behind than stopping its loop already
-    /// cleared) and additionally drops the manager itself, so nothing about
-    /// the previous connection — including which custody it resolved
-    /// material from — survives into the next connect.
+    /// Carries the same purge as [`stop_sync`](Self::stop_sync), so nothing about
+    /// the previous connection — including which custody it resolved material
+    /// from — survives into the next connect.
     pub fn disconnect_sync(&self) {
-        if let Some(manager) = self.sync_manager() {
-            if let Err(stop_error) = manager.stop_sync() {
-                error!("disconnect_sync failed to stop sync: {stop_error}");
-            }
-        }
-        *self.sync.write().unwrap() = None;
-        info!("coven handle: sync manager disconnected");
+        self.sync.disconnect()
     }
 
     /// Wake the sync loop to run a cycle now rather than at the next idle tick. A
     /// no-op when no provider is connected.
     pub fn sync_now(&self) {
-        match self.sync_manager() {
-            Some(manager) => manager.trigger_sync(),
-            None => debug!("sync_now: no provider connected; sync wake ignored"),
-        }
+        self.sync.trigger()
     }
 
     /// Whether the sync loop is running. `false` for a home-less store.
     pub fn is_syncing(&self) -> bool {
-        self.sync_manager()
-            .is_some_and(|manager| manager.is_sync_ready())
+        self.sync.is_syncing()
     }
 
-    /// Whether a sync manager is installed — a provider is connected. Distinct
+    /// Whether a provider connection is installed. Distinct
     /// from [`is_syncing`](Self::is_syncing), which additionally requires the loop
     /// to be running: this is the predicate a host uses for "has a cloud home"
     /// without the loop-ready condition.
     pub fn is_connected(&self) -> bool {
-        self.sync_manager().is_some()
+        self.sync.is_connected()
     }
 
     // =========================================================================
@@ -611,28 +534,21 @@ impl CovenHandle {
     /// The only place coven ever generates a master key. Returns its
     /// fingerprint for the host to record in its own config.
     pub fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
-        if self.key_custody.unlock()?.is_some() {
-            return Err(MasterKeyError::AlreadyEstablished);
-        }
-        let keyring = MasterKeyring::generate();
-        self.key_custody.persist(&keyring)?;
-        Ok(keyring.fingerprint())
+        self.security.initialize_master_key()
     }
 
     /// Import a serialized master keyring a host already holds and establish it
     /// under the handle's custody, replacing whatever custody already holds.
     /// Returns its fingerprint for the host to record in its own config.
     pub fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
-        let keyring = MasterKeyring::from_serialized(serialized)?;
-        self.key_custody.persist(&keyring)?;
-        Ok(keyring.fingerprint())
+        self.security.import_master_key(serialized)
     }
 
     /// The established master key's fingerprint, or `None` if custody has
     /// never had one established (or is locked, for a policy where that's
     /// representable).
     pub fn master_key_fingerprint(&self) -> Result<Option<String>, KeyError> {
-        Ok(self.key_custody.unlock()?.map(|k| k.fingerprint()))
+        self.security.master_key_fingerprint()
     }
 
     // =========================================================================
@@ -648,12 +564,7 @@ impl CovenHandle {
     /// their own identity as part of what they do). Returns the established
     /// public key, hex-encoded.
     pub fn initialize_identity(&self) -> Result<String, IdentityError> {
-        if self.identity_custody.unlock()?.is_some() {
-            return Err(IdentityError::AlreadyEstablished);
-        }
-        let keypair = crate::keys::UserKeypair::generate();
-        self.identity_custody.persist(&keypair)?;
-        Ok(crate::keys::public_key_hex(&keypair))
+        self.security.initialize_identity()
     }
 
     // =========================================================================
@@ -668,19 +579,19 @@ impl CovenHandle {
     /// with one of coven's own reserved slot names, is empty, or contains
     /// `:`.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
-        self.key_service.set_host_secret(name, value)
+        self.security.set_host_secret(name, value)
     }
 
     /// Read a host secret set by [`set_host_secret`](Self::set_host_secret),
     /// `None` if never set. A present-but-empty entry is corrupt, not
     /// absent — the same discipline coven's own key reads apply.
     pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
-        self.key_service.get_host_secret(name)
+        self.security.host_secret(name)
     }
 
     /// Remove a host secret. `Ok` whether or not one was set.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
-        self.key_service.delete_host_secret(name)
+        self.security.delete_host_secret(name)
     }
 
     // =========================================================================
@@ -702,7 +613,7 @@ impl CovenHandle {
     /// gate [`connect_sync`](Self::connect_sync) applies before it seals cloud
     /// traffic.
     pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        Ok(app_data_cipher(self.key_custody.as_ref())?.seal_app_data(plaintext, aad))
+        self.security.seal_app_data(plaintext, aad)
     }
 
     /// Open a payload [`seal_app_data`](Self::seal_app_data) produced, under
@@ -713,85 +624,17 @@ impl CovenHandle {
     /// payload, an unreadable version, or a generation this store's keyring lacks
     /// each surface their own typed error.
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        app_data_cipher(self.key_custody.as_ref())?.open_app_data(sealed, aad)
+        self.security.open_app_data(sealed, aad)
     }
 
     // =========================================================================
     // Blobs
     // =========================================================================
 
-    /// The read [`SyncStorage`] for coven's locality-aware read, or `None` for a
-    /// home-less store: `Some(home)` when a provider is connected, `None` when
-    /// none is. coven reaches storage only on a cloud miss — a Remote blob not yet
-    /// cached. A Local blob (the only kind a home-less store has) is served from
-    /// its external ref or the local store without ever touching storage, so a
-    /// home-less read passes `None` and the cache layer surfaces
-    /// [`BlobCacheError::NoCloudHome`] only if a Remote blob ever reaches the miss
-    /// path — a real fault, not masked.
-    ///
-    /// A provider that IS configured but whose storage fails to build (missing
-    /// credentials, a bad cipher) surfaces that error rather than reporting
-    /// home-less.
-    ///
-    /// When a [`SyncManager`] is connected and its loop is running, the read
-    /// reuses that loop's own [`CloudSyncStorage`] rather than rebuilding one from
-    /// config — so a read and the loop's writes share the exact home + cipher (and
-    /// a key rotation the loop applies in place is seen here on the next read), and
-    /// a test home injected via
-    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) is served
-    /// from with no separate hook. A manager connected but not yet running its loop
-    /// still wraps the manager's stored home; only a home-less store builds from
-    /// config when a provider is configured.
-    pub(crate) async fn blob_storage(
-        &self,
-    ) -> Result<Option<Arc<dyn SyncStorage>>, crate::storage::cloud::setup::StorageSetupError> {
-        if let Some(manager) = self.sync_manager() {
-            if let Some(loop_handle) = manager.sync_loop_handle() {
-                let storage: Arc<dyn SyncStorage> = loop_handle.storage().clone();
-                return Ok(Some(storage));
-            }
-            if let Some(home) = manager.cloud_home() {
-                let config = self.config();
-                let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
-                    &config,
-                    self.key_custody.as_ref(),
-                    self.identity_custody.as_ref(),
-                    home,
-                    None,
-                    self.blob_chunking,
-                )?;
-                return Ok(Some(Arc::new(storage)));
-            }
-        }
-        let config = self.config();
-        if config.cloud_home.provider.is_none() {
-            return Ok(None);
-        }
-        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-            &config,
-            &self.key_service,
-            self.key_custody.as_ref(),
-            self.identity_custody.as_ref(),
-            None,
-            self.clock.clone(),
-            self.cloudkit_ops.clone(),
-            self.blob_chunking,
-        )
-        .await?;
-        Ok(Some(Arc::new(storage)))
-    }
-
-    pub(crate) fn host_write_blob_staging(
-        &self,
-    ) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        let store = self.sync_manager()?.sync_loop_handle()?.store();
-        Some(store.host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir()))
-    }
-
     /// Capture the exact current blob-bearing row version. Blob operations use
     /// this row-bound value so a later row replacement cannot redirect a read.
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
-        self.db().row_blob_ref(table, row_id).await
+        self.blobs.row_blob_ref(table, row_id).await
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served
@@ -801,30 +644,14 @@ impl CovenHandle {
     /// [`RowBlobRef`] captured from [`row_blob_ref`](Self::row_blob_ref); coven
     /// holds the database, directory, and storage.
     pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .read(blob)
-        .await
+        self.blobs.read(blob).await
     }
 
     /// Ensure the exact current row blob plaintext is durable on this device.
     /// Remote blobs materialize into their locator-keyed cache path; Local and
     /// pending-remote blobs exact-verify their authoritative local source.
     pub async fn materialize_row_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .materialize(blob)
-        .await
+        self.blobs.materialize(blob).await
     }
 
     /// Open an exact row blob's plaintext for ranged reading, for streaming or
@@ -837,36 +664,20 @@ impl CovenHandle {
     /// stream for as long as the host is reading that blob — a stream per opened
     /// file, not per range — since re-opening re-proves the whole blob.
     pub async fn open_blob_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .open_stream(blob)
-        .await
+        self.blobs.open_stream(blob).await
     }
 
     /// Pin a Remote blob set for offline: coven fetches each into the protected
     /// cache (`storage/pinned/`) — from the evictable cache if already there, else
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        let storage = self.blob_storage().await?;
-        crate::sync::store::blob::StoreBlobAccess::open(
-            &self.database,
-            &self.store_dir,
-            storage.as_deref(),
-        )
-        .await?
-        .pin(blobs)
-        .await
+        self.blobs.pin(blobs).await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        crate::blob::cache::unpin(self.db(), &self.store_dir, blobs).await
+        self.blobs.unpin(blobs).await
     }
 
     /// The cloud object key a blob's bytes live at, derived under the connected
@@ -883,29 +694,7 @@ impl CovenHandle {
     /// A `Plain` home whose `cloud_path` is absent, or does not name the blob it
     /// carries, is a surfaced error — see [`CloudSyncStorage::blob_key`].
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let active_loop = self
-            .sync_manager()
-            .and_then(|manager| manager.sync_loop_handle());
-        let (scheme, uploader) = match active_loop {
-            Some(sync_loop) => (
-                sync_loop.blob_path_scheme(),
-                Some(sync_loop.self_uploader()),
-            ),
-            None => {
-                let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
-                let uploader = crate::keys::identity_public_key(self.identity_custody.as_ref())
-                    .map_err(|e| StorageError::Storage(format!("read this store's identity: {e}")))?
-                    .map(hex::encode);
-                (scheme, uploader)
-            }
-        };
-        CloudSyncStorage::blob_key(
-            scheme,
-            &blob.namespace,
-            uploader.as_deref(),
-            &blob.id,
-            blob.cloud_path.as_deref(),
-        )
+        self.blobs.cloud_key(blob)
     }
 
     /// Whether every blob in `blobs` is pinned for offline — present in coven's
@@ -915,12 +704,7 @@ impl CovenHandle {
     /// or absent) makes the whole set unpinned; an existence-check failure is
     /// surfaced, never read as "not pinned".
     pub async fn is_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        for blob in blobs {
-            if !crate::blob::cache::is_pinned(self.db(), &self.store_dir, blob).await? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        self.blobs.all_pinned(blobs).await
     }
 
     /// Remove one Remote blob's re-fetchable on-device cache copies from both
@@ -929,7 +713,7 @@ impl CovenHandle {
     /// It does not delete the cloud blob or its carrying row; a later read can
     /// fetch the bytes again.
     pub async fn evict_blob(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_cached_blob(self.db(), &self.store_dir, blob).await
+        self.blobs.evict(blob).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
@@ -945,10 +729,7 @@ impl CovenHandle {
         root_id: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        match self.sync_manager() {
-            Some(manager) => manager.make_remote(root_table, root_id, pin).await,
-            None => Err(MakeRemoteError::SyncNotReady),
-        }
+        self.blobs.make_remote(root_table, root_id, pin).await
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
@@ -960,10 +741,7 @@ impl CovenHandle {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        match self.sync_manager() {
-            Some(manager) => manager.cancel_make_remote(root_table, root_id).await,
-            None => Err(MakeRemoteError::SyncNotReady),
-        }
+        self.blobs.cancel_make_remote(root_table, root_id).await
     }
 
     /// Make `(root_table, root_id)` Local (Remote → Local): bring each blob back to
@@ -980,15 +758,8 @@ impl CovenHandle {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        let manager = self.sync_manager().ok_or(MakeLocalError::SyncNotReady)?;
-        let routing_encryption = self
-            .db()
-            .gates()
-            .has_scoped_graph()
-            .then(|| self.routing_encryption())
-            .transpose()?;
-        manager
-            .make_local(root_table, root_id, dest, cancel, routing_encryption)
+        self.blobs
+            .make_local(root_table, root_id, dest, cancel)
             .await
     }
 
@@ -1016,7 +787,7 @@ impl CovenHandle {
     /// [`make_remote_progress`](Self::make_remote_progress): the queue empties
     /// before the transition ends.
     pub async fn queued_uploads(&self) -> Result<Vec<crate::QueuedUpload>, crate::DbError> {
-        self.db().queued_uploads().await
+        self.blobs.queued_uploads().await
     }
 
     /// The queued uploads belonging to one gated root.
@@ -1031,7 +802,9 @@ impl CovenHandle {
         root_table: &str,
         root_id: &str,
     ) -> Result<Vec<crate::QueuedUpload>, crate::DbError> {
-        self.db().queued_uploads_for_root(root_table, root_id).await
+        self.blobs
+            .queued_uploads_for_root(root_table, root_id)
+            .await
     }
 
     /// Where the user's own file for a row's blob lives on disk, or `None`
@@ -1052,7 +825,7 @@ impl CovenHandle {
         table: &str,
         row_id: &str,
     ) -> Result<Option<crate::ExternalBlob>, crate::DbError> {
-        self.db().external_blob(table, row_id).await
+        self.blobs.external_blob(table, row_id).await
     }
 
     /// Every cloud tombstone the durable queue is holding, oldest first.
@@ -1062,7 +835,7 @@ impl CovenHandle {
     /// and stays until a sync cycle carries the removal out, so this reports
     /// removals still owed to the cloud across restarts.
     pub async fn queued_deletes(&self) -> Result<Vec<crate::QueuedDelete>, crate::DbError> {
-        self.db().queued_deletes().await
+        self.blobs.queued_deletes().await
     }
 
     /// How far the make-remote for one gated root has got, or `None` when that
@@ -1078,22 +851,15 @@ impl CovenHandle {
         root_table: &str,
         root_id: &str,
     ) -> Result<Option<crate::MakeRemoteProgress>, crate::DbError> {
-        self.db().make_remote_progress(root_table, root_id).await
+        self.blobs.make_remote_progress(root_table, root_id).await
     }
 
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        let sync_loop = manager
-            .sync_loop_handle()
-            .ok_or(SyncError::LoopNotRunning)?;
-        sync_loop
-            .drain_uploads()
-            .await
-            .map_err(SyncError::BlobUpload)
+        self.blobs.drain_uploads().await
     }
 
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
-        self.db().get_cache_budget(namespace).await
+        self.blobs.cache_budget(namespace).await
     }
 
     pub async fn set_cache_budget(
@@ -1101,7 +867,7 @@ impl CovenHandle {
         namespace: &str,
         max_bytes: u64,
     ) -> Result<(), crate::DbError> {
-        self.db().set_cache_budget(namespace, max_bytes).await
+        self.blobs.set_cache_budget(namespace, max_bytes).await
     }
 
     /// Generate a restore code, seeded with the store's current membership-head
@@ -1111,20 +877,17 @@ impl CovenHandle {
     /// no protection against a storage provider replaying an older, otherwise
     /// validly signed membership state to the device that redeems it.
     pub async fn generate_restore_code(&self) -> Result<String, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.generate_restore_code().await
+        self.recovery.generate_restore_code().await
     }
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.get_members().await
+        self.membership.members().await
     }
 
     pub async fn membership_conflict(
         &self,
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.membership_conflict().await
+        self.membership.conflict().await
     }
 
     /// Admit the device that generated `join_request_code`, and return the one
@@ -1138,19 +901,8 @@ impl CovenHandle {
         &self,
         join_request_code: &str,
         role: MemberRole,
-    ) -> Result<crate::sync::device_join_transport::DeviceJoinInvite, SyncError> {
-        let member_pubkey = crate::join_code::decode_join_request(join_request_code)
-            .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
-            .public_key;
-        let invite_code = self.invite_member(&member_pubkey, None, role).await?;
-        let bundle = self
-            .device_join_store()?
-            .begin_device_join_bundle(&member_pubkey)
-            .await?;
-        Ok(crate::sync::device_join_transport::DeviceJoinInvite::new(
-            invite_code,
-            bundle,
-        ))
+    ) -> Result<crate::joining::DeviceJoinInvite, SyncError> {
+        self.joining.begin_invite(join_request_code, role).await
     }
 
     /// Drive the admitting side of a join this device issued, publishing each
@@ -1160,20 +912,14 @@ impl CovenHandle {
     /// or the abandonment that ended it early.
     pub async fn drive_device_join(
         &self,
-        invite: &crate::sync::device_join_transport::DeviceJoinInvite,
+        invite: &crate::joining::DeviceJoinInvite,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        let store = self.device_join_store()?;
-        Ok(crate::sync::store::drive_device_join(
-            &store,
-            &invite.bundle,
-            policy,
-            access_administrator,
-            timing,
-        )
-        .await?)
+        self.joining
+            .drive(invite, policy, access_administrator, timing)
+            .await
     }
 
     /// Cancel an invited join and carry the unwind to its activated cleanup,
@@ -1192,11 +938,7 @@ impl CovenHandle {
         invite: &crate::DeviceJoinInvite,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        let store = self.device_join_store()?;
-        Ok(
-            crate::sync::store::cancel_device_join_via_transport(&store, &invite.bundle, timing)
-                .await?,
-        )
+        self.joining.cancel_invite(invite, timing).await
     }
 
     /// Give up on an invited join and publish the abandonment, so a joining
@@ -1208,25 +950,21 @@ impl CovenHandle {
         &self,
         invite: &crate::DeviceJoinInvite,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        let store = self.device_join_store()?;
-        Ok(crate::sync::store::abandon_device_join_via_transport(&store, &invite.bundle).await?)
+        self.joining.abandon_invite(invite).await
     }
 
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .begin_device_join(member_pubkey)
-            .await?)
+        self.joining.begin(member_pubkey).await
     }
 
     pub async fn abandon_device_join(
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        Ok(self.device_join_store()?.abandon_device_join(offer).await?)
+        self.joining.abandon(offer).await
     }
 
     pub async fn authorize_device_provider_access(
@@ -1234,70 +972,51 @@ impl CovenHandle {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .authorize_device_provider_access(request, access_administrator)
-            .await?)
+        self.joining
+            .authorize_provider_access(request, access_administrator)
+            .await
     }
 
     pub async fn accept_device_registration_request(
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .accept_device_registration_request(request)
-            .await?)
+        self.joining.accept_registration(request).await
     }
 
     pub async fn publish_device_provider_challenge(
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .publish_device_provider_challenge(bootstrap)
-            .await?)
+        self.joining.publish_provider_challenge(bootstrap).await
     }
 
     pub async fn complete_device_provider_admission(
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .complete_device_provider_admission(readiness)
-            .await?)
+        self.joining.complete_provider_admission(readiness).await
     }
 
     pub async fn finalize_device_join(
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .finalize_device_join(completion)
-            .await?)
+        self.joining.finalize(completion).await
     }
 
     pub async fn cancel_device_join(
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .cancel_device_join(attempt)
-            .await?)
+        self.joining.cancel(attempt).await
     }
 
     pub async fn close_device_provider_admission(
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .close_device_provider_admission(cancellation)
-            .await?)
+        self.joining.close_provider_admission(cancellation).await
     }
 
     pub async fn revoke_device_provider_admission_writes(
@@ -1305,10 +1024,9 @@ impl CovenHandle {
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .revoke_device_provider_admission_writes(cancellation, revocation_executor)
-            .await?)
+        self.joining
+            .revoke_provider_writes(cancellation, revocation_executor)
+            .await
     }
 
     pub async fn revoke_joining_device_writes(
@@ -1316,30 +1034,23 @@ impl CovenHandle {
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .revoke_joining_device_writes(cancellation, revocation_executor)
-            .await?)
+        self.joining
+            .revoke_joiner_writes(cancellation, revocation_executor)
+            .await
     }
 
     pub async fn activate_device_join_cleanup(
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(self
-            .device_join_store()?
-            .activate_device_join_cleanup(receipt)
-            .await?)
+        self.joining.activate_cleanup(receipt).await
     }
 
     pub async fn complete_cancelled_device_join(
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.device_join_store()?
-            .complete_owner_device_join_cleanup(activation)
-            .await?;
-        Ok(())
+        self.joining.complete_cancelled(activation).await
     }
 
     pub async fn device_join_status(
@@ -1347,19 +1058,11 @@ impl CovenHandle {
         attempt_id: crate::DeviceJoinAttemptId,
         role: crate::DeviceJoinRole,
     ) -> Result<Option<crate::DeviceJoinStatus>, SyncError> {
-        Ok(self.database.device_join_status(attempt_id, role).await?)
+        self.joining.status(attempt_id, role).await
     }
 
     pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
-        Ok(self.database.device_join_actions().await?)
-    }
-
-    fn device_join_store(&self) -> Result<Arc<Store>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        let loop_handle = manager
-            .sync_loop_handle()
-            .ok_or(SyncError::LoopNotRunning)?;
-        Ok(loop_handle.store())
+        self.joining.resumable_actions().await
     }
 
     pub async fn invite_member(
@@ -1368,30 +1071,70 @@ impl CovenHandle {
         invitee_email: Option<&str>,
         role: MemberRole,
     ) -> Result<String, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager
-            .invite_member(public_key_hex, invitee_email, role)
+        self.membership
+            .invite(public_key_hex, invitee_email, role)
             .await
     }
 
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.remove_member(public_key_hex).await
+        self.membership.remove(public_key_hex).await
     }
 
     pub async fn resolve_membership_conflict(
         &self,
         choice: &crate::MembershipConflictChoice,
     ) -> Result<(), SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        manager.resolve_membership_conflict(choice).await
+        self.membership.resolve_conflict(choice).await
+    }
+
+    /// Propose excluding one Store device and return the code that identifies
+    /// the exact activated proposal.
+    pub async fn propose_device_exclusion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<String, SyncError> {
+        self.membership.propose_device_exclusion(device_id).await
+    }
+
+    /// Cancel the exact Store-device exclusion proposal carried by `proposal_code`.
+    pub async fn cancel_device_exclusion(&self, proposal_code: &str) -> Result<(), SyncError> {
+        self.membership.cancel_device_exclusion(proposal_code).await
+    }
+
+    /// Finalize the exact Store-device exclusion proposal carried by `proposal_code`.
+    pub async fn finalize_device_exclusion(&self, proposal_code: &str) -> Result<(), SyncError> {
+        self.membership
+            .finalize_device_exclusion(proposal_code)
+            .await
+    }
+
+    /// Begin transferring Store ownership to an active device and return the
+    /// request code that device must accept.
+    pub async fn begin_owner_promotion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<String, SyncError> {
+        self.membership.begin_owner_promotion(device_id).await
+    }
+
+    /// Accept an Owner-promotion request and return the acceptance code the
+    /// existing Owner must finalize.
+    pub async fn accept_owner_promotion(&self, request_code: &str) -> Result<String, SyncError> {
+        self.membership.accept_owner_promotion(request_code).await
+    }
+
+    /// Finalize the Owner-promotion acceptance carried by `acceptance_code`.
+    pub async fn finalize_owner_promotion(&self, acceptance_code: &str) -> Result<(), SyncError> {
+        self.membership
+            .finalize_owner_promotion(acceptance_code)
+            .await
     }
 
     /// The Circle application surface: create, lifecycle, inspection, and typed
     /// [`CircleError`](crate::CircleError). A borrowed namespace with no state of
     /// its own.
     pub fn circles(&self) -> crate::Circles<'_> {
-        crate::Circles::new(self)
+        crate::Circles::new(&self.circles)
     }
 }
 
@@ -1411,14 +1154,14 @@ mod tests {
     };
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeError;
-    use crate::sync::cloud_storage::CloudCipher;
-    use crate::sync::sync_manager::{ConfigProvider, SyncError};
+    use crate::storage::{BlobPathScheme, CloudCipher};
+    use crate::store_sync::{ConfigProvider, SyncError};
     use crate::sync::test_helpers::{
         open_test_db_with_blob, plant_blob_row, read_test_db, temp_store_dir, TestStore,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
     use std::time::Duration;
 
     type TestCloudKitCoordinate = (CloudKitScope, String);
@@ -1506,7 +1249,7 @@ mod tests {
         cloud_path: &str,
         bytes: &[u8],
         remote: bool,
-    ) -> coven_core::WriteId {
+    ) -> crate::WriteId {
         let note_id = format!("note-{id}");
         let id = id.to_string();
         let cloud_path = cloud_path.to_string();
@@ -1551,7 +1294,7 @@ mod tests {
     async fn wait_for_host_blob_publication(
         handle: &CovenHandle,
         id: &str,
-        write_id: &coven_core::WriteId,
+        write_id: &crate::WriteId,
     ) -> RowBlobRef {
         let mut status = handle
             .subscribe_write_status(write_id)
@@ -1562,13 +1305,11 @@ mod tests {
             loop {
                 let current = status.borrow().clone();
                 match current {
-                    coven_core::WriteStatus::Published(_) => break,
-                    coven_core::WriteStatus::Pending | coven_core::WriteStatus::Publishing => {
-                        status
-                            .changed()
-                            .await
-                            .expect("write status channel remains open")
-                    }
+                    crate::WriteStatus::Published(_) => break,
+                    crate::WriteStatus::Pending | crate::WriteStatus::Publishing => status
+                        .changed()
+                        .await
+                        .expect("write status channel remains open"),
                     other => panic!("host blob write did not publish: {other:?}"),
                 }
             }
@@ -1622,7 +1363,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         plant_blob_row(&db, "anyblob0", false, b"typed setup error").await;
@@ -1641,7 +1382,13 @@ mod tests {
     }
 
     fn test_handle(store_id: &str, store_dir: StoreDir, db: Database) -> CovenHandle {
-        test_handle_with_custody(store_id, store_dir, db, test_key_custody())
+        test_handle_with_custody_and_storage(
+            store_id,
+            store_dir,
+            db,
+            test_key_custody(),
+            HomeStorage::Browsable,
+        )
     }
 
     fn test_handle_with_custody(
@@ -1650,12 +1397,29 @@ mod tests {
         db: Database,
         key_custody: Arc<dyn crate::keys::MasterKeyCustody>,
     ) -> CovenHandle {
-        let config = Config::with_defaults(
+        test_handle_with_custody_and_storage(
+            store_id,
+            store_dir,
+            db,
+            key_custody,
+            HomeStorage::Opaque,
+        )
+    }
+
+    fn test_handle_with_custody_and_storage(
+        store_id: &str,
+        store_dir: StoreDir,
+        db: Database,
+        key_custody: Arc<dyn crate::keys::MasterKeyCustody>,
+        storage: HomeStorage,
+    ) -> CovenHandle {
+        let mut config = Config::with_defaults(
             store_id.to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
+        config.cloud_home.storage = storage;
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
         CovenHandle::new(
             db.clone(),
@@ -1673,7 +1437,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         )
     }
 
@@ -1916,7 +1680,7 @@ mod tests {
         }
     }
 
-    /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
+    /// `connect_sync_with_test_home` starts the production sync loop over an injected
     /// `InMemoryCloudHome`. A host write creates a pending exact Store row/blob;
     /// the public drain uploads its prepared blob object, the next cycle publishes
     /// the row with its exact locator, and `read_blob` uses that row-bound locator
@@ -1980,7 +1744,7 @@ mod tests {
             None,
             Some(upload_pause.clone()),
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
@@ -2058,9 +1822,9 @@ mod tests {
 
     /// The chunk size a host sets through
     /// [`CovenBuilder::blob_chunking`](crate::CovenBuilder::blob_chunking) is what
-    /// the connected sync manager seals under. The receipt is the stored object's
+    /// the connected sync storage seals under. The receipt is the stored object's
     /// own header: it names the configured size, so the setting decides how little
-    /// a later ranged read can fetch. A connect path that builds its manager or its
+    /// a later ranged read can fetch. A connect path that builds its connection or its
     /// storage on `BlobChunking::DEFAULT` instead seals at 64 KiB and this fails.
     #[tokio::test]
     async fn connected_seal_honors_the_handles_configured_blob_chunking() {
@@ -2083,7 +1847,7 @@ mod tests {
         // (64 KiB chunk, 1 MiB window), so a dropped configuration is visible
         // rather than coinciding with the default.
         const CHUNK: u32 = 4096;
-        let chunking = crate::sync::cloud_storage::BlobChunking::new(
+        let chunking = crate::storage::BlobChunking::new(
             std::num::NonZeroU32::new(CHUNK).expect("nonzero chunk"),
             std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
         );
@@ -2181,10 +1945,9 @@ mod tests {
 
         // `[key tag][header][chunks]` — the header the sealer wrote is what every
         // later reader frames the object by.
-        let header = crate::encryption::SealedBlobHeader::parse(
-            &at_rest[crate::sync::cloud_storage::KEY_TAG_LEN..],
-        )
-        .expect("stored blob carries a sealed header");
+        let header =
+            crate::encryption::SealedBlobHeader::parse(&at_rest[crate::storage::KEY_TAG_LEN..])
+                .expect("stored blob carries a sealed header");
         assert_eq!(
             header.chunk_size().get(),
             CHUNK,
@@ -2203,7 +1966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connected_manager_reuses_cloud_home_for_loop_storage() {
+    async fn connected_sync_reuses_cloud_home_for_loop_storage() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
@@ -2238,7 +2001,7 @@ mod tests {
             Some(Arc::new(TestCloudKitOps::new())),
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         handle
@@ -2246,17 +2009,18 @@ mod tests {
             .await
             .expect("connect sync over the test CloudKit driver");
 
-        let manager = handle
-            .sync_manager()
-            .expect("connect_sync installs a manager");
-        let stored_home = manager.cloud_home().expect("manager stores cloud home");
-        let loop_handle = manager
-            .sync_loop_handle()
+        let stored_home = handle
+            .sync
+            .cloud_home_for_test()
+            .expect("StoreSync retains the cloud home");
+        let loop_handle = handle
+            .sync
+            .active_loop_for_test()
             .expect("connect_sync starts the sync loop");
 
         assert!(
             std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
-            "the sync loop storage must wrap the same cloud home stored on the manager",
+            "the sync loop storage must wrap the same cloud home retained by StoreSync",
         );
     }
 
@@ -2327,7 +2091,7 @@ mod tests {
             Some(ops.clone()),
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
         writer
             .connect_sync_with_cloudkit(ops.clone())
@@ -2349,7 +2113,7 @@ mod tests {
             identity_custody,
             Arc::new(SystemClock),
             Some(ops),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         let read = reader
@@ -2407,7 +2171,7 @@ mod tests {
     /// The end-to-end proof that `initialize_master_key` establishes the key
     /// that actually seals cloud traffic. A keyring-custody store initializes a
     /// master key, connects over an injected opaque `InMemoryCloudHome` through
-    /// the custody-resolving connect path — no cipher is injected; the manager
+    /// the custody-resolving connect path — no cipher is injected; StoreSync
     /// unlocks the key exactly as production `start_sync` does — then enqueues
     /// and drains a blob. The bytes at rest in the home are ciphertext, never
     /// the plaintext (the assertion a browsable/plaintext home would fail),
@@ -2465,7 +2229,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         handle
@@ -2475,7 +2239,7 @@ mod tests {
             .initialize_identity()
             .expect("establish this store's identity before connecting");
 
-        // Connect over the injected home through the custody path: the manager
+        // Connect over the injected home through the custody path: StoreSync
         // resolves the cipher from the just-established key, never an injected
         // one. An opaque home with no key would fail here with
         // `MasterKeyNotEstablished`.
@@ -2587,7 +2351,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         )
     }
 
@@ -2773,7 +2537,7 @@ mod tests {
             test_identity_custody(),
             Arc::new(SystemClock),
             None,
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         assert_eq!(
@@ -2913,14 +2677,18 @@ mod tests {
                     .expect("read active Circle members"),
                 vec![crate::CircleMemberInfo {
                     pubkey: crate::keys::public_key_hex(
-                        &crate::keys::require_identity(handle.identity_custody.as_ref())
+                        &handle
+                            .security
+                            .require_identity()
                             .expect("read test identity"),
                     ),
                     role: crate::CircleRole::Owner,
                     is_self: true,
                 }]
             );
-            let identity = crate::keys::require_identity(handle.identity_custody.as_ref())
+            let identity = handle
+                .security
+                .require_identity()
                 .expect("read test identity");
             assert!(StoreDatabase::from_database(db.clone())
                 .get_circle_members(
@@ -3132,12 +2900,13 @@ mod tests {
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let config = Config::with_defaults(
+        let mut config = Config::with_defaults(
             "lib-reconnect-loop".to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
+        config.cloud_home.storage = HomeStorage::Browsable;
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
@@ -3158,7 +2927,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -3167,9 +2936,8 @@ mod tests {
             .await
             .expect("first connect over injected home");
         let first_loop = handle
-            .sync_manager()
-            .expect("first manager installed")
-            .sync_loop_handle()
+            .sync
+            .active_loop_for_test()
             .expect("first loop installed");
         assert!(first_loop.is_running(), "first loop starts running");
 
@@ -3178,9 +2946,8 @@ mod tests {
             .await
             .expect("second connect over injected home");
         let replacement_loop = handle
-            .sync_manager()
-            .expect("replacement manager installed")
-            .sync_loop_handle()
+            .sync
+            .active_loop_for_test()
             .expect("replacement loop installed");
 
         assert!(
@@ -3210,12 +2977,13 @@ mod tests {
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let config = Config::with_defaults(
+        let mut config = Config::with_defaults(
             "lib-stopped-loop-readiness".to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
+        config.cloud_home.storage = HomeStorage::Browsable;
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
@@ -3236,24 +3004,23 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
-        let manager = handle.sync_manager().expect("manager installed");
-        let loop_handle = manager.sync_loop_handle().expect("loop installed");
+        let loop_handle = handle.sync.active_loop_for_test().expect("loop installed");
 
         loop_handle.stop().expect("stop installed loop");
 
-        let make_remote = manager.make_remote("notes", "note-1", false).await;
+        let make_remote = handle.make_remote("notes", "note-1", false).await;
         assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let make_local = manager
-            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx, None)
+        let make_local = handle
+            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx)
             .await;
         assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
     }
@@ -3311,7 +3078,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -3322,8 +3089,10 @@ mod tests {
             )
             .await
             .expect("connect encrypted injected home");
-        let manager = handle.sync_manager().expect("sync manager installed");
-        let loop_handle = manager.sync_loop_handle().expect("sync loop installed");
+        let loop_handle = handle
+            .sync
+            .active_loop_for_test()
+            .expect("sync loop installed");
 
         {
             let mut next_config = live_config
@@ -3382,7 +3151,7 @@ mod tests {
             .current_encryption()
             .expect("session remains encrypted");
         let (fingerprint, header, chunks) =
-            crate::sync::cloud_storage::split_sealed_blob(&stored).expect("stored blob layout");
+            crate::storage::split_sealed_blob(&stored).expect("stored blob layout");
         assert_eq!(fingerprint, encryption.seal_key_fingerprint());
         assert_eq!(
             encryption
@@ -3403,12 +3172,13 @@ mod tests {
     fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
         let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let config = Config::with_defaults(
+        let mut config = Config::with_defaults(
             store_id.to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
+        config.cloud_home.storage = HomeStorage::Browsable;
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
@@ -3429,7 +3199,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::sync::cloud_storage::BlobChunking::DEFAULT,
+            crate::storage::BlobChunking::DEFAULT,
         );
         (tmp, handle)
     }
@@ -3595,55 +3365,48 @@ mod tests {
         );
     }
 
-    /// `stop_sync` keeps the installed manager (so `start_sync` can resume
-    /// it); `disconnect_sync` drops it outright. The resolved cipher and the
-    /// device keypair `SyncManager`/`CloudSyncStorage` hold live only inside
-    /// that manager (see its doc) — nothing else in the handle references
-    /// them — so once `sync_manager()` is `None`, nothing a connection
-    /// resolved survives past the call. A later `connect_sync` builds a new
-    /// manager that re-resolves fresh from custody
-    /// (`resolve_cipher_never_caches_reflects_whatever_custody_now_serves` in
-    /// `sync_manager.rs` pins that re-resolution).
+    /// `stop_sync` keeps the provider connection so `start_sync` can resume it;
+    /// `disconnect_sync` drops it outright. The resolved cipher and device
+    /// keypair live only inside the active loop, so nothing resolved by the
+    /// connection survives disconnection. A later `connect_sync` resolves fresh
+    /// material from custody.
     #[tokio::test]
-    async fn disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
+    async fn disconnect_sync_drops_the_connection_not_just_the_loop() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 tokio::task::spawn_local(
-                    run_disconnect_sync_drops_the_installed_manager_not_just_the_loop(),
+                    run_disconnect_sync_drops_the_connection_not_just_the_loop(),
                 )
                 .await
-                .expect("disconnect-manager test task");
+                .expect("disconnect-connection test task");
             })
             .await;
     }
 
-    async fn run_disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
+    async fn run_disconnect_sync_drops_the_connection_not_just_the_loop() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let handle = test_handle("lib-disconnect-drops-manager", store_dir, db);
+        let handle = test_handle("lib-disconnect-drops-connection", store_dir, db);
 
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
-        assert!(
-            handle.sync_manager().is_some(),
-            "connect installs a manager"
-        );
+        assert!(handle.sync.is_connected(), "connect installs a connection");
 
         handle.stop_sync();
         assert!(
-            handle.sync_manager().is_some(),
-            "stop_sync keeps the manager installed so start_sync can resume it",
+            handle.sync.is_connected(),
+            "stop_sync keeps the connection installed so start_sync can resume it",
         );
 
         handle.disconnect_sync();
         assert!(
-            handle.sync_manager().is_none(),
-            "disconnect_sync drops the installed manager entirely — nothing it \
+            !handle.sync.is_connected(),
+            "disconnect_sync drops the connection entirely — nothing it \
              cached survives past this call",
         );
     }

@@ -264,7 +264,8 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
         .open()
         .expect("open the store");
-    let store = TestStore::create(handle.db(), "blob-facade-test", owner.clone())
+    let store = handle
+        .create_test_store("blob-facade-test", owner.clone())
         .await
         .expect("create the Store");
     handle
@@ -420,7 +421,8 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
         .open()
         .expect("open the store");
-    let store = TestStore::create(handle.db(), "blob-facade-test", owner)
+    let store = handle
+        .create_test_store("blob-facade-test", owner)
         .await
         .expect("create the Store");
     let bytes = b"a published photo".to_vec();
@@ -451,8 +453,8 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
         )
         .await
         .expect("write the note and its photo");
-    store
-        .publish_pending(handle.db(), &dir)
+    handle
+        .publish_test_store(&store)
         .await
         .expect("publish the photo");
 

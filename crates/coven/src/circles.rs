@@ -3,14 +3,14 @@
 //! [`CovenHandle`](crate::CovenHandle) with no state of its own; every method
 //! delegates to the sync manager and maps internal refusals to [`CircleError`].
 
-use coven_core::{
+use crate::{
     Circle, CircleCloseStatus, CircleControlCoord, CircleEpochCloseId, CircleId, CircleMemberInfo,
     CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleRole, StoreDeviceId,
 };
 
-use crate::handle::CovenHandle;
+use crate::store_circles::StoreCircles;
+use crate::store_sync::SyncError;
 use crate::sync::store::CircleOperationError;
-use crate::sync::sync_manager::SyncError;
 
 /// Why a Circle command or query failed. Maps the internal typed refusals 1:1 with
 /// stable identifiers and carries the ids a caller needs to display or retry.
@@ -167,34 +167,27 @@ impl From<SyncError> for CircleError {
     }
 }
 
-/// The `coven.circles()` namespace. Borrowed from a [`CovenHandle`]; holds no
-/// state of its own.
+/// The `coven.circles()` namespace. Borrowed from its Store Circle owner.
 pub struct Circles<'a> {
-    handle: &'a CovenHandle,
+    owner: &'a StoreCircles,
 }
 
 impl<'a> Circles<'a> {
-    pub(crate) fn new(handle: &'a CovenHandle) -> Self {
-        Self { handle }
-    }
-
-    fn manager(
-        &self,
-    ) -> Result<std::sync::Arc<crate::sync::sync_manager::SyncManager>, CircleError> {
-        self.handle.sync_manager().ok_or(CircleError::NotConfigured)
+    pub(crate) fn new(owner: &'a StoreCircles) -> Self {
+        Self { owner }
     }
 
     /// Create and activate a Circle whose founder is this Store identity. Returns
     /// only after the signed roster, metadata, access set, control, Store commit,
     /// activation head, and local materialization are durable.
     pub async fn create(&self, name: &str) -> Result<CircleId, CircleError> {
-        self.manager()?.create_circle(name).await
+        self.owner.create(name).await
     }
 
     /// Rename a Circle without changing its epoch key, membership, rows, or
     /// package history.
     pub async fn rename(&self, circle_id: CircleId, name: &str) -> Result<(), CircleError> {
-        self.manager()?.rename_circle(circle_id, name).await
+        self.owner.rename(circle_id, name).await
     }
 
     /// Add (or re-add) a Store identity to the Circle's roster, sealing it a fresh
@@ -204,8 +197,8 @@ impl<'a> Circles<'a> {
         circle_id: CircleId,
         member_pubkey: &str,
     ) -> Result<(), CircleError> {
-        self.manager()?
-            .add_circle_member(circle_id, member_pubkey.to_string(), CircleRole::Member)
+        self.owner
+            .add_member(circle_id, member_pubkey.to_string(), CircleRole::Member)
             .await
     }
 
@@ -216,8 +209,8 @@ impl<'a> Circles<'a> {
         circle_id: CircleId,
         member_pubkey: &str,
     ) -> Result<CircleOperationId, CircleError> {
-        self.manager()?
-            .remove_circle_member(circle_id, member_pubkey.to_string())
+        self.owner
+            .remove_member(circle_id, member_pubkey.to_string())
             .await
     }
 
@@ -229,9 +222,7 @@ impl<'a> Circles<'a> {
         circle_id: CircleId,
         chosen: CircleControlCoord,
     ) -> Result<(), CircleError> {
-        self.manager()?
-            .resolve_circle_control(circle_id, chosen)
-            .await
+        self.owner.resolve(circle_id, chosen).await
     }
 
     /// Cancel an in-flight epoch close, restoring the frozen epoch. Returns the
@@ -240,7 +231,7 @@ impl<'a> Circles<'a> {
         &self,
         circle_id: CircleId,
     ) -> Result<CircleOperationId, CircleError> {
-        self.manager()?.cancel_circle_epoch_close(circle_id).await
+        self.owner.cancel_close(circle_id).await
     }
 
     /// Exclude an unavailable participant device from the Circle's in-flight epoch
@@ -251,14 +242,12 @@ impl<'a> Circles<'a> {
         circle_id: CircleId,
         device_id: StoreDeviceId,
     ) -> Result<(), CircleError> {
-        self.manager()?
-            .exclude_circle_close_device(circle_id, device_id)
-            .await
+        self.owner.exclude_close_device(circle_id, device_id).await
     }
 
     /// Delete a Circle with an Owner-signed terminal control transition.
     pub async fn delete(&self, circle_id: CircleId) -> Result<(), CircleError> {
-        self.manager()?.delete_circle(circle_id).await
+        self.owner.delete(circle_id).await
     }
 
     /// Retry a blocked durable operation from its captured phase, idempotently.
@@ -266,7 +255,7 @@ impl<'a> Circles<'a> {
         &self,
         operation_id: CircleOperationId,
     ) -> Result<(), CircleError> {
-        self.manager()?.retry_circle_operation(operation_id).await
+        self.owner.retry(operation_id).await
     }
 
     /// Discard a durable operation that can provably never activate, deleting its
@@ -276,24 +265,24 @@ impl<'a> Circles<'a> {
         &self,
         operation_id: CircleOperationId,
     ) -> Result<(), CircleError> {
-        self.manager()?.discard_circle_operation(operation_id).await
+        self.owner.discard(operation_id).await
     }
 
     /// Every Circle the local identity can see, with its derived
     /// [`CircleState`](crate::CircleState).
     pub async fn list(&self) -> Result<Vec<Circle>, CircleError> {
-        self.manager()?.list_circles().await
+        self.owner.list().await
     }
 
     /// The Circle's current members who remain current Store members, with roles.
     pub async fn members(&self, circle_id: CircleId) -> Result<Vec<CircleMemberInfo>, CircleError> {
-        self.manager()?.circle_members(circle_id).await
+        self.owner.members(circle_id).await
     }
 
     /// Every durable Circle operation that has not activated, with its typed
     /// progress and block reason.
     pub async fn operations(&self) -> Result<Vec<CircleOperationInfo>, CircleError> {
-        self.manager()?.circle_operations().await
+        self.owner.operations().await
     }
 
     /// The read-only settlement status of a Circle's in-flight epoch close.
@@ -301,7 +290,7 @@ impl<'a> Circles<'a> {
         &self,
         circle_id: CircleId,
     ) -> Result<CircleCloseStatus, CircleError> {
-        self.manager()?.circle_close_status(circle_id).await
+        self.owner.close_status(circle_id).await
     }
 }
 

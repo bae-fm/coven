@@ -110,8 +110,8 @@ they never masquerade as a connectivity loss.
 
 ## Workspace
 
-- `coven`: the Rust package and public API.
-- `coven-core`: the sync engine used by `coven`.
+- `coven`: the Rust package containing the public API and its retained domain
+  owners.
 
 ## Development
 
