@@ -118,6 +118,77 @@ pub(crate) enum RetainedAudiencePackage {
 }
 
 impl RetainedAudiencePackage {
+    pub(crate) fn verify(
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        package: AudiencePackage,
+    ) -> Result<Self, DbError> {
+        if package.store_root_hash() != commit.store_root_hash
+            || package.write_id() != &commit.write_id
+            || package.commit_coord() != &commit_ref.coord
+            || package.candidate_family() != commit.candidate_family()
+        {
+            return Err(DbError::Message(
+                "retained audience package differs from its exact Store commit".to_string(),
+            ));
+        }
+        package
+            .validate_blob_uploader(&commit.author_registration)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        match package.audience() {
+            crate::protocol::audience_package::PackageAudience::Store => {
+                let reference = commit.store_package().ok_or_else(|| {
+                    DbError::Message(
+                        "retained Store package is absent from its exact commit".to_string(),
+                    )
+                })?;
+                if package.schema_version() != reference.schema_version {
+                    return Err(DbError::Message(
+                        "retained Store package schema version differs from its exact commit"
+                            .to_string(),
+                    ));
+                }
+                commit
+                    .verify_store_package(&package.to_bytes())
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                Ok(Self::Store {
+                    reference: reference.clone(),
+                    package,
+                })
+            }
+            crate::protocol::audience_package::PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } => {
+                let reference = commit
+                    .circle_packages()
+                    .iter()
+                    .find(|reference| reference.circle_id == *circle_id)
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "retained Circle package {circle_id} is absent from its exact commit"
+                        ))
+                    })?;
+                if reference.control != *control
+                    || reference.key_fingerprint != *key_fingerprint
+                    || package.schema_version() != reference.package.schema_version
+                {
+                    return Err(DbError::Message(format!(
+                        "retained Circle package {circle_id} differs from its exact commit"
+                    )));
+                }
+                commit
+                    .verify_circle_package(*circle_id, &package.to_bytes())
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                Ok(Self::Circle {
+                    reference: reference.clone(),
+                    package,
+                })
+            }
+        }
+    }
+
     pub(crate) fn package(&self) -> &AudiencePackage {
         match self {
             Self::Store { package, .. } | Self::Circle { package, .. } => package,

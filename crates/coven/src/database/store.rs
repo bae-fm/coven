@@ -67,8 +67,8 @@ pub use host_sql::SqlContext;
 pub use host_write_operation::WriteBatch;
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};
 pub(crate) use materialization_models::{
-    OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    OwnedVerifiedMergeMaterialization, RetainedAudiencePackage, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
 pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
 pub(crate) use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};

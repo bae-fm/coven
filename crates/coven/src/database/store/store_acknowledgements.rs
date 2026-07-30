@@ -223,7 +223,61 @@ impl StoreDatabase {
                     &accepted,
                     &outbound.ack.value.successor.next_slot,
                 )?;
-                finish_outbound_circle_acks_on(&tx, &outbound.circle_acknowledgements)?;
+                for circle in &outbound.circle_acknowledgements {
+                    let circle_id = circle.reference.circle_id.to_string();
+                    let removed = tx
+                        .execute(
+                            "DELETE FROM outbound_circle_acks WHERE circle_id = ?1",
+                            [&circle_id],
+                        )
+                        .map_err(DbError::from)?;
+                    if removed != 1 {
+                        return Err(DbError::Message(
+                            "outbound Circle acknowledgement disappeared during completion"
+                                .to_string(),
+                        ));
+                    }
+                    let successor_slot = serde_json::to_string(
+                        &circle.ack.value.successor.next_slot,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize Circle acknowledgement successor slot: {error}"
+                        ))
+                    })?;
+                    let store_cut =
+                        serde_json::to_string(&circle.ack.value.store_cut).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize Circle acknowledgement cut: {error}"
+                            ))
+                        })?;
+                    let control_coord =
+                        serde_json::to_string(&circle.ack.value.control).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize Circle acknowledgement control: {error}"
+                            ))
+                        })?;
+                    tx.execute(
+                        "INSERT INTO published_circle_acks
+                           (circle_id, ack_ref, successor_slot, store_cut, control_coord)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(circle_id) DO UPDATE SET
+                           ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot,
+                           store_cut = excluded.store_cut, control_coord = excluded.control_coord",
+                        rusqlite::params![
+                            circle_id,
+                            serde_json::to_string(&circle.reference).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize published Circle acknowledgement ref: {error}"
+                                ))
+                            })?,
+                            successor_slot,
+                            store_cut,
+                            control_coord,
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                }
                 tx.commit().map_err(DbError::from)
             })
             .await

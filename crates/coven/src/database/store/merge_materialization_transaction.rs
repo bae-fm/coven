@@ -5,8 +5,7 @@ use super::{
 };
 use crate::database::ReclaimCommitActivation;
 use crate::database::{
-    load_activated_registration_on, load_remote_object_on, record_activated_circle_acks_on,
-    record_activated_store_ack_on, record_store_reclaim_activation_on,
+    load_activated_registration_on, load_remote_object_on, record_store_reclaim_activation_on,
     required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
     Database, DbError, OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey,
     RetainedPackageApplication, VerifiedMergeMaterialization,
@@ -14,9 +13,9 @@ use crate::database::{
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::{
-    CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
+    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::storage::ExactObjectRef;
 use crate::sync::{VerifiedCircleActivations, VerifiedStreamActivations};
@@ -350,8 +349,8 @@ impl MergeMaterializationTransaction<'_, '_> {
         }
         let device_state =
             self.derive_materialized_store_device_state(&root, commit, device_operations)?;
-        record_activated_store_ack_on(conn, commit, commit_ref)?;
-        record_activated_circle_acks_on(conn, commit, commit_ref)?;
+        self.record_activated_store_ack(commit, commit_ref)?;
+        self.record_activated_circle_acks(commit, commit_ref)?;
         let seq = Database::sequence_to_sqlite(&stream_id, commit.seq())?;
         let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::Message(format!("serialize exact Store commit ref: {error}"))
@@ -406,6 +405,124 @@ impl MergeMaterializationTransaction<'_, '_> {
         )?;
         apply_store_device_exclusion_freezes_on(conn, &root, &device_state, device_operations)?;
         record_store_reclaim_activation_on(conn, commit, commit_ref, activation)
+    }
+
+    fn record_activated_store_ack(
+        &self,
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let Some(reference) = commit.acknowledgement() else {
+            return Ok(());
+        };
+        if reference.registration != commit.author_registration {
+            return Err(DbError::Message(
+                "activated Store acknowledgement names another registration".to_string(),
+            ));
+        }
+        let conn = self.transaction;
+        let device_id = reference.registration.device_id.to_string();
+        let current = conn
+            .query_row(
+                "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
+                [&device_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|raw| {
+                serde_json::from_str::<StoreAckRef>(&raw).map_err(|error| {
+                    DbError::Message(format!("activated Store acknowledgement ref: {error}"))
+                })
+            })
+            .transpose()?;
+        if current.as_ref().is_some_and(|current| {
+            current.registration != reference.registration || current.sequence >= reference.sequence
+        }) {
+            return Err(DbError::Message(
+                "Store acknowledgement activation does not advance the exact registration stream"
+                    .to_string(),
+            ));
+        }
+        conn.execute(
+            "INSERT INTO activated_store_acks (device_id, ack_ref, activating_commit) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT(device_id) DO UPDATE SET \
+               ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
+            rusqlite::params![
+                device_id,
+                serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
+                    "serialize activated Store acknowledgement ref: {error}"
+                )))?,
+                serde_json::to_string(commit_ref).map_err(|error| DbError::Message(format!(
+                    "serialize acknowledgement activating commit ref: {error}"
+                )))?,
+            ],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    fn record_activated_circle_acks(
+        &self,
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let conn = self.transaction;
+        for reference in commit.circle_acknowledgements() {
+            if reference.registration != commit.author_registration {
+                return Err(DbError::Message(
+                    "activated Circle acknowledgement names another registration".to_string(),
+                ));
+            }
+            let circle_id = reference.circle_id.to_string();
+            let device_id = reference.registration.device_id.to_string();
+            let current: Option<CircleAckRef> = conn
+                .query_row(
+                    "SELECT ack_ref FROM activated_circle_acks
+                     WHERE circle_id = ?1 AND device_id = ?2",
+                    rusqlite::params![circle_id, device_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|raw| {
+                    serde_json::from_str::<CircleAckRef>(&raw).map_err(|error| {
+                        DbError::Message(format!("activated Circle acknowledgement ref: {error}"))
+                    })
+                })
+                .transpose()?;
+            if current.as_ref().is_some_and(|current| {
+                current.registration != reference.registration
+                    || current.circle_id != reference.circle_id
+                    || current.sequence >= reference.sequence
+            }) {
+                return Err(DbError::Message(
+                    "Circle acknowledgement activation does not advance the exact stream"
+                        .to_string(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO activated_circle_acks
+                   (circle_id, device_id, ack_ref, activating_commit)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(circle_id, device_id) DO UPDATE SET
+                   ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
+                rusqlite::params![
+                    circle_id,
+                    device_id,
+                    serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
+                        "serialize activated Circle acknowledgement ref: {error}"
+                    )))?,
+                    serde_json::to_string(commit_ref).map_err(|error| DbError::Message(
+                        format!("serialize Circle acknowledgement activating commit: {error}")
+                    ))?,
+                ],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)?;
+        }
+        Ok(())
     }
 
     fn record_author_exclusion_activations(

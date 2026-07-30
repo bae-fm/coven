@@ -666,20 +666,6 @@ impl StoreDatabase {
         conn: &Connection,
         retained: &RetainedMergeMaterializationCache,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        Self::circle_replay_epoch_index_with_on(conn, |conn, circle_id, control| {
-            Self::verified_circle_activation_from_cache_on(conn, retained, circle_id, control)
-        })
-    }
-
-    fn circle_replay_epoch_index_with_on(
-        conn: &Connection,
-        mut load_activation: impl FnMut(
-            &Connection,
-            crate::protocol::circle::CircleId,
-            &crate::protocol::circle::CircleControlCoord,
-        )
-            -> Result<Option<crate::sync::VerifiedCircleReference>, DbError>,
-    ) -> Result<CircleReplayEpochIndex, DbError> {
         let mut statement = conn
             .prepare(
                 "SELECT circle_id, control_coord
@@ -710,7 +696,10 @@ impl StoreDatabase {
                     "parse Circle replay index control for {circle_id}: {error}"
                 ))
             })?;
-            let activation = load_activation(conn, circle_id, &control)?.ok_or_else(|| {
+            let activation = Self::verified_circle_activation_from_cache_on(
+                conn, retained, circle_id, &control,
+            )?
+            .ok_or_else(|| {
                 DbError::Message(format!(
                     "Circle replay index activation for {circle_id} disappeared"
                 ))
@@ -743,7 +732,7 @@ impl StoreDatabase {
             let package = by_audience.remove(&RemoteAudience::Store).ok_or_else(|| {
                 DbError::Message("retained Merge commit is missing its Store package".to_string())
             })?;
-            ordered.push(Self::retained_audience_package(
+            ordered.push(RetainedAudiencePackage::verify(
                 commit, commit_ref, package,
             )?);
         }
@@ -752,7 +741,7 @@ impl StoreDatabase {
             else {
                 continue;
             };
-            ordered.push(Self::retained_audience_package(
+            ordered.push(RetainedAudiencePackage::verify(
                 commit, commit_ref, package,
             )?);
         }
@@ -762,77 +751,6 @@ impl StoreDatabase {
             ));
         }
         Ok(ordered)
-    }
-
-    pub(crate) fn retained_audience_package(
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
-        package: AudiencePackage,
-    ) -> Result<RetainedAudiencePackage, DbError> {
-        if package.store_root_hash() != commit.store_root_hash
-            || package.write_id() != &commit.write_id
-            || package.commit_coord() != &commit_ref.coord
-            || package.candidate_family() != commit.candidate_family()
-        {
-            return Err(DbError::Message(
-                "retained audience package differs from its exact Store commit".to_string(),
-            ));
-        }
-        package
-            .validate_blob_uploader(&commit.author_registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        match package.audience() {
-            crate::protocol::audience_package::PackageAudience::Store => {
-                let reference = commit.store_package().ok_or_else(|| {
-                    DbError::Message(
-                        "retained Store package is absent from its exact commit".to_string(),
-                    )
-                })?;
-                if package.schema_version() != reference.schema_version {
-                    return Err(DbError::Message(
-                        "retained Store package schema version differs from its exact commit"
-                            .to_string(),
-                    ));
-                }
-                commit
-                    .verify_store_package(&package.to_bytes())
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                Ok(RetainedAudiencePackage::Store {
-                    reference: reference.clone(),
-                    package,
-                })
-            }
-            crate::protocol::audience_package::PackageAudience::Circle {
-                circle_id,
-                control,
-                key_fingerprint,
-            } => {
-                let reference = commit
-                    .circle_packages()
-                    .iter()
-                    .find(|reference| reference.circle_id == *circle_id)
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "retained Circle package {circle_id} is absent from its exact commit"
-                        ))
-                    })?;
-                if reference.control != *control
-                    || reference.key_fingerprint != *key_fingerprint
-                    || package.schema_version() != reference.package.schema_version
-                {
-                    return Err(DbError::Message(format!(
-                        "retained Circle package {circle_id} differs from its exact commit"
-                    )));
-                }
-                commit
-                    .verify_circle_package(*circle_id, &package.to_bytes())
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                Ok(RetainedAudiencePackage::Circle {
-                    reference: reference.clone(),
-                    package,
-                })
-            }
-        }
     }
 
     fn retained_merge_object_ids(
@@ -2446,7 +2364,7 @@ impl StoreDatabase {
         }
     }
 
-    pub(super) fn require_exact_merge_retraction_closure(
+    fn require_exact_merge_retraction_closure(
         direct_dependencies: &BTreeMap<StoreBatchCommitRef, BTreeSet<StoreBatchCommitRef>>,
         roots: BTreeSet<StoreBatchCommitRef>,
         provided: &BTreeSet<StoreBatchCommitRef>,

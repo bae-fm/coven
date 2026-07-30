@@ -1,5 +1,5 @@
 use crate::database::local_store_identity::local_store_authority_on;
-use crate::protocol::store_commit::{CircleAck, CircleAckRef};
+use crate::protocol::store_commit::CircleAck;
 
 use super::*;
 
@@ -122,11 +122,24 @@ pub(crate) fn load_published_store_ack_on(
     .transpose()
 }
 
-fn record_published_store_ack_on(
+pub(crate) fn finish_outbound_store_ack_on(
     conn: &Connection,
     reference: &StoreAckRef,
     successor_slot: &crate::storage::cloud::ObjectSlot,
 ) -> Result<(), DbError> {
+    let removed = conn
+        .execute(
+            "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
+            [serde_json::to_string(reference).map_err(|error| {
+                DbError::Message(format!("serialize Store acknowledgement ref: {error}"))
+            })?],
+        )
+        .map_err(DbError::from)?;
+    if removed != 1 {
+        return Err(DbError::Message(
+            "outbound Store acknowledgement disappeared".to_string(),
+        ));
+    }
     let successor_slot = serde_json::to_string(successor_slot).map_err(|error| {
         DbError::Message(format!(
             "serialize Store acknowledgement successor slot: {error}"
@@ -148,192 +161,6 @@ fn record_published_store_ack_on(
     )
     .map(|_| ())
     .map_err(DbError::from)
-}
-
-pub(crate) fn finish_outbound_store_ack_on(
-    conn: &Connection,
-    reference: &StoreAckRef,
-    successor_slot: &crate::storage::cloud::ObjectSlot,
-) -> Result<(), DbError> {
-    let removed = conn
-        .execute(
-            "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
-            [serde_json::to_string(reference).map_err(|error| {
-                DbError::Message(format!("serialize Store acknowledgement ref: {error}"))
-            })?],
-        )
-        .map_err(DbError::from)?;
-    if removed != 1 {
-        return Err(DbError::Message(
-            "outbound Store acknowledgement disappeared".to_string(),
-        ));
-    }
-    record_published_store_ack_on(conn, reference, successor_slot)
-}
-
-pub(crate) fn record_activated_store_ack_on(
-    conn: &Connection,
-    commit: &StoreBatchCommit,
-    commit_ref: &StoreBatchCommitRef,
-) -> Result<(), DbError> {
-    let Some(reference) = commit.acknowledgement() else {
-        return Ok(());
-    };
-    if reference.registration != commit.author_registration {
-        return Err(DbError::Message(
-            "activated Store acknowledgement names another registration".to_string(),
-        ));
-    }
-    let device_id = reference.registration.device_id.to_string();
-    let current = conn
-        .query_row(
-            "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
-            [&device_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .map(|raw| {
-            serde_json::from_str::<StoreAckRef>(&raw).map_err(|error| {
-                DbError::Message(format!("activated Store acknowledgement ref: {error}"))
-            })
-        })
-        .transpose()?;
-    if current.as_ref().is_some_and(|current| {
-        current.registration != reference.registration || current.sequence >= reference.sequence
-    }) {
-        return Err(DbError::Message(
-            "Store acknowledgement activation does not advance the exact registration stream"
-                .to_string(),
-        ));
-    }
-    conn.execute(
-        "INSERT INTO activated_store_acks (device_id, ack_ref, activating_commit) \
-         VALUES (?1, ?2, ?3) \
-         ON CONFLICT(device_id) DO UPDATE SET \
-           ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
-        rusqlite::params![
-            device_id,
-            serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
-                "serialize activated Store acknowledgement ref: {error}"
-            )))?,
-            serde_json::to_string(commit_ref).map_err(|error| DbError::Message(format!(
-                "serialize acknowledgement activating commit ref: {error}"
-            )))?,
-        ],
-    )
-    .map(|_| ())
-    .map_err(DbError::from)
-}
-
-pub(crate) fn finish_outbound_circle_acks_on(
-    conn: &Connection,
-    circle_acknowledgements: &[crate::sync::store::CircleAckActivation],
-) -> Result<(), DbError> {
-    for circle in circle_acknowledgements {
-        let circle_id = circle.reference.circle_id.to_string();
-        let removed = conn
-            .execute(
-                "DELETE FROM outbound_circle_acks WHERE circle_id = ?1",
-                [&circle_id],
-            )
-            .map_err(DbError::from)?;
-        if removed != 1 {
-            return Err(DbError::Message(
-                "outbound Circle acknowledgement disappeared during completion".to_string(),
-            ));
-        }
-        let successor_slot =
-            serde_json::to_string(&circle.ack.value.successor.next_slot).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize Circle acknowledgement successor slot: {error}"
-                ))
-            })?;
-        let store_cut = serde_json::to_string(&circle.ack.value.store_cut).map_err(|error| {
-            DbError::Message(format!("serialize Circle acknowledgement cut: {error}"))
-        })?;
-        let control_coord = serde_json::to_string(&circle.ack.value.control).map_err(|error| {
-            DbError::Message(format!("serialize Circle acknowledgement control: {error}"))
-        })?;
-        conn.execute(
-            "INSERT INTO published_circle_acks
-               (circle_id, ack_ref, successor_slot, store_cut, control_coord)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(circle_id) DO UPDATE SET
-               ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot,
-               store_cut = excluded.store_cut, control_coord = excluded.control_coord",
-            rusqlite::params![
-                circle_id,
-                serde_json::to_string(&circle.reference).map_err(|error| DbError::Message(
-                    format!("serialize published Circle acknowledgement ref: {error}")
-                ))?,
-                successor_slot,
-                store_cut,
-                control_coord,
-            ],
-        )
-        .map_err(DbError::from)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn record_activated_circle_acks_on(
-    conn: &Connection,
-    commit: &StoreBatchCommit,
-    commit_ref: &StoreBatchCommitRef,
-) -> Result<(), DbError> {
-    for reference in commit.circle_acknowledgements() {
-        if reference.registration != commit.author_registration {
-            return Err(DbError::Message(
-                "activated Circle acknowledgement names another registration".to_string(),
-            ));
-        }
-        let circle_id = reference.circle_id.to_string();
-        let device_id = reference.registration.device_id.to_string();
-        let current: Option<CircleAckRef> = conn
-            .query_row(
-                "SELECT ack_ref FROM activated_circle_acks
-                 WHERE circle_id = ?1 AND device_id = ?2",
-                rusqlite::params![circle_id, device_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|raw| {
-                serde_json::from_str::<CircleAckRef>(&raw).map_err(|error| {
-                    DbError::Message(format!("activated Circle acknowledgement ref: {error}"))
-                })
-            })
-            .transpose()?;
-        if current.as_ref().is_some_and(|current| {
-            current.registration != reference.registration
-                || current.circle_id != reference.circle_id
-                || current.sequence >= reference.sequence
-        }) {
-            return Err(DbError::Message(
-                "Circle acknowledgement activation does not advance the exact stream".to_string(),
-            ));
-        }
-        conn.execute(
-            "INSERT INTO activated_circle_acks (circle_id, device_id, ack_ref, activating_commit)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(circle_id, device_id) DO UPDATE SET
-               ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
-            rusqlite::params![
-                circle_id,
-                device_id,
-                serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
-                    "serialize activated Circle acknowledgement ref: {error}"
-                )))?,
-                serde_json::to_string(commit_ref).map_err(|error| DbError::Message(format!(
-                    "serialize Circle acknowledgement activating commit: {error}"
-                )))?,
-            ],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn load_outbound_circle_acks_on(

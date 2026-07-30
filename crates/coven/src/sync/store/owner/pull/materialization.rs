@@ -949,11 +949,8 @@ pub(crate) fn apply_prepared_merge_materialization_on(
                 });
             }
         };
-        let retained = crate::database::StoreDatabase::retained_audience_package(
-            commit,
-            commit_ref,
-            package.clone(),
-        )?;
+        let retained =
+            crate::database::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
         Database::install_pulled_package_activation_on(
             conn,
             commit_ref,
