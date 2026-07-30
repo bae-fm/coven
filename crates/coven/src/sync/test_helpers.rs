@@ -2406,8 +2406,12 @@ impl TestStore {
             .authorize_writer()
             .await
             .map_err(|error| error.to_string())?;
+        let prepared = writer
+            .prepare_pending_store_write(store_dir)
+            .await
+            .map_err(|error| error.to_string())?;
         let published = writer
-            .publish_pending_store_writes(store_dir)
+            .drain_store_writes()
             .await
             .map_err(|error| error.to_string())?;
         if published > 0 {
@@ -2419,7 +2423,7 @@ impl TestStore {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        Ok(published > 0)
+        Ok(prepared || published > 0)
     }
 }
 
