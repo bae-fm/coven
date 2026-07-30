@@ -282,20 +282,27 @@ impl GoogleDriveCloudHome {
                 "create",
             ));
         }
-        let id_result = match resp.text().await {
-            Ok(body) => parse_create_file_id(&body, key),
-            Err(e) => Err(CloudHomeError::Transport(format!(
-                "create {key}: read response: {e}"
-            ))),
+        let id_error = match resp.text().await {
+            Ok(body) => match parse_create_file_id(&body, key) {
+                Ok(id) => return Ok(DriveFileIdentity { id, create_token }),
+                Err(error) => error,
+            },
+            Err(error) => {
+                CloudHomeError::Transport(format!("create {key}: read response: {error}"))
+            }
         };
-        finish_create_metadata_response(
-            key,
-            id_result,
-            || self.find_created_file_id(encoded, &create_token),
-            |file_id| async move { self.delete_created_file(key, &file_id).await },
-        )
-        .await
-        .map(|id| DriveFileIdentity { id, create_token })
+        match self.find_created_file_id(encoded, &create_token).await {
+            Ok(Some(file_id)) => match self.delete_created_file(key, &file_id).await {
+                Ok(()) => Err(id_error),
+                Err(delete_error) => Err(CloudHomeError::Transport(format!(
+                    "create {key}: metadata response id failure: {id_error}; rollback delete failed: {delete_error}"
+                ))),
+            },
+            Ok(None) => Err(id_error),
+            Err(lookup_error) => Err(CloudHomeError::Transport(format!(
+                "create {key}: metadata response id failure: {id_error}; rollback lookup failed: {lookup_error}"
+            ))),
+        }
     }
 
     async fn create_file_for_key(
@@ -853,36 +860,6 @@ fn create_file_metadata_body(encoded_name: &str, folder_id: &str, create_token: 
         "appProperties": app_properties,
     })
     .to_string()
-}
-
-async fn finish_create_metadata_response<F, FFut, D, DFut>(
-    key: &str,
-    id_result: Result<String, CloudHomeError>,
-    find_created_file: F,
-    delete_created_file: D,
-) -> Result<String, CloudHomeError>
-where
-    F: FnOnce() -> FFut,
-    FFut: std::future::Future<Output = Result<Option<String>, CloudHomeError>>,
-    D: FnOnce(String) -> DFut,
-    DFut: std::future::Future<Output = Result<(), CloudHomeError>>,
-{
-    let id_error = match id_result {
-        Ok(file_id) => return Ok(file_id),
-        Err(e) => e,
-    };
-    match find_created_file().await {
-        Ok(Some(file_id)) => match delete_created_file(file_id).await {
-            Ok(()) => Err(id_error),
-            Err(delete_error) => Err(CloudHomeError::Transport(format!(
-                "create {key}: metadata response id failure: {id_error}; rollback delete failed: {delete_error}"
-            ))),
-        },
-        Ok(None) => Err(id_error),
-        Err(lookup_error) => Err(CloudHomeError::Transport(format!(
-            "create {key}: metadata response id failure: {id_error}; rollback lookup failed: {lookup_error}"
-        ))),
-    }
 }
 
 /// A Drive resumable sink. New objects use a resumable-create session, which
@@ -2030,17 +2007,24 @@ mod tests {
         )
     }
 
-    #[derive(Clone)]
-    struct MediaCreateEndpointState {
-        requests: Arc<Mutex<Vec<RecordedRequest>>>,
-        create_token: Arc<Mutex<Option<String>>>,
+    #[derive(Clone, Copy)]
+    struct CreateEndpointBehavior {
         metadata_status: StatusCode,
+        metadata_body: &'static str,
+        rollback_lookup_status: StatusCode,
         upload_status: StatusCode,
         delete_status: StatusCode,
     }
 
-    async fn media_create_endpoint(
-        State(state): State<MediaCreateEndpointState>,
+    #[derive(Clone)]
+    struct CreateEndpointState {
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        create_token: Arc<Mutex<Option<String>>>,
+        behavior: CreateEndpointBehavior,
+    }
+
+    async fn create_endpoint(
+        State(state): State<CreateEndpointState>,
         request: Request<Body>,
     ) -> Response<Body> {
         let method = request.method().to_string();
@@ -2068,6 +2052,12 @@ mod tests {
                     .lock()
                     .expect("lock create token")
                     .clone();
+                if token.is_some() && !state.behavior.rollback_lookup_status.is_success() {
+                    return Response::builder()
+                        .status(state.behavior.rollback_lookup_status)
+                        .body(Body::from("lookup failed"))
+                        .expect("build lookup failure");
+                }
                 let response = match token {
                     Some(token) => serde_json::json!({
                         "files": [{
@@ -2085,7 +2075,7 @@ mod tests {
                     .body(Body::from(response.to_string()))
                     .expect("build file list response")
             }
-            ("POST", "/files") if state.metadata_status.is_success() => {
+            ("POST", "/files") if state.behavior.metadata_status.is_success() => {
                 let metadata: serde_json::Value =
                     serde_json::from_slice(&body).expect("parse create metadata");
                 let token = metadata["appProperties"][CREATE_TOKEN_PROPERTY]
@@ -2094,21 +2084,21 @@ mod tests {
                     .to_string();
                 *state.create_token.lock().expect("lock create token") = Some(token);
                 Response::builder()
-                    .status(state.metadata_status)
+                    .status(state.behavior.metadata_status)
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"id":"created-file-id"}"#))
+                    .body(Body::from(state.behavior.metadata_body))
                     .expect("build metadata response")
             }
             ("POST", "/files") => Response::builder()
-                .status(state.metadata_status)
+                .status(state.behavior.metadata_status)
                 .body(Body::from("metadata failed"))
                 .expect("build metadata failure"),
             ("PATCH", "/files/created-file-id") => Response::builder()
-                .status(state.upload_status)
+                .status(state.behavior.upload_status)
                 .body(Body::from("media upload failed"))
                 .expect("build media response"),
             ("DELETE", "/files/created-file-id") => Response::builder()
-                .status(state.delete_status)
+                .status(state.behavior.delete_status)
                 .body(Body::from("delete failed"))
                 .expect("build delete response"),
             _ => Response::builder()
@@ -2118,27 +2108,21 @@ mod tests {
         }
     }
 
-    async fn media_create_test_home(
-        metadata_status: StatusCode,
-        upload_status: StatusCode,
-        delete_status: StatusCode,
+    async fn create_test_home(
+        behavior: CreateEndpointBehavior,
     ) -> (
         GoogleDriveCloudHome,
         Arc<Mutex<Vec<RecordedRequest>>>,
         tokio::sync::oneshot::Sender<()>,
     ) {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = MediaCreateEndpointState {
+        let state = CreateEndpointState {
             requests: requests.clone(),
             create_token: Arc::new(Mutex::new(None)),
-            metadata_status,
-            upload_status,
-            delete_status,
+            behavior,
         };
         let (endpoint, shutdown) = crate::storage::cloud::test_server::spawn_test_server(
-            Router::new()
-                .fallback(media_create_endpoint)
-                .with_state(state),
+            Router::new().fallback(create_endpoint).with_state(state),
         )
         .await;
         (
@@ -2720,44 +2704,61 @@ mod tests {
 
     #[tokio::test]
     async fn create_metadata_id_error_rolls_back_token_matched_file() {
-        let delete_called_with = std::cell::RefCell::new(None);
-        let id_error = CloudHomeError::Transport("response missing id".to_string());
-        let err = finish_create_metadata_response(
-            "objects/a",
-            Err(id_error),
-            || async { Ok(Some("created-file-id".to_string())) },
-            |file_id| async {
-                delete_called_with.replace(Some(file_id));
-                Ok(())
-            },
-        )
-        .await
-        .expect_err("create id error");
+        let (home, requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::OK,
+            metadata_body: r#"{"name":"encoded-object-name"}"#,
+            rollback_lookup_status: StatusCode::OK,
+            upload_status: StatusCode::OK,
+            delete_status: StatusCode::NO_CONTENT,
+        })
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("create id error");
         let msg = err.to_string();
 
-        assert_eq!(
-            delete_called_with.into_inner().as_deref(),
-            Some("created-file-id"),
+        assert!(
+            requests
+                .lock()
+                .expect("lock requests")
+                .iter()
+                .any(|request| {
+                    request.method == "DELETE" && request.path == "/files/created-file-id"
+                }),
+            "token-matched created file was not deleted"
         );
         assert!(
             msg.contains("response missing id"),
             "missing create id failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[tokio::test]
     async fn create_metadata_id_error_reports_token_lookup_failure() {
-        let id_error = CloudHomeError::Transport("response missing id".to_string());
-        let err = finish_create_metadata_response(
-            "objects/a",
-            Err(id_error),
-            || async { Err(CloudHomeError::Transport("lookup failed".to_string())) },
-            |_| async { Ok(()) },
-        )
-        .await
-        .expect_err("lookup failure");
+        let (home, requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::OK,
+            metadata_body: r#"{"name":"encoded-object-name"}"#,
+            rollback_lookup_status: StatusCode::BAD_REQUEST,
+            upload_status: StatusCode::OK,
+            delete_status: StatusCode::NO_CONTENT,
+        })
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("lookup failure");
         let msg = err.to_string();
 
+        assert!(
+            !requests
+                .lock()
+                .expect("lock requests")
+                .iter()
+                .any(|request| request.method == "DELETE"),
+            "delete ran without a resolved created file"
+        );
         assert!(
             msg.contains("response missing id"),
             "missing create id failure: {msg}"
@@ -2766,21 +2767,35 @@ mod tests {
             msg.contains("lookup failed"),
             "missing lookup failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[tokio::test]
     async fn create_metadata_id_error_reports_token_delete_failure() {
-        let id_error = CloudHomeError::Transport("response missing id".to_string());
-        let err = finish_create_metadata_response(
-            "objects/a",
-            Err(id_error),
-            || async { Ok(Some("created-file-id".to_string())) },
-            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
-        )
-        .await
-        .expect_err("delete failure");
+        let (home, requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::OK,
+            metadata_body: r#"{"name":"encoded-object-name"}"#,
+            rollback_lookup_status: StatusCode::OK,
+            upload_status: StatusCode::OK,
+            delete_status: StatusCode::BAD_REQUEST,
+        })
+        .await;
+        let err = home
+            .put_object("objects/a", b"media".to_vec())
+            .await
+            .expect_err("delete failure");
         let msg = err.to_string();
 
+        assert!(
+            requests
+                .lock()
+                .expect("lock requests")
+                .iter()
+                .any(|request| {
+                    request.method == "DELETE" && request.path == "/files/created-file-id"
+                }),
+            "rollback delete was not attempted"
+        );
         assert!(
             msg.contains("response missing id"),
             "missing create id failure: {msg}"
@@ -2789,15 +2804,18 @@ mod tests {
             msg.contains("delete failed"),
             "missing delete failure: {msg}"
         );
+        shutdown.send(()).expect("shut down test endpoint");
     }
 
     #[tokio::test]
     async fn create_file_with_media_does_not_delete_on_metadata_failure() {
-        let (home, requests, shutdown) = media_create_test_home(
-            StatusCode::BAD_REQUEST,
-            StatusCode::OK,
-            StatusCode::NO_CONTENT,
-        )
+        let (home, requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::BAD_REQUEST,
+            metadata_body: r#"{"id":"created-file-id"}"#,
+            rollback_lookup_status: StatusCode::OK,
+            upload_status: StatusCode::OK,
+            delete_status: StatusCode::NO_CONTENT,
+        })
         .await;
         let err = home
             .put_object("objects/a", b"media".to_vec())
@@ -2822,11 +2840,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_file_with_media_deletes_created_id_on_media_failure() {
-        let (home, requests, shutdown) = media_create_test_home(
-            StatusCode::OK,
-            StatusCode::BAD_REQUEST,
-            StatusCode::NO_CONTENT,
-        )
+        let (home, requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::OK,
+            metadata_body: r#"{"id":"created-file-id"}"#,
+            rollback_lookup_status: StatusCode::OK,
+            upload_status: StatusCode::BAD_REQUEST,
+            delete_status: StatusCode::NO_CONTENT,
+        })
         .await;
         let err = home
             .put_object("objects/a", b"media".to_vec())
@@ -2852,11 +2872,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_file_with_media_reports_upload_and_rollback_failures() {
-        let (home, _requests, shutdown) = media_create_test_home(
-            StatusCode::OK,
-            StatusCode::BAD_REQUEST,
-            StatusCode::BAD_REQUEST,
-        )
+        let (home, _requests, shutdown) = create_test_home(CreateEndpointBehavior {
+            metadata_status: StatusCode::OK,
+            metadata_body: r#"{"id":"created-file-id"}"#,
+            rollback_lookup_status: StatusCode::OK,
+            upload_status: StatusCode::BAD_REQUEST,
+            delete_status: StatusCode::BAD_REQUEST,
+        })
         .await;
         let err = home
             .put_object("objects/a", b"media".to_vec())
