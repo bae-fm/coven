@@ -1348,7 +1348,6 @@ impl AuthorizedReclaim<'_, '_> {
             let stable = Box::pin(stable_circle_snapshots(
                 self.writer.history(),
                 circle_id,
-                &control,
                 &streams,
             ))
             .await?;
@@ -1485,7 +1484,6 @@ async fn load_circle_snapshot_streams(
 async fn stable_circle_snapshots(
     history: &mut AuthorizedStoreHistory<'_>,
     circle_id: CircleId,
-    current_control: &CircleControlCoord,
     streams: &[CircleSnapshotStream],
 ) -> Result<Vec<SelectedCircleSnapshot>, StoreReclaimError> {
     let mut stable = Vec::new();
@@ -1494,7 +1492,7 @@ async fn stable_circle_snapshots(
             if let Some(acknowledgements) = history
                 .circles()
                 .acknowledgements()
-                .stable_dominating(circle_id, current_control, &meta.bootstrap.coverage)
+                .stable_dominating(circle_id, &meta.bootstrap.coverage)
                 .await
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
             {
@@ -1545,13 +1543,7 @@ async fn choose_circle_snapshot(
         registrations,
     ))
     .await?;
-    let stable = Box::pin(stable_circle_snapshots(
-        history,
-        circle_id,
-        current_control,
-        &streams,
-    ))
-    .await?;
+    let stable = Box::pin(stable_circle_snapshots(history, circle_id, &streams)).await?;
     Ok(maximal_stable_circle_snapshot(&stable).cloned())
 }
 
@@ -1609,7 +1601,6 @@ impl AuthorizedReclaim<'_, '_> {
         let database = self.writer.database().clone();
         let root = self.writer.store_root().clone();
         let roster = database.circle_current_roster_members(circle_id).await?;
-        let retained_controls = database.retained_circle_control_coords(circle_id).await?;
         // The maximal acknowledgement-stable Circle snapshot cut, if any. A seed a
         // still-active recipient holds is superseded only when this cut strictly
         // dominates it — a later sufficient snapshot every active device acknowledged.
@@ -1620,7 +1611,7 @@ impl AuthorizedReclaim<'_, '_> {
                 .history()
                 .circles()
                 .acknowledgements()
-                .load_under_retained_controls(&acknowledgement, current_control, &retained_controls)
+                .load(&acknowledgement)
                 .await
             {
                 Ok(ack) => ack,
@@ -2252,11 +2243,7 @@ async fn verify_circle_snapshot_image_reclaim_claim(
     if history
         .circles()
         .acknowledgements()
-        .stable_dominating(
-            circle_id,
-            &current_control,
-            &superseding.1.bootstrap.coverage,
-        )
+        .stable_dominating(circle_id, &superseding.1.bootstrap.coverage)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
         .is_none()
@@ -2446,8 +2433,8 @@ async fn verify_circle_package_beyond_cutoff_claim(
 /// Re-verify a Circle package reclaim: a stable Circle snapshot on the same
 /// Circle covers the package's activating commit, and every device holding
 /// active Circle access has acknowledged coverage dominating the snapshot cut.
-/// The acknowledgements are read under the Circle's current control, whose
-/// retained keyring resolves epochs sealed before a rotation.
+/// Each acknowledgement reference names the exact control that resolves the
+/// epoch key it was sealed under.
 async fn verify_circle_package_snapshot_coverage_claim(
     history: &mut AuthorizedStoreHistory<'_>,
     activation: &VerifiedStoreBatchCommit,
@@ -2506,7 +2493,7 @@ async fn verify_circle_package_snapshot_coverage_claim(
     let expected = history
         .circles()
         .acknowledgements()
-        .stable_dominating(circle_id, &current_control, cut)
+        .stable_dominating(circle_id, cut)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
         .ok_or_else(|| {
@@ -2543,8 +2530,8 @@ async fn verify_circle_package_snapshot_coverage_claim(
 /// acknowledgement names the exact coverage being deleted (`seeded_from`), and
 /// either the recipient advanced strictly past that seed while still holding
 /// active access, or it lost authority under an activated successor control. The
-/// acknowledgement is read under the Circle's current control, whose retained
-/// keyring resolves the epoch it was sealed under even after a rotation.
+/// acknowledgement reference names the exact control that resolves the epoch key
+/// it was sealed under.
 async fn verify_circle_bootstrap_image_reclaim_claim(
     history: &mut AuthorizedStoreHistory<'_>,
     activation: &VerifiedStoreBatchCommit,
@@ -2572,12 +2559,11 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
                 "Circle {circle_id} has no active control for bootstrap reclaim"
             ))
         })?;
-    let retained_controls = database.retained_circle_control_coords(circle_id).await?;
     let acknowledgement_ref = claim.proof.acknowledgement();
     let acknowledgement = history
         .circles()
         .acknowledgements()
-        .load_under_retained_controls(acknowledgement_ref, &current_control, &retained_controls)
+        .load(acknowledgement_ref)
         .await
         .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     // The recipient's signed acknowledgement is the sole authority for the coverage

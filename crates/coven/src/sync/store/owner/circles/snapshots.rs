@@ -175,7 +175,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 .map_err(publication_error)?
             {
                 if !self
-                    .circle_snapshot_is_stable(input.circle_id, &input.control, &previous.cut)
+                    .circle_snapshot_is_stable(input.circle_id, &previous.cut)
                     .await?
                 {
                     tracing::debug!(
@@ -234,14 +234,13 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     /// The current active-access device set is enumerated first (every active
     /// Store device owned by a current roster member), so a device that holds
     /// access but has never acknowledged fails the check closed rather than being
-    /// invisible. Each device's acknowledgement is decrypted with the epoch key
-    /// resolved under the reader's current control (its keyring retains the epochs
-    /// it holds, so an acknowledgement sealed under a rotated epoch stays
-    /// readable). Mirrors the Store-level `assemble_snapshot_stability`.
+    /// invisible. Each acknowledgement reference names the exact control that
+    /// resolves its encryption key, so an acknowledgement sealed under a rotated
+    /// epoch stays readable without probing unrelated controls. Mirrors the
+    /// Store-level `assemble_snapshot_stability`.
     pub(crate) async fn circle_snapshot_is_stable(
         &mut self,
         circle_id: CircleId,
-        current_control: &CircleControlCoord,
         snapshot_cut: &CommitFrontier,
     ) -> Result<bool, SnapshotError> {
         Ok(self
@@ -249,7 +248,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .history()
             .circles()
             .acknowledgements()
-            .stable_dominating(circle_id, current_control, snapshot_cut)
+            .stable_dominating(circle_id, snapshot_cut)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
             .is_some())

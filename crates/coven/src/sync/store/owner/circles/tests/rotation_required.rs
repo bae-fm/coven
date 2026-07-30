@@ -1909,10 +1909,9 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
         &fixture.store.storage,
         &fixture.signer,
         &ack_ref,
-        &old_control,
     )
     .await
-    .expect("read acknowledgement under the current control");
+    .expect("read acknowledgement through its exact control");
     assert_eq!(before.epoch_id, old_epoch);
     assert_eq!(before.control, old_control);
     // The owner authored the Circle; its projection never came from an image, so
@@ -1950,7 +1949,6 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
         &fixture.store.storage,
         &fixture.signer,
         &ack_ref,
-        &old_control,
     )
     .await
     .expect("read the pre-rotation acknowledgement after the epoch rotated");
@@ -1961,12 +1959,6 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
 #[tokio::test]
 async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge() {
     let fixture = rotation_fixture("snapshot-stability").await;
-    let owner_pk = keys::public_key_hex(&fixture.signer);
-    let (authoring, _) = StoreDatabase::new(&fixture.db)
-        .circle_authoring_context(fixture.circle_id, &owner_pk)
-        .await
-        .expect("Circle authoring context");
-    let control = authoring.control.coord.clone();
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
 
     // Author a Circle snapshot before any device has acknowledged coverage.
@@ -2001,7 +1993,6 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         &fixture.store.storage,
         &fixture.signer,
         fixture.circle_id,
-        &control,
         &published.cut,
     )
     .await
@@ -2025,7 +2016,6 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         &fixture.store.storage,
         &fixture.signer,
         fixture.circle_id,
-        &control,
         &published.cut,
     )
     .await
@@ -2232,7 +2222,6 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
 async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     let fixture = rotation_fixture("circle-ack-seeded-from").await;
     let circle_id = fixture.circle_id;
-    let owner_pk = keys::public_key_hex(&fixture.signer);
 
     // The member device installs the Circle bootstrap: its projection seeds from a
     // real coverage row the install recorded.
@@ -2255,14 +2244,6 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
         .await
         .expect("owner activates the member's Circle acknowledgement");
 
-    let control = StoreDatabase::new(&fixture.db)
-        .circle_authoring_context(circle_id, &owner_pk)
-        .await
-        .expect("owner Circle authoring context")
-        .0
-        .control
-        .coord;
-
     // The owner reads and verifies the member's acknowledgement: its seed coverage
     // is present and names the exact bootstrap coverage row the member installed.
     let member_device_id = local_device_id(&fixture.member_db).await;
@@ -2276,7 +2257,6 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
         &fixture.store.storage,
         &fixture.signer,
         &member_ack_ref,
-        &control,
     )
     .await
     .expect("owner reads the member's Circle acknowledgement");
@@ -2299,7 +2279,6 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
         &fixture.store.storage,
         &fixture.signer,
         &owner_ack_ref,
-        &control,
     )
     .await
     .expect("owner reads its own Circle acknowledgement");
@@ -3549,14 +3528,6 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
 
     // The member's activated acknowledgement names its exact seed coverage — the
     // cross-device evidence the owner reads and dominates to prove stability.
-    let owner_pk = keys::public_key_hex(&fixture.signer);
-    let control = StoreDatabase::new(&fixture.db)
-        .circle_authoring_context(circle_id, &owner_pk)
-        .await
-        .expect("owner Circle authoring context")
-        .0
-        .control
-        .coord;
     let member_device_id = local_device_id(&fixture.member_db).await;
     let member_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, member_device_id)
@@ -3568,7 +3539,6 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
         &fixture.store.storage,
         &fixture.signer,
         &member_ack_ref,
-        &control,
     )
     .await
     .expect("owner reads the member acknowledgement");
@@ -4047,10 +4017,9 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
 
 #[tokio::test]
 async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_epoch() {
-    // Reclaim reads each device's acknowledgement under the Circle's CURRENT control.
-    // After the epoch rotates, a pre-rotation acknowledgement stays readable because
-    // the current control's retained keyring resolves the rotated-away epoch key —
-    // the exact resolution the reclaim stability check depends on.
+    // Each acknowledgement reference names the control that resolves its epoch
+    // key. After rotation, a pre-rotation acknowledgement remains readable through
+    // that retained exact control.
     let fixture = rotation_fixture("circle-reclaim-rotated-ack").await;
     let circle_id = fixture.circle_id;
     let owner_pk = keys::public_key_hex(&fixture.signer);
@@ -4106,7 +4075,6 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
         &fixture.store.storage,
         &fixture.signer,
         &owner_ack_ref,
-        &old_control,
     )
     .await
     .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");

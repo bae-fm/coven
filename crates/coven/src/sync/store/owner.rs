@@ -1407,14 +1407,13 @@ impl Store {
     pub(crate) async fn load_circle_acknowledgement_for_test(
         &self,
         reference: &crate::protocol::store_commit::CircleAckRef,
-        control: &crate::protocol::circle::CircleControlCoord,
     ) -> Result<crate::protocol::store_commit::CircleAck, StoreAckError> {
         self.authorize_history()
             .await
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
             .circles()
             .acknowledgements()
-            .load(reference, control)
+            .load(reference)
             .await
     }
 

@@ -239,7 +239,6 @@ pub(crate) async fn circle_snapshot_is_stable_for_test(
     storage: &Arc<CloudSyncStorage>,
     identity: &UserKeypair,
     circle_id: crate::protocol::circle::CircleId,
-    control: &crate::protocol::circle::CircleControlCoord,
     snapshot_cut: &crate::protocol::store_commit::CommitFrontier,
 ) -> Result<bool, snapshot::SnapshotError> {
     let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
@@ -251,7 +250,7 @@ pub(crate) async fn circle_snapshot_is_stable_for_test(
         .map_err(|error| snapshot::SnapshotError::PublicationState(error.to_string()))?
         .circles()
         .snapshots()
-        .circle_snapshot_is_stable(circle_id, control, snapshot_cut)
+        .circle_snapshot_is_stable(circle_id, snapshot_cut)
         .await
 }
 
@@ -277,12 +276,9 @@ pub(crate) async fn load_circle_acknowledgement_for_test(
     storage: &Arc<CloudSyncStorage>,
     identity: &UserKeypair,
     reference: &crate::protocol::store_commit::CircleAckRef,
-    control: &crate::protocol::circle::CircleControlCoord,
 ) -> Result<crate::protocol::store_commit::CircleAck, owner::StoreAckError> {
     let store = Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
         .await
         .map_err(|error| owner::StoreAckError::InvalidOutbound(error.to_string()))?;
-    store
-        .load_circle_acknowledgement_for_test(reference, control)
-        .await
+    store.load_circle_acknowledgement_for_test(reference).await
 }

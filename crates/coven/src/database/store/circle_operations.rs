@@ -323,25 +323,6 @@ impl StoreDatabase {
             .await
     }
 
-    /// Every retained Circle control coordinate for `circle_id`. Bootstrap
-    /// reclamation reads a removed recipient's acknowledgement under the epoch that
-    /// sealed it — an epoch a later removal rotated away — so it must resolve the
-    /// key from the control the acknowledgement names, not the current control.
-    pub(crate) async fn retained_circle_control_coords(
-        &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Vec<crate::protocol::circle::CircleControlCoord>, DbError> {
-        self.connection
-            .call(move |conn| {
-                Ok(Self::circle_control_activation_index_on(conn)?
-                    .into_iter()
-                    .find(|(indexed, _)| *indexed == circle_id)
-                    .map(|(_, controls)| controls)
-                    .unwrap_or_default())
-            })
-            .await
-    }
-
     /// Whether one activated Circle control strictly covers another in the retained
     /// control lineage — `covering` is a proper successor of `covered`. Bootstrap
     /// reclamation uses this to prove a removed recipient lost authority under a

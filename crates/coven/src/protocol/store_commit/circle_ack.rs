@@ -35,6 +35,7 @@ pub(crate) struct CircleAck {
 pub struct CircleAckRef {
     pub registration: StoreDeviceRegistrationRef,
     pub circle_id: CircleId,
+    pub control: CircleControlCoord,
     pub sequence: u64,
     pub ack_hash: ObjectHash,
     pub object: ExactObjectRef,
@@ -154,6 +155,11 @@ impl CircleAck {
                 "Circle acknowledgement names another Circle".to_string(),
             ));
         }
+        if ack.control != expected.control {
+            return Err(StoreProtocolError::Malformed(
+                "Circle acknowledgement names another control".to_string(),
+            ));
+        }
         if ack.sequence != expected.sequence {
             return Err(StoreProtocolError::RelocatedSlot {
                 expected: circle_ack_slot_prefix(
@@ -210,4 +216,54 @@ fn validate_circle_ack_state(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circle_ack_reference_names_its_encryption_control() {
+        let control = CircleControlCoord {
+            device_id: "circle-ack-author".to_string(),
+            stream_id: crate::protocol::causal_grants::AuthorStreamId::from_digest(
+                ObjectHash::digest(b"circle-ack-stream"),
+            ),
+            author_pubkey: "circle-ack-author-pubkey".to_string(),
+            author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+                "circle-ack-owner",
+            ),
+            seq: 1,
+            control_hash: ObjectHash::digest(b"circle-ack-control"),
+        };
+        let object = ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(
+                "circles/ack-test/acknowledgements/device/1.json".to_string(),
+            )
+            .expect("valid acknowledgement slot"),
+            1,
+            ObjectHash::digest(b"ack"),
+        );
+        let reference = CircleAckRef {
+            registration: StoreDeviceRegistrationRef {
+                device_id: ObjectHash::digest(b"circle-ack-device")
+                    .to_string()
+                    .parse()
+                    .expect("digest is a valid device id"),
+                registration_hash: ObjectHash::digest(b"circle-ack-registration"),
+                object: object.clone(),
+            },
+            circle_id: CircleId::from_bytes([1; 16]),
+            control: control.clone(),
+            sequence: 1,
+            ack_hash: ObjectHash::digest(b"circle-ack"),
+            object,
+        };
+
+        let encoded = serde_json::to_value(reference).expect("serialize acknowledgement ref");
+        assert_eq!(
+            encoded.get("control"),
+            Some(&serde_json::to_value(control).expect("serialize control"))
+        );
+    }
 }

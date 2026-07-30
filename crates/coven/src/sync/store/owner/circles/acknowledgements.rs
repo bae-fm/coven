@@ -31,19 +31,18 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) async fn load(
         &self,
         reference: &crate::protocol::store_commit::CircleAckRef,
-        control: &crate::protocol::circle::CircleControlCoord,
     ) -> Result<CircleAck, StoreAckError> {
         let access = self
             .database
             .circle_package_access(
                 self.history.root().clone(),
                 reference.circle_id,
-                control.clone(),
+                reference.control.clone(),
             )
             .await?
             .ok_or_else(|| {
                 StoreAckError::InvalidOutbound(format!(
-                    "Circle {} acknowledgement key is not resolvable from retained controls",
+                    "Circle {} acknowledgement key is not resolvable from its exact control",
                     reference.circle_id
                 ))
             })?;
@@ -71,33 +70,9 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
     }
 
-    pub(crate) async fn load_under_retained_controls(
-        &self,
-        reference: &crate::protocol::store_commit::CircleAckRef,
-        preferred: &crate::protocol::circle::CircleControlCoord,
-        retained: &[crate::protocol::circle::CircleControlCoord],
-    ) -> Result<CircleAck, StoreAckError> {
-        let mut last_error = None;
-        for control in std::iter::once(preferred)
-            .chain(retained.iter().filter(|control| *control != preferred))
-        {
-            match self.load(reference, control).await {
-                Ok(acknowledgement) => return Ok(acknowledgement),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            StoreAckError::InvalidOutbound(format!(
-                "Circle {} acknowledgement has no retained control to resolve its epoch key",
-                reference.circle_id
-            ))
-        }))
-    }
-
     pub(crate) async fn stable_dominating(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        current_control: &crate::protocol::circle::CircleControlCoord,
         snapshot_cut: &CommitFrontier,
     ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, StoreAckError> {
         let devices = self
@@ -116,7 +91,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             else {
                 return Ok(None);
             };
-            let acknowledgement = self.load(&reference, current_control).await?;
+            let acknowledgement = self.load(&reference).await?;
             if !acknowledgement.store_cut.covers(snapshot_cut) {
                 return Ok(None);
             }

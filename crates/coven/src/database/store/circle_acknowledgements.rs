@@ -305,6 +305,7 @@ impl StoreDatabase {
                 let reference = CircleAckRef {
                     registration: ack.registration.clone(),
                     circle_id: ack.circle_id,
+                    control: ack.control.clone(),
                     sequence: ack.sequence,
                     ack_hash: ack.ack_hash(),
                     object: prepared.reference().clone(),

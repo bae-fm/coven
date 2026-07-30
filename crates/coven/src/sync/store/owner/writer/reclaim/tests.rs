@@ -875,6 +875,7 @@ fn claim_ack(circle_id: CircleId, label: &str) -> CircleAckRef {
     CircleAckRef {
         registration: claim_registration(label),
         circle_id,
+        control: claim_control(label, 1),
         sequence: 1,
         ack_hash: ObjectHash::digest(format!("{label}:ack").as_bytes()),
         object: proof_object(&format!("circles/{circle_id}/acks/{label}/1.json")),
