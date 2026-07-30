@@ -12,7 +12,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::blob::delete::{
-    drain_tombstones, gc_tombstones, BlobTombstoneJson, BLOB_TOMBSTONE_GRACE,
+    BlobTombstoneJson, TombstoneCollection, TombstoneDrain, BLOB_TOMBSTONE_GRACE,
 };
 use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::FixedClock;
@@ -112,7 +112,7 @@ async fn gc_tombstones_as(
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect();
-    gc_tombstones(
+    TombstoneCollection::new(
         &store_database,
         cloud_home,
         &storage.storage,
@@ -124,6 +124,7 @@ async fn gc_tombstones_as(
         clock,
         grace,
     )
+    .collect()
     .await
 }
 
@@ -654,7 +655,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     enqueue_delete(&db, &stored, T0).await;
 
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
@@ -663,6 +664,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
         &kp,
         &clock,
     )
+    .drain()
     .await
     .expect("drain");
     assert_eq!(n, 1, "one tombstone written");
@@ -719,7 +721,7 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
 
     enqueue_delete(&db, &stored, T0).await;
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
@@ -728,6 +730,7 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
         &kp,
         &clock,
     )
+    .drain()
     .await
     .expect("drain");
 
@@ -764,7 +767,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
 
     enqueue_delete(&db, &stored, T0).await;
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
@@ -773,6 +776,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         &kp,
         &clock,
     )
+    .drain()
     .await
     .expect("drain");
 
@@ -866,7 +870,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
 
     enqueue_delete(&db, &stored, T0).await;
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let error = drain_tombstones(
+    let error = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -875,6 +879,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
         &kp,
         &first,
     )
+    .drain()
     .await
     .expect_err("failed validation fails the drain");
     assert!(error.contains("Failed to validate"), "{error}");
@@ -894,7 +899,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
     assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -903,6 +908,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
         &kp,
         &inside,
     )
+    .drain()
     .await
     .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
@@ -918,7 +924,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -927,6 +933,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
         &kp,
         &after,
     )
+    .drain()
     .await
     .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
@@ -958,7 +965,7 @@ async fn delete_write_failure_backs_off_then_retries() {
 
     enqueue_delete(&db, &stored, T0).await;
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let error = drain_tombstones(
+    let error = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -967,6 +974,7 @@ async fn delete_write_failure_backs_off_then_retries() {
         &kp,
         &first,
     )
+    .drain()
     .await
     .expect_err("failed write fails the drain");
     assert!(error.contains("Tombstone write failed"), "{error}");
@@ -984,7 +992,7 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -993,6 +1001,7 @@ async fn delete_write_failure_backs_off_then_retries() {
         &kp,
         &inside,
     )
+    .drain()
     .await
     .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
@@ -1003,7 +1012,7 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         &cloud,
         &cipher,
@@ -1012,6 +1021,7 @@ async fn delete_write_failure_backs_off_then_retries() {
         &kp,
         &after,
     )
+    .drain()
     .await
     .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
@@ -1079,17 +1089,19 @@ async fn corrupt_delete_backoff_timestamp_case() {
     .expect("corrupt last_attempt_at");
 
     let clock = FixedClock(at("2024-06-01T00:00:10Z"));
-    let error = Box::pin(drain_tombstones(
+    let pending_rotation = PendingRotation::none();
+    let drain = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
-        &PendingRotation::none(),
+        &pending_rotation,
         "lib",
         &kp,
         &clock,
-    ))
-    .await
-    .expect_err("a corrupt retry timestamp fails the drain");
+    );
+    let error = Box::pin(drain.drain())
+        .await
+        .expect_err("a corrupt retry timestamp fails the drain");
     assert!(error.contains("unparseable last_attempt_at"), "{error}");
     assert!(
         cloud.get(&exact_tombstone_key(&corrupt)).is_none(),
@@ -2140,7 +2152,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // First drain at T0: writes the tombstone, removes the row.
     enqueue_delete(&db, &stored, T0).await;
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
@@ -2149,6 +2161,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         &kp,
         &first,
     )
+    .drain()
     .await
     .expect("first drain");
     assert_eq!(n, 1, "the first drain writes the tombstone");
@@ -2163,7 +2176,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // already exists, so this drain must not rewrite it.
     enqueue_delete(&db, &stored, "2024-06-02T00:00:00Z").await;
     let second = FixedClock(at("2024-06-02T00:00:00Z"));
-    let n = drain_tombstones(
+    let n = TombstoneDrain::new(
         &store_database,
         cloud,
         &cipher,
@@ -2172,6 +2185,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         &kp,
         &second,
     )
+    .drain()
     .await
     .expect("second drain");
     assert_eq!(n, 0, "the re-drain writes no new tombstone");

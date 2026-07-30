@@ -566,7 +566,15 @@ impl BlobDecls {
         let Some((table, tb)) = self.table_for_namespace(namespace) else {
             return Ok(None);
         };
-        Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
+        let sql = format!(
+            "SELECT id FROM {} WHERE {} = ?1",
+            quote_ident(table),
+            quote_ident(&tb.id_col_name),
+        );
+        conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
+            .optional()
+            .map(|primary_key| primary_key.map(|primary_key| (table.clone(), primary_key)))
+            .map_err(BlobDeclError::from)
     }
 
     /// The one `(table, declaration)` whose blob namespace is `namespace`, or
@@ -696,25 +704,6 @@ fn publication_blob_from_row(
         plaintext_size: blob.size_from_row(table, row)?,
         plaintext_hash: blob.hash_from_row(row)?,
     })
-}
-
-/// The primary key (`id`) of the row in `table` whose declared blob-id column equals
-/// `blob_id`, or `None`. The per-table lookup [`BlobDecls::row_for_blob_in_namespace`]
-/// runs against the one namespace-resolved table.
-fn pk_carrying_blob(
-    conn: &Connection,
-    table: &str,
-    tb: &TableBlob,
-    blob_id: &str,
-) -> Result<Option<String>, BlobDeclError> {
-    let sql = format!(
-        "SELECT id FROM {} WHERE {} = ?1",
-        quote_ident(table),
-        quote_ident(&tb.id_col_name),
-    );
-    conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
-        .optional()
-        .map_err(BlobDeclError::from)
 }
 
 #[cfg(test)]

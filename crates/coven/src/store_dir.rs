@@ -44,6 +44,28 @@ pub enum PathTokenError {
     Unindexable,
 }
 
+#[derive(Debug)]
+pub(crate) enum RequiredLocalBlobPathError {
+    Path(PathTokenError),
+    Missing { namespace: String, id: String },
+    Io(String),
+}
+
+#[derive(Debug)]
+pub(crate) enum CachedLocatorRemovalError {
+    Path(PathTokenError),
+    Io(String),
+}
+
+impl std::fmt::Display for CachedLocatorRemovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(error) => write!(formatter, "blob cache path: {error}"),
+            Self::Io(error) => write!(formatter, "blob cache file: {error}"),
+        }
+    }
+}
+
 impl std::fmt::Display for PathTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -293,6 +315,35 @@ impl StoreDir {
         self.cache_folder_blob_path("cache", namespace, &locator_hash.to_string())
     }
 
+    pub(crate) fn remote_blob_paths(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(PathBuf, PathBuf), PathTokenError> {
+        let locator = stored.locator();
+        Ok((
+            self.pinned_blob_path(locator.namespace(), locator.locator_hash())?,
+            self.cache_blob_path(locator.namespace(), locator.locator_hash())?,
+        ))
+    }
+
+    pub(crate) async fn remove_cached_locator(
+        &self,
+        namespace: &str,
+        locator_hash: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), CachedLocatorRemovalError> {
+        for path in [
+            self.pinned_blob_path(namespace, locator_hash)
+                .map_err(CachedLocatorRemovalError::Path)?,
+            self.cache_blob_path(namespace, locator_hash)
+                .map_err(CachedLocatorRemovalError::Path)?,
+        ] {
+            crate::local_blob::remove_file(&path)
+                .await
+                .map_err(CachedLocatorRemovalError::Io)?;
+        }
+        Ok(())
+    }
+
     /// `storage/<folder>/<namespace>/{ab}/{cd}/<locator-hash>` — the single blob-path builder
     /// behind [`Self::cache_blob_path`] (`folder` = `cache`) and
     /// [`Self::pinned_blob_path`] (`folder` = `pinned`), which differ only by the
@@ -339,6 +390,24 @@ impl StoreDir {
             .join("local")
             .join(namespace)
             .join(id))
+    }
+
+    pub(crate) async fn require_local_blob_path(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> Result<PathBuf, RequiredLocalBlobPathError> {
+        let path = self
+            .local_blob_path(namespace, id)
+            .map_err(RequiredLocalBlobPathError::Path)?;
+        match crate::local_blob::exists(&path).await {
+            Ok(true) => Ok(path),
+            Ok(false) => Err(RequiredLocalBlobPathError::Missing {
+                namespace: namespace.to_string(),
+                id: id.to_string(),
+            }),
+            Err(error) => Err(RequiredLocalBlobPathError::Io(error)),
+        }
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.

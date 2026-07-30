@@ -37,7 +37,7 @@ impl AuthorizedWriterOperation<'_> {
         clock: &dyn crate::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
-        crate::blob::delete::drain_tombstones(
+        crate::blob::delete::TombstoneDrain::new(
             &self.database,
             cloud_home,
             cipher,
@@ -46,6 +46,7 @@ impl AuthorizedWriterOperation<'_> {
             self.writer.identity,
             clock,
         )
+        .drain()
         .await
     }
 
@@ -63,7 +64,7 @@ impl AuthorizedWriterOperation<'_> {
             .map_err(|error| error.to_string())?
             .into_iter()
             .collect();
-        crate::blob::delete::gc_tombstones(
+        crate::blob::delete::TombstoneCollection::new(
             &self.database,
             cloud_home,
             self.storage.as_ref(),
@@ -75,6 +76,7 @@ impl AuthorizedWriterOperation<'_> {
             clock,
             self.database.blob_tombstone_grace(),
         )
+        .collect()
         .await
     }
 

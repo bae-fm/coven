@@ -52,7 +52,7 @@ use crate::storage::{StorageError, SyncStorage};
 
 /// The default convergence window a host gets if it configures none: how long a
 /// deleted blob is kept after its tombstone is written, before a GC pass reclaims
-/// it. The host overrides it on the coven builder; [`gc_tombstones`] evaluates
+/// it. The host overrides it on the coven builder; [`TombstoneCollection::collect`] evaluates
 /// whatever grace it is handed against the tombstone's `deleted_at`.
 ///
 /// A device offline for less than the grace is never stranded by a deletion — when
@@ -84,6 +84,37 @@ enum ExistingTombstone {
     Valid,
     Absent,
     Invalid(String),
+}
+
+/// One coherent pass that drains queued blob deletions into signed tombstones.
+/// The blob itself is **not** deleted here — [`TombstoneCollection::collect`]
+/// reclaims it once the tombstone has aged past [`BLOB_TOMBSTONE_GRACE`].
+///
+/// Coven records a delete intent atomically with the row or blob transition;
+/// the drain records that intent durably in the cloud as a tombstone so every
+/// device converges on the deletion, rather than deleting the blob out from
+/// under a peer that has not pulled the row removal yet.
+///
+/// A failed tombstone attempt leaves the outbox row queued, records the attempt,
+/// and fails the drain so the caller retries the whole operation. Rotation state
+/// refuses every write while this device has not adopted a Store-key rotation
+/// the cloud has already committed, leaving those rows queued for retry.
+///
+/// A valid tombstone already at the key is preserved. Its original `deleted_at`
+/// fixes the reclaim deadline; rewriting it during a repeated drain would keep
+/// moving that deadline and could prevent reclamation indefinitely.
+///
+/// The operation retains the exact database, cloud home, cipher, rotation state,
+/// Store identity, writer identity, and clock used by validation, publication,
+/// and retry recording.
+pub(crate) struct TombstoneDrain<'a> {
+    db: &'a crate::database::StoreDatabase,
+    cloud_home: &'a dyn CloudHome,
+    cipher: &'a dyn CloudCipherAccess,
+    pending_rotation: &'a PendingRotation,
+    store_id: &'a str,
+    keypair: &'a UserKeypair,
+    clock: &'a dyn crate::clock::Clock,
 }
 
 /// Serialized form of a `blob_tombstones/{exact_object_hash}{suffix}` object: the durable,
@@ -176,244 +207,203 @@ fn tombstone_signing_payload(store_id: &str, stored: &StoredBlobRef, deleted_at:
     serde_json::to_vec(&fields).expect("tombstone fields serialization cannot fail")
 }
 
-async fn existing_tombstone_state(
-    cloud_home: &dyn CloudHome,
-    cipher: &dyn CloudCipherAccess,
-    store_id: &str,
-    key: &str,
-    expected_stored: &StoredBlobRef,
-) -> Result<ExistingTombstone, String> {
-    let stored = match cloud_home.read(key).await {
-        Ok(stored) => stored,
-        Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => {
-            return Ok(ExistingTombstone::Absent)
+impl<'a> TombstoneDrain<'a> {
+    async fn existing_tombstone_state(
+        &self,
+        key: &str,
+        expected_stored: &StoredBlobRef,
+    ) -> Result<ExistingTombstone, String> {
+        let stored = match self.cloud_home.read(key).await {
+            Ok(stored) => stored,
+            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => {
+                return Ok(ExistingTombstone::Absent)
+            }
+            Err(e) => return Err(format!("tombstone read failed: {e}")),
+        };
+        let aad_context = crate::storage::cloud_aad_context(self.store_id, key);
+        let decoded = match self.cipher.snapshot().open(stored, &aad_context) {
+            Ok(decoded) => decoded,
+            Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
+        };
+        let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
+            Ok(tombstone) => tombstone,
+            Err(e) => return Ok(ExistingTombstone::Invalid(format!("parse failed: {e}"))),
+        };
+        if &tombstone.stored != expected_stored {
+            return Ok(ExistingTombstone::Invalid(format!(
+                "signed stored blob {:?} does not match {expected_stored:?}",
+                tombstone.stored
+            )));
         }
-        Err(e) => return Err(format!("tombstone read failed: {e}")),
-    };
-    let aad_context = crate::storage::cloud_aad_context(store_id, key);
-    let decoded = match cipher.snapshot().open(stored, &aad_context) {
-        Ok(decoded) => decoded,
-        Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
-    };
-    let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
-        Ok(tombstone) => tombstone,
-        Err(e) => return Ok(ExistingTombstone::Invalid(format!("parse failed: {e}"))),
-    };
-    if &tombstone.stored != expected_stored {
-        return Ok(ExistingTombstone::Invalid(format!(
-            "signed stored blob {:?} does not match {expected_stored:?}",
-            tombstone.stored
-        )));
+        if !tombstone.verify(self.store_id) {
+            return Ok(ExistingTombstone::Invalid(
+                "signature verification failed".to_string(),
+            ));
+        }
+        Ok(ExistingTombstone::Valid)
     }
-    if !tombstone.verify(store_id) {
-        return Ok(ExistingTombstone::Invalid(
-            "signature verification failed".to_string(),
-        ));
+
+    async fn write_signed_tombstone(
+        &self,
+        key: &str,
+        stored: &StoredBlobRef,
+        deleted_at: &str,
+    ) -> Result<(), String> {
+        let tombstone = BlobTombstoneJson::signed(
+            self.store_id,
+            stored.clone(),
+            deleted_at.to_string(),
+            self.keypair,
+        );
+        let bytes = serde_json::to_vec(&tombstone)
+            .map_err(|e| format!("tombstone serialization failed: {e}"))?;
+        let aad_context = crate::storage::cloud_aad_context(self.store_id, key);
+        let cipher = self.cipher.snapshot();
+        self.pending_rotation
+            .check(&cipher)
+            .map_err(|e| e.to_string())?;
+        let sealed = cipher.seal(bytes, &aad_context);
+        self.cloud_home
+            .write(
+                key,
+                crate::storage::cloud::BlobBody::from_bytes(sealed),
+                &no_progress(),
+            )
+            .await
+            .map_err(|e| format!("tombstone write failed: {e}"))
     }
-    Ok(ExistingTombstone::Valid)
-}
 
-async fn write_signed_tombstone(
-    cloud_home: &dyn CloudHome,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    store_id: &str,
-    key: &str,
-    stored: &StoredBlobRef,
-    deleted_at: &str,
-    keypair: &UserKeypair,
-) -> Result<(), String> {
-    let tombstone =
-        BlobTombstoneJson::signed(store_id, stored.clone(), deleted_at.to_string(), keypair);
-    let bytes = serde_json::to_vec(&tombstone)
-        .map_err(|e| format!("tombstone serialization failed: {e}"))?;
-    let aad_context = crate::storage::cloud_aad_context(store_id, key);
-    let cipher = cipher.snapshot();
-    pending_rotation.check(&cipher).map_err(|e| e.to_string())?;
-    let sealed = cipher.seal(bytes, &aad_context);
-    cloud_home
-        .write(
-            key,
-            crate::storage::cloud::BlobBody::from_bytes(sealed),
-            &no_progress(),
-        )
-        .await
-        .map_err(|e| format!("tombstone write failed: {e}"))
-}
-
-/// Drain the queued blob deletes: for each, write a signed tombstone and remove
-/// the outbox row. The blob itself is **not** deleted here — [`gc_tombstones`]
-/// reclaims it once the tombstone has aged past [`BLOB_TOMBSTONE_GRACE`].
-///
-/// Coven records a delete intent atomically with the row or blob transition;
-/// the drain records that intent durably in the cloud as a tombstone so every device
-/// converges on the deletion, rather than deleting the blob out from under a peer
-/// that hasn't pulled the row removal yet.
-///
-/// A failed tombstone attempt leaves the outbox row queued (the row is removed only
-/// after the tombstone is present), records the attempt, and fails the drain so the
-/// caller retries the whole operation. Returns the number of tombstones written.
-/// `pending_rotation` refuses every write the same way while this device has not
-/// adopted a store-key rotation the cloud has already committed — the rows stay
-/// queued, retried once adoption clears the marker.
-///
-/// The write is idempotent on the tombstone's existence, not its contents: if a
-/// tombstone already exists for the key it is left untouched and only the row is
-/// removed. The grace is measured from the tombstone's `deleted_at`, so rewriting
-/// it with a fresh `now` would push the reclaim deadline forward every time the
-/// row re-drains (which happens whenever the row-removal failed last cycle) — a
-/// blob could then never age out. Preserving the original tombstone holds the
-/// grace deadline fixed from the first drain.
-pub(crate) async fn drain_tombstones(
-    db: &crate::database::StoreDatabase,
-    cloud_home: &dyn CloudHome,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    store_id: &str,
-    keypair: &UserKeypair,
-    clock: &dyn crate::clock::Clock,
-) -> Result<usize, String> {
-    Box::pin(drain_tombstones_inner(
-        db,
-        cloud_home,
-        cipher,
-        pending_rotation,
-        store_id,
-        keypair,
-        clock,
-    ))
-    .await
-}
-
-async fn drain_tombstones_inner(
-    db: &crate::database::StoreDatabase,
-    cloud_home: &dyn CloudHome,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    store_id: &str,
-    keypair: &UserKeypair,
-    clock: &dyn crate::clock::Clock,
-) -> Result<usize, String> {
-    let deletes = db
-        .pending_blob_deletes()
-        .await
-        .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
-
-    let now = clock.now();
-    let now_rfc = now.to_rfc3339();
-    let suffix = cipher.snapshot().suffix();
-    let mut count = 0;
-    let scheduled_deletes = deletes
-        .into_iter()
-        .map(|entry| {
-            crate::blob::retry::entry_in_backoff(&entry, now).map(|in_backoff| (entry, in_backoff))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Failed to read delete retry schedule: {error}"))?;
-    for (entry, in_backoff) in scheduled_deletes {
-        let OutboxOperation::Delete { stored } = &entry.operation else {
+    async fn record_outbox_failure(
+        &self,
+        entry: &OutboxEntry,
+        cloud_key: &str,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), String> {
+        if let Err(record_error) = self
+            .db
+            .record_blob_delete_failure(entry, error, attempted_at)
+            .await
+        {
             return Err(format!(
-                "pending delete query returned non-delete outbox entry {}",
+                "Failed to record delete failure for {cloud_key} (entry {}): {record_error}",
                 entry.id
             ));
-        };
-        let cloud_key = stored_cloud_key(stored);
-        if in_backoff {
-            continue;
         }
+        Ok(())
+    }
 
-        let key = tombstone_key(stored, suffix);
+    /// Bind every dependency used by one deletion-drain pass.
+    pub(crate) fn new(
+        db: &'a crate::database::StoreDatabase,
+        cloud_home: &'a dyn CloudHome,
+        cipher: &'a dyn CloudCipherAccess,
+        pending_rotation: &'a PendingRotation,
+        store_id: &'a str,
+        keypair: &'a UserKeypair,
+        clock: &'a dyn crate::clock::Clock,
+    ) -> Self {
+        TombstoneDrain {
+            db,
+            cloud_home,
+            cipher,
+            pending_rotation,
+            store_id,
+            keypair,
+            clock,
+        }
+    }
 
-        // Write only when the slot is absent or invalid. A valid tombstone already
-        // at the key carries the original `deleted_at` that the grace is measured
-        // from; overwriting it with a fresh `now` would reset the grace, so a row
-        // that re-drains (its prior row-removal failed) must not move the deadline.
-        match existing_tombstone_state(cloud_home, cipher, store_id, &key, stored).await {
-            Ok(ExistingTombstone::Valid) => {
-                debug!(
-                    %cloud_key,
-                    "tombstone already exists; preserving its deleted_at (not resetting the grace)"
-                );
-            }
-            Ok(ExistingTombstone::Absent) => {
-                if let Err(e) = write_signed_tombstone(
-                    cloud_home,
-                    cipher,
-                    pending_rotation,
-                    store_id,
-                    &key,
-                    stored,
-                    &now_rfc,
-                    keypair,
-                )
-                .await
-                {
-                    record_outbox_failure(db, &entry, cloud_key, &e, &now_rfc).await?;
-                    return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
-                }
-                count += 1;
-            }
-            Ok(ExistingTombstone::Invalid(reason)) => {
-                warn!(
-                    %cloud_key,
-                    reason = %reason,
-                    "replacing invalid tombstone object"
-                );
-                if let Err(e) = write_signed_tombstone(
-                    cloud_home,
-                    cipher,
-                    pending_rotation,
-                    store_id,
-                    &key,
-                    stored,
-                    &now_rfc,
-                    keypair,
-                )
-                .await
-                {
-                    record_outbox_failure(db, &entry, cloud_key, &e, &now_rfc).await?;
-                    return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
-                }
-                count += 1;
-            }
-            Err(e) => {
-                let msg = format!("tombstone validation failed: {e}");
-                record_outbox_failure(db, &entry, cloud_key, &msg, &now_rfc).await?;
+    /// Write each due deletion as a signed tombstone, then remove its outbox row.
+    /// Existing valid tombstones keep their original deletion time; any failed
+    /// validation or publication records retry state and fails the pass.
+    pub(crate) async fn drain(&self) -> Result<usize, String> {
+        let db = self.db;
+        let clock = self.clock;
+        let deletes = db
+            .pending_blob_deletes()
+            .await
+            .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
+
+        let now = clock.now();
+        let now_rfc = now.to_rfc3339();
+        let suffix = self.cipher.snapshot().suffix();
+        let mut count = 0;
+        let scheduled_deletes = deletes
+            .into_iter()
+            .map(|entry| {
+                crate::blob::retry::entry_in_backoff(&entry, now)
+                    .map(|in_backoff| (entry, in_backoff))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read delete retry schedule: {error}"))?;
+        for (entry, in_backoff) in scheduled_deletes {
+            let OutboxOperation::Delete { stored } = &entry.operation else {
                 return Err(format!(
-                    "Failed to validate an existing tombstone for {cloud_key}: {e}"
+                    "pending delete query returned non-delete outbox entry {}",
+                    entry.id
                 ));
+            };
+            let cloud_key = stored_cloud_key(stored);
+            if in_backoff {
+                continue;
             }
+
+            let key = tombstone_key(stored, suffix);
+
+            // Write only when the slot is absent or invalid. A valid tombstone already
+            // at the key carries the original `deleted_at` that the grace is measured
+            // from; overwriting it with a fresh `now` would reset the grace, so a row
+            // that re-drains (its prior row-removal failed) must not move the deadline.
+            match self.existing_tombstone_state(&key, stored).await {
+                Ok(ExistingTombstone::Valid) => {
+                    debug!(
+                        %cloud_key,
+                        "tombstone already exists; preserving its deleted_at (not resetting the grace)"
+                    );
+                }
+                Ok(ExistingTombstone::Absent) => {
+                    if let Err(e) = self.write_signed_tombstone(&key, stored, &now_rfc).await {
+                        self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
+                            .await?;
+                        return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
+                    }
+                    count += 1;
+                }
+                Ok(ExistingTombstone::Invalid(reason)) => {
+                    warn!(
+                        %cloud_key,
+                        reason = %reason,
+                        "replacing invalid tombstone object"
+                    );
+                    if let Err(e) = self.write_signed_tombstone(&key, stored, &now_rfc).await {
+                        self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
+                            .await?;
+                        return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
+                    }
+                    count += 1;
+                }
+                Err(e) => {
+                    let msg = format!("tombstone validation failed: {e}");
+                    self.record_outbox_failure(&entry, cloud_key, &msg, &now_rfc)
+                        .await?;
+                    return Err(format!(
+                        "Failed to validate an existing tombstone for {cloud_key}: {e}"
+                    ));
+                }
+            }
+
+            // The tombstone is present (written now or already there); drop the local
+            // intent row. If this remove fails the row stays and the next drain finds
+            // the tombstone already present, so it removes the row without touching the
+            // tombstone — the deletion is never lost and the grace never moves.
+            db.remove_blob_delete(&entry).await.map_err(|error| {
+                format!("Failed to remove delete outbox entry {}: {error}", entry.id)
+            })?;
         }
 
-        // The tombstone is present (written now or already there); drop the local
-        // intent row. If this remove fails the row stays and the next drain finds
-        // the tombstone already present, so it removes the row without touching the
-        // tombstone — the deletion is never lost and the grace never moves.
-        db.remove_blob_delete(&entry).await.map_err(|error| {
-            format!("Failed to remove delete outbox entry {}: {error}", entry.id)
-        })?;
+        Ok(count)
     }
-
-    Ok(count)
-}
-
-async fn record_outbox_failure(
-    db: &crate::database::StoreDatabase,
-    entry: &OutboxEntry,
-    cloud_key: &str,
-    error: &str,
-    attempted_at: &str,
-) -> Result<(), String> {
-    if let Err(record_error) = db
-        .record_blob_delete_failure(entry, error, attempted_at)
-        .await
-    {
-        return Err(format!(
-            "Failed to record delete failure for {cloud_key} (entry {}): {record_error}",
-            entry.id
-        ));
-    }
-    Ok(())
 }
 
 /// Garbage-collect tombstones: delete each blob whose authentic tombstone has aged
@@ -460,242 +450,285 @@ async fn record_outbox_failure(
 ///
 /// Returns the number of blobs deleted this pass. Provider and local-state failures
 /// fail the pass; invalid or unauthorized bucket objects remain non-actionable.
-pub(crate) async fn gc_tombstones(
-    db: &crate::database::StoreDatabase,
-    cloud_home: &dyn CloudHome,
-    storage: &dyn SyncStorage,
-    cipher: &dyn CloudCipherAccess,
-    store_id: &str,
-    self_pubkey: &str,
-    activated_uploaders: &std::collections::BTreeMap<
+pub(crate) struct TombstoneCollection<'a> {
+    db: &'a crate::database::StoreDatabase,
+    cloud_home: &'a dyn CloudHome,
+    storage: &'a dyn SyncStorage,
+    cipher: &'a dyn CloudCipherAccess,
+    store_id: &'a str,
+    self_pubkey: &'a str,
+    activated_uploaders: &'a std::collections::BTreeMap<
         crate::protocol::store_commit::StoreDeviceRegistrationRef,
         crate::protocol::store_commit::StoreDeviceRegistration,
     >,
-    membership_chain: &MembershipChain,
-    clock: &dyn crate::clock::Clock,
+    membership_chain: &'a MembershipChain,
+    clock: &'a dyn crate::clock::Clock,
     grace: chrono::Duration,
-) -> Result<usize, String> {
-    let suffix = cipher.snapshot().suffix();
-    let keys = cloud_home
-        .list(TOMBSTONE_PREFIX)
-        .await
-        .map_err(|e| format!("Failed to list tombstones: {e}"))?;
+}
 
-    // A member physically deletes only blobs under its own `{namespace}/{self}/`
-    // prefix; an owner additionally sweeps every other member's prefix (owners
-    // retain bucket-wide delete, which a provider ACL can grant). This is what lets
-    // the ACL express "members write/delete their own prefix, owners anywhere".
-    let is_owner = membership_chain.is_owner_now(self_pubkey);
-
-    let now = clock.now();
-    let mut deleted = 0;
-    for key in keys {
-        // Recover the signed exact-object identity from the tombstone slot. A key
-        // that doesn't fit this store's canonical layout is not actionable.
-        let key_object_id = match key
-            .strip_suffix(suffix)
-            .and_then(|k| k.strip_prefix(TOMBSTONE_PREFIX))
-            .and_then(|encoded| encoded.parse().ok())
-        {
-            Some(object_id) => object_id,
-            None => {
-                debug!("skipping tombstone key with unexpected format: {key}");
-                continue;
-            }
-        };
-
-        let stored = match cloud_home.read(&key).await {
-            Ok(s) => s,
-            Err(e) => return Err(format!("Failed to read tombstone {key}: {e}")),
-        };
-        let aad_context = crate::storage::cloud_aad_context(store_id, &key);
-        let decoded = match cipher.snapshot().open(stored, &aad_context) {
-            Ok(d) => d,
-            Err(e) => {
-                // A tombstone we can't decrypt is a foreign store's object in a
-                // shared bucket — skip it rather than abort the whole GC pass.
-                debug!("skipping tombstone {key} this store cannot decrypt: {e}");
-                continue;
-            }
-        };
-        let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("skipping unparseable tombstone {key}: {e}");
-                continue;
-            }
-        };
-
-        // Cross-check that the exact object signed inside the tombstone hashes to
-        // the identity encoded in the tombstone slot.
-        let tombstone_cloud_key = stored_cloud_key(&tombstone.stored);
-        let tombstone_object_id = tombstone_object_id(&tombstone.stored);
-        if tombstone_object_id != key_object_id {
-            warn!(
-                "skipping tombstone {key}: signed object {tombstone_object_id} does not match its slot"
-            );
-            continue;
+impl<'a> TombstoneCollection<'a> {
+    pub(crate) fn new(
+        db: &'a crate::database::StoreDatabase,
+        cloud_home: &'a dyn CloudHome,
+        storage: &'a dyn SyncStorage,
+        cipher: &'a dyn CloudCipherAccess,
+        store_id: &'a str,
+        self_pubkey: &'a str,
+        activated_uploaders: &'a std::collections::BTreeMap<
+            crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
+        membership_chain: &'a MembershipChain,
+        clock: &'a dyn crate::clock::Clock,
+        grace: chrono::Duration,
+    ) -> Self {
+        Self {
+            db,
+            cloud_home,
+            storage,
+            cipher,
+            store_id,
+            self_pubkey,
+            activated_uploaders,
+            membership_chain,
+            clock,
+            grace,
         }
-
-        // Verify the signature (binds author, exact stored object, deleted_at, and this
-        // store). A tombstone that fails is forged, corrupt, tampered, or a
-        // different store's — skip it, the blob survives.
-        if !tombstone.verify(store_id) {
-            warn!("skipping tombstone {key} with an invalid signature");
-            continue;
-        }
-
-        // Authorize the author against the cycle's once-loaded membership chain,
-        // already anchored to the pinned owner: only a current write-capable member
-        // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
-        // (a bucket writer forging a deletion), or one authored by the forged founder
-        // of a wiped/refounded chain, fails here and is skipped.
-        if !membership_chain.can_write_now(&tombstone.author_pubkey) {
-            warn!(
-                "skipping tombstone {key}: author {} is not a current write-capable member",
-                tombstone.author_pubkey
-            );
-            continue;
-        }
-
-        // Age it by the authenticated deletion time.
-        let deleted_at = match chrono::DateTime::parse_from_rfc3339(&tombstone.deleted_at) {
-            Ok(dt) => dt.with_timezone(&chrono::Utc),
-            Err(e) => {
-                // A verified tombstone with an unparseable timestamp can't be aged.
-                // Keep it (never delete on an unageable tombstone) and surface it.
-                warn!(
-                    "skipping tombstone {key} with unparseable deleted_at {:?}: {e}",
-                    tombstone.deleted_at
-                );
-                continue;
-            }
-        };
-        if now.signed_duration_since(deleted_at) <= grace {
-            // Still inside the convergence window: a peer may not have pulled the row
-            // removal yet, so the blob must stay readable. The live-row cancel below
-            // is deliberately gated behind this check: a peer whose db still reads the
-            // row live+remote here may simply not have pulled the retraction yet, so a
-            // within-grace tombstone is never canceled on that basis — canceling it
-            // would strand the cloud blob once the writer's outbox row is gone. A later
-            // pass reclaims it (or cancels, if a live row genuinely re-references the
-            // blob) once the grace has passed. A legitimate skip, surfaced so an
-            // operator can see why a tombstoned blob is still present.
-            debug!(
-                tombstone = %key,
-                deleted_at = %tombstone.deleted_at,
-                "skipping tombstone still inside the grace",
-            );
-            continue;
-        }
-
-        // Past grace. Only now does the live-row check run: cancel the tombstone if a
-        // row still references its blob and resolves as remote. By the time grace has
-        // expired, a peer that reads the row as live+remote has either not yet pulled
-        // the retraction (the row then resolves gone or local and reclaim proceeds) or
-        // genuinely observes a re-referencing row (canceling the deletion is correct).
-        let exact_stored = tombstone.stored.clone();
-        let row_reference = db
-            .stored_blob_reference_state(exact_stored)
-            .await
-            .map_err(|e| format!("Failed to check live blob references: {e}"))?;
-        match row_reference {
-            StoredBlobReferenceState::LiveRemote => {
-                cloud_home
-                    .delete(&key)
-                    .await
-                    .map_err(|e| format!("Failed to cancel stale tombstone {key}: {e}"))?;
-                debug!(
-                    cloud_key = %tombstone_cloud_key,
-                    "canceled tombstone because a live row still references its blob",
-                );
-                continue;
-            }
-            StoredBlobReferenceState::Unresolved => {
-                return Err(format!(
-                    "tombstone {key} has a live blob reference whose locality is unresolved"
-                ));
-            }
-            StoredBlobReferenceState::NotLiveRemote => {}
-        }
-
-        // The exact locator names the activated device registration that uploaded
-        // this object. Its author, or a current owner, may reclaim it.
-        let uploader = activated_uploaders
-            .get(tombstone.stored.locator().uploader())
-            .ok_or_else(|| {
-                format!(
-                    "tombstone {key} names an unactivated blob uploader {}",
-                    tombstone.stored.locator().uploader().device_id
-                )
-            })?;
-        if uploader.author_pubkey != self_pubkey && !is_owner {
-            debug!(
-                tombstone = %key,
-                uploader = %uploader.author_pubkey,
-                "skipping reclaim of an object uploaded by another member",
-            );
-            continue;
-        }
-
-        // Re-check the tombstone still exists before reclaiming. Another GC worker
-        // may have completed this exact deletion after our listing.
-        match cloud_home.exists(&key).await {
-            Ok(true) => {}
-            Ok(false) => {
-                debug!("tombstone {key} disappeared before reclaim; skipping");
-                continue;
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Failed to re-check tombstone {key} before reclaim: {e}"
-                ))
-            }
-        }
-
-        // Confirm the blob is actually present before deleting, so a leftover
-        // tombstone whose blob a prior pass already reclaimed is cleaned up without
-        // counting a phantom second reclaim.
-        let blob_present = match storage.verify_blob_object(&tombstone.stored).await {
-            Ok(()) => true,
-            Err(StorageError::NotFound(_)) => false,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to check blob presence for {} before reclaim: {e}",
-                    tombstone_cloud_key
-                ))
-            }
-        };
-        if blob_present {
-            // Delete only the exact immutable object signed by the tombstone.
-            storage
-                .delete_blob_object(&tombstone.stored)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to delete blob {} past the grace: {e}",
-                        tombstone_cloud_key
-                    )
-                })?;
-            deleted += 1;
-            debug!(
-                cloud_key = %tombstone_cloud_key,
-                "reclaimed blob past the tombstone grace",
-            );
-        } else {
-            debug!(
-                cloud_key = %tombstone_cloud_key,
-                "tombstone's blob already gone; cleaning up the leftover tombstone",
-            );
-        }
-
-        // The blob is gone (deleted now or already absent); removing the durable
-        // tombstone completes this idempotent reclaim operation.
-        cloud_home
-            .delete(&key)
-            .await
-            .map_err(|e| format!("Failed to delete tombstone {key} after reclaim: {e}"))?;
     }
 
-    Ok(deleted)
+    pub(crate) async fn collect(&self) -> Result<usize, String> {
+        let db = self.db;
+        let cloud_home = self.cloud_home;
+        let storage = self.storage;
+        let cipher = self.cipher;
+        let store_id = self.store_id;
+        let self_pubkey = self.self_pubkey;
+        let activated_uploaders = self.activated_uploaders;
+        let membership_chain = self.membership_chain;
+        let clock = self.clock;
+        let grace = self.grace;
+        let suffix = cipher.snapshot().suffix();
+        let keys = cloud_home
+            .list(TOMBSTONE_PREFIX)
+            .await
+            .map_err(|e| format!("Failed to list tombstones: {e}"))?;
+
+        // A member physically deletes only blobs under its own `{namespace}/{self}/`
+        // prefix; an owner additionally sweeps every other member's prefix (owners
+        // retain bucket-wide delete, which a provider ACL can grant). This is what lets
+        // the ACL express "members write/delete their own prefix, owners anywhere".
+        let is_owner = membership_chain.is_owner_now(self_pubkey);
+
+        let now = clock.now();
+        let mut deleted = 0;
+        for key in keys {
+            // Recover the signed exact-object identity from the tombstone slot. A key
+            // that doesn't fit this store's canonical layout is not actionable.
+            let key_object_id = match key
+                .strip_suffix(suffix)
+                .and_then(|k| k.strip_prefix(TOMBSTONE_PREFIX))
+                .and_then(|encoded| encoded.parse().ok())
+            {
+                Some(object_id) => object_id,
+                None => {
+                    debug!("skipping tombstone key with unexpected format: {key}");
+                    continue;
+                }
+            };
+
+            let stored = match cloud_home.read(&key).await {
+                Ok(s) => s,
+                Err(e) => return Err(format!("Failed to read tombstone {key}: {e}")),
+            };
+            let aad_context = crate::storage::cloud_aad_context(store_id, &key);
+            let decoded = match cipher.snapshot().open(stored, &aad_context) {
+                Ok(d) => d,
+                Err(e) => {
+                    // A tombstone we can't decrypt is a foreign store's object in a
+                    // shared bucket — skip it rather than abort the whole GC pass.
+                    debug!("skipping tombstone {key} this store cannot decrypt: {e}");
+                    continue;
+                }
+            };
+            let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("skipping unparseable tombstone {key}: {e}");
+                    continue;
+                }
+            };
+
+            // Cross-check that the exact object signed inside the tombstone hashes to
+            // the identity encoded in the tombstone slot.
+            let tombstone_cloud_key = stored_cloud_key(&tombstone.stored);
+            let tombstone_object_id = tombstone_object_id(&tombstone.stored);
+            if tombstone_object_id != key_object_id {
+                warn!(
+                "skipping tombstone {key}: signed object {tombstone_object_id} does not match its slot"
+            );
+                continue;
+            }
+
+            // Verify the signature (binds author, exact stored object, deleted_at, and this
+            // store). A tombstone that fails is forged, corrupt, tampered, or a
+            // different store's — skip it, the blob survives.
+            if !tombstone.verify(store_id) {
+                warn!("skipping tombstone {key} with an invalid signature");
+                continue;
+            }
+
+            // Authorize the author against the cycle's once-loaded membership chain,
+            // already anchored to the pinned owner: only a current write-capable member
+            // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
+            // (a bucket writer forging a deletion), or one authored by the forged founder
+            // of a wiped/refounded chain, fails here and is skipped.
+            if !membership_chain.can_write_now(&tombstone.author_pubkey) {
+                warn!(
+                    "skipping tombstone {key}: author {} is not a current write-capable member",
+                    tombstone.author_pubkey
+                );
+                continue;
+            }
+
+            // Age it by the authenticated deletion time.
+            let deleted_at = match chrono::DateTime::parse_from_rfc3339(&tombstone.deleted_at) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(e) => {
+                    // A verified tombstone with an unparseable timestamp can't be aged.
+                    // Keep it (never delete on an unageable tombstone) and surface it.
+                    warn!(
+                        "skipping tombstone {key} with unparseable deleted_at {:?}: {e}",
+                        tombstone.deleted_at
+                    );
+                    continue;
+                }
+            };
+            if now.signed_duration_since(deleted_at) <= grace {
+                // Still inside the convergence window: a peer may not have pulled the row
+                // removal yet, so the blob must stay readable. The live-row cancel below
+                // is deliberately gated behind this check: a peer whose db still reads the
+                // row live+remote here may simply not have pulled the retraction yet, so a
+                // within-grace tombstone is never canceled on that basis — canceling it
+                // would strand the cloud blob once the writer's outbox row is gone. A later
+                // pass reclaims it (or cancels, if a live row genuinely re-references the
+                // blob) once the grace has passed. A legitimate skip, surfaced so an
+                // operator can see why a tombstoned blob is still present.
+                debug!(
+                    tombstone = %key,
+                    deleted_at = %tombstone.deleted_at,
+                    "skipping tombstone still inside the grace",
+                );
+                continue;
+            }
+
+            // Past grace. Only now does the live-row check run: cancel the tombstone if a
+            // row still references its blob and resolves as remote. By the time grace has
+            // expired, a peer that reads the row as live+remote has either not yet pulled
+            // the retraction (the row then resolves gone or local and reclaim proceeds) or
+            // genuinely observes a re-referencing row (canceling the deletion is correct).
+            let exact_stored = tombstone.stored.clone();
+            let row_reference = db
+                .stored_blob_reference_state(exact_stored)
+                .await
+                .map_err(|e| format!("Failed to check live blob references: {e}"))?;
+            match row_reference {
+                StoredBlobReferenceState::LiveRemote => {
+                    cloud_home
+                        .delete(&key)
+                        .await
+                        .map_err(|e| format!("Failed to cancel stale tombstone {key}: {e}"))?;
+                    debug!(
+                        cloud_key = %tombstone_cloud_key,
+                        "canceled tombstone because a live row still references its blob",
+                    );
+                    continue;
+                }
+                StoredBlobReferenceState::Unresolved => {
+                    return Err(format!(
+                        "tombstone {key} has a live blob reference whose locality is unresolved"
+                    ));
+                }
+                StoredBlobReferenceState::NotLiveRemote => {}
+            }
+
+            // The exact locator names the activated device registration that uploaded
+            // this object. Its author, or a current owner, may reclaim it.
+            let uploader = activated_uploaders
+                .get(tombstone.stored.locator().uploader())
+                .ok_or_else(|| {
+                    format!(
+                        "tombstone {key} names an unactivated blob uploader {}",
+                        tombstone.stored.locator().uploader().device_id
+                    )
+                })?;
+            if uploader.author_pubkey != self_pubkey && !is_owner {
+                debug!(
+                    tombstone = %key,
+                    uploader = %uploader.author_pubkey,
+                    "skipping reclaim of an object uploaded by another member",
+                );
+                continue;
+            }
+
+            // Re-check the tombstone still exists before reclaiming. Another GC worker
+            // may have completed this exact deletion after our listing.
+            match cloud_home.exists(&key).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    debug!("tombstone {key} disappeared before reclaim; skipping");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to re-check tombstone {key} before reclaim: {e}"
+                    ))
+                }
+            }
+
+            // Confirm the blob is actually present before deleting, so a leftover
+            // tombstone whose blob a prior pass already reclaimed is cleaned up without
+            // counting a phantom second reclaim.
+            let blob_present = match storage.verify_blob_object(&tombstone.stored).await {
+                Ok(()) => true,
+                Err(StorageError::NotFound(_)) => false,
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to check blob presence for {} before reclaim: {e}",
+                        tombstone_cloud_key
+                    ))
+                }
+            };
+            if blob_present {
+                // Delete only the exact immutable object signed by the tombstone.
+                storage
+                    .delete_blob_object(&tombstone.stored)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "Failed to delete blob {} past the grace: {e}",
+                            tombstone_cloud_key
+                        )
+                    })?;
+                deleted += 1;
+                debug!(
+                    cloud_key = %tombstone_cloud_key,
+                    "reclaimed blob past the tombstone grace",
+                );
+            } else {
+                debug!(
+                    cloud_key = %tombstone_cloud_key,
+                    "tombstone's blob already gone; cleaning up the leftover tombstone",
+                );
+            }
+
+            // The blob is gone (deleted now or already absent); removing the durable
+            // tombstone completes this idempotent reclaim operation.
+            cloud_home
+                .delete(&key)
+                .await
+                .map_err(|e| format!("Failed to delete tombstone {key} after reclaim: {e}"))?;
+        }
+
+        Ok(deleted)
+    }
 }

@@ -146,11 +146,10 @@ impl LocalBlobCleanupIntent {
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             }
-            LocalBlobCleanupIdentity::Exact(locator_hash) => {
-                crate::blob::cache::drop_cached_locator(store_dir, self.namespace(), *locator_hash)
-                    .await
-                    .map_err(|error| error.to_string())
-            }
+            LocalBlobCleanupIdentity::Exact(locator_hash) => store_dir
+                .remove_cached_locator(self.namespace(), *locator_hash)
+                .await
+                .map_err(|error| error.to_string()),
             LocalBlobCleanupIdentity::Row { .. } => {
                 return Err(DbError::Message(
                     "persisted local cleanup intent is row-bound".to_string(),
