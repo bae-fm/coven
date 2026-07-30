@@ -259,6 +259,15 @@ impl ConfigYaml {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oauth_requirement_follows_the_provider() {
+        assert!(!CloudProvider::S3.needs_oauth());
+        assert!(!CloudProvider::CloudKit.needs_oauth());
+        assert!(CloudProvider::GoogleDrive.needs_oauth());
+        assert!(CloudProvider::Dropbox.needs_oauth());
+        assert!(CloudProvider::OneDrive.needs_oauth());
+    }
+
     /// Saving a `Config` and loading it back must reproduce every field,
     /// including `store_dir` — the caller supplies the same `store_dir` to
     /// both `save_to_config_yaml` (via `self`) and `load_from_config_yaml`,

@@ -276,16 +276,6 @@ pub(crate) fn decode_hex_bytes(
     Ok(bytes)
 }
 
-/// Returns true if this provider requires an OAuth flow before restore.
-pub(crate) fn provider_needs_oauth(provider: &CloudHomeJoinInfo) -> bool {
-    matches!(
-        provider,
-        CloudHomeJoinInfo::GoogleDrive { .. }
-            | CloudHomeJoinInfo::Dropbox { .. }
-            | CloudHomeJoinInfo::OneDrive { .. }
-    )
-}
-
 /// UI-ready info from a decoded restore code.
 pub struct RestoreCodeInfo {
     pub store_id: String,
@@ -303,8 +293,8 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
     Ok(RestoreCodeInfo {
         store_id: parsed.sid,
         store_name: parsed.name,
+        needs_oauth: cloud_provider.needs_oauth(),
         cloud_provider,
-        needs_oauth: provider_needs_oauth(&parsed.provider),
     })
 }
 
@@ -710,26 +700,18 @@ mod tests {
     }
 
     #[test]
-    fn needs_oauth() {
-        assert!(!provider_needs_oauth(&CloudHomeJoinInfo::S3 {
-            bucket: String::new(),
-            region: String::new(),
-            endpoint: None,
-            key_prefix: None,
-            access_key: String::new(),
-            secret_key: String::new(),
-        }));
-        assert!(!provider_needs_oauth(&CloudHomeJoinInfo::CloudKit));
-        assert!(provider_needs_oauth(&CloudHomeJoinInfo::GoogleDrive {
-            folder_id: String::new(),
-        }));
-        assert!(provider_needs_oauth(&CloudHomeJoinInfo::Dropbox {
-            folder_path: String::new(),
-        }));
-        assert!(provider_needs_oauth(&CloudHomeJoinInfo::OneDrive {
-            drive_id: String::new(),
-            folder_id: String::new(),
-        }));
+    fn decoded_info_uses_the_provider_oauth_requirement() {
+        let s3 = sample_s3_code();
+        let s3_info = decode_restore_code_info(&encode_restore_code(&s3)).unwrap();
+        assert!(!s3_info.needs_oauth);
+
+        let mut google_drive = sample_s3_code();
+        google_drive.provider = CloudHomeJoinInfo::GoogleDrive {
+            folder_id: "folder".to_string(),
+        };
+        let google_drive_info =
+            decode_restore_code_info(&encode_restore_code(&google_drive)).unwrap();
+        assert!(google_drive_info.needs_oauth);
     }
 
     #[test]
