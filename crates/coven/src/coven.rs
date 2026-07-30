@@ -3361,7 +3361,10 @@ mod tests {
         let connect_handle = handle.clone();
         tokio::spawn(async move {
             connect_handle
-                .connect_sync_with_test_home(home, CloudCipher::Plaintext)
+                .connect_sync_with_test_home(
+                    home,
+                    CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+                )
                 .await
         })
         .await
@@ -3419,7 +3422,7 @@ mod tests {
             connect_handle
                 .connect_sync_with_test_home(
                     Arc::new(InMemoryCloudHome::new()),
-                    CloudCipher::Plaintext,
+                    CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
                 )
                 .await
         })
