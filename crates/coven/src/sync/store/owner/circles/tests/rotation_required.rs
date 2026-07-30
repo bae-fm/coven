@@ -1215,11 +1215,10 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
             Some(&routing),
         )
         .await
-        .expect("a Circle with active access but no image restores without error")
-        .into_database();
+        .expect("a Circle with active access but no image restores without error");
 
     let coverage = restored
-        .circle_bootstrap_coverage_ref(circle_id)
+        .circle_bootstrap_coverage_for_test(circle_id)
         .await
         .expect("read restored Circle coverage");
     assert!(
@@ -1545,7 +1544,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     )
     .await
     .expect("restore the post-close Store snapshot");
-    let restored = bootstrap
+    let mut restored = bootstrap
         .open_database(
             store.storage.store_id(),
             &database_path,
@@ -1558,22 +1557,13 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             Some(&routing),
         )
         .await
-        .expect("install the restored snapshot database")
-        .into_database();
+        .expect("install the restored snapshot database");
 
     // The restored device pulls and converges to the owner's accepted Store
     // frontier: the installed snapshot represents the closed epoch exactly, so
     // nothing is held and the projections agree.
     let (_restored_temp, restored_dir) = temp_store_dir();
-    let restored_device = store
-        .bind_store_device(&restored, &signer)
-        .await
-        .expect("bind the restored Store device");
-    let mut restored_writer = restored_device
-        .authorize_writer()
-        .await
-        .expect("authorize the restored Store device");
-    let pull = restored_writer
+    let pull = restored
         .pull(&restored_dir, Some(&routing))
         .await
         .expect("the restored device pulls the close without a foreign-key violation");
@@ -1587,7 +1577,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .await
         .expect("read owner Store frontier");
     let restored_frontier = restored
-        .materialized_frontier()
+        .materialized_frontier_for_test()
         .await
         .expect("read restored Store frontier");
     assert_eq!(
@@ -1627,11 +1617,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             Some(&routing),
         )
         .await
-        .expect("install the removed-member restore database")
-        .into_database();
+        .expect("install the removed-member restore database");
 
     let removed_coverage = removed_db
-        .circle_bootstrap_coverage_ref(circle_id)
+        .circle_bootstrap_coverage_for_test(circle_id)
         .await
         .expect("read removed-member Circle coverage");
     assert!(
@@ -1654,7 +1643,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     // took away. Were the clear skipped, the preserved row would reappear here and
     // re-arm the replay — this assertion is what makes the clear load-bearing.
     let replay_inputs = removed_db
-        .circle_bootstrap_replay_inputs()
+        .circle_bootstrap_replay_inputs_for_test()
         .await
         .expect("read removed-member Circle replay inputs");
     assert!(
@@ -1856,13 +1845,12 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
             Some(&routing),
         )
         .await
-        .expect("install the restored snapshot database")
-        .into_database();
+        .expect("install the restored snapshot database");
 
     // The staged Install decision chose the dominating standalone snapshot: the
     // coverage row names its image.
     let coverage_row = restored
-        .circle_bootstrap_coverage_ref(circle_id)
+        .circle_bootstrap_coverage_for_test(circle_id)
         .await
         .expect("read restored Circle coverage")
         .expect("the restore installs a Circle coverage row");

@@ -1926,11 +1926,11 @@ mod tests {
         }
     }
 
-    async fn open_published_scoped_snapshot(
-        fixture: &PublishedScopedSnapshot,
+    async fn open_published_scoped_snapshot<'storage>(
+        fixture: &'storage PublishedScopedSnapshot,
         store_id: &str,
         database_path: &Path,
-    ) -> Result<StoreDatabase, SnapshotError> {
+    ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
         let restorer_identity = crate::keys::UserKeypair::generate();
         let bootstrap = bootstrap_from_snapshot(
             &fixture.store.storage,
@@ -1956,7 +1956,6 @@ mod tests {
                 Some(&routing),
             )
             .await
-            .map(crate::sync::store::RestoringStore::into_database)
     }
 
     #[tokio::test]
@@ -2458,9 +2457,8 @@ mod tests {
                 Some(&routing),
             )
             .await
-            .expect("migrate and validate scoped snapshot")
-            .into_database();
-        assert_eq!(database.schema_version(), 2);
+            .expect("migrate and validate scoped snapshot");
+        assert_eq!(database.schema_version_for_test(), 2);
         let migrated = database
             .migrated_scoped_snapshot_facts_for_test()
             .await

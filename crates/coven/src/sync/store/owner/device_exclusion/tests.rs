@@ -84,16 +84,6 @@ async fn abandon_merge_candidate(
     store.abandon_merge_candidate(write_id).await
 }
 
-async fn abandon_merge_candidate_on_store_database(
-    database: &StoreDatabase,
-    storage: &Arc<CloudSyncStorage>,
-    signer: &UserKeypair,
-    write_id: WriteId,
-) -> Result<MergeCandidateAbandonment, StoreError> {
-    let store = Store::load(database.clone(), storage.clone(), signer.clone()).await?;
-    store.abandon_merge_candidate(write_id).await
-}
-
 async fn prepare_merge_candidate_abandonment(
     db: &Database,
     storage: &Arc<CloudSyncStorage>,
@@ -305,20 +295,24 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         AuthorExclusionLocatorTamper::ActivationCommit,
         AuthorExclusionLocatorTamper::ActivationHead,
     ] {
-        let (_restored_directory, restored) = Box::pin(open_published_exclusion_snapshot(
+        let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
             &store,
             "snapshot-author-exclusion-store",
             &restore.membership_floor,
             owner_db.schema_version(),
+            &signer,
             target.device_id.to_string(),
         ))
         .await;
-        StoreDatabase::new(&peer_db)
-            .transfer_prepared_write_to_for_test(&restored, &candidate_write_id)
+        restored
+            .transfer_prepared_write_from_for_test(
+                &StoreDatabase::new(&peer_db),
+                &candidate_write_id,
+            )
             .await
             .expect("transfer prepared write");
         let transferred_candidate = restored
-            .blocked_merge_candidate(candidate_write_id.clone())
+            .blocked_merge_candidate_for_test(candidate_write_id.clone())
             .await
             .expect("load candidate before tampering with snapshot evidence")
             .expect("transferred candidate exists before snapshot evidence tamper");
@@ -330,45 +324,41 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
             )
             .await
             .expect("tamper author exclusion locator");
-        Box::pin(abandon_merge_candidate_on_store_database(
-            &restored,
-            &store.storage,
-            &signer,
-            candidate_write_id.clone(),
-        ))
-        .await
-        .expect_err("tampered snapshot exclusion evidence must fail loud");
+        restored
+            .abandon_merge_candidate_for_test(candidate_write_id.clone())
+            .await
+            .expect_err("tampered snapshot exclusion evidence must fail loud");
         assert!(restored
-            .blocked_merge_candidate(candidate_write_id.clone())
+            .blocked_merge_candidate_for_test(candidate_write_id.clone())
             .await
             .expect("reload candidate after tampered snapshot evidence")
             .is_some());
         assert!(!restored
-            .merge_candidate_cleanup_pending(&candidate_write_id)
+            .merge_candidate_cleanup_pending_for_test(&candidate_write_id)
             .await
             .expect("tampered snapshot evidence cannot start cleanup"));
     }
 
-    let (_restored_directory, restored) = Box::pin(open_published_exclusion_snapshot(
+    let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
         &store,
         "snapshot-author-exclusion-store",
         &restore.membership_floor,
         owner_db.schema_version(),
+        &signer,
         target.device_id.to_string(),
     ))
     .await;
-    StoreDatabase::new(&peer_db)
-        .transfer_prepared_write_to_for_test(&restored, &candidate_write_id)
+    restored
+        .transfer_prepared_write_from_for_test(&StoreDatabase::new(&peer_db), &candidate_write_id)
         .await
         .expect("transfer prepared write");
     let transferred_candidate = restored
-        .blocked_merge_candidate(candidate_write_id.clone())
+        .blocked_merge_candidate_for_test(candidate_write_id.clone())
         .await
         .expect("load restored exclusion candidate")
         .expect("restored exclusion candidate exists");
     restored
-        .author_exclusion_activation_for_candidate(
-            store.root.clone(),
+        .author_exclusion_activation_for_candidate_for_test(
             transferred_candidate.head.value.commit.clone(),
             transferred_candidate
                 .commit
@@ -380,18 +370,14 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .expect("select snapshotted exclusion locator")
         .expect("snapshotted exclusion covers restored candidate");
     assert_eq!(
-        Box::pin(abandon_merge_candidate_on_store_database(
-            &restored,
-            &store.storage,
-            &signer,
-            candidate_write_id.clone(),
-        ))
-        .await
-        .expect("consume snapshotted exclusion evidence"),
+        restored
+            .abandon_merge_candidate_for_test(candidate_write_id.clone())
+            .await
+            .expect("consume snapshotted exclusion evidence"),
         MergeCandidateAbandonment::Abandoned,
     );
     assert!(!restored
-        .merge_candidate_cleanup_pending(&candidate_write_id)
+        .merge_candidate_cleanup_pending_for_test(&candidate_write_id)
         .await
         .expect("restored candidate cleanup completes"));
 }
@@ -525,19 +511,18 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     let database_path = destination.path().join("store.db");
     let bootstrap_root = store.root.clone();
     let bootstrap_floor = restore.membership_floor.clone();
-    let bootstrap_identity = crate::keys::UserKeypair::generate();
     let bootstrap = Box::pin(crate::sync::store::snapshot::bootstrap_from_snapshot(
-        &store.storage,
+        store.storage.as_ref(),
         "bootstrap-author-exclusion-store",
         bootstrap_root,
         &bootstrap_floor,
         1,
         &database_path,
-        &bootstrap_identity,
+        &signer,
     ))
     .await
     .expect("verify pre-exclusion snapshot");
-    let joining_db = bootstrap
+    let mut joining_db = bootstrap
         .open_database(
             "bootstrap-author-exclusion-store",
             &database_path,
@@ -555,9 +540,8 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .install_device_join_bootstrap_for_test(plan)
         .await
         .expect("replay exclusion after snapshot");
-    let joining_db = joining_db.into_database();
-    StoreDatabase::new(&peer_db)
-        .transfer_prepared_write_to_for_test(&joining_db, &candidate_write_id)
+    joining_db
+        .transfer_prepared_write_from_for_test(&StoreDatabase::new(&peer_db), &candidate_write_id)
         .await
         .expect("transfer prepared write");
 
@@ -568,18 +552,14 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
     assert!(!stored.0.is_empty());
     assert!(!stored.1.is_empty());
     assert_eq!(
-        Box::pin(abandon_merge_candidate_on_store_database(
-            &joining_db,
-            &store.storage,
-            &signer,
-            candidate_write_id.clone(),
-        ))
-        .await
-        .expect("consume replayed exclusion evidence"),
+        joining_db
+            .abandon_merge_candidate_for_test(candidate_write_id.clone())
+            .await
+            .expect("consume replayed exclusion evidence"),
         MergeCandidateAbandonment::Abandoned,
     );
     assert!(!joining_db
-        .merge_candidate_cleanup_pending(&candidate_write_id)
+        .merge_candidate_cleanup_pending_for_test(&candidate_write_id)
         .await
         .expect("replayed exclusion candidate cleanup completes"));
 }
@@ -2405,24 +2385,27 @@ async fn pull_peer_exclusion(
     }
 }
 
-async fn open_published_exclusion_snapshot(
-    store: &TestStore,
+async fn open_published_exclusion_snapshot<'storage>(
+    store: &'storage TestStore,
     store_id: &str,
     membership_floor: &crate::joining::MembershipFloor,
     schema_version: u32,
+    identity: &UserKeypair,
     device_id: String,
-) -> (tempfile::TempDir, StoreDatabase) {
+) -> (
+    tempfile::TempDir,
+    crate::sync::store::RestoringStore<'storage>,
+) {
     let directory = tempfile::tempdir().expect("restored exclusion directory");
     let path = directory.path().join("restored.db");
-    let restorer_identity = crate::keys::UserKeypair::generate();
     let bootstrap = crate::sync::store::snapshot::bootstrap_from_snapshot(
-        &store.storage,
+        store.storage.as_ref(),
         store_id,
         store.root.clone(),
         membership_floor,
         schema_version,
         &path,
-        &restorer_identity,
+        identity,
     )
     .await
     .expect("verify author exclusion snapshot");
@@ -2440,7 +2423,7 @@ async fn open_published_exclusion_snapshot(
         )
         .await
         .expect("open author exclusion snapshot");
-    (directory, database.into_database())
+    (directory, database)
 }
 
 async fn prepare_transfer_candidate(
