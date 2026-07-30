@@ -1908,6 +1908,99 @@ def parameter_call_candidates(
     return sorted(candidates)
 
 
+def callable_parameter_positions(record: dict[str, Any]) -> list[int]:
+    parameters = [
+        parameter
+        for parameter in record["parameters"]
+        if parameter["name"] != "self"
+    ]
+    return [
+        position
+        for position, parameter in enumerate(parameters)
+        if re.search(r"\b(?:FnOnce|FnMut|Fn)\s*\(", parameter["type"])
+        or re.search(r"\bfn\s*\(", parameter["type"])
+    ]
+
+
+def append_caller_edge(
+    record: dict[str, Any],
+    caller: str,
+    site: dict[str, Any],
+) -> None:
+    edge = next(
+        (
+            candidate
+            for candidate in record["callers"]
+            if candidate["symbol"] == caller
+        ),
+        None,
+    )
+    if edge is None:
+        edge = {"symbol": caller, "sites": []}
+        record["callers"].append(edge)
+    existing_site = next(
+        (
+            existing
+            for existing in edge["sites"]
+            if existing["range"] == site["range"]
+        ),
+        None,
+    )
+    if existing_site is None:
+        edge["sites"].append(site)
+        return
+    existing_site["views"] = sorted(
+        set(existing_site.get("views", [])).union(site.get("views", []))
+    )
+
+
+def attach_callable_argument_edges(records: list[dict[str, Any]]) -> None:
+    records_by_symbol = {
+        record["symbol"]: record
+        for record in records
+    }
+    records_by_path: dict[Path, list[dict[str, Any]]] = {}
+    for record in records:
+        path = (ROOT / record["path"]).resolve()
+        records_by_path.setdefault(path, []).append(record)
+
+    for caller in records:
+        for edge in list(caller["callees"]):
+            callee = records_by_symbol.get(edge["symbol"])
+            if callee is None:
+                continue
+            for position in callable_parameter_positions(callee):
+                for call_site in edge["sites"]:
+                    argument = parameter_site_argument(
+                        callee,
+                        call_site,
+                        position,
+                    )
+                    if argument is None:
+                        continue
+                    for target_symbol in argument_callable_candidates(
+                        caller,
+                        argument,
+                        records_by_symbol,
+                        records_by_path,
+                        records,
+                        set(),
+                    ):
+                        target = records_by_symbol.get(target_symbol)
+                        if target is None:
+                            continue
+                        site = {
+                            "range": argument["range"],
+                            "views": call_site.get("views", []),
+                            "expression": argument["text"],
+                            "arguments": [],
+                            "callee_text": argument["text"],
+                            "role": "callable-argument",
+                        }
+                        append_semantic_edge(caller, target_symbol, site)
+                        append_caller_edge(target, caller["symbol"], site)
+
+
 def lexical_call_candidates(
     record: dict[str, Any],
     call: dict[str, Any],
@@ -2762,6 +2855,8 @@ def build_index() -> dict[str, Any]:
                         "sites": edge["sites"],
                     }
                 )
+
+    attach_callable_argument_edges(records)
 
     for record in records:
         for call in record["unresolved_calls"]:

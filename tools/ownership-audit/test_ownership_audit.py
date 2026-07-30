@@ -1415,6 +1415,88 @@ class SemanticIndexTests(unittest.TestCase):
         )
         self.assertEqual(candidates, [closure["symbol"]])
 
+    def test_callable_argument_is_an_ownership_dependency(self):
+        argument_range = {
+            "start": {"line": 2, "character": 31},
+            "end": {"line": 2, "character": 44},
+        }
+        caller = {
+            "symbol": "sample::make_clock",
+            "name": "make_clock",
+            "crate": "sample",
+            "kind": "free",
+            "semantic_parent": None,
+            "parameters": [],
+            "path": "sample.rs",
+            "callees": [
+                {
+                    "symbol": "sample::<Clock>::with_source",
+                    "sites": [
+                        {
+                            "range": {
+                                "start": {"line": 2, "character": 4},
+                                "end": {"line": 2, "character": 45},
+                            },
+                            "views": ["library-default"],
+                            "expression": "Clock::with_source(wall_clock_ms)",
+                            "arguments": [
+                                {
+                                    "text": "wall_clock_ms",
+                                    "range": argument_range,
+                                }
+                            ],
+                            "callee_text": "Clock::with_source",
+                        }
+                    ],
+                }
+            ],
+            "callers": [],
+        }
+        constructor = {
+            "symbol": "sample::<Clock>::with_source",
+            "name": "with_source",
+            "crate": "sample",
+            "kind": "associated",
+            "semantic_parent": None,
+            "parameters": [
+                {
+                    "name": "source",
+                    "type": "impl Fn() -> u64 + Send + Sync + 'static",
+                }
+            ],
+            "signature": "fn with_source(source: impl Fn() -> u64 + Send + Sync + 'static) -> Self",
+            "path": "sample.rs",
+            "callees": [],
+            "callers": [
+                {
+                    "symbol": caller["symbol"],
+                    "sites": caller["callees"][0]["sites"],
+                }
+            ],
+        }
+        source = {
+            "symbol": "sample::wall_clock_ms",
+            "name": "wall_clock_ms",
+            "crate": "sample",
+            "kind": "free",
+            "semantic_parent": None,
+            "parameters": [],
+            "signature": "fn wall_clock_ms() -> u64",
+            "path": "sample.rs",
+            "callees": [],
+            "callers": [],
+        }
+        records = [caller, constructor, source]
+
+        ownership_audit.attach_callable_argument_edges(records)
+
+        self.assertEqual(
+            [edge["symbol"] for edge in caller["callees"]],
+            [constructor["symbol"], source["symbol"]],
+        )
+        self.assertEqual(source["callers"][0]["symbol"], caller["symbol"])
+        self.assertEqual(source["callers"][0]["sites"][0]["range"], argument_range)
+
     def test_callback_factory_resolves_its_returned_closure(self):
         caller = {
             "symbol": "sample::root",
