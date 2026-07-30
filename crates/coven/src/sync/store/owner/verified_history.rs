@@ -888,7 +888,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 && next_state == state
                 && registrations.len() == registration_count;
             if stable {
-                return Ok(self.history().commits.contains_key(expected));
+                let accepted_closure =
+                    verified_merge_commit_closure(&self.history().commits, next.values().cloned())?;
+                return Ok(accepted_closure.contains(expected));
             }
             let state_fingerprint = ObjectHash::digest(
                 &serde_json::to_vec(&(&next, &next_state))
