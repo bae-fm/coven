@@ -173,6 +173,65 @@ fn publish(database: &Database, storage: &dyn SyncStorage) {
         self.assertEqual(record["ambient_dependencies"], ["clock"])
         self.assertIn("storage-write", record["effects"])
 
+    def test_service_exposure_report_uses_syntax_tree_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates" / "coven-core" / "src" / "sample.rs"
+            path.parent.mkdir(parents=True)
+            source = """
+pub(crate) struct History<'a> {
+    pub(super) database: StoreDatabase,
+    history_verifier: MergeHistoryVerifier<'a>,
+    pub label: String,
+}
+impl History<'_> {
+    pub(super) fn database(&self) -> &StoreDatabase {
+        &self.database
+    }
+
+    fn storage(&self) -> &dyn SyncStorage {
+        todo!()
+    }
+
+    fn verify(&mut self) {
+        let _ = &mut self.history.history_verifier;
+        let _ = &self.history.root;
+    }
+}
+"""
+            path.write_text(source)
+            source_file = ownership_audit.parse_source(path, source)
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                findings = ownership_audit.service_exposures_for_source(source_file)
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(
+            [
+                (
+                    finding["kind"],
+                    finding["name"],
+                    finding["dependencies"],
+                )
+                for finding in findings
+            ],
+            [
+                ("service-field", "History::database", ["database"]),
+                (
+                    "service-getter",
+                    "coven_core::sample::<History<'_>>::database",
+                    ["database"],
+                ),
+                (
+                    "nested-service-reach",
+                    "coven_core::sample::<History<'_>>::verify",
+                    ["verification"],
+                ),
+            ],
+        )
+
     def test_inventory_records_closures_under_their_enclosing_callable(self):
         records = self.inventory(
             "fn run(database: &Database) { let load = || database.load(); load(); }"

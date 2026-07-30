@@ -47,6 +47,34 @@ STATEFUL_TYPE_PATTERNS = {
     "time_or_id": re.compile(r"\b(?:Clock|Hlc|IdProvider|Uuid|Instant|SystemTime)\b"),
     "client": re.compile(r"\b(?:Client|HttpClient|OAuth|ProviderBinding)\b"),
 }
+SERVICE_TYPE_PATTERNS = {
+    "database": re.compile(
+        r"\b(?:Database|StoreDatabase|Connection|Transaction|WriteTransaction|DbHandle)\b"
+    ),
+    "storage": re.compile(
+        r"\b(?:SyncStorage|CloudSyncStorage|ExactSlotStorage|Storage|CloudHome)\b"
+    ),
+    "identity": re.compile(
+        r"\b(?:UserKeypair|Identity|DeviceSigner|MasterKeyCustody|Keypair)\b"
+    ),
+    "verification": re.compile(r"\b(?:[A-Za-z0-9_]*Verifier|Authorized[A-Za-z0-9_]*)\b"),
+    "encryption": re.compile(r"\b(?:EncryptionService|CloudCipherAccess)\b"),
+    "runtime": re.compile(
+        r"\b(?:Runtime|Handle|Cancellation|Cancel|Sender|Receiver|Mutex|RwLock|Semaphore)\b"
+    ),
+    "client": re.compile(r"\b(?:Client|HttpClient|OAuth)\b"),
+}
+SERVICE_FIELD_PATTERNS = {
+    "database": re.compile(r"^(?:database|db|connection|transaction)$"),
+    "storage": re.compile(r"^(?:storage|cloud_home)$"),
+    "identity": re.compile(
+        r"^(?:identity|keypair|signer|device_signer|custody|keyring)$"
+    ),
+    "verification": re.compile(r"(?:^|_)verifier$"),
+    "encryption": re.compile(r"^(?:encryption|cipher)$"),
+    "runtime": re.compile(r"^(?:runtime|clock|cancel|cancellation)$"),
+    "client": re.compile(r"(?:^|_)client$"),
+}
 AMBIENT_PATTERNS = {
     "clock": re.compile(r"\b(?:Utc|Local|SystemTime|Instant)::now\s*\("),
     "randomness": re.compile(
@@ -295,6 +323,58 @@ def ancestors(source_file: SourceFile, index: int) -> Iterable[tuple[int, Syntax
     while parent is not None:
         yield parent, source_file.nodes[parent]
         parent = source_file.nodes[parent].parent
+
+
+def record_field_type(source_file: SourceFile, index: int) -> str:
+    return next(
+        (
+            source_file.text(source_file.nodes[child]).strip()
+            for child in source_file.nodes[index].children
+            if source_file.nodes[child].kind.endswith("_TYPE")
+        ),
+        "",
+    )
+
+
+def enclosing_record_name(source_file: SourceFile, index: int) -> str:
+    for ancestor_index, ancestor in ancestors(source_file, index):
+        if ancestor.kind not in {"STRUCT", "ENUM_VARIANT"}:
+            continue
+        name = direct_name(source_file, ancestor_index)
+        if name is not None:
+            return name[0]
+    return "<record>"
+
+
+def field_expression_chain(
+    source_file: SourceFile,
+    index: int,
+) -> list[str]:
+    node = source_file.nodes[index]
+    if node.kind != "FIELD_EXPR":
+        return []
+    receiver_index = next(
+        (
+            child
+            for child in node.children
+            if source_file.nodes[child].kind.endswith("_EXPR")
+        ),
+        None,
+    )
+    field = next(
+        (
+            source_file.text(source_file.nodes[child]).strip()
+            for child in reversed(node.children)
+            if source_file.nodes[child].kind == "NAME_REF"
+        ),
+        None,
+    )
+    if receiver_index is None or field is None:
+        return []
+    receiver = source_file.nodes[receiver_index]
+    if receiver.kind == "FIELD_EXPR":
+        return [*field_expression_chain(source_file, receiver_index), field]
+    return [source_file.text(receiver).strip(), field]
 
 
 def direct_name(source_file: SourceFile, index: int) -> tuple[str, int, int] | None:
@@ -891,6 +971,140 @@ def retained_dependencies(signature: str) -> list[str]:
         for category, pattern in STATEFUL_TYPE_PATTERNS.items()
         if pattern.search(signature)
     ]
+
+
+def service_dependencies(type_text: str) -> list[str]:
+    return [
+        category
+        for category, pattern in SERVICE_TYPE_PATTERNS.items()
+        if pattern.search(type_text)
+    ]
+
+
+def service_field_dependencies(fields: Iterable[str]) -> list[str]:
+    return sorted(
+        {
+            category
+            for field in fields
+            for category, pattern in SERVICE_FIELD_PATTERNS.items()
+            if pattern.search(field)
+        }
+    )
+
+
+def service_exposures_for_source(
+    source_file: SourceFile,
+) -> list[dict[str, Any]]:
+    path = str(source_file.path.relative_to(ROOT))
+    findings: list[dict[str, Any]] = []
+    records = inventory_file(source_file)
+    records_by_start = {
+        (
+            record["range"]["start"]["line"],
+            record["range"]["start"]["character"],
+        ): record
+        for record in records
+    }
+
+    for index, node in enumerate(source_file.nodes):
+        if node.kind == "RECORD_FIELD":
+            visibility_node = direct_child(source_file, index, "VISIBILITY")
+            field_visibility = (
+                source_file.text(visibility_node).strip()
+                if visibility_node is not None
+                else "private"
+            )
+            if field_visibility == "private":
+                continue
+            name = direct_name(source_file, index)
+            if name is None:
+                continue
+            dependencies = service_dependencies(record_field_type(source_file, index))
+            if not dependencies:
+                continue
+            findings.append(
+                {
+                    "kind": "service-field",
+                    "name": f"{enclosing_record_name(source_file, index)}::{name[0]}",
+                    "dependencies": dependencies,
+                    "visibility": field_visibility,
+                    "path": path,
+                    "line": source_file.position(node.start)["line"] + 1,
+                    "expression": re.sub(
+                        r"\s+", " ", source_file.text(node)
+                    ).strip(),
+                }
+            )
+            continue
+
+        if node.kind != "FIELD_EXPR":
+            continue
+        parent = node.parent
+        if parent is not None and source_file.nodes[parent].kind == "FIELD_EXPR":
+            continue
+        chain = field_expression_chain(source_file, index)
+        if len(chain) < 3:
+            continue
+        dependencies = service_field_dependencies(chain[1:])
+        if not dependencies:
+            continue
+        callable_index = nearest_callable_ancestor(source_file, index)
+        if callable_index is None:
+            continue
+        callable_start = source_file.position(
+            source_file.nodes[callable_index].start
+        )
+        record = records_by_start.get(
+            (callable_start["line"], callable_start["character"])
+        )
+        if record is None:
+            continue
+        findings.append(
+            {
+                "kind": "nested-service-reach",
+                "name": record["symbol"],
+                "dependencies": dependencies,
+                "visibility": record["visibility"],
+                "path": path,
+                "line": source_file.position(node.start)["line"] + 1,
+                "expression": re.sub(
+                    r"\s+", " ", source_file.text(node)
+                ).strip(),
+            }
+        )
+
+    for record in records:
+        if record["visibility"] == "private" or record["kind"] != "method":
+            continue
+        dependencies = service_dependencies(record["return_type"])
+        returns_shared_service = (
+            "&" in record["return_type"]
+            or "Arc<" in record["return_type"]
+            or "Box<dyn " in record["return_type"]
+        )
+        if not dependencies or not returns_shared_service:
+            continue
+        findings.append(
+            {
+                "kind": "service-getter",
+                "name": record["symbol"],
+                "dependencies": dependencies,
+                "visibility": record["visibility"],
+                "path": path,
+                "line": record["range"]["start"]["line"] + 1,
+                "expression": record["signature"],
+            }
+        )
+
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding["path"],
+            finding["line"],
+            finding["kind"],
+            finding["name"],
+        ),
+    )
 
 
 def matches(body: str, patterns: dict[str, re.Pattern[str]]) -> list[str]:
@@ -4427,6 +4641,39 @@ def command_reach_throughs(args: argparse.Namespace) -> None:
             print(f"  {json.dumps(entry, sort_keys=True)}")
 
 
+def selected_rust_paths(values: list[str]) -> list[Path]:
+    selected = values or ["crates"]
+    paths: set[Path] = set()
+    for value in selected:
+        candidate = (ROOT / value).resolve()
+        if not candidate.is_relative_to(ROOT):
+            raise ValueError(f"path lies outside the repository: {value}")
+        if candidate.is_dir():
+            paths.update(path.resolve() for path in candidate.rglob("*.rs"))
+        elif candidate.is_file() and candidate.suffix == ".rs":
+            paths.add(candidate)
+        else:
+            raise ValueError(f"path is not a Rust file or directory: {value}")
+    return sorted(paths)
+
+
+def command_service_exposures(args: argparse.Namespace) -> None:
+    findings = [
+        finding
+        for path in selected_rust_paths(args.paths)
+        for finding in service_exposures_for_source(parse_source(path))
+    ]
+    for finding in findings:
+        dependencies = ",".join(finding["dependencies"])
+        print(
+            f"{finding['path']}:{finding['line']}: "
+            f"{finding['kind']} {finding['visibility']} "
+            f"[{dependencies}] {finding['name']}: "
+            f"{finding['expression']}"
+        )
+    print(f"{len(findings)} service exposures")
+
+
 def command_show(args: argparse.Namespace) -> None:
     index = read_index()
     for record in select_symbols(index, args.symbol):
@@ -4548,6 +4795,9 @@ def parser() -> argparse.ArgumentParser:
     reach_throughs = subcommands.add_parser("reach-throughs")
     reach_throughs.add_argument("report", nargs="?")
     reach_throughs.set_defaults(run=command_reach_throughs)
+    service_exposures = subcommands.add_parser("service-exposures")
+    service_exposures.add_argument("paths", nargs="*")
+    service_exposures.set_defaults(run=command_service_exposures)
     subcommands.add_parser("unclassified").set_defaults(run=command_unclassified)
     subcommands.add_parser("check").set_defaults(run=command_check)
     return value
