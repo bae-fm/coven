@@ -381,7 +381,8 @@ async fn publish_exact_remote_blob_binding(
         std::sync::Arc::new(crate::clock::SystemClock),
     );
     let database = StoreDatabase::new(db);
-    crate::blob::transition::make_remote(&database, store_dir, &hlc, "notes", root_id, false)
+    crate::blob::transition::LocalBlobTransitions::new(database.clone(), store_dir.clone())
+        .make_remote("notes", root_id, false)
         .await
         .expect("start exact make_remote");
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));

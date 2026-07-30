@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connected_sync_reuses_cloud_home_for_loop_storage() {
+    async fn connected_sync_reuses_connection_storage_for_loop() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
@@ -2016,18 +2016,9 @@ mod tests {
             .await
             .expect("connect sync over the test CloudKit driver");
 
-        let stored_home = handle
-            .sync
-            .cloud_home_for_test()
-            .expect("StoreSync retains the cloud home");
-        let loop_handle = handle
-            .sync
-            .active_loop_for_test()
-            .expect("connect_sync starts the sync loop");
-
         assert!(
-            std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
-            "the sync loop storage must wrap the same cloud home retained by StoreSync",
+            handle.sync.loop_uses_connected_storage_for_test(),
+            "StoreSync and its sync loop must retain the same storage instance",
         );
     }
 

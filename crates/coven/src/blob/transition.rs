@@ -7,16 +7,19 @@
 //! coven's cache, and the gate is on). coven owns moving between the two, with the
 //! durable-copy-before-delete ordering and a single atomic commit point each way:
 //!
-//! - [`make_remote`] verifies and journals every blob-bearing row beneath the root,
+//! - [`LocalBlobTransitions::make_remote`] verifies and journals every
+//!   blob-bearing row beneath the root,
 //!   then returns. The upload drain ([`crate::blob::upload::drain_uploads`]) creates
 //!   each exact cloud object. Once every row has a created object, one Store write
 //!   flips the gate true and drops external-file ownership. The intent and exact
 //!   upload journals remain authoritative until that Store write activates, when
 //!   activation consumes them atomically. Before publication starts,
-//!   [`cancel_make_remote`] marks the intent Cancelling; the upload drain
+//!   [`BlobTransitionJournal::cancel_make_remote`] marks the intent Cancelling;
+//!   the upload drain
 //!   exact-deletes every object and spool before atomically removing the last
 //!   journal and intent, so the root remains Local.
-//! - [`make_local`] brings each blob back to a local file durability-first
+//! - [`ConnectedBlobTransitions::make_local`] brings each blob back to a local
+//!   file durability-first
 //!   (read from cache/cloud → write the local copy → verify): a **user-provided**
 //!   blob to its `dest` path (path required) registered as an external ref, a
 //!   **host-provided** blob to coven's local store (no path). Then it takes the
@@ -45,12 +48,12 @@ use crate::database::DbError;
 use crate::database::StoreDatabase;
 use crate::db::OutboxEntry;
 use crate::store_dir::StoreDir;
-use crate::sync::hlc::Hlc;
 use crate::sync::session::SyncedTable;
 
 use crate::blob::BlobTransitionObserver;
 use crate::storage::SyncStorage;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::watch;
 
 /// Why a make_remote (or its cancel) could not be started.
@@ -113,6 +116,217 @@ pub enum MakeLocalError {
     Db(#[from] DbError),
 }
 
+#[derive(Clone)]
+pub(crate) struct BlobTransitionJournal {
+    database: StoreDatabase,
+}
+
+impl BlobTransitionJournal {
+    pub(crate) fn new(database: StoreDatabase) -> Self {
+        Self { database }
+    }
+
+    /// Cancel an uploading make_remote by durably marking its intent Cancelling. The gate
+    /// remains Local. The upload drain exact-deletes each prepared/created cloud object
+    /// and spool, then removes the last journal and intent together. A new transition
+    /// cannot start over cleanup in progress. Once the publication Store write exists,
+    /// cancellation is rejected because that write owns the transition's atomic outcome.
+    pub(crate) async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), MakeRemoteError> {
+        let tables = self.database.synced_tables();
+        gated_root_gate_col(tables, root_table)?;
+        self.database
+            .cancel_make_remote(root_table, root_id)
+            .await
+            .map_err(MakeRemoteError::from)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LocalBlobTransitions {
+    journal: BlobTransitionJournal,
+    store_dir: StoreDir,
+}
+
+impl LocalBlobTransitions {
+    pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
+        Self {
+            journal: BlobTransitionJournal::new(database),
+            store_dir,
+        }
+    }
+
+    /// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
+    /// verify each user-provided blob's external source file, enqueue an upload per blob,
+    /// and record the make_remote intent in one transaction. Returns once enqueued — the
+    /// sync cycle uploads all needed blobs and flips the gate true only after they land.
+    /// The caller triggers a sync cycle to start that completion.
+    ///
+    /// Verifying every source up front (exists + length matches the registered size)
+    /// means a missing file aborts with nothing enqueued, rather than leaving a
+    /// half-queued make_remote. `pin` becomes each upload's `retain_pinned`, so the
+    /// blob is kept in coven's cache as a pinned (offline) copy.
+    pub(crate) async fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        let db = &self.journal.database;
+        let tables = db.synced_tables().to_vec();
+        let gate_col = gated_root_gate_col(&tables, root_table)?;
+        let locality = db
+            .gated_root_locality(root_table, &gate_col, root_id)
+            .await?;
+        match locality {
+            Some(false) => {}
+            Some(true) => {
+                return Err(MakeRemoteError::AlreadyRemote(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ));
+            }
+            None => {
+                return Err(MakeRemoteError::UnresolvedLocality(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ));
+            }
+        }
+
+        let refs = db.row_blob_refs_for_root(root_table, root_id).await?;
+        if refs.is_empty() {
+            return Err(MakeRemoteError::NothingToMakeRemote(
+                root_table.to_string(),
+                root_id.to_string(),
+            ));
+        }
+
+        let mut uploads = Vec::with_capacity(refs.len());
+        for reference in refs {
+            if reference.authority() != &crate::blob::RowBlobAuthority::Local
+                || reference.stored().is_some()
+            {
+                return Err(MakeRemoteError::AlreadyRemote(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ));
+            }
+            let blob = reference.blob();
+            let source_path = match blob.provenance {
+                Provenance::UserProvided => {
+                    db.external_blob_for_row(&reference)
+                        .await?
+                        .ok_or_else(|| MakeRemoteError::NotExternal(blob.id.clone()))?
+                        .path
+                }
+                Provenance::HostProvided => self
+                    .store_dir
+                    .local_blob_path(&blob.namespace, &blob.id)
+                    .map_err(|error| MakeRemoteError::Source {
+                        blob_id: blob.id.clone(),
+                        path: format!("local/{}/{}", blob.namespace, blob.id),
+                        detail: error.to_string(),
+                    })?,
+            };
+            let (actual_size, actual_hash) = crate::local_blob::exact_file_facts(&source_path)
+                .await
+                .map_err(|detail| MakeRemoteError::Source {
+                    blob_id: blob.id.clone(),
+                    path: source_path.display().to_string(),
+                    detail,
+                })?;
+            if actual_size != reference.plaintext_size()
+                || actual_hash != reference.plaintext_hash()
+            {
+                return Err(MakeRemoteError::Source {
+                    blob_id: blob.id.clone(),
+                    path: source_path.display().to_string(),
+                    detail: format!(
+                        "plaintext facts {actual_size}/{actual_hash} differ from row facts {}/{}",
+                        reference.plaintext_size(),
+                        reference.plaintext_hash(),
+                    ),
+                });
+            }
+            uploads.push((reference, source_path));
+        }
+
+        let created_at = db.stamp();
+        let locality = db
+            .begin_make_remote(root_table, &gate_col, root_id, pin, created_at, uploads)
+            .await?;
+        match locality {
+            Some(false) => Ok(()),
+            Some(true) => Err(MakeRemoteError::AlreadyRemote(
+                root_table.to_string(),
+                root_id.to_string(),
+            )),
+            None => Err(MakeRemoteError::UnresolvedLocality(
+                root_table.to_string(),
+                root_id.to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), MakeRemoteError> {
+        self.journal.cancel_make_remote(root_table, root_id).await
+    }
+}
+
+pub(crate) struct ConnectedBlobTransitions {
+    local: LocalBlobTransitions,
+    blob_access: crate::sync::store::blob::RemoteStoreBlobAccess,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
+    observer: Option<Arc<dyn BlobTransitionObserver>>,
+}
+
+impl ConnectedBlobTransitions {
+    pub(crate) fn new(
+        database: StoreDatabase,
+        storage: Arc<dyn SyncStorage>,
+        store_dir: StoreDir,
+        routing_encryption: Option<crate::encryption::EncryptionService>,
+        observer: Option<Arc<dyn BlobTransitionObserver>>,
+    ) -> Self {
+        let local = LocalBlobTransitions::new(database.clone(), store_dir.clone());
+        let blob_access = crate::sync::store::blob::RemoteStoreBlobAccess::new(
+            crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir),
+            storage,
+        );
+        Self {
+            local,
+            blob_access,
+            routing_encryption,
+            observer,
+        }
+    }
+
+    pub(crate) async fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        self.local.make_remote(root_table, root_id, pin).await
+    }
+
+    pub(crate) async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), MakeRemoteError> {
+        self.local.cancel_make_remote(root_table, root_id).await
+    }
+}
+
 /// The gate column of `root_table`, or `None` if it is not a gated root.
 fn gate_column<'a>(tables: &'a [SyncedTable], root_table: &str) -> Option<&'a str> {
     tables
@@ -129,8 +343,8 @@ fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
 
 /// Validate that `root_table` is a coven-owned gated root (rejecting a remote root
 /// and a non-gated table) and return its gate column. The gate column names the row
-/// whose truth is the root's Local/Remote state — [`make_remote`] reads it to refuse
-/// a root already Remote.
+/// whose truth is the root's Local/Remote state —
+/// [`LocalBlobTransitions::make_remote`] reads it to refuse a root already Remote.
 fn gated_root_gate_col(
     tables: &[SyncedTable],
     root_table: &str,
@@ -141,135 +355,6 @@ fn gated_root_gate_col(
     gate_column(tables, root_table)
         .map(str::to_string)
         .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
-}
-
-/// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
-/// verify each user-provided blob's external source file, enqueue an upload per blob,
-/// and record the make_remote intent in one transaction. Returns once enqueued — the
-/// sync cycle uploads all needed blobs and flips the gate true only after they land.
-/// The caller triggers a sync cycle to start that completion.
-///
-/// Verifying every source up front (exists + length matches the registered size)
-/// means a missing file aborts with nothing enqueued, rather than leaving a
-/// half-queued make_remote. `pin` becomes each upload's `retain_pinned`, so the
-/// blob is kept in coven's cache as a pinned (offline) copy.
-pub(crate) async fn make_remote(
-    database: &StoreDatabase,
-    store_dir: &StoreDir,
-    hlc: &Hlc,
-    root_table: &str,
-    root_id: &str,
-    pin: bool,
-) -> Result<(), MakeRemoteError> {
-    let db = &database;
-    let tables = db.synced_tables().to_vec();
-    let gate_col = gated_root_gate_col(&tables, root_table)?;
-    let locality = db
-        .gated_root_locality(root_table, &gate_col, root_id)
-        .await?;
-    match locality {
-        Some(false) => {}
-        Some(true) => {
-            return Err(MakeRemoteError::AlreadyRemote(
-                root_table.to_string(),
-                root_id.to_string(),
-            ));
-        }
-        None => {
-            return Err(MakeRemoteError::UnresolvedLocality(
-                root_table.to_string(),
-                root_id.to_string(),
-            ));
-        }
-    }
-
-    let refs = db.row_blob_refs_for_root(root_table, root_id).await?;
-    if refs.is_empty() {
-        return Err(MakeRemoteError::NothingToMakeRemote(
-            root_table.to_string(),
-            root_id.to_string(),
-        ));
-    }
-
-    let mut uploads = Vec::with_capacity(refs.len());
-    for reference in refs {
-        if reference.authority() != &crate::blob::RowBlobAuthority::Local
-            || reference.stored().is_some()
-        {
-            return Err(MakeRemoteError::AlreadyRemote(
-                root_table.to_string(),
-                root_id.to_string(),
-            ));
-        }
-        let blob = reference.blob();
-        let source_path = match blob.provenance {
-            Provenance::UserProvided => {
-                db.external_blob_for_row(&reference)
-                    .await?
-                    .ok_or_else(|| MakeRemoteError::NotExternal(blob.id.clone()))?
-                    .path
-            }
-            Provenance::HostProvided => store_dir
-                .local_blob_path(&blob.namespace, &blob.id)
-                .map_err(|error| MakeRemoteError::Source {
-                    blob_id: blob.id.clone(),
-                    path: format!("local/{}/{}", blob.namespace, blob.id),
-                    detail: error.to_string(),
-                })?,
-        };
-        let (actual_size, actual_hash) = crate::local_blob::exact_file_facts(&source_path)
-            .await
-            .map_err(|detail| MakeRemoteError::Source {
-                blob_id: blob.id.clone(),
-                path: source_path.display().to_string(),
-                detail,
-            })?;
-        if actual_size != reference.plaintext_size() || actual_hash != reference.plaintext_hash() {
-            return Err(MakeRemoteError::Source {
-                blob_id: blob.id.clone(),
-                path: source_path.display().to_string(),
-                detail: format!(
-                    "plaintext facts {actual_size}/{actual_hash} differ from row facts {}/{}",
-                    reference.plaintext_size(),
-                    reference.plaintext_hash(),
-                ),
-            });
-        }
-        uploads.push((reference, source_path));
-    }
-
-    let created_at = hlc.now().to_string();
-    let locality = db
-        .begin_make_remote(root_table, &gate_col, root_id, pin, created_at, uploads)
-        .await?;
-    match locality {
-        Some(false) => Ok(()),
-        Some(true) => Err(MakeRemoteError::AlreadyRemote(
-            root_table.to_string(),
-            root_id.to_string(),
-        )),
-        None => Err(MakeRemoteError::UnresolvedLocality(
-            root_table.to_string(),
-            root_id.to_string(),
-        )),
-    }
-}
-
-/// Cancel an uploading make_remote by durably marking its intent Cancelling. The gate
-/// remains Local. The upload drain exact-deletes each prepared/created cloud object
-/// and spool, then removes the last journal and intent together. A new transition
-/// cannot start over cleanup in progress. Once the publication Store write exists,
-/// cancellation is rejected because that write owns the transition's atomic outcome.
-pub(crate) async fn cancel_make_remote(
-    db: &StoreDatabase,
-    root_table: &str,
-    root_id: &str,
-) -> Result<(), MakeRemoteError> {
-    let tables = db.synced_tables();
-    gated_root_gate_col(tables, root_table)?;
-    db.cancel_make_remote(root_table, root_id)
-        .await
-        .map_err(MakeRemoteError::from)
 }
 
 pub(crate) enum PostUpload {
@@ -300,10 +385,10 @@ pub(crate) async fn finalize_created_upload(
 // make_local — foreground operation with a cancel signal
 // ===========================================================================
 
-/// One blob materialized back to a local file by [`make_local`], carrying what the
-/// single commit needs. `dest` is present for a user-provided blob whose local
-/// home is the user's path; absent for a host-provided blob whose local home is
-/// coven's local store.
+/// One blob materialized back to a local file by
+/// [`ConnectedBlobTransitions::make_local`], carrying what the single commit needs.
+/// `dest` is present for a user-provided blob whose local home is the user's path;
+/// absent for a host-provided blob whose local home is coven's local store.
 /// Bring a Remote root's blobs back to local files, then flip it Local in one atomic
 /// commit. Foreground and awaitable, with per-blob materialize progress and
 /// cooperative cancellation.
@@ -323,129 +408,124 @@ pub(crate) async fn finalize_created_upload(
 /// a write error) before the commit, deletes the partial local copies already
 /// written and aborts: the gate is still on and the cloud is intact, so the root
 /// stays Remote and a retry re-materializes cleanly.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn make_local(
-    database: &StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
-    store_dir: &StoreDir,
-    hlc: &Hlc,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
-    observer: Option<&dyn BlobTransitionObserver>,
-    root_table: &str,
-    root_id: &str,
-    dest: &HashMap<String, PathBuf>,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(), MakeLocalError> {
-    let db = &database;
-    let tables = db.synced_tables().to_vec();
-    StoreDatabase::validate_store_write_routing(db.gates().as_ref(), routing_encryption.as_ref())?;
-    if is_remote_root(&tables, root_table) {
-        return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
-    }
-    let gate_col = gate_column(&tables, root_table)
-        .ok_or_else(|| MakeLocalError::NotGated(root_table.to_string()))?
-        .to_string();
-
-    // Refuse a root already Local before any materialization. Otherwise the
-    // materializer would try to read each blob back from the cloud — a Local blob has
-    // no cloud copy — and fail deep inside with a misleading cloud-read error.
-    // `query_truth` is the same locality reader the read/delete paths use, so there is
-    // one definition of a root's Local/Remote state.
-    let locality = db
-        .gated_root_locality(root_table, &gate_col, root_id)
-        .await?;
-    match locality {
-        Some(true) => {}
-        Some(false) => {
-            return Err(MakeLocalError::AlreadyLocal(
-                root_table.to_string(),
-                root_id.to_string(),
-            ))
+impl ConnectedBlobTransitions {
+    pub(crate) async fn make_local(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        dest: &HashMap<String, PathBuf>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), MakeLocalError> {
+        let db = &self.local.journal.database;
+        let tables = db.synced_tables().to_vec();
+        StoreDatabase::validate_store_write_routing(
+            db.gates().as_ref(),
+            self.routing_encryption.as_ref(),
+        )?;
+        if is_remote_root(&tables, root_table) {
+            return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
         }
-        None => {
-            return Err(MakeLocalError::UnresolvedLocality(
-                root_table.to_string(),
-                root_id.to_string(),
-            ))
-        }
-    }
+        let gate_col = gate_column(&tables, root_table)
+            .ok_or_else(|| MakeLocalError::NotGated(root_table.to_string()))?
+            .to_string();
 
-    let refs = db.row_blob_refs_for_root(root_table, root_id).await?;
-    for reference in &refs {
-        if !matches!(
-            reference.authority(),
-            crate::blob::RowBlobAuthority::Remote(_)
-        ) || reference.stored().is_none()
+        // Refuse a root already Local before any materialization. Otherwise the
+        // materializer would try to read each blob back from the cloud — a Local blob has
+        // no cloud copy — and fail deep inside with a misleading cloud-read error.
+        // `query_truth` is the same locality reader the read/delete paths use, so there is
+        // one definition of a root's Local/Remote state.
+        let locality = db
+            .gated_root_locality(root_table, &gate_col, root_id)
+            .await?;
+        match locality {
+            Some(true) => {}
+            Some(false) => {
+                return Err(MakeLocalError::AlreadyLocal(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ))
+            }
+            None => {
+                return Err(MakeLocalError::UnresolvedLocality(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ))
+            }
+        }
+
+        let refs = db.row_blob_refs_for_root(root_table, root_id).await?;
+        for reference in &refs {
+            if !matches!(
+                reference.authority(),
+                crate::blob::RowBlobAuthority::Remote(_)
+            ) || reference.stored().is_none()
+            {
+                return Err(MakeLocalError::UnresolvedLocality(
+                    root_table.to_string(),
+                    root_id.to_string(),
+                ));
+            }
+        }
+
+        // Validate every provided dest is UTF-8 up front — before any materialization — so
+        // a non-UTF-8 path aborts with nothing written and the cloud intact, rather than
+        // being caught only at commit-building after the destructive materialize (and on a
+        // filesystem that rejects non-UTF-8 names, the write would fail first and that
+        // check would never be reached). An external ref persists the path as a string, so
+        // a non-UTF-8 path cannot be registered; fail loud rather than lossily rewrite it
+        // and tombstone the cloud copy.
+        for (blob_id, path) in dest {
+            if path.to_str().is_none() {
+                return Err(MakeLocalError::NonUtf8Dest {
+                    blob_id: blob_id.clone(),
+                    path: path.display().to_string(),
+                });
+            }
+        }
+
+        // Any error after the first local copy is written must roll those files back, so
+        // an aborted make_local leaves no partial materialization behind. `written`
+        // tracks what to remove; the loop's result drives the cleanup-or-commit
+        // decision.
+        let mut written: Vec<PathBuf> = Vec::new();
+        let materialized = match materialize_blobs(
+            &self.blob_access,
+            &self.local.store_dir,
+            self.observer.as_deref(),
+            root_table,
+            root_id,
+            &refs,
+            dest,
+            cancel,
+            &mut written,
+        )
+        .await
         {
-            return Err(MakeLocalError::UnresolvedLocality(
-                root_table.to_string(),
-                root_id.to_string(),
-            ));
+            Ok(m) => m,
+            Err(e) => return Err(roll_back(&written, e).await),
+        };
+
+        let stamp = db.stamp();
+        let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
+        // The single atomic commit: flip false + register external refs (user-provided
+        // only) + enqueue the cloud deletes, together. The destructive cloud delete is
+        // durable inside this commit, so a crash right after can never leave the root
+        // Local with the cloud blobs un-tombstoned.
+        db.commit_make_local(
+            &root_table_owned,
+            &root_id_owned,
+            &gate_col,
+            stamp,
+            self.routing_encryption.clone(),
+            materialized,
+        )
+        .await?;
+
+        if let Some(obs) = self.observer.as_deref() {
+            obs.on_root_made_local(root_table, root_id).await;
         }
+        Ok(())
     }
-
-    // Validate every provided dest is UTF-8 up front — before any materialization — so
-    // a non-UTF-8 path aborts with nothing written and the cloud intact, rather than
-    // being caught only at commit-building after the destructive materialize (and on a
-    // filesystem that rejects non-UTF-8 names, the write would fail first and that
-    // check would never be reached). An external ref persists the path as a string, so
-    // a non-UTF-8 path cannot be registered; fail loud rather than lossily rewrite it
-    // and tombstone the cloud copy.
-    for (blob_id, path) in dest {
-        if path.to_str().is_none() {
-            return Err(MakeLocalError::NonUtf8Dest {
-                blob_id: blob_id.clone(),
-                path: path.display().to_string(),
-            });
-        }
-    }
-
-    // Any error after the first local copy is written must roll those files back, so
-    // an aborted make_local leaves no partial materialization behind. `written`
-    // tracks what to remove; the loop's result drives the cleanup-or-commit
-    // decision.
-    let mut written: Vec<PathBuf> = Vec::new();
-    let blob_access = crate::sync::store::blob::RemoteStoreBlobAccess::new(
-        crate::sync::store::blob::LocalStoreBlobAccess::new(database.clone(), store_dir.clone()),
-        storage,
-    );
-    let materialized = match materialize_blobs(
-        &blob_access,
-        store_dir,
-        observer,
-        root_table,
-        root_id,
-        &refs,
-        dest,
-        cancel,
-        &mut written,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => return Err(roll_back(&written, e).await),
-    };
-
-    let stamp = hlc.now().to_string();
-    let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
-    // The single atomic commit: flip false + register external refs (user-provided
-    // only) + enqueue the cloud deletes, together. The destructive cloud delete is
-    // durable inside this commit, so a crash right after can never leave the root
-    // Local with the cloud blobs un-tombstoned.
-    db.commit_make_local(
-        &root_table_owned,
-        &root_id_owned,
-        &gate_col,
-        stamp,
-        routing_encryption,
-        materialized,
-    )
-    .await?;
-
-    if let Some(obs) = observer {
-        obs.on_root_made_local(root_table, root_id).await;
-    }
-    Ok(())
 }
 
 /// Read each of `refs`'s blobs and write it durably to its local file, pushing each

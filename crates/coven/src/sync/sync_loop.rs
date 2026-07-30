@@ -27,10 +27,8 @@ use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 
 use super::cycle::SyncComponents;
-use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
 use crate::storage::BlobPathScheme;
-use crate::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +103,7 @@ pub(crate) struct SyncLoopHandle {
 
 struct SyncLoopInner {
     components: SyncComponents,
+    blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
     security: StoreSecurity,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
@@ -182,10 +181,13 @@ impl SyncLoopHandle {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let store_dir = config.store_dir.clone();
+        let blob_transitions =
+            components.connected_blob_transitions(store_dir.clone(), observer.clone());
 
         Self {
             inner: Arc::new(SyncLoopInner {
                 components,
+                blob_transitions,
                 security,
                 observer,
                 _open_guard: open_guard,
@@ -299,13 +301,7 @@ impl SyncLoopHandle {
                     let mut consecutive_failures: u32 = 0;
                     while running.load(Ordering::Acquire) && !*stop_rx.borrow() {
                         status_tx.send_replace(SyncLoopStatus::CheckingStorage);
-                        let reachable = inner
-                            .components
-                            .storage()
-                            .cloud_home()
-                            .probe()
-                            .await
-                            .map_err(crate::storage::StorageError::from);
+                        let reachable = inner.components.probe_storage().await;
                         let (decision, status) = match reachable {
                             Err(error) => {
                                 let status = storage_check_failure_status(&error);
@@ -334,7 +330,15 @@ impl SyncLoopHandle {
                                 };
                                 let status = match &decision.report {
                                     SyncLoopReport::Success(success) => {
-                                        match current_success_status(inner.components.database(), success.clone()).await {
+                                        let projected = match inner
+                                            .components
+                                            .pending_blocked_writes()
+                                            .await
+                                        {
+                                            Ok(writes) => current_success_status(writes, success.clone()),
+                                            Err(error) => Err(format!("read pending writes after sync: {error}")),
+                                        };
+                                        match projected {
                                             Ok(status) => status,
                                             Err(error) => SyncLoopStatus::Failed { error },
                                         }
@@ -441,12 +445,16 @@ impl SyncLoopHandle {
 
     // -- Accessors for membership operations --
 
-    pub(crate) fn storage(&self) -> &Arc<dyn SyncStorage> {
-        self.inner.components.storage()
-    }
-
     pub(crate) fn store(&self) -> Arc<crate::sync::store::Store> {
         self.inner.components.store()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uses_storage_for_test(
+        &self,
+        expected: &Arc<dyn crate::storage::SyncStorage>,
+    ) -> bool {
+        self.inner.components.uses_storage_for_test(expected)
     }
 
     pub(crate) async fn discard_blocked_write(
@@ -456,6 +464,7 @@ impl SyncLoopHandle {
         self.inner.components.discard_blocked_write(write_id).await
     }
 
+    #[cfg(test)]
     pub(crate) fn store_dir(&self) -> &StoreDir {
         &self.store_dir
     }
@@ -470,10 +479,6 @@ impl SyncLoopHandle {
 
     pub(crate) fn self_uploader(&self) -> String {
         self.inner.components.self_uploader()
-    }
-
-    pub(crate) fn hlc(&self) -> &Arc<Hlc> {
-        self.inner.components.hlc()
     }
 
     pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
@@ -533,6 +538,42 @@ impl SyncLoopHandle {
                 &self.store_dir,
                 self.inner.observer.as_deref(),
             )
+            .await
+    }
+
+    pub(crate) async fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.inner
+            .blob_transitions
+            .make_remote(root_table, root_id, pin)
+            .await
+    }
+
+    pub(crate) async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.inner
+            .blob_transitions
+            .cancel_make_remote(root_table, root_id)
+            .await
+    }
+
+    pub(crate) async fn make_local(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        dest: &std::collections::HashMap<String, std::path::PathBuf>,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), crate::blob::transition::MakeLocalError> {
+        self.inner
+            .blob_transitions
+            .make_local(root_table, root_id, dest, cancel)
             .await
     }
 
@@ -797,17 +838,10 @@ fn storage_check_failure_status(error: &crate::storage::StorageError) -> SyncLoo
     }
 }
 
-async fn current_success_status(
-    db: &crate::database::StoreDatabase,
+fn current_success_status(
+    writes: Vec<crate::PendingWrite>,
     success: SyncLoopSuccess,
 ) -> Result<SyncLoopStatus, String> {
-    let writes: Vec<_> = db
-        .pending_writes()
-        .await
-        .map_err(|error| format!("read pending writes after sync: {error}"))?
-        .into_iter()
-        .filter(|write| matches!(write.status, crate::WriteStatus::Blocked(_)))
-        .collect();
     if !writes.is_empty() {
         return Ok(SyncLoopStatus::Blocked { success, writes });
     }
@@ -918,9 +952,11 @@ mod tests {
             }),
         )
         .await;
-        let blocked = current_success_status(&store_database, success())
+        let writes = store_database
+            .pending_writes()
             .await
-            .expect("project blocked state");
+            .expect("load blocked writes");
+        let blocked = current_success_status(writes, success()).expect("project blocked state");
         assert!(matches!(
             blocked,
             SyncLoopStatus::Blocked { writes, .. }
@@ -938,9 +974,14 @@ mod tests {
         .expect("remove blocked projection fixture");
 
         assert!(matches!(
-            current_success_status(&store_database, success())
-                .await
-                .expect("project synchronized state"),
+            current_success_status(
+                store_database
+                    .pending_writes()
+                    .await
+                    .expect("load synchronized writes"),
+                success(),
+            )
+            .expect("project synchronized state"),
             SyncLoopStatus::Synchronized(_)
         ));
     }

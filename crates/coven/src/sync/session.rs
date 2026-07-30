@@ -315,8 +315,8 @@ impl SyncedTable {
 
     /// Make this a remote root: every row syncs, and blobs on the row or its
     /// foreign-key descendants are always Remote. There is no Local state for
-    /// [`crate::blob::transition::make_remote`] or
-    /// [`crate::blob::transition::make_local`] to transition.
+    /// [`crate::CovenHandle::make_remote`] or [`crate::CovenHandle::make_local`]
+    /// to transition.
     pub fn remote_root(mut self) -> Self {
         self.role = GateRole::RemoteRoot;
         self

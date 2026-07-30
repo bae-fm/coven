@@ -3719,14 +3719,11 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
-    crate::blob::transition::make_remote(
-        &crate::database::StoreDatabase::new(&db),
-        &ld,
-        hlc.as_ref(),
-        "notes",
-        "n1",
-        false,
+    crate::blob::transition::LocalBlobTransitions::new(
+        crate::database::StoreDatabase::new(&db),
+        ld.clone(),
     )
+    .make_remote("notes", "n1", false)
     .await
     .expect("queue the host-provided make_remote intent");
 
@@ -3842,14 +3839,11 @@ async fn ready_make_remote_provider_transport_is_offline() {
     crate::blob::local_files::store(&ld, "photos", "transport-blob", b"cover")
         .await
         .expect("store host-provided blob");
-    crate::blob::transition::make_remote(
-        &crate::database::StoreDatabase::new(&db),
-        &ld,
-        &hlc,
-        "notes",
-        "transport-root",
-        false,
+    crate::blob::transition::LocalBlobTransitions::new(
+        crate::database::StoreDatabase::new(&db),
+        ld.clone(),
     )
+    .make_remote("notes", "transport-root", false)
     .await
     .expect("queue make_remote intent");
     fail_exact_create_on(&storage, 1);

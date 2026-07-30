@@ -1,8 +1,8 @@
 //! Tests for the coven-owned make-Remote / make-Local transitions.
 //!
-//! These drive the real transition functions ([`make_remote`],
-//! [`cancel_make_remote`], [`make_local`]) and the upload drain's completion
-//! flip against a real [`Database`] and a [`TestStore`] that serves as both
+//! These drive the real transition owners (`LocalBlobTransitions`,
+//! `BlobTransitionJournal`, and `ConnectedBlobTransitions`) and the upload
+//! drain's completion flip against a real [`Database`] and a [`TestStore`] that serves as both
 //! the sync storage and the cloud home. A `Plaintext` cipher + `Plain` blob-path
 //! scheme keep what the drain writes and what a read fetches byte-identical through
 //! the mock, so a blob round-trips as plaintext across devices.
@@ -15,13 +15,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::{
-    cancel_make_remote, make_local as store_make_local, make_remote as store_make_remote,
+    BlobTransitionJournal, ConnectedBlobTransitions, LocalBlobTransitions,
 };
 use crate::blob::{cache, local_files, BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use crate::clock::SystemClock;
@@ -46,20 +46,13 @@ use crate::sync::test_helpers::{
 async fn make_remote(
     db: &Database,
     store_dir: &StoreDir,
-    hlc: &Hlc,
     root_table: &str,
     root_id: &str,
     pin: bool,
 ) -> Result<(), crate::blob::transition::MakeRemoteError> {
-    store_make_remote(
-        &StoreDatabase::new(db),
-        store_dir,
-        hlc,
-        root_table,
-        root_id,
-        pin,
-    )
-    .await
+    LocalBlobTransitions::new(StoreDatabase::new(db), store_dir.clone())
+        .make_remote(root_table, root_id, pin)
+        .await
 }
 
 async fn read_blob(
@@ -80,28 +73,32 @@ async fn make_local(
     db: &Database,
     storage: std::sync::Arc<dyn SyncStorage>,
     store_dir: &StoreDir,
-    hlc: &Hlc,
     routing_encryption: Option<crate::encryption::EncryptionService>,
-    observer: Option<&dyn BlobTransitionObserver>,
+    observer: Option<Arc<dyn BlobTransitionObserver>>,
     root_table: &str,
     root_id: &str,
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), crate::blob::transition::MakeLocalError> {
-    let database = StoreDatabase::new(db);
-    store_make_local(
-        &database,
+    ConnectedBlobTransitions::new(
+        StoreDatabase::new(db),
         storage,
-        store_dir,
-        hlc,
+        store_dir.clone(),
         routing_encryption,
         observer,
-        root_table,
-        root_id,
-        dest,
-        cancel,
     )
+    .make_local(root_table, root_id, dest, cancel)
     .await
+}
+
+async fn cancel_make_remote(
+    database: &StoreDatabase,
+    root_table: &str,
+    root_id: &str,
+) -> Result<(), crate::blob::transition::MakeRemoteError> {
+    BlobTransitionJournal::new(database.clone())
+        .cancel_make_remote(root_table, root_id)
+        .await
 }
 
 async fn drain_uploads(
@@ -478,7 +475,7 @@ async fn seed_remote_release(
         .expect("build exact remote fixture source path");
     register_external_blob(db, "note_photos", photo_id, &source).await;
     storage.open_into(db).await.expect("open exact test Store");
-    make_remote(db, store_dir, hlc, "notes", note_id, false)
+    make_remote(db, store_dir, "notes", note_id, false)
         .await
         .expect("queue exact remote fixture upload");
     let outcome = drain_uploads(
@@ -793,7 +790,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
     // A makes it Remote: enqueue the upload + intent, then the next cycle's drain
     // uploads the blob and flips the gate.
-    make_remote(&db_a, &lib_a, &hlc_a, "notes", "n1", true)
+    make_remote(&db_a, &lib_a, "notes", "n1", true)
         .await
         .expect("make_remote");
     let recorder = Recorder::default();
@@ -917,7 +914,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
     )
     .await;
 
-    make_remote(&db, &lib, &hlc, "notes", "n1", false)
+    make_remote(&db, &lib, "notes", "n1", false)
         .await
         .expect("make_remote pin=false");
     assert!(
@@ -926,7 +923,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
     );
 
     // A second make_remote with a pin, before the upload drains.
-    make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect("make_remote pin=true");
     assert!(
@@ -963,7 +960,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
 
     let src1 =
         seed_local_release(&db, &user_dir, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
-    make_remote(&db, &lib, &hlc, "notes", "n1", false)
+    make_remote(&db, &lib, "notes", "n1", false)
         .await
         .expect("first make_remote");
     assert_eq!(
@@ -978,7 +975,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     register_external_blob(&db, "note_photos", "photoaaa", &src2).await;
     std::fs::remove_file(&src1).unwrap();
 
-    make_remote(&db, &lib, &hlc, "notes", "n1", false)
+    make_remote(&db, &lib, "notes", "n1", false)
         .await
         .expect("second make_remote");
     assert_eq!(
@@ -1023,7 +1020,7 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         &bytes,
     )
     .await;
-    make_remote(&db, &lib, &hlc, "notes", "n1", false)
+    make_remote(&db, &lib, "notes", "n1", false)
         .await
         .expect("make_remote");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
@@ -1123,15 +1120,14 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let dest_path = dest_dir.join("photoaaa.jpg");
         let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
         let (_cancel_tx, cancel) = watch::channel(false);
-        let recorder = Recorder::default();
+        let recorder = Arc::new(Recorder::default());
         let reads_before_make_local = storage.home.exact_stream_read_count();
         Box::pin(make_local(
             &db_a,
             storage.storage.clone(),
             &lib_a,
-            &hlc_a,
             None,
-            Some(&recorder),
+            Some(recorder.clone()),
             "notes",
             "n1",
             &dest,
@@ -1245,15 +1241,14 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     let dest_path = dest_dir.join("photoscoped.jpg");
     let dest: HashMap<String, PathBuf> = [("photoscoped".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
-    let recorder = Recorder::default();
+    let recorder = Arc::new(Recorder::default());
 
     let error = make_local(
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
-        Some(&recorder),
+        Some(recorder.clone()),
         "notes",
         "n-scoped",
         &dest,
@@ -1308,9 +1303,8 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         Some(routing_encryption),
-        Some(&recorder),
+        Some(recorder.clone()),
         "notes",
         "n-scoped",
         &dest,
@@ -1378,7 +1372,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let source = user_dir.join("photo-user-scoped.jpg");
     std::fs::write(&source, bytes).unwrap();
     register_external_blob(&db, "note_photos", "photo-user-scoped", &source).await;
-    make_remote(&db, &lib, &hlc, "notes", "n-user-scoped", false)
+    make_remote(&db, &lib, "notes", "n-user-scoped", false)
         .await
         .expect("queue scoped user-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
@@ -1497,7 +1491,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     local_files::store(&lib, "covers", "cover-host-scoped", bytes)
         .await
         .expect("store host-provided fixture");
-    make_remote(&db, &lib, &hlc, "notes", "n-host-scoped", false)
+    make_remote(&db, &lib, "notes", "n-host-scoped", false)
         .await
         .expect("queue scoped host-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
@@ -1639,7 +1633,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     // make_remote: the photo drains, the gate flips, and this cycle's inline push
     // uploads the cover from the local store and keeps the requested pin.
-    make_remote(&db_a, &lib_a, &hlc_a, "notes", "n1", true)
+    make_remote(&db_a, &lib_a, "notes", "n1", true)
         .await
         .expect("make_remote");
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
@@ -1694,7 +1688,6 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         &db_a,
         storage.storage.clone(),
         &lib_a,
-        &hlc_a,
         None,
         None,
         "notes",
@@ -1794,7 +1787,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     .expect("read Local host-provided cover");
     assert_eq!(before, cover);
 
-    make_remote(&db_a, &lib_a, &hlc_a, "notes", "n-host", true)
+    make_remote(&db_a, &lib_a, "notes", "n-host", true)
         .await
         .expect("make host-provided-only root remote");
     assert_eq!(
@@ -1899,10 +1892,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             .await
             .expect("store host-provided cover");
     }
-    make_remote(&db, &lib, &hlc, "notes", "n-pin", true)
+    make_remote(&db, &lib, "notes", "n-pin", true)
         .await
         .expect("make_remote pin");
-    make_remote(&db, &lib, &hlc, "notes", "n-drop", false)
+    make_remote(&db, &lib, "notes", "n-drop", false)
         .await
         .expect("make_remote drop");
 
@@ -2213,10 +2206,6 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 
 #[tokio::test]
 async fn make_remote_rejects_remote_root() {
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let db = remote_root_db(cover_decl());
     let (_tmp, lib) = temp_store_dir();
     exec(
@@ -2238,7 +2227,7 @@ async fn make_remote_rejects_remote_root() {
         .await
         .expect("store host-provided blob");
 
-    let err = make_remote(&db, &lib, &hlc, "notes", "n-remote-root", true)
+    let err = make_remote(&db, &lib, "notes", "n-remote-root", true)
         .await
         .expect_err("remote roots have no make_remote transition");
     assert!(
@@ -2251,10 +2240,6 @@ async fn make_remote_rejects_remote_root() {
 async fn make_local_rejects_remote_root() {
     let db = remote_root_db(cover_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     exec(
         &db,
@@ -2279,7 +2264,6 @@ async fn make_local_rejects_remote_root() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -2315,10 +2299,6 @@ async fn cancel_make_remote_rejects_remote_root() {
 /// already-on gate with a fresh stamp — a spurious full-subtree re-publish.
 #[tokio::test]
 async fn make_remote_rejects_already_remote_root() {
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();
 
@@ -2341,7 +2321,7 @@ async fn make_remote_rejects_already_remote_root() {
 
     let stamp_before = gate_stamp(&db, "n-host").await;
 
-    let err = make_remote(&db, &lib, &hlc, "notes", "n-host", true)
+    let err = make_remote(&db, &lib, "notes", "n-host", true)
         .await
         .expect_err("a root already Remote has no make_remote transition");
     assert!(
@@ -2376,10 +2356,6 @@ async fn make_remote_rejects_already_remote_root() {
 /// `test_manage_truncated_source_aborts_before_enqueue`.
 #[tokio::test]
 async fn make_remote_aborts_when_source_size_no_longer_matches() {
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-full-length".to_vec();
@@ -2404,7 +2380,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 
     let stamp_before = gate_stamp(&db, "n1").await;
 
-    let err = make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    let err = make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect_err("a source whose length drifted from its blob row aborts make_remote");
     assert!(
@@ -2457,10 +2433,6 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 async fn make_local_rejects_already_local_root() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"already-local".to_vec();
 
@@ -2484,7 +2456,6 @@ async fn make_local_rejects_already_local_root() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -2537,7 +2508,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     let _src1 = seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
     let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
-    make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect("make_remote");
     assert_eq!(pending_uploads(&db).await, 2, "both uploads queued");
@@ -2624,7 +2595,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     register_external_blob(&db, "note_photos", "photo-a", &photo_source).await;
     register_external_blob(&db, "note_photos", "photo-b", &cover_source).await;
 
-    make_remote(&db, &lib, &hlc, "notes", "n1", false)
+    make_remote(&db, &lib, "notes", "n1", false)
         .await
         .expect("queue both same-locator uploads");
     storage.open_into(&db).await.expect("open exact test Store");
@@ -2850,7 +2821,6 @@ async fn cancel_make_local_before_commit_stays_remote() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -2913,7 +2883,6 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -2993,7 +2962,6 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -3051,7 +3019,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
     let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
-    make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect("make_remote");
 
@@ -3143,7 +3111,6 @@ async fn make_local_abort_then_retry_converges() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -3170,7 +3137,6 @@ async fn make_local_abort_then_retry_converges() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -3215,7 +3181,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &bytes,
     )
     .await;
-    make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect("make_remote 1");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
@@ -3234,7 +3200,6 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &db,
         storage.storage.clone(),
         &lib,
-        &hlc,
         None,
         None,
         "notes",
@@ -3259,7 +3224,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
 
     // Second make_remote: the external file is uploaded to a new exact object and
     // the gate flips back on.
-    make_remote(&db, &lib, &hlc, "notes", "n1", true)
+    make_remote(&db, &lib, "notes", "n1", true)
         .await
         .expect("make_remote 2");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;

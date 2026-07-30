@@ -378,19 +378,10 @@ async fn plant_uploads(
             .expect("register exact source authority");
         paths.push(path);
     }
-    crate::blob::transition::make_remote(
-        &fixture.database,
-        store_dir,
-        &Hlc::new(
-            "test-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        ),
-        "notes",
-        ROOT_ID,
-        retain_pinned,
-    )
-    .await
-    .expect("enqueue real make_remote upload journals");
+    crate::blob::transition::LocalBlobTransitions::new(fixture.database.clone(), store_dir.clone())
+        .make_remote("notes", ROOT_ID, retain_pinned)
+        .await
+        .expect("enqueue real make_remote upload journals");
     paths
 }
 

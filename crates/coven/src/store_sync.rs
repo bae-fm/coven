@@ -6,7 +6,7 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::blob::cache::BlobCacheError;
-use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
+use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
@@ -84,7 +84,7 @@ enum SyncConnection {
     Disconnected,
     Connected {
         loop_handle: Option<Arc<SyncLoopHandle>>,
-        cloud_home: Option<Arc<dyn CloudHome>>,
+        storage: Option<Arc<dyn SyncStorage>>,
     },
 }
 
@@ -96,10 +96,10 @@ impl SyncConnection {
         }
     }
 
-    fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
+    fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
         match self {
             Self::Disconnected => None,
-            Self::Connected { cloud_home, .. } => cloud_home.clone(),
+            Self::Connected { storage, .. } => storage.clone(),
         }
     }
 
@@ -170,23 +170,18 @@ impl StoreSync {
         self.active_loop()
     }
 
-    fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
-        self.connection.read().unwrap().cloud_home()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cloud_home_for_test(&self) -> Option<Arc<dyn CloudHome>> {
-        self.cloud_home()
+    fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
+        self.connection.read().unwrap().storage()
     }
 
     fn install_connection(
         &self,
         loop_handle: Option<Arc<SyncLoopHandle>>,
-        cloud_home: Option<Arc<dyn CloudHome>>,
+        storage: Option<Arc<dyn SyncStorage>>,
     ) {
         *self.connection.write().unwrap() = SyncConnection::Connected {
             loop_handle,
-            cloud_home,
+            storage,
         };
     }
 
@@ -232,31 +227,33 @@ impl StoreSync {
             .create_cloud_home(&config, self.clock.clone(), cloudkit_ops)
             .await?;
         let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
-        let storage = self
-            .security
-            .create_sync_storage_with_home(
-                &config,
-                cloud_home.clone(),
-                Some(cipher),
-                self.blob_chunking,
-            )
-            .map_err(|error| match error {
-                crate::storage::cloud::setup::StorageSetupError::Key(error) => {
-                    SyncError::Key(error)
-                }
-                error => SyncError::StorageSetup(error),
-            })?;
+        let storage = Arc::new(
+            self.security
+                .create_sync_storage_with_home(
+                    &config,
+                    cloud_home.clone(),
+                    Some(cipher),
+                    self.blob_chunking,
+                )
+                .map_err(|error| match error {
+                    crate::storage::cloud::setup::StorageSetupError::Key(error) => {
+                        SyncError::Key(error)
+                    }
+                    error => SyncError::StorageSetup(error),
+                })?,
+        );
         let components = self
-            .initialize_components(storage, routing_encryption)
+            .initialize_components(Arc::clone(&storage), routing_encryption)
             .await?;
         let loop_handle = self.start_loop(components, config)?;
-        self.install_connection(Some(loop_handle), Some(cloud_home));
+        let storage: Arc<dyn SyncStorage> = storage;
+        self.install_connection(Some(loop_handle), Some(storage));
         Ok(())
     }
 
     async fn initialize_components(
         &self,
-        storage: CloudSyncStorage,
+        storage: Arc<CloudSyncStorage>,
         routing_encryption: Option<EncryptionService>,
     ) -> Result<SyncComponents, SyncError> {
         let initialization = match self.database.local_store_root_ref().await? {
@@ -342,20 +339,27 @@ impl StoreSync {
         let routing_encryption = self
             .security
             .routing_encryption(self.database.has_scoped_graph())?;
-        let storage = self
-            .security
-            .create_sync_storage_with_home(&config, home.clone(), Some(cipher), self.blob_chunking)
-            .map_err(|error| match error {
-                crate::storage::cloud::setup::StorageSetupError::Key(error) => {
-                    SyncError::Key(error)
-                }
-                error => SyncError::StorageSetup(error),
-            })?;
+        let storage = Arc::new(
+            self.security
+                .create_sync_storage_with_home(
+                    &config,
+                    home.clone(),
+                    Some(cipher),
+                    self.blob_chunking,
+                )
+                .map_err(|error| match error {
+                    crate::storage::cloud::setup::StorageSetupError::Key(error) => {
+                        SyncError::Key(error)
+                    }
+                    error => SyncError::StorageSetup(error),
+                })?,
+        );
         let components = self
-            .initialize_components(storage, routing_encryption)
+            .initialize_components(Arc::clone(&storage), routing_encryption)
             .await?;
         let loop_handle = self.start_loop(components, config)?;
-        self.install_connection(Some(loop_handle), Some(home));
+        let storage: Arc<dyn SyncStorage> = storage;
+        self.install_connection(Some(loop_handle), Some(storage));
         Ok(())
     }
 
@@ -531,17 +535,8 @@ impl StoreSync {
     }
 
     async fn blob_storage(&self) -> Result<Option<Arc<dyn SyncStorage>>, BlobCacheError> {
-        if let Some(loop_handle) = self.active_loop() {
-            return Ok(Some(loop_handle.storage().clone()));
-        }
-        if let Some(home) = self.cloud_home() {
-            let storage = self.security.create_sync_storage_with_home(
-                &self.config(),
-                home,
-                None,
-                self.blob_chunking,
-            )?;
-            return Ok(Some(Arc::new(storage)));
+        if let Some(storage) = self.storage() {
+            return Ok(Some(storage));
         }
         let config = self.config();
         if config.cloud_home.provider.is_none() {
@@ -601,15 +596,7 @@ impl StoreSync {
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
         let sync_loop = self.running_loop().ok_or(MakeRemoteError::SyncNotReady)?;
-        transition::make_remote(
-            &self.database,
-            sync_loop.store_dir(),
-            sync_loop.hlc(),
-            root_table,
-            root_id,
-            pin,
-        )
-        .await?;
+        sync_loop.make_remote(root_table, root_id, pin).await?;
         self.trigger();
         Ok(())
     }
@@ -619,10 +606,8 @@ impl StoreSync {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        if self.running_loop().is_none() {
-            return Err(MakeRemoteError::SyncNotReady);
-        }
-        transition::cancel_make_remote(&self.database, root_table, root_id).await?;
+        let sync_loop = self.running_loop().ok_or(MakeRemoteError::SyncNotReady)?;
+        sync_loop.cancel_make_remote(root_table, root_id).await?;
         self.trigger();
         Ok(())
     }
@@ -635,22 +620,9 @@ impl StoreSync {
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
         let sync_loop = self.running_loop().ok_or(MakeLocalError::SyncNotReady)?;
-        let routing_encryption = self
-            .security
-            .routing_encryption(self.database.has_scoped_graph())?;
-        transition::make_local(
-            &self.database,
-            sync_loop.storage().clone(),
-            sync_loop.store_dir(),
-            sync_loop.hlc(),
-            routing_encryption,
-            self.observer.as_deref(),
-            root_table,
-            root_id,
-            dest,
-            cancel,
-        )
-        .await?;
+        sync_loop
+            .make_local(root_table, root_id, dest, cancel)
+            .await?;
         self.trigger();
         Ok(())
     }
@@ -690,10 +662,9 @@ impl StoreSync {
         &self,
         identity: &crate::keys::UserKeypair,
     ) -> Result<Store, SyncError> {
-        let active_loop = self.active_loop();
         let config = self.command_config();
-        let storage = match active_loop {
-            Some(handle) => handle.storage().clone(),
+        let storage = match self.storage() {
+            Some(storage) => storage,
             None => {
                 let storage = self
                     .security
@@ -712,6 +683,19 @@ impl StoreSync {
         Store::load(self.database.clone(), storage, identity.clone())
             .await
             .map_err(SyncError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loop_uses_connected_storage_for_test(&self) -> bool {
+        match (self.storage(), self.active_loop()) {
+            (Some(storage), Some(sync_loop)) => sync_loop.uses_storage_for_test(&storage),
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_remote_storage_for_test(&self) -> bool {
+        self.storage().is_some()
     }
 
     pub(crate) fn active_store(&self) -> Result<Arc<Store>, SyncError> {

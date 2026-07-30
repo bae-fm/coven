@@ -279,6 +279,10 @@ impl StoreDatabase {
         self.hlc.clone()
     }
 
+    pub(crate) fn stamp(&self) -> String {
+        self.hlc.now().to_string()
+    }
+
     pub(crate) fn id_provider(&self) -> &dyn crate::id_provider::IdProvider {
         self.ids.as_ref()
     }

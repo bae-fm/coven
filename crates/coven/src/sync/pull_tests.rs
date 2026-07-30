@@ -694,16 +694,10 @@ async fn make_test_root_remote(
         "blob-fixture".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
     );
-    crate::blob::transition::make_remote(
-        &store_database(db),
-        store_dir,
-        &hlc,
-        "notes",
-        root_id,
-        false,
-    )
-    .await
-    .expect("queue exact blob fixture upload");
+    crate::blob::transition::LocalBlobTransitions::new(store_database(db), store_dir.clone())
+        .make_remote("notes", root_id, false)
+        .await
+        .expect("queue exact blob fixture upload");
     let (registration_ref, registration) = store_database(db)
         .local_blob_write_authority()
         .await
@@ -5844,21 +5838,14 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // The source makes the root Local again. Its gate retraction carries the child
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
-    crate::blob::transition::make_local(
-        &crate::database::StoreDatabase::new(&db1),
+    crate::blob::transition::ConnectedBlobTransitions::new(
+        crate::database::StoreDatabase::new(&db1),
         storage.storage.clone(),
-        &source_store_dir,
-        &crate::sync::hlc::Hlc::new(
-            "delete-fixture".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        ),
+        source_store_dir.clone(),
         None,
         None,
-        "notes",
-        "n1",
-        &HashMap::new(),
-        &cancel,
     )
+    .make_local("notes", "n1", &HashMap::new(), &cancel)
     .await
     .expect("make exact blob root Local");
     assert!(storage
@@ -8052,19 +8039,11 @@ mod blob_path_traversal {
         )
         .await;
         let (_tmp, store_dir) = temp_store_dir();
-        let error = crate::blob::transition::make_remote(
-            &store_database(&db1),
-            &store_dir,
-            &crate::sync::hlc::Hlc::new(
-                "traversal-test".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            "notes",
-            "n1",
-            false,
-        )
-        .await
-        .expect_err("a traversal blob id cannot enter the upload journal");
+        let error =
+            crate::blob::transition::LocalBlobTransitions::new(store_database(&db1), store_dir)
+                .make_remote("notes", "n1", false)
+                .await
+                .expect_err("a traversal blob id cannot enter the upload journal");
         assert!(matches!(
             error,
             crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }
@@ -8099,19 +8078,11 @@ mod blob_path_traversal {
         )
         .await;
         let (_tmp, store_dir) = temp_store_dir();
-        let error = crate::blob::transition::make_remote(
-            &store_database(&db1),
-            &store_dir,
-            &crate::sync::hlc::Hlc::new(
-                "short-id-test".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            "notes",
-            "n1",
-            false,
-        )
-        .await
-        .expect_err("an unindexable blob id cannot enter the upload journal");
+        let error =
+            crate::blob::transition::LocalBlobTransitions::new(store_database(&db1), store_dir)
+                .make_remote("notes", "n1", false)
+                .await
+                .expect_err("an unindexable blob id cannot enter the upload journal");
         assert!(matches!(
             error,
             crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }

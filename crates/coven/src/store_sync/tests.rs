@@ -277,7 +277,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
         })
     ));
     assert!(active_loop.is_running());
-    assert!(sync.cloud_home().is_some());
+    assert!(sync.loop_uses_connected_storage_for_test());
 
     let error = connect_test_home(
         sync.clone(),
@@ -293,7 +293,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
         })
     ));
     assert!(active_loop.is_running());
-    assert!(sync.cloud_home().is_some());
+    assert!(sync.loop_uses_connected_storage_for_test());
 }
 
 #[tokio::test]
@@ -365,7 +365,7 @@ async fn failed_restart_leaves_no_stale_connection() {
         .expect_err("invalid configured provider fails restart");
     assert!(error.to_string().contains("failed to build cloud home"));
     assert!(sync.active_loop().is_none());
-    assert!(sync.cloud_home().is_none());
+    assert!(!sync.has_remote_storage_for_test());
 }
 
 #[tokio::test]
@@ -404,7 +404,7 @@ async fn connect_rejects_a_missing_device_identity() {
         .expect_err("missing device identity must fail the connect");
     assert!(matches!(error, SyncError::Key(KeyError::NoDeviceIdentity)));
     assert!(sync.active_loop().is_none());
-    assert!(sync.cloud_home().is_none());
+    assert!(!sync.has_remote_storage_for_test());
 }
 
 #[tokio::test]
@@ -460,7 +460,7 @@ async fn foreign_founder_installs_no_connection() {
         SyncError::Init(crate::sync::cycle::InitSyncError::StoreProtocolRoot(_))
     ));
     assert!(sync.active_loop().is_none());
-    assert!(sync.cloud_home().is_none());
+    assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database
             .get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)

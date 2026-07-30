@@ -1409,11 +1409,8 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
     let components = crate::sync::test_helpers::run_cycle_fixture(&db_b, joiner_storage, &lib_b)
         .await
         .expect("B sync cycle");
-    let joiner_storage = components.storage();
-
-    let snapshot_after = joiner_storage
-        .cloud_home()
-        .list("store-v1/snapshots/")
+    let snapshot_after = components
+        .list_storage_objects_for_test("store-v1/snapshots/")
         .await
         .expect("list Store snapshot objects");
     assert!(

@@ -600,11 +600,12 @@ pub(crate) enum StoreInitialization {
 
 pub(crate) async fn init_sync_over_storage(
     store_database: &crate::database::StoreDatabase,
-    storage: CloudSyncStorage,
+    storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
     initialization: StoreInitialization,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 ) -> Result<SyncComponents, InitSyncError> {
     let db = store_database;
+    let storage = storage.into();
     // Integration guard. The host declared its synced tables on the builder; an
     // empty set means a synced store would attach nothing, every changeset would
     // come out empty, and sync would silently become snapshot-only. Refuse loudly
@@ -631,7 +632,6 @@ pub(crate) async fn init_sync_over_storage(
     let hlc = db.hlc();
     let user_keypair = storage.user_keypair().clone();
     let store_id = storage.store_id().to_string();
-    let storage = std::sync::Arc::new(storage);
     let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
     let initialized = match initialization {
         StoreInitialization::CreateStore => {
@@ -717,13 +717,24 @@ impl SyncComponents {
         self.store.clone()
     }
 
-    #[doc(hidden)]
-    pub(crate) fn database(&self) -> &crate::database::StoreDatabase {
-        &self.database
+    pub(crate) async fn probe_storage(&self) -> Result<(), crate::storage::StorageError> {
+        self.storage
+            .cloud_home()
+            .probe()
+            .await
+            .map_err(crate::storage::StorageError::from)
     }
 
-    pub(crate) fn storage(&self) -> &std::sync::Arc<dyn crate::storage::SyncStorage> {
-        &self.storage
+    pub(crate) async fn pending_blocked_writes(
+        &self,
+    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+        Ok(self
+            .database
+            .pending_writes()
+            .await?
+            .into_iter()
+            .filter(|write| matches!(write.status, crate::WriteStatus::Blocked(_)))
+            .collect())
     }
 
     pub(crate) async fn discard_blocked_write(
@@ -733,8 +744,38 @@ impl SyncComponents {
         self.store.discard_blocked_write(write_id).await
     }
 
-    pub(crate) fn hlc(&self) -> &std::sync::Arc<Hlc> {
-        &self.hlc
+    pub(crate) fn connected_blob_transitions(
+        &self,
+        store_dir: StoreDir,
+        observer: Option<std::sync::Arc<dyn BlobTransitionObserver>>,
+    ) -> crate::blob::transition::ConnectedBlobTransitions {
+        crate::blob::transition::ConnectedBlobTransitions::new(
+            self.database.clone(),
+            self.storage.clone(),
+            store_dir,
+            self.routing_encryption.clone(),
+            observer,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn list_storage_objects_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::storage::StorageError> {
+        self.storage
+            .cloud_home()
+            .list(prefix)
+            .await
+            .map_err(crate::storage::StorageError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uses_storage_for_test(
+        &self,
+        expected: &std::sync::Arc<dyn crate::storage::SyncStorage>,
+    ) -> bool {
+        std::sync::Arc::ptr_eq(&self.storage, expected)
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
