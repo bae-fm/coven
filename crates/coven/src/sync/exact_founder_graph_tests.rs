@@ -38,31 +38,31 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
         .await
         .expect("create source Store");
     let opened_db = open_test_db();
-    store
+    let creates_before = store.home.exact_create_count();
+    let opened = store
         .open_into(&opened_db)
         .await
-        .expect("open existing Store without registering a device");
+        .expect("open existing Store through its founder registration");
 
-    let creates_before = store.home.exact_create_count();
-    let local_registrations_before = table_count(
+    assert_eq!(store.home.exact_create_count(), creates_before);
+    let local_registrations = table_count(
         &opened_db,
         "SELECT COUNT(*) FROM local_store_device_registration",
     )
     .await;
-    let activations_before = table_count(
+    let activations = table_count(
         &opened_db,
         "SELECT COUNT(*) FROM store_device_registration_activations",
     )
     .await;
+    assert_eq!(local_registrations, 1);
+    assert_eq!(activations, 1);
 
-    let error = match store.bind_device(&opened_db, &founder).await {
-        Ok(_) => panic!("an opened Store without a registered device authorized a writer"),
-        Err(error) => error,
-    };
-    assert!(
-        error.contains(crate::database::LOCAL_DEVICE_ID_STATE_KEY),
-        "{error}"
-    );
+    let rebound = store
+        .bind_device(&opened_db, &founder)
+        .await
+        .expect("bind the installed founder registration");
+    assert_eq!(rebound.device_id, opened.device_id);
     assert_eq!(store.home.exact_create_count(), creates_before);
     assert_eq!(
         table_count(
@@ -70,7 +70,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
             "SELECT COUNT(*) FROM local_store_device_registration",
         )
         .await,
-        local_registrations_before,
+        local_registrations,
     );
     assert_eq!(
         table_count(
@@ -78,7 +78,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
             "SELECT COUNT(*) FROM store_device_registration_activations",
         )
         .await,
-        activations_before,
+        activations,
     );
 }
 
