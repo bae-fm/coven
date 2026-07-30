@@ -229,12 +229,14 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
 #[tokio::test]
 async fn capability_admission_refuses_before_stopping_the_active_loop() {
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let config = Arc::new(RwLock::new(Config::with_defaults(
+    let mut initial_config = Config::with_defaults(
         "immutable-admission-before-stop".to_string(),
         "test-device".to_string(),
         store_dir.clone(),
         "Blob Store".to_string(),
-    )));
+    );
+    initial_config.cloud_home.storage = HomeStorage::Browsable;
+    let config = Arc::new(RwLock::new(initial_config));
     let database = crate::sync::test_helpers::open_test_db_with_blob(crate::BlobDecl::new(
         "photos",
         crate::Provenance::HostProvided,
@@ -300,12 +302,13 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
 async fn test_home_replacement_stops_the_previous_loop() {
     test_keyring::install();
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let config = Config::with_defaults(
+    let mut config = Config::with_defaults(
         "sync-restart".to_string(),
         "test-device".to_string(),
         store_dir.clone(),
         "Test Store".to_string(),
     );
+    config.cloud_home.storage = HomeStorage::Browsable;
     let sync = store_sync(
         Arc::new(move || config.clone()),
         StoreKeys::new("sync-restart".to_string()),
@@ -332,12 +335,14 @@ async fn test_home_replacement_stops_the_previous_loop() {
 async fn failed_restart_leaves_no_stale_connection() {
     test_keyring::install();
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let config = Arc::new(RwLock::new(Config::with_defaults(
+    let mut initial_config = Config::with_defaults(
         "sync-failed-restart".to_string(),
         "test-device".to_string(),
         store_dir.clone(),
         "Test Store".to_string(),
-    )));
+    );
+    initial_config.cloud_home.storage = HomeStorage::Browsable;
+    let config = Arc::new(RwLock::new(initial_config));
     let sync = store_sync(
         {
             let config = config.clone();
