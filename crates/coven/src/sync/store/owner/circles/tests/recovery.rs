@@ -36,15 +36,15 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
         .await
         .expect("invite successor member");
     let successor_db = open_test_db();
-    install_active_device_fixture(
-        &store,
-        &db,
-        &successor_db,
-        &successor,
-        "0000000001003-0000-successor",
-    )
-    .await
-    .expect("activate successor device");
+    store
+        .activate_joined_device(
+            &db,
+            &successor_db,
+            &successor,
+            "0000000001003-0000-successor",
+        )
+        .await
+        .expect("activate successor device");
     let exact_membership = store
         .bind_device(&successor_db, &successor)
         .await

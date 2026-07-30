@@ -43,24 +43,24 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
 
     let first_owner_db = crate::sync::test_helpers::open_test_db();
     let second_owner_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &founder_db,
-        &first_owner_db,
-        &first_owner,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate first Owner device");
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &founder_db,
-        &second_owner_db,
-        &second_owner,
-        "2026-07-21T00:01:00Z",
-    )
-    .await
-    .expect("activate second Owner device");
+    store
+        .activate_joined_device(
+            &founder_db,
+            &first_owner_db,
+            &first_owner,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate first Owner device");
+    store
+        .activate_joined_device(
+            &founder_db,
+            &second_owner_db,
+            &second_owner,
+            "2026-07-21T00:01:00Z",
+        )
+        .await
+        .expect("activate second Owner device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &store,
         &founder_db,
@@ -139,15 +139,10 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .await
         .expect("invite Member identity");
     let member_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &owner_db,
-        &member_db,
-        &member,
-        "2026-07-20T00:00:00Z",
-    )
-    .await
-    .expect("activate Member device");
+    store
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
+        .await
+        .expect("activate Member device");
     let member_registration = store
         .bind_device(&member_db, &member)
         .await
@@ -267,15 +262,10 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("invite Member identity");
     let member_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &owner_db,
-        &member_db,
-        &member,
-        "2026-07-20T00:00:00Z",
-    )
-    .await
-    .expect("activate Member device");
+    store
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
+        .await
+        .expect("activate Member device");
     let member_registration = store
         .bind_device(&member_db, &member)
         .await
@@ -396,15 +386,10 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .await
         .expect("invite Member identity");
     let member_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &owner_db,
-        &member_db,
-        &member,
-        "2026-07-20T00:00:00Z",
-    )
-    .await
-    .expect("activate Member device");
+    store
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
+        .await
+        .expect("activate Member device");
     let member_registration = store
         .bind_device(&member_db, &member)
         .await

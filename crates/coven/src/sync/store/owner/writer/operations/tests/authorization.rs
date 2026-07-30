@@ -27,15 +27,10 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .await
         .expect("invite operation author");
     let writer_db = open_test_db();
-    install_active_device_fixture(
-        &store,
-        &owner_db,
-        &writer_db,
-        &writer,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate operation author device");
+    store
+        .activate_joined_device(&owner_db, &writer_db, &writer, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate operation author device");
     promote_active_member_fixture(&store, &owner_db, &writer_db, &owner, &writer, &encryption)
         .await
         .expect("promote operation author to Owner");
@@ -128,15 +123,10 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .await
         .expect("invite operation author");
     let writer_db = open_test_db();
-    install_active_device_fixture(
-        &store,
-        &owner_db,
-        &writer_db,
-        &writer,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate operation author device");
+    store
+        .activate_joined_device(&owner_db, &writer_db, &writer, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate operation author device");
     let owner_device = store
         .bind_device(&owner_db, &owner)
         .await

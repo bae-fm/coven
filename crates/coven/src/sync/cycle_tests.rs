@@ -394,27 +394,6 @@ async fn stored_blob_exists(db: &Database, storage: &TestStore, table: &str, row
     storage.storage.verify_blob_object(&stored).await.is_ok()
 }
 
-async fn activate_joined_test_device(
-    storage: &TestStore,
-    owner_db: &Database,
-    joining_db: &Database,
-    joining_identity: &UserKeypair,
-) -> TestDevice {
-    crate::sync::test_helpers::install_active_device_fixture(
-        storage,
-        owner_db,
-        joining_db,
-        joining_identity,
-        T0,
-    )
-    .await
-    .expect("install active exact device fixture");
-    storage
-        .bind_device(joining_db, joining_identity)
-        .await
-        .expect("bind installed exact device fixture")
-}
-
 fn exercise_pre_attempt_abandonment<'a>(
     owner_db: &'a crate::database::StoreDatabase,
     storage: &'a TestStore,
@@ -1277,7 +1256,10 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
         .await
         .expect("invite exact pending-upload peer");
     let db_b = open_test_db_with_blob(blob_decl);
-    let peer_device = activate_joined_test_device(&storage, &db, &db_b, &peer).await;
+    let peer_device = storage
+        .activate_joined_device(&db, &db_b, &peer, T0)
+        .await
+        .expect("activate exact joined test device");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1388,7 +1370,10 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
         .await
         .expect("invite exact gate-flip peer");
     let db_b = open_test_db_with_blob(blob_decl);
-    let peer_device = activate_joined_test_device(&storage, &db, &db_b, &peer).await;
+    let peer_device = storage
+        .activate_joined_device(&db, &db_b, &peer, T0)
+        .await
+        .expect("activate exact joined test device");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -3090,7 +3075,10 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 // M's database. The injector runs this INSERT into M at the package-read
                 // await, mid-pull.
                 let db_m = open_test_db();
-                activate_joined_test_device(&inner, &producer_db, &db_m, &keypair).await;
+                inner
+                    .activate_joined_device(&producer_db, &db_m, &keypair, T0)
+                    .await
+                    .expect("activate exact joined test device");
                 retain_store_packages_for_assertion(&db_m, &inner, b"existing-host-write-snapshot")
                     .await;
                 let peer_sequence = producer_device
@@ -3113,9 +3101,11 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
          VALUES ('m_mid', 'WrittenMidCycle', NULL, 1, '0000000002000-0000-M', '2026-01-01')",
                 );
                 let db_c = open_test_db();
-                let device_c =
-                    activate_joined_test_device(&storage.inner, &producer_db, &db_c, &keypair)
-                        .await;
+                let device_c = storage
+                    .inner
+                    .activate_joined_device(&producer_db, &db_c, &keypair, T0)
+                    .await
+                    .expect("activate exact joined test device");
 
                 drop(a_src);
                 drop(producer_db);
@@ -3188,7 +3178,10 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .await
         .expect("retain producer Store device");
     let db_m = open_test_db();
-    let device_m = activate_joined_test_device(&storage, &producer_db, &db_m, &keypair).await;
+    let device_m = storage
+        .activate_joined_device(&producer_db, &db_m, &keypair, T0)
+        .await
+        .expect("activate exact joined test device");
     let device_id = db_m
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -5203,7 +5196,10 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         .await
         .expect("invite exact behind Member identity");
     let behind_db = open_test_db();
-    let behind_store = activate_joined_test_device(&storage, &owner_db, &behind_db, &behind).await;
+    let behind_store = storage
+        .activate_joined_device(&owner_db, &behind_db, &behind, T0)
+        .await
+        .expect("activate exact joined test device");
     behind_store
         .pull_store(&ld)
         .await
@@ -5318,7 +5314,10 @@ async fn member_device_does_not_create_a_snapshot() {
         .expect("invite exact Member identity");
 
     let member_db = open_test_db();
-    activate_joined_test_device(&storage, &owner_db, &member_db, &member).await;
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, T0)
+        .await
+        .expect("activate exact joined test device");
     let encryption = Arc::new(RwLock::new(CloudCipher::Encrypted(encryption)));
     host_exec(
         &member_db,
@@ -5384,15 +5383,15 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .await
         .expect("invite successor Owner");
     let successor_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &founder_db,
-        &successor_db,
-        &successor_owner,
-        "2026-07-26T00:00:00Z",
-    )
-    .await
-    .expect("activate successor Owner device");
+    storage
+        .activate_joined_device(
+            &founder_db,
+            &successor_db,
+            &successor_owner,
+            "2026-07-26T00:00:00Z",
+        )
+        .await
+        .expect("activate successor Owner device");
     promote_active_member_fixture(
         &storage,
         &founder_db,
@@ -5480,7 +5479,10 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
         .expect("invite exact Member identity");
 
     let member_db = open_test_db();
-    activate_joined_test_device(&storage, &owner_db, &member_db, &member).await;
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, T0)
+        .await
+        .expect("activate exact joined test device");
 
     assert!(
         crate::database::StoreDatabase::new(&member_db)
@@ -5912,15 +5914,15 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             .await
             .expect("invite second exact Owner identity");
         let excluding_db = open_test_db();
-        crate::sync::test_helpers::install_active_device_fixture(
-            &storage,
-            &founder_db,
-            &excluding_db,
-            &excluding_owner,
-            "2026-07-20T00:00:00Z",
-        )
-        .await
-        .expect("activate second Owner device");
+        storage
+            .activate_joined_device(
+                &founder_db,
+                &excluding_db,
+                &excluding_owner,
+                "2026-07-20T00:00:00Z",
+            )
+            .await
+            .expect("activate second Owner device");
         crate::sync::test_helpers::promote_active_member_fixture(
             &storage,
             &founder_db,

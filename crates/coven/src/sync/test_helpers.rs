@@ -1237,114 +1237,6 @@ pub(crate) async fn run_cycle_fixture(
     Ok(components)
 }
 
-pub(crate) fn install_active_device_fixture<'a>(
-    store: &'a TestStore,
-    observer_db: &'a Database,
-    local_db: &'a Database,
-    identity: &'a UserKeypair,
-    published_at: &'a str,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-    install_active_device_fixture_from_store_database(
-        store,
-        crate::database::StoreDatabase::new(observer_db),
-        local_db,
-        identity,
-        published_at,
-    )
-}
-
-fn install_active_device_fixture_from_store_database<'a>(
-    store: &'a TestStore,
-    observer_database: crate::database::StoreDatabase,
-    local_db: &'a Database,
-    identity: &'a UserKeypair,
-    published_at: &'a str,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-    let future = async move {
-        let local_database = crate::database::StoreDatabase::new(local_db);
-        let observer = store
-            .bind_store_device(&observer_database, &store.signer)
-            .await?;
-        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
-            pending_dir.path().join("pending-device-join.sqlite"),
-        )
-        .map_err(|error| error.to_string())?;
-        let offer = observer
-            .store
-            .begin_device_join(&pubkey_hex(identity))
-            .await
-            .map_err(|error| format!("begin device join: {error}"))?;
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
-            &pending,
-            &*store.storage,
-            identity,
-            offer,
-        )
-        .await
-        .map_err(|error| format!("open pending device join: {error}"))?;
-        let access_request = pending_join
-            .prepare_provider_access_request()
-            .await
-            .map_err(|error| format!("prepare provider access request: {error}"))?;
-        let approval = observer
-            .store
-            .authorize_device_provider_access(access_request, None)
-            .await
-            .map_err(|error| format!("authorize device provider access: {error}"))?;
-        let registration_request = pending_join
-            .prepare_registration_request(approval)
-            .await
-            .map_err(|error| format!("prepare device registration request: {error}"))?;
-        let provisional = observer
-            .store
-            .accept_device_registration_request(registration_request)
-            .await
-            .map_err(|error| format!("accept device registration request: {error}"))?;
-        let provider_ready = observer
-            .store
-            .publish_device_provider_challenge(provisional)
-            .await
-            .map_err(|error| format!("publish device provider challenge: {error}"))?;
-        let mut joining =
-            crate::sync::store::JoiningStore::begin_from_pending(pending_join, local_database)
-                .await
-                .map_err(|error| format!("begin joining Store: {error}"))?;
-        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
-        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-        let bootstrap_pull = joining
-            .pull_store_history(&bootstrap_store_dir, Some(&routing_encryption))
-            .await
-            .map_err(|error| format!("pull joining Store history: {error}"))?;
-        if !bootstrap_pull.held_positions.is_empty() {
-            return Err(format!(
-                "device join bootstrap pull held signed positions: {:?}",
-                bootstrap_pull.held_positions
-            ));
-        }
-        let readiness = joining
-            .bootstrap(provider_ready, published_at)
-            .await
-            .map_err(|error| format!("bootstrap joining Store: {error}"))?;
-        let completion = observer
-            .store
-            .complete_device_provider_admission(readiness)
-            .await
-            .map_err(|error| format!("complete device provider admission: {error}"))?;
-        let activation = observer
-            .store
-            .finalize_device_join(completion)
-            .await
-            .map_err(|error| format!("finalize device join: {error}"))?;
-        joining
-            .complete(activation)
-            .await
-            .map_err(|error| format!("complete joining Store: {error}"))?;
-        Ok(())
-    };
-    Box::pin(future)
-}
-
 pub(crate) async fn promote_active_member_fixture(
     store: &TestStore,
     owner_db: &Database,
@@ -2093,6 +1985,111 @@ impl TestStore {
             .await
     }
 
+    pub(crate) async fn activate_joined_device(
+        &self,
+        observer_db: &Database,
+        joining_db: &Database,
+        joining_identity: &UserKeypair,
+        published_at: &str,
+    ) -> Result<TestDevice, String> {
+        self.activate_joined_device_from_store_database(
+            crate::database::StoreDatabase::new(observer_db),
+            joining_db,
+            joining_identity,
+            published_at,
+        )
+        .await
+    }
+
+    async fn activate_joined_device_from_store_database(
+        &self,
+        observer_database: crate::database::StoreDatabase,
+        joining_db: &Database,
+        joining_identity: &UserKeypair,
+        published_at: &str,
+    ) -> Result<TestDevice, String> {
+        let joining_database = crate::database::StoreDatabase::new(joining_db);
+        let observer = self
+            .bind_store_device(&observer_database, &self.signer)
+            .await?;
+        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+            pending_dir.path().join("pending-device-join.sqlite"),
+        )
+        .map_err(|error| error.to_string())?;
+        let offer = observer
+            .store
+            .begin_device_join(&pubkey_hex(joining_identity))
+            .await
+            .map_err(|error| format!("begin device join: {error}"))?;
+        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+            &pending,
+            &*self.storage,
+            joining_identity,
+            offer,
+        )
+        .await
+        .map_err(|error| format!("open pending device join: {error}"))?;
+        let access_request = pending_join
+            .prepare_provider_access_request()
+            .await
+            .map_err(|error| format!("prepare provider access request: {error}"))?;
+        let approval = observer
+            .store
+            .authorize_device_provider_access(access_request, None)
+            .await
+            .map_err(|error| format!("authorize device provider access: {error}"))?;
+        let registration_request = pending_join
+            .prepare_registration_request(approval)
+            .await
+            .map_err(|error| format!("prepare device registration request: {error}"))?;
+        let provisional = observer
+            .store
+            .accept_device_registration_request(registration_request)
+            .await
+            .map_err(|error| format!("accept device registration request: {error}"))?;
+        let provider_ready = observer
+            .store
+            .publish_device_provider_challenge(provisional)
+            .await
+            .map_err(|error| format!("publish device provider challenge: {error}"))?;
+        let mut joining =
+            crate::sync::store::JoiningStore::begin_from_pending(pending_join, joining_database)
+                .await
+                .map_err(|error| format!("begin joining Store: {error}"))?;
+        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
+        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let bootstrap_pull = joining
+            .pull_store_history(&bootstrap_store_dir, Some(&routing_encryption))
+            .await
+            .map_err(|error| format!("pull joining Store history: {error}"))?;
+        if !bootstrap_pull.held_positions.is_empty() {
+            return Err(format!(
+                "device join bootstrap pull held signed positions: {:?}",
+                bootstrap_pull.held_positions
+            ));
+        }
+        let readiness = joining
+            .bootstrap(provider_ready, published_at)
+            .await
+            .map_err(|error| format!("bootstrap joining Store: {error}"))?;
+        let completion = observer
+            .store
+            .complete_device_provider_admission(readiness)
+            .await
+            .map_err(|error| format!("complete device provider admission: {error}"))?;
+        let activation = observer
+            .store
+            .finalize_device_join(completion)
+            .await
+            .map_err(|error| format!("finalize device join: {error}"))?;
+        joining
+            .complete(activation)
+            .await
+            .map_err(|error| format!("complete joining Store: {error}"))?;
+        self.bind_device(joining_db, joining_identity).await
+    }
+
     pub(crate) async fn bind_store_device(
         &self,
         database: &crate::database::StoreDatabase,
@@ -2327,24 +2324,13 @@ impl TestStore {
                         .db
                         .clone()
                 };
-                install_active_device_fixture_from_store_database(
-                    self,
+                self.activate_joined_device_from_store_database(
                     observer_db,
                     &db,
                     &self.signer,
                     "2026-07-16T00:00:00Z",
                 )
-                .await?;
-                let device_id = db
-                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "test producer has no activated device".to_string())?;
-                let device = self.bind_device(&db, &self.signer).await?;
-                if device.device_id != device_id {
-                    return Err("bound test device differs from its activated id".to_string());
-                }
-                device
+                .await?
             }
         };
         let mut producers = self.producers.lock().await;

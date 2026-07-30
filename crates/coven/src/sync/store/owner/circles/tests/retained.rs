@@ -27,15 +27,15 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("invite successor member through the production membership path");
 
     let successor_db = open_test_db();
-    install_active_device_fixture(
-        &store,
-        &db,
-        &successor_db,
-        &successor,
-        "0000000001003-0000-successor",
-    )
-    .await
-    .expect("activate successor exact device fixture");
+    store
+        .activate_joined_device(
+            &db,
+            &successor_db,
+            &successor,
+            "0000000001003-0000-successor",
+        )
+        .await
+        .expect("activate successor exact device fixture");
     let journal = prepare_circle_operation(
         &successor_db,
         &store.storage,

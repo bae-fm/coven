@@ -134,23 +134,6 @@ async fn invite_exact_member(
         .expect("read exact membership after invitation")
 }
 
-async fn activate_joined_device(
-    storage: &TestStore,
-    owner_db: &crate::database::Database,
-    joining_db: &crate::database::Database,
-    joining_identity: &UserKeypair,
-) {
-    crate::sync::test_helpers::install_active_device_fixture(
-        storage,
-        owner_db,
-        joining_db,
-        joining_identity,
-        "0000000001000-0000-refresh",
-    )
-    .await
-    .expect("install active exact device fixture");
-}
-
 async fn load_exact_chain(storage: &TestStore, db: &crate::database::Database) -> MembershipChain {
     let device = storage
         .open_into(db)
@@ -333,7 +316,10 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // cipher is the OLD key. This is the just-joined steady state.
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
@@ -530,7 +516,10 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
 
     // A peer changeset waiting to be pulled, so the cycle proving it "completes"
     // also proves the pull ran and applied it while sealing was paused.
@@ -620,7 +609,10 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
@@ -724,7 +716,10 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
@@ -802,8 +797,19 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     .await;
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
-    activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(
+            &owner_db,
+            &second_owner_db,
+            &second_owner,
+            "0000000001000-0000-refresh",
+        )
+        .await
+        .expect("activate exact joined test device");
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &storage,
         &owner_db,
@@ -868,7 +874,15 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     )
     .await;
     let second_owner_db = open_test_db();
-    activate_joined_device(&storage, &founder_db, &second_owner_db, &second_owner).await;
+    storage
+        .activate_joined_device(
+            &founder_db,
+            &second_owner_db,
+            &second_owner,
+            "0000000001000-0000-refresh",
+        )
+        .await
+        .expect("activate exact joined test device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &storage,
         &founder_db,
@@ -1017,8 +1031,19 @@ async fn removed_owner_key_is_not_adopted() {
     .await;
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
-    activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(
+            &owner_db,
+            &second_owner_db,
+            &second_owner,
+            "0000000001000-0000-refresh",
+        )
+        .await
+        .expect("activate exact joined test device");
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &storage,
         &owner_db,
@@ -1101,7 +1126,10 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     // B holds its real key (live + keyring) and pins the owner.
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
@@ -1162,7 +1190,10 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let owner_device = storage
         .bind_device(&owner_db, &owner)
         .await
@@ -1234,7 +1265,10 @@ async fn one_cycle_loads_exact_membership_once() {
     // snapshot — whose reclaim would be a separate, out-of-scope membership read.
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
-    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    storage
+        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .await
+        .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));

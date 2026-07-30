@@ -491,15 +491,10 @@ async fn history_with_member_removal() -> (
         .await
         .expect("invite removable member");
     let member_db = open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &db,
-        &member_db,
-        &member,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate removable member device");
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate removable member device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &store,
         &db,

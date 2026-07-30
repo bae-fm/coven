@@ -202,15 +202,10 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
         .expect("publish canonical replay base"));
 
     let writer = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &founder,
-        &writer,
-        &identity,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate concurrent writer");
+    store
+        .activate_joined_device(&founder, &writer, &identity, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate concurrent writer");
     let mut producers = Vec::new();
     for database in [founder.clone(), writer] {
         let stream_id = local_store_stream_id(&database, &store, &identity).await;
@@ -446,15 +441,15 @@ async fn effective_access_fixture(
         )
         .await
         .expect("invite effective-access Store member");
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &owner_database,
-        member_database,
-        &member,
-        "2026-07-23T00:00:00Z",
-    )
-    .await
-    .expect("activate effective-access member device");
+    store
+        .activate_joined_device(
+            &owner_database,
+            member_database,
+            &member,
+            "2026-07-23T00:00:00Z",
+        )
+        .await
+        .expect("activate effective-access member device");
 
     let owner_store = store
         .bind_device(&owner_database, &owner)
@@ -1217,15 +1212,10 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         let progressive = open_scoped_replay_database();
         let complete = open_scoped_replay_database();
         for participant in [&first_writer, &second_writer, &progressive, &complete] {
-            crate::sync::test_helpers::install_active_device_fixture(
-                &store,
-                &founder,
-                participant,
-                &identity,
-                "2026-07-22T00:00:00Z",
-            )
-            .await
-            .expect("activate scoped replay device");
+            store
+                .activate_joined_device(&founder, participant, &identity, "2026-07-22T00:00:00Z")
+                .await
+                .expect("activate scoped replay device");
         }
         let (_first_temp, first_dir) = crate::sync::test_helpers::temp_store_dir();
         let (_second_temp, second_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -1453,15 +1443,15 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .expect("invite exact Store member");
 
     let candidate_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &founder_db,
-        &candidate_db,
-        &candidate,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate candidate device");
+    store
+        .activate_joined_device(
+            &founder_db,
+            &candidate_db,
+            &candidate,
+            "2026-07-21T00:00:00Z",
+        )
+        .await
+        .expect("activate candidate device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &store,
         &founder_db,

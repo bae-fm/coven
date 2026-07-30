@@ -12,8 +12,7 @@ use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::hlc::Hlc;
 use crate::sync::test_helpers::{
-    install_active_device_fixture, open_test_db, promote_active_member_fixture, pubkey_hex,
-    TestCustody, TestStore,
+    open_test_db, promote_active_member_fixture, pubkey_hex, TestCustody, TestStore,
 };
 use std::sync::{Arc, RwLock};
 
@@ -557,15 +556,11 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     let member = UserKeypair::generate();
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let member_db = open_test_db();
-    install_active_device_fixture(
-        &fixture.store,
-        &fixture.db,
-        &member_db,
-        &member,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate member device");
+    fixture
+        .store
+        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate member device");
     let before_promotion = load_fixture(&fixture).await;
     promote_active_member_fixture(
         &fixture.store,
@@ -1018,15 +1013,11 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     let member = UserKeypair::generate();
     invite_fixture_member(&fixture, &member, MemberRole::Member).await;
     let member_db = open_test_db();
-    install_active_device_fixture(
-        &fixture.store,
-        &fixture.db,
-        &member_db,
-        &member,
-        "2026-07-21T00:00:00Z",
-    )
-    .await
-    .expect("activate the member's device");
+    fixture
+        .store
+        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate the member's device");
     Box::pin(promote_active_member_fixture(
         &fixture.store,
         &fixture.db,

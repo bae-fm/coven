@@ -214,15 +214,10 @@ async fn invite_and_activate_peer(
         )
         .await
         .expect("invite peer identity");
-    crate::sync::test_helpers::install_active_device_fixture(
-        storage,
-        observer_db,
-        peer_db,
-        peer,
-        "2026-07-16T00:00:00Z",
-    )
-    .await
-    .expect("activate peer Store device");
+    storage
+        .activate_joined_device(observer_db, peer_db, peer, "2026-07-16T00:00:00Z")
+        .await
+        .expect("activate peer Store device");
     storage
         .bind_device(peer_db, peer)
         .await

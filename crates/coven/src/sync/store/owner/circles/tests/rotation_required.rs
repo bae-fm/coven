@@ -99,7 +99,8 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         .await
         .expect("invite Store member");
     let member_db = open_circle_routing_test_db();
-    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
         .expect("activate Store member device");
 
@@ -929,15 +930,16 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     // A remaining member (the owner) installs a new device through the ordinary
     // genesis-replaying join, which reconstructs the full retained history.
     let joined_db = open_circle_routing_test_db();
-    install_active_device_fixture(
-        &fixture.store,
-        &fixture.db,
-        &joined_db,
-        &fixture.signer,
-        "2026-07-24T00:00:00Z",
-    )
-    .await
-    .expect("device join succeeds after a Circle epoch close");
+    fixture
+        .store
+        .activate_joined_device(
+            &fixture.db,
+            &joined_db,
+            &fixture.signer,
+            "2026-07-24T00:00:00Z",
+        )
+        .await
+        .expect("device join succeeds after a Circle epoch close");
 
     // The newly joined device pulls the Circle's post-close state, including the
     // successor bootstrap, which triggers a retained-replay projection.
@@ -3718,15 +3720,11 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .await
         .expect("invite the second Store member");
     let second_db = open_circle_routing_test_db();
-    install_active_device_fixture(
-        &fixture.store,
-        &fixture.db,
-        &second_db,
-        &second,
-        "2026-07-25T02:00:00Z",
-    )
-    .await
-    .expect("activate the second member device");
+    fixture
+        .store
+        .activate_joined_device(&fixture.db, &second_db, &second, "2026-07-25T02:00:00Z")
+        .await
+        .expect("activate the second member device");
     fixture
         .components
         .add_circle_member(

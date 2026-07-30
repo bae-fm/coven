@@ -4089,15 +4089,10 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     let second = open_scoped_circle_test_db();
     let receiver = open_scoped_circle_test_db();
     for participant in [&first, &second, &receiver] {
-        install_active_device_fixture(
-            &storage,
-            &observer,
-            participant,
-            &owner,
-            "2026-07-19T00:00:00Z",
-        )
-        .await
-        .expect("install active Circle test device");
+        storage
+            .activate_joined_device(&observer, participant, &owner, "2026-07-19T00:00:00Z")
+            .await
+            .expect("install active Circle test device");
     }
     for participant in [&first, &second, &receiver] {
         let (_temp, store_dir) = temp_store_dir();
@@ -4279,15 +4274,10 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
 
     // A second owner device that will hold the comment the mover never sees.
     let receiver = scoped_fk_circle_db();
-    install_active_device_fixture(
-        &storage,
-        &founder,
-        &receiver,
-        &owner,
-        "2026-07-19T00:00:00Z",
-    )
-    .await
-    .expect("install receiver device");
+    storage
+        .activate_joined_device(&founder, &receiver, &owner, "2026-07-19T00:00:00Z")
+        .await
+        .expect("install receiver device");
 
     let loaded = storage
         .bind_device(&founder, &owner)
@@ -6450,15 +6440,10 @@ async fn persisted_cycle_removal() -> PersistedCycleRemoval {
         .await
         .expect("invite second Owner as a Member");
     let second_owner_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &db,
-        &second_owner_db,
-        &second_owner,
-        "2026-03-01T00:00:45Z",
-    )
-    .await
-    .expect("activate second Owner device");
+    storage
+        .activate_joined_device(&db, &second_owner_db, &second_owner, "2026-03-01T00:00:45Z")
+        .await
+        .expect("activate second Owner device");
     promote_active_member_fixture(
         &storage,
         &db,
@@ -6780,15 +6765,15 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await
         .expect("invite second Owner as a Member");
     let second_owner_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &source,
-        &second_owner_db,
-        &second_owner,
-        "2026-03-01T00:00:45Z",
-    )
-    .await
-    .expect("activate second Owner device");
+    storage
+        .activate_joined_device(
+            &source,
+            &second_owner_db,
+            &second_owner,
+            "2026-03-01T00:00:45Z",
+        )
+        .await
+        .expect("activate second Owner device");
     promote_active_member_fixture(
         &storage,
         &source,
@@ -7246,15 +7231,10 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         .expect("active Owner signs membership grant");
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
     let member_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &owner_db,
-        &member_db,
-        &member,
-        "2026-03-01T00:02:00Z",
-    )
-    .await
-    .expect("activate member device");
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-03-01T00:02:00Z")
+        .await
+        .expect("activate member device");
 
     let cs = capture_bytes(
         &member_db,
@@ -7344,15 +7324,10 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
 
     let member_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &owner_db,
-        &member_db,
-        &member,
-        "2026-03-01T00:02:00Z",
-    )
-    .await
-    .expect("activate member device");
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-03-01T00:02:00Z")
+        .await
+        .expect("activate member device");
     let member_changeset = capture_bytes(
         &member_db,
         &[
@@ -7786,7 +7761,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .expect("active Owner signs membership grant");
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
     let member_db = open_test_db();
-    install_active_device_fixture(&storage, &db1, &member_db, &member, "2026-03-01T00:02:00Z")
+    storage
+        .activate_joined_device(&db1, &member_db, &member, "2026-03-01T00:02:00Z")
         .await
         .expect("activate member device");
 
@@ -8166,15 +8142,10 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     let second = open_test_db();
     let receiver = open_test_db();
     for participant in [&first, &second, &receiver] {
-        install_active_device_fixture(
-            &storage,
-            &observer,
-            participant,
-            &keypair,
-            "2026-01-01T00:00:00Z",
-        )
-        .await
-        .expect("install active test device");
+        storage
+            .activate_joined_device(&observer, participant, &keypair, "2026-01-01T00:00:00Z")
+            .await
+            .expect("install active test device");
     }
     for participant in [&first, &second, &receiver] {
         let (_activation_temp, activation_store_dir) = temp_store_dir();

@@ -94,7 +94,8 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     // b_hlc), including A's edit, before it activates the local registration.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_store_dir();
-    install_active_device_fixture(&storage, &db_a, &db_b, &keypair, "0000000001000-0000-dev-b")
+    storage
+        .activate_joined_device(&db_a, &db_b, &keypair, "0000000001000-0000-dev-b")
         .await
         .expect("install B's active exact device fixture");
     let active_device_count = db_a
@@ -365,15 +366,10 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("open exact Store on receiving device");
     let member_db = open_test_db();
-    install_active_device_fixture(
-        &storage,
-        &owner_db,
-        &member_db,
-        &member,
-        "0000000002500-0000-member",
-    )
-    .await
-    .expect("install member's active exact device fixture");
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, "0000000002500-0000-member")
+        .await
+        .expect("install member's active exact device fixture");
     let member_device_id = member_db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await

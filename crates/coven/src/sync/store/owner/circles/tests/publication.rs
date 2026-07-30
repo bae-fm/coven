@@ -534,7 +534,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
              ) STRICT;",
         )],
     );
-    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
         .expect("activate Store member device");
     let (_temp, store_dir) = temp_store_dir();
@@ -640,15 +641,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
              ) STRICT;",
         )],
     );
-    install_active_device_fixture(
-        &store,
-        &db,
-        &concurrent_db,
-        &concurrent_writer,
-        "2026-07-23T00:00:01Z",
-    )
-    .await
-    .expect("activate concurrent Store writer device");
+    store
+        .activate_joined_device(
+            &db,
+            &concurrent_db,
+            &concurrent_writer,
+            "2026-07-23T00:00:01Z",
+        )
+        .await
+        .expect("activate concurrent Store writer device");
     components
         .add_circle_member(
             &store_dir,
@@ -1205,7 +1206,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("invite remaining Store member");
     let member_db = open_circle_routing_test_db();
-    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-23T00:00:00Z")
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
         .expect("activate Store member device");
 
@@ -2260,7 +2262,8 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
         .await
         .expect("invite remaining Store member");
     let member_db = open_circle_routing_test_db();
-    install_active_device_fixture(&store, &db, &member_db, &member, "2026-07-24T00:00:00Z")
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-24T00:00:00Z")
         .await
         .expect("activate Store member device");
 
@@ -3372,7 +3375,8 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         .await
         .expect("invite silent Store member");
     let silent_db = open_circle_routing_test_db();
-    install_active_device_fixture(&store, &db, &silent_db, &silent, "2026-07-24T01:00:00Z")
+    store
+        .activate_joined_device(&db, &silent_db, &silent, "2026-07-24T01:00:00Z")
         .await
         .expect("activate silent participant device");
 

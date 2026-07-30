@@ -1462,15 +1462,10 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    crate::sync::test_helpers::install_active_device_fixture(
-        &storage,
-        &db,
-        &member_db,
-        &member,
-        "2024-06-01T00:00:00Z",
-    )
-    .await
-    .expect("activate exact member uploader");
+    storage
+        .activate_joined_device(&db, &member_db, &member, "2024-06-01T00:00:00Z")
+        .await
+        .expect("activate exact member uploader");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     crate::sync::test_helpers::pull_into(&db, &storage, &store_dir).await;
 
@@ -1546,15 +1541,10 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    crate::sync::test_helpers::install_active_device_fixture(
-        &storage,
-        &db,
-        &member_db,
-        &member,
-        "2024-06-01T00:00:00Z",
-    )
-    .await
-    .expect("activate exact member uploader");
+    storage
+        .activate_joined_device(&db, &member_db, &member, "2024-06-01T00:00:00Z")
+        .await
+        .expect("activate exact member uploader");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     crate::sync::test_helpers::pull_into(&db, &storage, &store_dir).await;
 

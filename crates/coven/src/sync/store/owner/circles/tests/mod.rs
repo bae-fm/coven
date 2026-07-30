@@ -25,8 +25,7 @@ use crate::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
 use crate::sync::test_helpers::{
-    install_active_device_fixture, open_test_db, temp_store_dir, test_migrations,
-    test_synced_tables, TestCustody, TestStore,
+    open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };
 
 async fn local_device_id(db: &Database) -> String {

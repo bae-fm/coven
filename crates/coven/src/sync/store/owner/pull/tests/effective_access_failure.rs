@@ -45,15 +45,15 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         )
         .await
         .expect("invite the second owner");
-    crate::sync::test_helpers::install_active_device_fixture(
-        &store,
-        &owner_database,
-        &second_owner_database,
-        &second_owner,
-        "2026-07-23T00:00:00Z",
-    )
-    .await
-    .expect("activate the second owner's device");
+    store
+        .activate_joined_device(
+            &owner_database,
+            &second_owner_database,
+            &second_owner,
+            "2026-07-23T00:00:00Z",
+        )
+        .await
+        .expect("activate the second owner's device");
     crate::sync::test_helpers::promote_active_member_fixture(
         &store,
         &owner_database,

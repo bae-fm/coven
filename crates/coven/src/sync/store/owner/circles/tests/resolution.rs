@@ -114,7 +114,8 @@ async fn conflict_fixture(label: &str) -> ConflictFixture {
         .expect("activate founder transition");
 
     let db2 = open_test_db();
-    install_active_device_fixture(&store, &db1, &db2, &founder, "0000000001100-0000-device2")
+    store
+        .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
         .await
         .expect("register the founder's second device");
     let (_dir1, dir1) = temp_store_dir();
@@ -547,15 +548,10 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .await
         .expect("invite Store member");
     let member_db = open_routing_db();
-    install_active_device_fixture(
-        &store,
-        &db1,
-        &member_db,
-        &member,
-        "0000000001100-0000-member",
-    )
-    .await
-    .expect("activate Store member device");
+    store
+        .activate_joined_device(&db1, &member_db, &member, "0000000001100-0000-member")
+        .await
+        .expect("activate Store member device");
 
     let (_store_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
@@ -589,7 +585,8 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // The founder's second device pulls the with-member Circle so it can author a
     // successor concurrent with the removal.
     let db2 = open_routing_db();
-    install_active_device_fixture(&store, &db1, &db2, &founder, "0000000001100-0000-device2")
+    store
+        .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
         .await
         .expect("register the founder's second device");
     let (_dir2, dir2) = temp_store_dir();
@@ -808,15 +805,16 @@ async fn non_owner_resolution_is_refused() {
         .await
         .expect("invite a non-owner Store member");
     let outsider_db = open_test_db();
-    install_active_device_fixture(
-        &fixture.store,
-        &fixture.db1,
-        &outsider_db,
-        &outsider,
-        "0000000001600-0000-outsider",
-    )
-    .await
-    .expect("register the non-owner device");
+    fixture
+        .store
+        .activate_joined_device(
+            &fixture.db1,
+            &outsider_db,
+            &outsider,
+            "0000000001600-0000-outsider",
+        )
+        .await
+        .expect("register the non-owner device");
 
     let (chosen, _losing) = fork(&fixture).await;
 

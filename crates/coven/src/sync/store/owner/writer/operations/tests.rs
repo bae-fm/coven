@@ -8,8 +8,8 @@ use crate::sync::store::owner::history::abandonment::{
     ExcludedCandidateHeadObservation, MergeCandidateAbandonment,
 };
 use crate::sync::test_helpers::{
-    create_exact_test_store, host_exec, install_active_device_fixture, open_test_db,
-    promote_active_member_fixture, pubkey_hex, temp_store_dir, TestCustody, TestStore,
+    create_exact_test_store, host_exec, open_test_db, promote_active_member_fixture, pubkey_hex,
+    temp_store_dir, TestCustody, TestStore,
 };
 
 async fn prepare_plan(

@@ -13,8 +13,8 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
 use crate::sync::test_helpers::{
-    host_exec, install_active_device_fixture, open_test_db, pull_into_result, store_database,
-    temp_store_dir, TestDevice, TestStore,
+    host_exec, open_test_db, pull_into_result, store_database, temp_store_dir, TestDevice,
+    TestStore,
 };
 use crate::{StoreDir, WriteId};
 
@@ -155,15 +155,9 @@ async fn run_remaining_device_exclusion() {
         .await
         .expect("open two-device exclusion Store");
     let peer_db = open_test_db();
-    Box::pin(install_active_device_fixture(
-        &store,
-        &owner_db,
-        &peer_db,
-        &signer,
-        "2026-07-18T00:00:00Z",
-    ))
-    .await
-    .expect("activate peer Store device");
+    Box::pin(store.activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z"))
+        .await
+        .expect("activate peer Store device");
 
     let local_device_id = owner_device.device_id.clone();
     let target = store_database(&owner_db)
@@ -198,15 +192,9 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .await
         .expect("open snapshot exclusion Store");
     let peer_db = open_test_db();
-    Box::pin(install_active_device_fixture(
-        &store,
-        &owner_db,
-        &peer_db,
-        &signer,
-        "2026-07-18T00:00:00Z",
-    ))
-    .await
-    .expect("activate snapshot exclusion peer");
+    Box::pin(store.activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z"))
+        .await
+        .expect("activate snapshot exclusion peer");
     let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
         prepare_transfer_candidate(&peer_db, &store, &signer, "snapshot-excluded-candidate"),
     )
@@ -407,7 +395,8 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .await
         .expect("retain bootstrap exclusion membership authority");
     let peer_db = open_test_db();
-    install_active_device_fixture(&store, &owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
+    store
+        .activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
         .await
         .expect("activate bootstrap exclusion peer");
     let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
@@ -1106,15 +1095,9 @@ async fn run_excluded_author_candidate_cleanup_case(
     let directory = tempfile::tempdir().expect("excluded-author database directory");
     let path = directory.path().join("excluded-peer.sqlite");
     let peer_db = open(&path, "excluded-peer-host");
-    Box::pin(install_active_device_fixture(
-        &store,
-        &owner_db,
-        &peer_db,
-        &signer,
-        "2026-07-18T01:00:00Z",
-    ))
-    .await
-    .expect("activate excluded peer");
+    Box::pin(store.activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T01:00:00Z"))
+        .await
+        .expect("activate excluded peer");
     let (_store_temp, store_dir) = temp_store_dir();
     if materialize_before_exclusion {
         Box::pin(materialize_surviving_owner_commit(
