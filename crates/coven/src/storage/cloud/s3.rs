@@ -3,6 +3,8 @@
 //! Wraps `aws-sdk-s3` to provide raw storage operations against any
 //! S3-compatible endpoint.
 
+mod runtime;
+
 use async_trait::async_trait;
 use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
 use aws_config::{BehaviorVersion, Region};
@@ -19,76 +21,12 @@ use super::{
     CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
     ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
 };
-
-/// A coven-owned tokio runtime whose worker threads have a large stack, used to
-/// run every aws-sdk call.
-///
-/// The reason it exists: aws-sdk-s3's endpoint resolver
-/// (`DefaultResolver::resolve_endpoint`, a giant generated function) descends
-/// deep *synchronously in one poll*. When a `CloudHome` S3 call is awaited on a
-/// foreign UI executor thread (Swift's cooperative pool / Kotlin's dispatcher,
-/// ~0.5 MiB stack) the descent overflows that stack → SIGBUS. Spawning every aws
-/// interaction onto a worker of this runtime guarantees the descent always runs
-/// on a big stack, no matter who awaits the `CloudHome` method — so the host no
-/// longer has to know which calls are "deep" and hand-wrap them.
-fn s3_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_stack_size(16 * 1024 * 1024) // aws endpoint resolver needs >> a UI thread's ~0.5 MiB
-            .thread_name("coven-s3")
-            .enable_all() // io + time: the aws connector/sleep need both
-            .build()
-            .expect("build coven S3 runtime")
-    })
-}
-
-struct AbortOnDropTask<T> {
-    handle: Option<tokio::task::JoinHandle<T>>,
-}
-
-impl<T> AbortOnDropTask<T> {
-    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self {
-            handle: Some(handle),
-        }
-    }
-
-    async fn wait(mut self) -> Result<T, tokio::task::JoinError> {
-        let result = self
-            .handle
-            .as_mut()
-            .expect("S3 task handle is present")
-            .await;
-        self.handle.take();
-        result
-    }
-}
-
-impl<T> Drop for AbortOnDropTask<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-/// Run an S3 interaction on the big-stack runtime, flattening the join-handle
-/// result into the future's own `Result<T, CloudHomeError>`.
-/// The future must be `Send + 'static` (owned args, a cloned `Client`).
-async fn on_s3_rt<T: Send + 'static>(
-    fut: impl std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,
-) -> Result<T, CloudHomeError> {
-    match AbortOnDropTask::new(s3_runtime().spawn(fut)).wait().await {
-        Ok(r) => r,
-        Err(e) => Err(CloudHomeError::Transport(format!("S3 task aborted: {e}"))),
-    }
-}
+use runtime::S3Runtime;
 
 /// S3-backed cloud home.
 #[derive(Clone)]
 pub struct S3CloudHome {
+    runtime: S3Runtime,
     client: Client,
     sts_client: Option<aws_sdk_sts::Client>,
     bucket: String,
@@ -120,6 +58,7 @@ impl S3CloudHome {
         key_prefix: Option<String>,
         custom_exact_slots: Option<crate::config::CustomS3ExactSlots>,
     ) -> Result<Self, CloudHomeError> {
+        let runtime = S3Runtime::new()?;
         let exact_slots = endpoint.is_none()
             || custom_exact_slots
                 == Some(crate::config::CustomS3ExactSlots::StandardConditionalRequests);
@@ -186,6 +125,7 @@ impl S3CloudHome {
             .then(|| aws_sdk_sts::Client::new(&aws_config));
 
         Ok(S3CloudHome {
+            runtime,
             client,
             sts_client,
             bucket,
@@ -216,26 +156,27 @@ impl S3CloudHome {
             let full = full.clone();
             let client = self.client.clone();
             let bucket = self.bucket.clone();
-            on_s3_rt(async move {
-                let create = client
-                    .create_multipart_upload()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        CloudHomeError::Transport(format!("multipart create {key}: {error}"))
-                    })?;
-                create
-                    .upload_id()
-                    .ok_or_else(|| {
-                        CloudHomeError::Transport(format!(
-                            "multipart create {key}: no upload id returned"
-                        ))
-                    })
-                    .map(str::to_string)
-            })
-            .await?
+            self.runtime
+                .run(async move {
+                    let create = client
+                        .create_multipart_upload()
+                        .bucket(&bucket)
+                        .key(&full)
+                        .send()
+                        .await
+                        .map_err(|error| {
+                            CloudHomeError::Transport(format!("multipart create {key}: {error}"))
+                        })?;
+                    create
+                        .upload_id()
+                        .ok_or_else(|| {
+                            CloudHomeError::Transport(format!(
+                                "multipart create {key}: no upload id returned"
+                            ))
+                        })
+                        .map(str::to_string)
+                })
+                .await?
         };
         let (commands, receiver) = tokio::sync::mpsc::channel(1);
         let owner = S3MultipartOwner {
@@ -250,7 +191,7 @@ impl S3CloudHome {
         };
         Ok(Box::new(S3PartSink {
             commands: Some(commands),
-            owner: Some(s3_runtime().spawn(owner.run(receiver))),
+            owner: Some(self.runtime.spawn(owner.run(receiver))),
         }))
     }
 
@@ -259,25 +200,26 @@ impl S3CloudHome {
         let logical_key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            client
-                .put_object()
-                .bucket(&bucket)
-                .key(&full)
-                .if_none_match("*")
-                .body(data.into())
-                .send()
-                .await
-                .map_err(|error| {
-                    if create_only_put_failed(&error) {
-                        CloudHomeError::AlreadyExists(logical_key.clone())
-                    } else {
-                        put_object_error(&logical_key, error)
-                    }
-                })?;
-            Ok(())
-        })
-        .await
+        self.runtime
+            .run(async move {
+                client
+                    .put_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .if_none_match("*")
+                    .body(data.into())
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        if create_only_put_failed(&error) {
+                            CloudHomeError::AlreadyExists(logical_key.clone())
+                        } else {
+                            put_object_error(&logical_key, error)
+                        }
+                    })?;
+                Ok(())
+            })
+            .await
     }
 
     async fn append_create_only(
@@ -685,33 +627,30 @@ impl S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let destination = destination.to_path_buf();
-        match AbortOnDropTask::new(s3_runtime().spawn(async move {
-            let response = client
-                .get_object()
-                .bucket(&bucket)
-                .key(&full)
-                .send()
-                .await
-                .map_err(|error| get_object_error(&key, error))?;
-            let stream =
-                futures_util::stream::unfold((response.body, key), |(mut body, key)| async move {
-                    body.next().await.map(|result| {
-                        let result = result
-                            .map_err(|error| body_read_error("read appended body", &key, error));
-                        (result, (body, key))
-                    })
-                });
-            super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
-            Ok::<(), super::CloudFileReadError>(())
-        }))
-        .wait()
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(super::CloudFileReadError::Source(
-                CloudHomeError::Transport(format!("S3 task aborted: {error}")),
-            )),
-        }
+        self.runtime
+            .run_file_read(async move {
+                let response = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                    .map_err(|error| get_object_error(&key, error))?;
+                let stream = futures_util::stream::unfold(
+                    (response.body, key),
+                    |(mut body, key)| async move {
+                        body.next().await.map(|result| {
+                            let result = result.map_err(|error| {
+                                body_read_error("read appended body", &key, error)
+                            });
+                            (result, (body, key))
+                        })
+                    },
+                );
+                super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
+                Ok::<(), super::CloudFileReadError>(())
+            })
+            .await
     }
 }
 
@@ -726,22 +665,23 @@ impl CloudHome for S3CloudHome {
     async fn probe(&self) -> Result<(), CloudHomeError> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+        self.runtime
+            .run(async move {
+                use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 
-            match client.head_bucket().bucket(&bucket).send().await {
-                Ok(_) => Ok(()),
-                Err(SdkError::ServiceError(svc)) => {
-                    let status = svc.raw().status().as_u16();
-                    let code: Option<String> = svc.err().code().map(str::to_string);
-                    // The shared 404→missing / 403→creds-rejected classification both
-                    // S3 backends use.
-                    Err(probe_error(status, code.as_deref(), &bucket))
+                match client.head_bucket().bucket(&bucket).send().await {
+                    Ok(_) => Ok(()),
+                    Err(SdkError::ServiceError(svc)) => {
+                        let status = svc.raw().status().as_u16();
+                        let code: Option<String> = svc.err().code().map(str::to_string);
+                        // The shared 404→missing / 403→creds-rejected classification both
+                        // S3 backends use.
+                        Err(probe_error(status, code.as_deref(), &bucket))
+                    }
+                    Err(e) => Err(CloudHomeError::Transport(format!("S3 probe failed: {e}"))),
                 }
-                Err(e) => Err(CloudHomeError::Transport(format!("S3 probe failed: {e}"))),
-            }
-        })
-        .await
+            })
+            .await
     }
 
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -749,18 +689,19 @@ impl CloudHome for S3CloudHome {
         let key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            client
-                .put_object()
-                .bucket(&bucket)
-                .key(&full)
-                .body(data.into())
-                .send()
-                .await
-                .map_err(|e| put_object_error(&key, e))?;
-            Ok(())
-        })
-        .await
+        self.runtime
+            .run(async move {
+                client
+                    .put_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .body(data.into())
+                    .send()
+                    .await
+                    .map_err(|e| put_object_error(&key, e))?;
+                Ok(())
+            })
+            .await
     }
 
     async fn open_multipart<'a>(
@@ -784,26 +725,27 @@ impl CloudHome for S3CloudHome {
         let bucket = self.bucket.clone();
         // The body `collect()` runs inside the spawn too: streaming the response
         // drives the same aws connector that needs the big stack.
-        on_s3_rt(async move {
-            let resp = client
-                .get_object()
-                .bucket(&bucket)
-                .key(&full)
-                .send()
-                .await
-                .map_err(|e| get_object_error(&key, e))?;
+        self.runtime
+            .run(async move {
+                let resp = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                    .map_err(|e| get_object_error(&key, e))?;
 
-            let bytes = resp
-                .body
-                .collect()
-                .await
-                .map_err(|e| body_read_error("read body", &key, e))?
-                .into_bytes()
-                .to_vec();
+                let bytes = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| body_read_error("read body", &key, e))?
+                    .into_bytes()
+                    .to_vec();
 
-            Ok(bytes)
-        })
-        .await
+                Ok(bytes)
+            })
+            .await
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -812,42 +754,43 @@ impl CloudHome for S3CloudHome {
         let key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            let resp = client
-                .get_object()
-                .bucket(&bucket)
-                .key(&full)
-                .range(range)
-                .send()
-                .await
-                .map_err(|e| get_object_error(&key, e))?;
+        self.runtime
+            .run(async move {
+                let resp = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .range(range)
+                    .send()
+                    .await
+                    .map_err(|e| get_object_error(&key, e))?;
 
-            let bytes = resp
-                .body
-                .collect()
-                .await
-                .map_err(|e| body_read_error("read range body", &key, e))?
-                .into_bytes()
-                .to_vec();
+                let bytes = resp
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| body_read_error("read range body", &key, e))?
+                    .into_bytes()
+                    .to_vec();
 
-            // A ranged GET is honored only with 206 Partial Content; a 200 means
-            // the provider ignored `Range` and returned the whole object from
-            // byte 0. The aws-sdk `GetObjectOutput` doesn't surface the raw HTTP
-            // status, so verify the equivalent invariant the reqwest transports
-            // check by status: the body must be exactly the requested byte count
-            // (the `CloudHome` contract never reads past the object's end).
-            let expected = end - start;
-            if bytes.len() as u64 != expected {
-                return Err(CloudHomeError::Transport(format!(
-                    "read range {key}: expected {expected} bytes for range {start}..{end}, \
+                // A ranged GET is honored only with 206 Partial Content; a 200 means
+                // the provider ignored `Range` and returned the whole object from
+                // byte 0. The aws-sdk `GetObjectOutput` doesn't surface the raw HTTP
+                // status, so verify the equivalent invariant the reqwest transports
+                // check by status: the body must be exactly the requested byte count
+                // (the `CloudHome` contract never reads past the object's end).
+                let expected = end - start;
+                if bytes.len() as u64 != expected {
+                    return Err(CloudHomeError::Transport(format!(
+                        "read range {key}: expected {expected} bytes for range {start}..{end}, \
                      got {} — the provider likely ignored Range and returned the whole object",
-                    bytes.len()
-                )));
-            }
+                        bytes.len()
+                    )));
+                }
 
-            Ok(bytes)
-        })
-        .await
+                Ok(bytes)
+            })
+            .await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
@@ -858,58 +801,59 @@ impl CloudHome for S3CloudHome {
         let bucket = self.bucket.clone();
         // The whole continuation loop is one spawned task: every page's `send`
         // runs on the big-stack runtime.
-        on_s3_rt(async move {
-            let mut keys = Vec::new();
-            let mut continuation_token: Option<String> = None;
+        self.runtime
+            .run(async move {
+                let mut keys = Vec::new();
+                let mut continuation_token: Option<String> = None;
 
-            loop {
-                let mut req = client
-                    .list_objects_v2()
-                    .bucket(&bucket)
-                    .prefix(&full_prefix);
+                loop {
+                    let mut req = client
+                        .list_objects_v2()
+                        .bucket(&bucket)
+                        .prefix(&full_prefix);
 
-                if let Some(token) = continuation_token.take() {
-                    req = req.continuation_token(token);
-                }
+                    if let Some(token) = continuation_token.take() {
+                        req = req.continuation_token(token);
+                    }
 
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| CloudHomeError::Transport(format!("list {prefix}: {e}")))?;
+                    let resp = req
+                        .send()
+                        .await
+                        .map_err(|e| CloudHomeError::Transport(format!("list {prefix}: {e}")))?;
 
-                for obj in resp.contents() {
-                    let Some(key) = obj.key() else {
-                        warn!("list {prefix}: S3 returned an object with no key; skipping it");
-                        continue;
-                    };
-                    let Some(stripped) =
-                        strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
-                    else {
-                        warn!(
+                    for obj in resp.contents() {
+                        let Some(key) = obj.key() else {
+                            warn!("list {prefix}: S3 returned an object with no key; skipping it");
+                            continue;
+                        };
+                        let Some(stripped) =
+                            strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
+                        else {
+                            warn!(
                             "list {prefix}: key {key} is outside the configured S3 prefix {:?}; \
                              skipping it",
                             key_prefix
                         );
-                        continue;
-                    };
-                    keys.push(stripped.to_string());
+                            continue;
+                        };
+                        keys.push(stripped.to_string());
+                    }
+
+                    if resp.is_truncated() == Some(true) {
+                        let token = resp.next_continuation_token().ok_or_else(|| {
+                            CloudHomeError::Transport(format!(
+                                "list {prefix}: S3 truncated but returned no continuation token"
+                            ))
+                        })?;
+                        continuation_token = Some(token.to_string());
+                    } else {
+                        break;
+                    }
                 }
 
-                if resp.is_truncated() == Some(true) {
-                    let token = resp.next_continuation_token().ok_or_else(|| {
-                        CloudHomeError::Transport(format!(
-                            "list {prefix}: S3 truncated but returned no continuation token"
-                        ))
-                    })?;
-                    continuation_token = Some(token.to_string());
-                } else {
-                    break;
-                }
-            }
-
-            Ok(keys)
-        })
-        .await
+                Ok(keys)
+            })
+            .await
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
@@ -917,27 +861,28 @@ impl CloudHome for S3CloudHome {
         let key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            use aws_sdk_s3::error::ProvideErrorMetadata;
-            if let Err(e) = client
-                .delete_object()
-                .bucket(&bucket)
-                .key(&full)
-                .send()
-                .await
-            {
-                // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
-                // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
-                // a failure. Exact cleanup operations are retried after uncertain
-                // outcomes, so deleting an already-absent object must succeed. Swallow
-                // not-found and surface only real errors.
-                if !is_not_found_code(e.code()) {
-                    return Err(CloudHomeError::Transport(format!("delete {key}: {e}")));
+        self.runtime
+            .run(async move {
+                use aws_sdk_s3::error::ProvideErrorMetadata;
+                if let Err(e) = client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                {
+                    // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
+                    // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
+                    // a failure. Exact cleanup operations are retried after uncertain
+                    // outcomes, so deleting an already-absent object must succeed. Swallow
+                    // not-found and surface only real errors.
+                    if !is_not_found_code(e.code()) {
+                        return Err(CloudHomeError::Transport(format!("delete {key}: {e}")));
+                    }
                 }
-            }
-            Ok(())
-        })
-        .await
+                Ok(())
+            })
+            .await
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
@@ -945,26 +890,27 @@ impl CloudHome for S3CloudHome {
         let key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        on_s3_rt(async move {
-            use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-            match client.head_object().bucket(&bucket).key(&full).send().await {
-                Ok(_) => Ok(true),
-                // Apply the shared not-found rule (NoSuchKey/NotFound, or a raw 404)
-                // off the modeled error code and status, not a Display-string match.
-                Err(e) => {
-                    let status = match &e {
-                        SdkError::ServiceError(svc) => Some(svc.raw().status().as_u16()),
-                        _ => None,
-                    };
-                    if is_not_found_code(e.code()) || status == Some(404) {
-                        Ok(false)
-                    } else {
-                        Err(CloudHomeError::Transport(format!("head {key}: {e}")))
+        self.runtime
+            .run(async move {
+                use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+                match client.head_object().bucket(&bucket).key(&full).send().await {
+                    Ok(_) => Ok(true),
+                    // Apply the shared not-found rule (NoSuchKey/NotFound, or a raw 404)
+                    // off the modeled error code and status, not a Display-string match.
+                    Err(e) => {
+                        let status = match &e {
+                            SdkError::ServiceError(svc) => Some(svc.raw().status().as_u16()),
+                            _ => None,
+                        };
+                        if is_not_found_code(e.code()) || status == Some(404) {
+                            Ok(false)
+                        } else {
+                            Err(CloudHomeError::Transport(format!("head {key}: {e}")))
+                        }
                     }
                 }
-            }
-        })
-        .await
+            })
+            .await
     }
 
     async fn set_access(
@@ -1009,14 +955,16 @@ impl ExactSlotStorage for S3CloudHome {
                 let client = self.sts_client.clone().ok_or_else(|| {
                     CloudHomeError::Configuration("AWS S3 adapter has no STS client".to_string())
                 })?;
-                let identity = on_s3_rt(async move {
-                    client
-                        .get_caller_identity()
-                        .send()
-                        .await
-                        .map_err(sts_request_error)
-                })
-                .await?;
+                let identity = self
+                    .runtime
+                    .run(async move {
+                        client
+                            .get_caller_identity()
+                            .send()
+                            .await
+                            .map_err(sts_request_error)
+                    })
+                    .await?;
                 let account = identity.account().ok_or_else(|| {
                     CloudHomeError::Configuration(
                         "STS GetCallerIdentity returned no account id".to_string(),
@@ -1823,7 +1771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_multipart_sink_starts_abort_without_blocking() {
+    async fn multipart_sink_retains_the_s3_runtime_through_abort() {
         let bucket = "immutable-cancel-success-test".to_string();
         let abort_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (endpoint, shutdown) = spawn_fake_s3(
@@ -1845,6 +1793,7 @@ mod tests {
             .await
             .unwrap();
 
+        drop(home);
         drop(sink);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while !abort_seen.load(Ordering::SeqCst) {
@@ -2440,8 +2389,8 @@ mod tests {
         assert_eq!(bytes.len() as u64, end - start);
     }
 
-    /// Proves an `S3CloudHome`'s aws calls run end to end on `s3_runtime` — a
-    /// different runtime than the `Client` was built on — against a real bucket:
+    /// Proves an `S3CloudHome`'s AWS calls run end to end on its retained
+    /// runtime—a different runtime than the `Client` was built on—against a real bucket:
     /// connection establishment, TLS, and body streaming, not just "it compiles".
     /// If the aws connector bound to the build-time runtime's reactor this would
     /// panic with "no reactor running" or hang; a real byte vec back proves the
