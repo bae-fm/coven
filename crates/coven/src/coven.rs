@@ -1493,7 +1493,7 @@ mod tests {
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
-        let staged = crate::local_blob::AtomicStagedFile::create(&final_path)
+        let mut staged = crate::local_blob::AtomicStagedFile::create(&final_path)
             .await
             .expect("allocate local blob stage");
         staged
@@ -3486,7 +3486,7 @@ mod tests {
         let committed_local = local_ns.join("blob0bbb");
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
         let stale_local_stage = runtime.block_on(async {
-            let stage = crate::local_blob::AtomicStagedFile::create(&local_ns.join("blob"))
+            let mut stage = crate::local_blob::AtomicStagedFile::create(&local_ns.join("blob"))
                 .await
                 .expect("local staging path");
             stage.write_bytes(b"x").await.expect("write local stage");

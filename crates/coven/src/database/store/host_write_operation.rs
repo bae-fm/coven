@@ -64,13 +64,13 @@ impl StagedBlob {
         let staged = crate::local_blob::AtomicStagedFile::create(&destination)
             .await
             .map_err(HostWriteError::Blob)?;
-        let staged_blob = Self {
+        let mut staged_blob = Self {
             namespace: blob.namespace,
             id: blob.id,
             staged: Some(staged),
             published: None,
         };
-        if let Err(operation) = staged_blob.staged().write_bytes(&blob.bytes).await {
+        if let Err(operation) = staged_blob.staged_mut().write_bytes(&blob.bytes).await {
             return match staged_blob.discard().await {
                 Ok(()) => Err(HostWriteError::Blob(operation)),
                 Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
@@ -82,8 +82,8 @@ impl StagedBlob {
         Ok(staged_blob)
     }
 
-    fn staged(&self) -> &crate::local_blob::AtomicStagedFile {
-        self.staged.as_ref().expect("blob is staged")
+    fn staged_mut(&mut self) -> &mut crate::local_blob::AtomicStagedFile {
+        self.staged.as_mut().expect("blob is staged")
     }
 
     fn publish(&mut self) -> Result<(), String> {

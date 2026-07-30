@@ -107,8 +107,7 @@ impl AtomicStagedFile {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| format!("create parent dir for {}: {error}", destination.display()))?;
-        let mut staged = AtomicTempFile::create_in(parent)?;
-        staged.close();
+        let staged = AtomicTempFile::create_in(parent)?;
         Ok(Self {
             destination: destination.to_path_buf(),
             staged: Some(staged),
@@ -123,12 +122,145 @@ impl AtomicStagedFile {
             .path
     }
 
-    pub(crate) async fn write_bytes(&self, bytes: &[u8]) -> Result<(), String> {
-        write_atomic(self.path(), bytes).await
+    /// Hand the reserved path to a writer that performs its own atomic
+    /// replacement. The retained descriptor is closed first so publication
+    /// always names the replacement inode.
+    pub(crate) fn path_for_atomic_replacement(&mut self) -> &Path {
+        self.staged
+            .as_mut()
+            .expect("atomic stage is unpublished")
+            .close();
+        self.path()
+    }
+
+    pub(crate) async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+        let staged = self.staged.as_mut().expect("atomic stage is unpublished");
+        let path = staged.path.clone();
+        let file = staged.file_mut();
+        file.set_len(0)
+            .await
+            .map_err(|error| format!("truncate staged blob {}: {error}", path.display()))?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|error| format!("seek staged blob {}: {error}", path.display()))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| format!("write staged blob {}: {error}", path.display()))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("fsync staged blob {}: {error}", path.display()))
+    }
+
+    /// Fill this unpublished stage from a plaintext stream and fsync the
+    /// completed file. The caller verifies higher-level content facts before
+    /// publishing the stage.
+    pub(crate) async fn write_plaintext(
+        &mut self,
+        source: &mut dyn PlaintextChunkReader,
+    ) -> Result<u64, StreamWriteError> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+        let staged = self.staged.as_mut().expect("atomic stage is unpublished");
+        let path = staged.path.clone();
+        let file = staged.file_mut();
+        file.set_len(0).await.map_err(|error| {
+            StreamWriteError::Local(format!("truncate staged blob {}: {error}", path.display()))
+        })?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|error| {
+                StreamWriteError::Local(format!("seek staged blob {}: {error}", path.display()))
+            })?;
+        let mut written = 0u64;
+        loop {
+            let chunk = source.next_chunk(1 << 20).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            file.write_all(&chunk).await.map_err(|error| {
+                StreamWriteError::Local(format!("write staged blob {}: {error}", path.display()))
+            })?;
+            written += chunk.len() as u64;
+        }
+        file.sync_all().await.map_err(|error| {
+            StreamWriteError::Local(format!("fsync staged blob {}: {error}", path.display()))
+        })?;
+        Ok(written)
+    }
+
+    pub(crate) async fn write_byte_stream<E: Send>(
+        mut self,
+        mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
+    ) -> Result<(Self, u64), ByteStreamWriteError<E>> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+        let write = async {
+            let staged = self.staged.as_mut().expect("atomic stage is unpublished");
+            let path = staged.path.clone();
+            let file = staged.file_mut();
+            file.set_len(0).await.map_err(|error| {
+                AtomicChunkWriteError::Local(format!(
+                    "truncate staged blob {}: {error}",
+                    path.display()
+                ))
+            })?;
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    AtomicChunkWriteError::Local(format!(
+                        "seek staged blob {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            let mut written = 0u64;
+            while let Some(chunk) = stream
+                .next()
+                .await
+                .transpose()
+                .map_err(AtomicChunkWriteError::Source)?
+            {
+                file.write_all(&chunk).await.map_err(|error| {
+                    AtomicChunkWriteError::Local(format!(
+                        "write staged blob {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                written += chunk.len() as u64;
+            }
+            file.sync_all().await.map_err(|error| {
+                AtomicChunkWriteError::Local(format!(
+                    "fsync staged blob {}: {error}",
+                    path.display()
+                ))
+            })?;
+            Ok(written)
+        }
+        .await;
+        match write {
+            Ok(written) => Ok((self, written)),
+            Err(AtomicChunkWriteError::Source(source)) => match self.take_stage().cleanup().await {
+                Ok(()) => Err(ByteStreamWriteError::Source(source)),
+                Err(cleanup) => Err(ByteStreamWriteError::SourceCleanup { source, cleanup }),
+            },
+            Err(AtomicChunkWriteError::SourceCleanup { .. }) => {
+                unreachable!("source cleanup errors are assembled after writing")
+            }
+            Err(AtomicChunkWriteError::Local(operation)) => {
+                let error = self
+                    .take_stage()
+                    .fail::<()>(operation)
+                    .await
+                    .expect_err("failed staged write returns an error");
+                Err(ByteStreamWriteError::Local(error))
+            }
+        }
     }
 
     pub async fn commit(mut self) -> Result<(), String> {
         let mut staged = self.take_stage();
+        staged.close();
         let result = commit_staged_file(&staged.path, &self.destination, |path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }
@@ -162,7 +294,8 @@ impl AtomicStagedFile {
         F: FnMut(&Path) -> Fut,
         Fut: std::future::Future<Output = Result<(), String>>,
     {
-        let staged = self.take_stage();
+        let mut staged = self.take_stage();
+        staged.close();
         match tokio::fs::hard_link(&staged.path, &self.destination).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -282,50 +415,6 @@ where
         return Err(operation);
     }
     Ok(())
-}
-
-/// Fill an unpublished staged destination from a plaintext stream and fsync the
-/// completed file. The caller verifies any higher-level content facts before it
-/// publishes the stage with [`AtomicStagedFile::commit`] or
-/// [`AtomicStagedFile::commit_new`].
-pub(crate) async fn write_stream_to_stage(
-    staged: &AtomicStagedFile,
-    source: &mut dyn PlaintextChunkReader,
-) -> Result<u64, StreamWriteError> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(staged.path())
-        .await
-        .map_err(|error| {
-            StreamWriteError::Local(format!(
-                "create staged blob {}: {error}",
-                staged.path().display()
-            ))
-        })?;
-    let mut written = 0u64;
-    loop {
-        let chunk = source.next_chunk(1 << 20).await?;
-        if chunk.is_empty() {
-            break;
-        }
-        file.write_all(&chunk).await.map_err(|error| {
-            StreamWriteError::Local(format!(
-                "write staged blob {}: {error}",
-                staged.path().display()
-            ))
-        })?;
-        written += chunk.len() as u64;
-    }
-    file.sync_all().await.map_err(|error| {
-        StreamWriteError::Local(format!(
-            "fsync staged blob {}: {error}",
-            staged.path().display()
-        ))
-    })?;
-    Ok(written)
 }
 
 async fn rollback_new_destination(
@@ -876,6 +965,7 @@ pub(crate) async fn read(path: &Path) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("read local blob {}: {e}", path.display()))
 }
 
+#[cfg(test)]
 pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
@@ -1227,10 +1317,11 @@ mod tests {
         write_atomic(&destination, b"prior")
             .await
             .expect("seed destination");
-        let staged = AtomicStagedFile::create(&destination)
+        let mut staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
-        write_atomic(staged.path(), b"verified")
+        staged
+            .write_bytes(b"verified")
             .await
             .expect("write staged file");
 
@@ -1241,13 +1332,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plaintext_stream_fills_the_reserved_stage_before_commit() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let source_path = tmp.path().join("source.bin");
+        let destination = tmp.path().join("blob.bin");
+        let bytes = b"verified plaintext";
+        write_atomic(&source_path, bytes)
+            .await
+            .expect("write plaintext source");
+        let mut source = FilePlaintextReader {
+            file: tokio::fs::File::open(&source_path)
+                .await
+                .expect("open plaintext source"),
+            path: source_path,
+        };
+        let mut staged = AtomicStagedFile::create(&destination)
+            .await
+            .expect("reserve staging file");
+
+        let written = staged
+            .write_plaintext(&mut source)
+            .await
+            .expect("fill reserved staging file");
+        assert_eq!(written, bytes.len() as u64);
+        assert!(!destination.exists());
+
+        staged.commit().await.expect("publish verified stage");
+        assert_eq!(read(&destination).await.expect("read destination"), bytes);
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn byte_stream_fills_the_reserved_stage_before_commit() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        let stream = futures_util::stream::iter([
+            Ok::<_, &'static str>(Bytes::from_static(b"verified ")),
+            Ok(Bytes::from_static(b"bytes")),
+        ]);
+        let staged = AtomicStagedFile::create(&destination)
+            .await
+            .expect("reserve staging file");
+
+        let (staged, written) = staged
+            .write_byte_stream(Box::pin(stream))
+            .await
+            .expect("fill reserved staging file");
+        assert_eq!(written, b"verified bytes".len() as u64);
+        assert!(!destination.exists());
+
+        staged.commit().await.expect("publish verified stage");
+        assert_eq!(
+            read(&destination).await.expect("read destination"),
+            b"verified bytes"
+        );
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn staged_file_publish_rolls_back_when_directory_sync_fails() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = AtomicStagedFile::create(&destination)
+        let mut staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
-        write_atomic(staged.path(), b"verified")
+        staged
+            .write_bytes(b"verified")
             .await
             .expect("write staged file");
         let staged_path = staged.path().to_path_buf();
@@ -1273,10 +1423,11 @@ mod tests {
         write_atomic(&destination, b"user file")
             .await
             .expect("seed user destination");
-        let staged = AtomicStagedFile::create(&destination)
+        let mut staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
-        write_atomic(staged.path(), b"downloaded")
+        staged
+            .write_bytes(b"downloaded")
             .await
             .expect("write verified staged file");
 
@@ -1292,10 +1443,11 @@ mod tests {
     async fn staged_new_file_publishes_complete_verified_bytes() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = AtomicStagedFile::create(&destination)
+        let mut staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
-        write_atomic(staged.path(), b"downloaded")
+        staged
+            .write_bytes(b"downloaded")
             .await
             .expect("write verified staged file");
 
@@ -1309,10 +1461,11 @@ mod tests {
     async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = AtomicStagedFile::create(&destination)
+        let mut staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
-        write_atomic(staged.path(), b"downloaded")
+        staged
+            .write_bytes(b"downloaded")
             .await
             .expect("write verified staged file");
         let staged_path = staged.path().to_path_buf();
