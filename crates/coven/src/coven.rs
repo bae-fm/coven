@@ -338,6 +338,7 @@ impl CovenBuilder {
             self.blob_tombstone_grace,
             transfer_limits,
             config.device_id.clone(),
+            self.clock.clone(),
             &migrations,
         )?;
         // A second, read-only connection on the same WAL database, opened after the
@@ -352,6 +353,7 @@ impl CovenBuilder {
             self.blob_tombstone_grace,
             transfer_limits,
             config.device_id.clone(),
+            self.clock.clone(),
             &migrations,
         )?;
         let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
@@ -412,6 +414,7 @@ impl CovenBuilder {
                 downloads: self.max_concurrent_downloads,
             },
             config.device_id.clone(),
+            self.clock.clone(),
             &migrations,
         )?;
         let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
@@ -804,6 +807,33 @@ mod tests {
             .open()
             .expect("open handle");
         (tmp, handle)
+    }
+
+    #[tokio::test]
+    async fn configured_clock_is_the_hlc_wall_source() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let clock = chrono::DateTime::from_timestamp_millis(1_234).expect("valid clock instant");
+        let handle = Coven::builder(config(StoreDir::new(tmp.path())))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .clock(Arc::new(crate::clock::FixedClock(clock)))
+            .open()
+            .expect("open handle");
+
+        let receipt = handle
+            .sql(|sql| {
+                let stamp = sql.stamp();
+                sql.execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('configured-clock', NULL, 0, ?1)",
+                    [&stamp],
+                )?;
+                Ok(stamp)
+            })
+            .await
+            .expect("write with configured clock");
+
+        assert_eq!(receipt.value, "0000000001234-0000-device-test");
     }
 
     #[tokio::test]

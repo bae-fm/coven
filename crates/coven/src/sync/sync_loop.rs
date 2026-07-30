@@ -877,6 +877,7 @@ mod tests {
             chrono::Duration::days(30),
             crate::blob::TransferLimits::one_at_a_time(),
             "status-test".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &[],
         )
         .expect("open status test database")

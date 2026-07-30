@@ -256,7 +256,10 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &peer_pubkey,
             None,
             MemberRole::Member,
@@ -419,7 +422,10 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &peer_pubkey,
             None,
             MemberRole::Member,

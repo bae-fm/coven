@@ -22,7 +22,6 @@
 /// from it alone could let the first post-restart stamp sort below the device's
 /// own un-flushed rows.
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `protocol_state` key under which the clock's high-water mark is persisted, so it
 /// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
@@ -123,41 +122,40 @@ fn increment(state: &mut HlcState) {
 pub struct Hlc {
     device_id: String,
     state: Mutex<HlcState>,
-    /// Injected wall clock for testing. Returns milliseconds since epoch.
-    wall_clock: Box<dyn Fn() -> u64 + Send + Sync>,
+    clock: crate::clock::ClockRef,
 }
 
 impl Hlc {
-    pub fn try_new(device_id: String) -> Result<Self, crate::store_dir::PathTokenError> {
-        Self::try_new_with_wall_clock(device_id, wall_clock_ms)
+    pub fn try_new(
+        device_id: String,
+        clock: crate::clock::ClockRef,
+    ) -> Result<Self, crate::store_dir::PathTokenError> {
+        crate::store_dir::validate_path_token(&device_id)?;
+        Ok(Self {
+            device_id,
+            state: Mutex::new(HlcState {
+                millis: 0,
+                counter: 0,
+            }),
+            clock,
+        })
     }
 
     /// Create a new HLC with the given device ID.
-    pub fn new(device_id: String) -> Self {
-        Self::try_new(device_id).expect("device_id must be a safe path token")
+    pub fn new(device_id: String, clock: crate::clock::ClockRef) -> Self {
+        Self::try_new(device_id, clock).expect("device_id must be a safe path token")
     }
 
     pub(crate) fn device_id(&self) -> &str {
         &self.device_id
     }
 
-    fn try_new_with_wall_clock(
-        device_id: String,
-        clock: impl Fn() -> u64 + Send + Sync + 'static,
-    ) -> Result<Self, crate::store_dir::PathTokenError> {
-        crate::store_dir::validate_path_token(&device_id)?;
-        Ok(Self::new_validated(device_id, Box::new(clock)))
-    }
-
-    fn new_validated(device_id: String, wall_clock: Box<dyn Fn() -> u64 + Send + Sync>) -> Self {
-        Self {
-            device_id,
-            state: Mutex::new(HlcState {
-                millis: 0,
-                counter: 0,
-            }),
-            wall_clock,
-        }
+    fn wall_millis(&self) -> u64 {
+        self.clock
+            .now()
+            .timestamp_millis()
+            .try_into()
+            .expect("clock before UNIX epoch")
     }
 
     /// Seed the clock's monotonic state from a persisted high-water mark so it
@@ -192,13 +190,13 @@ impl Hlc {
     /// physical component — never an author-supplied value. Read once per pull and
     /// passed down, not sampled in a loop.
     pub fn wall_now_ms(&self) -> u64 {
-        (self.wall_clock)()
+        self.wall_millis()
     }
 
     /// Generate a new timestamp. Guaranteed to be greater than any previous
     /// timestamp returned by this clock.
     pub fn now(&self) -> Timestamp {
-        let wall = (self.wall_clock)();
+        let wall = self.wall_millis();
         let mut state = self.state.lock().unwrap();
 
         if wall > state.millis {
@@ -221,7 +219,7 @@ impl Hlc {
     /// Monotonic: a `remote` ahead of the current state becomes the state floor;
     /// one behind it is ignored. Either way the next [`Self::now`] outranks `remote`.
     pub fn advance_past(&self, remote: &Timestamp) {
-        let wall = (self.wall_clock)();
+        let wall = self.wall_millis();
         let mut state = self.state.lock().unwrap();
 
         if wall > state.millis && wall > remote.millis {
@@ -236,15 +234,6 @@ impl Hlc {
             // Same millis: keep the higher register floor.
             state.counter = remote.counter;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_wall_clock(
-        device_id: String,
-        clock: impl Fn() -> u64 + Send + Sync + 'static,
-    ) -> Self {
-        Self::try_new_with_wall_clock(device_id, clock)
-            .expect("device_id must be a safe path token")
     }
 }
 
@@ -289,36 +278,43 @@ impl UpdatedAtStamper {
 /// round-trips, gate/FK mechanics tests), where the honest receiver-now is real
 /// wall time and the future-skew bound is incidental, not under test.
 #[cfg(test)]
-pub(crate) fn now_wall_ms() -> u64 {
-    wall_clock_ms()
-}
-
-/// Epoch milliseconds for the HLC's physical component.
-fn wall_clock_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_millis() as u64
+pub(crate) fn now_wall_ms(clock: &dyn crate::clock::Clock) -> u64 {
+    clock
+        .now()
+        .timestamp_millis()
+        .try_into()
+        .expect("clock before UNIX epoch")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::{ClosureClock, FixedClock, SystemClock};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn fixed_clock(ms: u64) -> impl Fn() -> u64 + Send + Sync + 'static {
-        move || ms
+    fn instant(ms: u64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp_millis(ms.try_into().expect("test millis fit in i64"))
+            .expect("valid test clock instant")
     }
 
-    fn advancing_clock(start: u64) -> (Arc<AtomicU64>, impl Fn() -> u64 + Send + Sync + 'static) {
+    fn fixed_clock(ms: u64) -> crate::clock::ClockRef {
+        Arc::new(FixedClock(instant(ms)))
+    }
+
+    fn advancing_clock(start: u64) -> (Arc<AtomicU64>, crate::clock::ClockRef) {
         let time = Arc::new(AtomicU64::new(start));
         let time_clone = time.clone();
-        (time, move || time_clone.load(Ordering::SeqCst))
+        (
+            time,
+            Arc::new(ClosureClock(move || {
+                instant(time_clone.load(Ordering::SeqCst))
+            })),
+        )
     }
 
     #[test]
     fn basic_monotonicity() {
-        let hlc = Hlc::new("dev-1".into());
+        let hlc = Hlc::new("dev-1".into(), Arc::new(SystemClock));
         let t1 = hlc.now();
         let t2 = hlc.now();
         let t3 = hlc.now();
@@ -330,14 +326,14 @@ mod tests {
     #[test]
     fn new_rejects_empty_device_id() {
         assert!(matches!(
-            Hlc::try_new(String::new()),
+            Hlc::try_new(String::new(), Arc::new(SystemClock)),
             Err(crate::store_dir::PathTokenError::Empty),
         ));
     }
 
     #[test]
     fn counter_increments_when_clock_stalls() {
-        let hlc = Hlc::with_wall_clock("dev-1".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-1".into(), fixed_clock(1000));
 
         let t1 = hlc.now();
         assert_eq!(t1.millis, 1000);
@@ -358,7 +354,7 @@ mod tests {
     #[test]
     fn wall_clock_advance_resets_counter() {
         let (time, clock) = advancing_clock(1000);
-        let hlc = Hlc::with_wall_clock("dev-1".into(), clock);
+        let hlc = Hlc::new("dev-1".into(), clock);
 
         let t1 = hlc.now();
         assert_eq!(t1.millis, 1000);
@@ -379,7 +375,7 @@ mod tests {
 
     #[test]
     fn advance_past_remote_ahead() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
 
         // Local clock is at 1000. Applied row stamp is at 5000.
         let remote = Timestamp::new(5000, 3, "dev-remote".into());
@@ -397,7 +393,7 @@ mod tests {
 
     #[test]
     fn advance_past_remote_behind() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(5000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(5000));
 
         // Prime the local clock to 5000.
         let primed = hlc.now();
@@ -422,7 +418,7 @@ mod tests {
     /// the advance to wall time would reintroduce exactly that loss.
     #[test]
     fn advance_past_far_future_applied_row_is_not_capped() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
 
         // An applied row stamped 48 hours beyond local wall — well past the old
         // 24h cap.
@@ -539,7 +535,7 @@ mod tests {
 
     #[test]
     fn advance_past_counter_bound_carries_into_millis() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
         let observed = Timestamp::new(1000, 9999, "dev-remote".into());
 
         hlc.advance_past(&observed);
@@ -555,7 +551,7 @@ mod tests {
 
     #[test]
     fn now_counter_bound_carries_into_millis() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
         hlc.seed(&Timestamp::new(1000, 9999, "dev-remote".into()));
 
         let next = hlc.now();
@@ -567,7 +563,7 @@ mod tests {
 
     #[test]
     fn minted_counters_keep_fixed_width_lexical_order() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let hlc = Hlc::new("dev-local".into(), fixed_clock(1000));
         hlc.seed(&Timestamp::new(1000, 9998, "dev-remote".into()));
 
         let stamps = [hlc.now(), hlc.now(), hlc.now()];

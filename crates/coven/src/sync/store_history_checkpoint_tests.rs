@@ -478,7 +478,10 @@ async fn history_with_member_removal() -> (
         .invite_member(
             &db,
             &owner,
-            &super::hlc::Hlc::new("retained-removal-proof".to_string()),
+            &super::hlc::Hlc::new(
+                "retained-removal-proof".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -516,7 +519,10 @@ async fn history_with_member_removal() -> (
         .remove_member(
             &db,
             &owner,
-            &super::hlc::Hlc::new("retained-removal-proof-remove".to_string()),
+            &super::hlc::Hlc::new(
+                "retained-removal-proof-remove".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             &encryption,
             &security,

@@ -27,7 +27,10 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
             .invite_member(
                 &founder_db,
                 &founder,
-                &crate::sync::hlc::Hlc::new("successive-owner-promotions".to_string()),
+                &crate::sync::hlc::Hlc::new(
+                    "successive-owner-promotions".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
                 &keys::public_key_hex(member),
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -123,7 +126,10 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("owner-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -248,7 +254,10 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("owner-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -374,7 +383,10 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("owner-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,

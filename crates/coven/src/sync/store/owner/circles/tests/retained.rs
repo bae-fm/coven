@@ -13,7 +13,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &successor_pubkey,
             None,
             MemberRole::Member,
@@ -57,7 +60,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .remove_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &successor_pubkey,
             &encryption,
             &security,
@@ -72,7 +78,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &successor_pubkey,
             None,
             MemberRole::Member,
@@ -167,7 +176,10 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &peer_pubkey,
             None,
             MemberRole::Member,

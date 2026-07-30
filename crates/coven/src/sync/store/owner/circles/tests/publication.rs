@@ -52,6 +52,7 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("open copied Circle routing database")
@@ -168,6 +169,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open circle database");
@@ -183,6 +185,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("reopen circle database");
@@ -220,6 +223,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open circle database");
@@ -274,6 +278,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("reopen circle database");
@@ -320,6 +325,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open circle database");
@@ -359,6 +365,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("reopen circle database");
@@ -400,6 +407,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open circle database");
@@ -491,7 +499,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-bootstrap-member".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-bootstrap-member".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -594,7 +605,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-bootstrap-concurrent-writer".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-bootstrap-concurrent-writer".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &concurrent_writer_pubkey,
             None,
             MemberRole::Member,
@@ -1160,7 +1174,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-removal-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-removal-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1175,7 +1192,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-removal-second-member".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-removal-second-member".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &remaining_member_pubkey,
             None,
             MemberRole::Member,
@@ -1970,6 +1990,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open circle database");
@@ -2009,6 +2030,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
         )
         .expect("reopen circle database");
@@ -2203,7 +2225,10 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-cancel-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-cancel-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -2218,7 +2243,10 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-cancel-second-member".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-cancel-second-member".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &remaining_member_pubkey,
             None,
             MemberRole::Member,
@@ -3305,7 +3333,10 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-exclude-removed".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-exclude-removed".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &removed_pubkey,
             None,
             MemberRole::Member,
@@ -3320,7 +3351,10 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("circle-exclude-silent".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "circle-exclude-silent".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &silent_pubkey,
             None,
             MemberRole::Member,

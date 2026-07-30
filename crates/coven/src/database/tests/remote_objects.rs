@@ -14,6 +14,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "prepared-audience-objects".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[],
     )
     .expect("open database");

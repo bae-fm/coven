@@ -296,6 +296,7 @@ pub async fn restore_from_cloud(
             &store_dir,
             store_id,
             &device_id,
+            clock.clone(),
             store_root,
             crate::joining::RestoreBootstrapContext {
                 keypair,

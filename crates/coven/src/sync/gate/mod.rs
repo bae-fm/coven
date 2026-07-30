@@ -838,8 +838,13 @@ mod tests {
         // Apply cycle 2's output to a fresh peer: complete consistent subtree.
         let peer = conn();
         create_synced_schema(&peer);
-        resolve_and_apply_changeset(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
-            .expect("apply to peer");
+        resolve_and_apply_changeset(
+            &peer,
+            &out2,
+            &tables,
+            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
+        )
+        .expect("apply to peer");
         assert!(
             row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer has the note"
@@ -1101,8 +1106,13 @@ mod tests {
 
     /// Apply a changeset with the production conflict-resolving apply path, scoped to the album set.
     fn apply_album(c: &Connection, bytes: &[u8]) {
-        resolve_and_apply_changeset(c, bytes, &album_tables(), crate::sync::hlc::now_wall_ms())
-            .expect("apply album changeset");
+        resolve_and_apply_changeset(
+            c,
+            bytes,
+            &album_tables(),
+            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
+        )
+        .expect("apply album changeset");
     }
 
     /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
@@ -1885,8 +1895,13 @@ mod tests {
         );
         let peer = conn();
         create_synced_schema(&peer);
-        resolve_and_apply_changeset(&peer, &out1, &tables, crate::sync::hlc::now_wall_ms())
-            .expect("apply share");
+        resolve_and_apply_changeset(
+            &peer,
+            &out1,
+            &tables,
+            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
+        )
+        .expect("apply share");
         assert!(row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"));
         assert!(row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"));
         assert!(row_exists(
@@ -1900,8 +1915,13 @@ mod tests {
             &tables,
             &["UPDATE notes SET shared = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
         );
-        resolve_and_apply_changeset(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
-            .expect("apply retract");
+        resolve_and_apply_changeset(
+            &peer,
+            &out2,
+            &tables,
+            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
+        )
+        .expect("apply retract");
         assert!(
             !row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer drops the retracted root"
@@ -2311,7 +2331,7 @@ mod tests {
             c,
             bytes,
             &album_asset_tables(),
-            crate::sync::hlc::now_wall_ms(),
+            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
         )
         .expect("apply album-asset changeset");
     }

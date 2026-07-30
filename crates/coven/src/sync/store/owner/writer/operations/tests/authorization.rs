@@ -14,7 +14,10 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("operation-predecessor-membership".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "operation-predecessor-membership".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &writer_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -58,7 +61,10 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .remove_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("operation-membership-removal".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "operation-membership-removal".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &writer_pubkey,
             &encryption,
             &security,
@@ -109,7 +115,10 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("direct-removal-predecessor-membership".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "direct-removal-predecessor-membership".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &writer_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -147,7 +156,10 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .remove_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("direct-membership-removal".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "direct-membership-removal".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &writer_pubkey,
             &encryption,
             &security,
@@ -258,7 +270,10 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new("new-direct-membership".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "new-direct-membership".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &new_member_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,

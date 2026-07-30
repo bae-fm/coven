@@ -205,7 +205,10 @@ async fn invite_and_activate_peer(
         .invite_member(
             observer_db,
             &storage.signer,
-            &Hlc::new("peer-invitation".to_string()),
+            &Hlc::new(
+                "peer-invitation".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::sync::test_helpers::pubkey_hex(peer),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -759,7 +762,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let db_a = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
     let enc = plaintext_cipher();
-    let hlc_a = Hlc::new("A".to_string());
+    let hlc_a = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp_a, lib_a) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
 
@@ -894,7 +900,10 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-repin".to_vec();
 
@@ -944,7 +953,10 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-relocate".to_vec();
     let user_dir = tmp.path().join("user");
@@ -995,7 +1007,10 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
@@ -1056,8 +1071,14 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let storage = create_store(&db_a, kp_a.clone()).await;
         let enc = plaintext_cipher();
         let kp_b = UserKeypair::generate();
-        let hlc_a = Hlc::new("A".to_string());
-        let hlc_b = Hlc::new("B".to_string());
+        let hlc_a = Hlc::new(
+            "A".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
+        let hlc_b = Hlc::new(
+            "B".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
         let db_b = open_test_db_with_blob(photo_decl());
         let (tmp_a, lib_a) = temp_store_dir();
         let (_tmp_b, lib_b) = temp_store_dir();
@@ -1197,7 +1218,10 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     let db = scoped_blob_transition_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     storage.open_into(&db).await.expect("open exact test Store");
     let (tmp, lib) = temp_store_dir();
     let bytes = b"scoped-managed-photo".to_vec();
@@ -1327,7 +1351,10 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let storage = create_store(&db, UserKeypair::generate()).await;
     let exact_creates_before = storage.home.exact_create_count();
     storage.open_into(&db).await.expect("open exact test Store");
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"scoped-user-photo";
     let routing_encryption = crate::encryption::EncryptionService::from_key([7; 32]);
@@ -1441,7 +1468,10 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let exact_creates_before = storage.home.exact_create_count();
     storage.open_into(&db).await.expect("open exact test Store");
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"scoped-host-cover";
     let routing_encryption = crate::encryption::EncryptionService::from_key([9; 32]);
@@ -1567,7 +1597,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
     let enc = plaintext_cipher();
-    let hlc_a = Hlc::new("A".to_string());
+    let hlc_a = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp_a, lib_a) = temp_store_dir();
     let kp_b = UserKeypair::generate();
     let db_b = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
@@ -1725,7 +1758,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let exact_creates_before = storage.home.exact_create_count();
     let enc = plaintext_cipher();
     let kp_a = storage.protocol_founder_keypair();
-    let hlc_a = Hlc::new("A".to_string());
+    let hlc_a = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"HOST-ONLY-COVER".to_vec();
 
@@ -1827,7 +1863,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp, lib) = temp_store_dir();
     let pin_bytes = b"PINNED-COVER".to_vec();
     let drop_bytes = b"DROPPED-COVER".to_vec();
@@ -1961,7 +2000,10 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-PINNED".to_vec();
 
@@ -2006,7 +2048,10 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-CACHED".to_vec();
 
@@ -2093,7 +2138,10 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let db_a = remote_root_db(cover_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
     let enc = plaintext_cipher();
-    let hlc_a = Hlc::new("A".to_string());
+    let hlc_a = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
 
@@ -2165,7 +2213,10 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 
 #[tokio::test]
 async fn make_remote_rejects_remote_root() {
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let db = remote_root_db(cover_decl());
     let (_tmp, lib) = temp_store_dir();
     exec(
@@ -2200,7 +2251,10 @@ async fn make_remote_rejects_remote_root() {
 async fn make_local_rejects_remote_root() {
     let db = remote_root_db(cover_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     exec(
         &db,
@@ -2261,7 +2315,10 @@ async fn cancel_make_remote_rejects_remote_root() {
 /// already-on gate with a fresh stamp — a spurious full-subtree re-publish.
 #[tokio::test]
 async fn make_remote_rejects_already_remote_root() {
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();
 
@@ -2319,7 +2376,10 @@ async fn make_remote_rejects_already_remote_root() {
 /// `test_manage_truncated_source_aborts_before_enqueue`.
 #[tokio::test]
 async fn make_remote_aborts_when_source_size_no_longer_matches() {
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-full-length".to_vec();
@@ -2397,7 +2457,10 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 async fn make_local_rejects_already_local_root() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"already-local".to_vec();
 
@@ -2463,7 +2526,10 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     let db = open_test_db_with_blob(photo_decl());
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let user = tmp.path().join("user");
 
@@ -2525,7 +2591,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let db = open_test_db_with_blob(photo_decl().with_id_column("blob_id"));
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"same-locator-created-journals";
     let hash = crate::blob::content_hash(bytes);
@@ -2686,7 +2755,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
 async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
 
     let src = seed_local_release(
@@ -2749,7 +2821,10 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 async fn cancel_make_local_before_commit_stays_remote() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"still-managed".to_vec();
 
@@ -2807,7 +2882,10 @@ async fn cancel_make_local_before_commit_stays_remote() {
 async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"managed-bytes".to_vec();
 
@@ -2884,7 +2962,10 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"managed-bytes".to_vec();
 
@@ -2960,7 +3041,10 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 async fn make_remote_crash_before_flip_redrain_converges() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let user = tmp.path().join("user");
 
@@ -3030,7 +3114,10 @@ async fn make_remote_crash_before_flip_redrain_converges() {
 async fn make_local_abort_then_retry_converges() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"materialize-me".to_vec();
 
@@ -3111,7 +3198,10 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let enc = plaintext_cipher();
     let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (tmp, lib) = temp_store_dir();
     let bytes = b"round-trip-photo".to_vec();
 

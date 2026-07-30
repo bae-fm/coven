@@ -288,6 +288,7 @@ async fn upload_fixture_with_home(uploads: usize, home: Arc<InstrumentedHome>) -
         crate::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open upload database");
@@ -380,7 +381,10 @@ async fn plant_uploads(
     crate::blob::transition::make_remote(
         &fixture.database,
         store_dir,
-        &Hlc::new("test-device".to_string()),
+        &Hlc::new(
+            "test-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        ),
         "notes",
         ROOT_ID,
         retain_pinned,
@@ -405,7 +409,10 @@ async fn run_drain(
         authority,
         store_dir,
         clock,
-        &Hlc::new("test-device".to_string()),
+        &Hlc::new(
+            "test-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        ),
         None,
         observer,
     )

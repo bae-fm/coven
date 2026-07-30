@@ -205,7 +205,10 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let result = run_single_sync_cycle(
         storage.storage.clone(),
         "M",
-        &Hlc::new("M".to_string()),
+        &Hlc::new(
+            "M".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        ),
         &SystemClock,
         &db,
         &cipher,
@@ -1246,7 +1249,10 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([5u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
 
     retain_store_packages_for_assertion(&db, &storage, b"existing-pending-upload-snapshot").await;
     let peer = UserKeypair::generate();
@@ -1254,7 +1260,10 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
         .invite_member(
             &db,
             &keypair,
-            &Hlc::new("M".to_string()),
+            &Hlc::new(
+                "M".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&peer),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1350,13 +1359,19 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([8u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let peer = UserKeypair::generate();
     storage
         .invite_member(
             &db,
             &keypair,
-            &Hlc::new("M".to_string()),
+            &Hlc::new(
+                "M".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&peer),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1456,7 +1471,10 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
     db.set_protocol_state("local_seq", "1")
@@ -1493,7 +1511,10 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [11u8; 32],
     )));
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     host_exec(
         &db,
@@ -1549,7 +1570,10 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([12u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
 
     exec(
         &db,
@@ -1722,6 +1746,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
             None,
         )
@@ -1766,7 +1791,10 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     let cipher = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([24u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
@@ -1863,6 +1891,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "snapshot-cleanup-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open snapshot cleanup database")
@@ -1905,7 +1934,10 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
             EncryptionService::from_key([12u8; 32]),
         ))),
         keypair,
-        Arc::new(Hlc::new("M".to_string())),
+        Arc::new(Hlc::new(
+            "M".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        )),
         store_dir,
         device_id,
     )
@@ -2007,7 +2039,10 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
             EncryptionService::from_key([12u8; 32]),
         ))),
         keypair,
-        Arc::new(Hlc::new("M".to_string())),
+        Arc::new(Hlc::new(
+            "M".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        )),
         store_dir,
         device_id,
     )
@@ -2090,7 +2125,10 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let cipher = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([12u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
 
     let error = run_cycle_in_task(
         Arc::clone(&interceptor),
@@ -3011,7 +3049,10 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
         .run_until(async {
             tokio::task::spawn_local(async {
                 let keypair = UserKeypair::generate();
-                let hlc = Hlc::new("M".to_string());
+                let hlc = Hlc::new(
+                    "M".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                );
                 let (_tmp, ld) = temp_store_dir();
                 let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
                     [4u8; 32],
@@ -3113,7 +3154,10 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
 #[tokio::test]
 async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([6u8; 32]),
@@ -3222,7 +3266,10 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 #[tokio::test]
 async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([8u8; 32]),
@@ -3334,7 +3381,10 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
 #[tokio::test]
 async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([24u8; 32]),
@@ -3449,7 +3499,10 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
 #[tokio::test]
 async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     // The live cipher is generation 1; the cloud has committed generation 2.
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
@@ -3634,7 +3687,10 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 #[tokio::test]
 async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([9u8; 32]),
@@ -3752,7 +3808,10 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
 #[tokio::test]
 async fn ready_make_remote_provider_transport_is_offline() {
     let keypair = UserKeypair::generate();
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [23u8; 32],
@@ -3826,7 +3885,10 @@ async fn ready_make_remote_provider_transport_is_offline() {
 #[tokio::test]
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([18u8; 32]),
@@ -3959,7 +4021,10 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 #[tokio::test]
 async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([19u8; 32]),
@@ -4078,7 +4143,10 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
 #[tokio::test]
 async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([20u8; 32]),
@@ -4276,7 +4344,10 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [21u8; 32],
     )));
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     retain_store_packages_for_assertion(&db, &storage, b"push-cycle-head-timestamp").await;
 
     host_exec(
@@ -4322,7 +4393,10 @@ async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [22u8; 32],
     )));
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
     db.set_protocol_state("local_seq", "1")
@@ -4434,7 +4508,10 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .invite_member(
                 &db,
                 &owner,
-                &Hlc::new("local".to_string()),
+                &Hlc::new(
+                    "local".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
                 &pubkey_hex(&unregistered_member),
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -4453,7 +4530,10 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             &db,
             &cipher,
             &owner,
-            &Hlc::new("local".to_string()),
+            &Hlc::new(
+                "local".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &store_dir,
         )
         .await;
@@ -4551,7 +4631,10 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
         run_single_sync_cycle(
             storage.storage.clone(),
             &device_id,
-            &Hlc::new("local".to_string()),
+            &Hlc::new(
+                "local".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &FixedClock(now),
             &db,
             &cipher,
@@ -4591,7 +4674,10 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([23u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     retain_store_packages_for_assertion(&db, &storage, b"prepared-retry-head-timestamp").await;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -4652,7 +4738,10 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
 #[tokio::test]
 async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([10u8; 32]),
@@ -4795,7 +4884,10 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
 #[tokio::test]
 async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     let keypair = UserKeypair::generate();
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
     let (_tmp, ld) = temp_store_dir();
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([9u8; 32]),
@@ -4958,7 +5050,10 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
     let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
         EncryptionService::from_key([11u8; 32]),
     )));
-    let hlc = Arc::new(Hlc::new("M".to_string()));
+    let hlc = Arc::new(Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    ));
 
     // Peer A's changeset 1 (a shareable note).
     let a_src = open_test_db();
@@ -5064,7 +5159,10 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [12u8; 32],
     )));
-    let hlc = Hlc::new("owner".to_string());
+    let hlc = Hlc::new(
+        "owner".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     let source = open_test_db();
     let first_changeset = capture_bytes(
@@ -5085,7 +5183,10 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&behind),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -5194,7 +5295,10 @@ async fn member_device_does_not_create_a_snapshot() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -5225,7 +5329,10 @@ async fn member_device_does_not_create_a_snapshot() {
         member_db.clone(),
         Arc::clone(&encryption),
         member.clone(),
-        Arc::new(Hlc::new("member".to_string())),
+        Arc::new(Hlc::new(
+            "member".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        )),
         ld.clone(),
         member_device_id,
     )
@@ -5255,7 +5362,10 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .invite_member(
             &founder_db,
             &founder,
-            &Hlc::new("founder".to_string()),
+            &Hlc::new(
+                "founder".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&successor_owner),
             None,
             MemberRole::Member,
@@ -5303,7 +5413,10 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .remove_member(
             &successor_db,
             &successor_owner,
-            &Hlc::new("successor-owner".to_string()),
+            &Hlc::new(
+                "successor-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&founder),
             &encryption,
             &security,
@@ -5344,7 +5457,10 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -5385,7 +5501,10 @@ async fn prepare_same_principal_approval_fixture<'storage>(
         .invite_member(
             owner_db,
             owner,
-            &Hlc::new(hlc_node.to_string()),
+            &Hlc::new(
+                hlc_node.to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -5771,7 +5890,10 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             .invite_member(
                 &founder_db,
                 &founder,
-                &Hlc::new("excluding-owner".to_string()),
+                &Hlc::new(
+                    "excluding-owner".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
                 &pubkey_hex(&excluding_owner),
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -6051,7 +6173,10 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6081,7 +6206,10 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6112,7 +6240,10 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6162,7 +6293,10 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6193,7 +6327,10 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6223,7 +6360,10 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6254,7 +6394,10 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6305,7 +6448,10 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -6349,7 +6495,10 @@ async fn owner_device_creates_a_snapshot() {
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [6u8; 32],
     )));
-    let hlc = Hlc::new("M".to_string());
+    let hlc = Hlc::new(
+        "M".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     host_exec(
         &db,

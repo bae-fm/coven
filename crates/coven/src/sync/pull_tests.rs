@@ -633,6 +633,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open file-backed blob test database")
@@ -689,7 +690,10 @@ async fn make_test_root_remote(
         .authorize_writer()
         .await
         .expect("activate exact fixture writer");
-    let hlc = crate::sync::hlc::Hlc::new("blob-fixture".to_string());
+    let hlc = crate::sync::hlc::Hlc::new(
+        "blob-fixture".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     crate::blob::transition::make_remote(
         &store_database(db),
         store_dir,
@@ -1953,6 +1957,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "test-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
         )
         .map(|(database, _)| database)
@@ -2347,6 +2352,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open copied retained collision database");
@@ -5842,7 +5848,10 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         &crate::database::StoreDatabase::new(&db1),
         storage.storage.clone(),
         &source_store_dir,
-        &crate::sync::hlc::Hlc::new("delete-fixture".to_string()),
+        &crate::sync::hlc::Hlc::new(
+            "delete-fixture".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        ),
         None,
         None,
         "notes",
@@ -6441,7 +6450,10 @@ async fn persisted_cycle_removal() -> PersistedCycleRemoval {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("persisted-cycle-second-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "persisted-cycle-second-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &second_owner_pubkey,
             None,
             MemberRole::Member,
@@ -6768,7 +6780,10 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .invite_member(
             &source,
             &owner,
-            &crate::sync::hlc::Hlc::new("exact-predecessor-second-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "exact-predecessor-second-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&second_owner),
             None,
             MemberRole::Member,
@@ -6831,7 +6846,10 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .remove_member(
             &second_owner_db,
             &second_owner,
-            &crate::sync::hlc::Hlc::new("exact-predecessor-founder-removal".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "exact-predecessor-founder-removal".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &owner_pk,
             &encryption,
             &second_owner_security,
@@ -8037,7 +8055,10 @@ mod blob_path_traversal {
         let error = crate::blob::transition::make_remote(
             &store_database(&db1),
             &store_dir,
-            &crate::sync::hlc::Hlc::new("traversal-test".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "traversal-test".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             "notes",
             "n1",
             false,
@@ -8081,7 +8102,10 @@ mod blob_path_traversal {
         let error = crate::blob::transition::make_remote(
             &store_database(&db1),
             &store_dir,
-            &crate::sync::hlc::Hlc::new("short-id-test".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "short-id-test".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             "notes",
             "n1",
             false,

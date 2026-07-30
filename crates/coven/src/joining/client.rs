@@ -648,6 +648,7 @@ impl DeviceJoinClient {
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 device_id,
+                self.clock.clone(),
                 &self.migrations,
                 Some(&routing_encryption),
             )
@@ -714,6 +715,7 @@ impl DeviceJoinClient {
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             device_id.clone(),
+            self.clock.clone(),
             &self.migrations,
         )
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
@@ -880,6 +882,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_dir: &StoreDir,
     store_id: &str,
     device_id: &str,
+    clock: crate::clock::ClockRef,
     store_root: crate::protocol::store_commit::StoreRootRef,
     context: RestoreBootstrapContext<'_>,
     membership_floor: &MembershipFloor,
@@ -934,6 +937,7 @@ pub(crate) async fn bootstrap_and_save_store(
             synced_tables,
             migrations,
             device_id,
+            clock,
             context.activated_continuation(),
             context.owner_recovery(),
             routing_encryption.as_ref(),
@@ -1002,6 +1006,7 @@ pub(crate) async fn open_db_and_pull(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     device_id: &str,
+    clock: crate::clock::ClockRef,
     activated_continuation: Option<&crate::restoration::ActivatedContinuation>,
     owner_recovery: Option<&crate::restoration::OwnerRecoveryAuthority>,
     routing_encryption: Option<&EncryptionService>,
@@ -1019,6 +1024,7 @@ pub(crate) async fn open_db_and_pull(
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
+            clock,
             migrations,
             routing_encryption,
         )

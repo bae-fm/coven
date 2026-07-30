@@ -66,7 +66,10 @@ async fn invite_fixture_member(
         .invite_member(
             &fixture.db,
             &fixture.owner,
-            &Hlc::new("owner-device".to_string()),
+            &Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(member),
             None,
             role,
@@ -91,7 +94,10 @@ async fn try_remove_fixture_member(
         .remove_member(
             &fixture.db,
             &fixture.owner,
-            &Hlc::new("owner-device".to_string()),
+            &Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(member),
             &EncryptionService::from_key([42; 32]),
             &security,
@@ -683,7 +689,10 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
         .invite_member(
             &fixture.db,
             &fixture.owner,
-            &Hlc::new("owner-device".to_string()),
+            &Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &fixture.owner_pubkey,
             None,
             MemberRole::Member,

@@ -214,6 +214,7 @@ impl<'storage> BootstrapResult<'storage> {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
         device_id: String,
+        clock: crate::clock::ClockRef,
         migrations: &[Migration],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
@@ -267,6 +268,7 @@ impl<'storage> BootstrapResult<'storage> {
                         blob_tombstone_grace,
                         transfer_limits,
                         &device_id,
+                        &clock,
                         migrations,
                         &mut self.history_verifier,
                         &store_frontier,
@@ -291,6 +293,7 @@ impl<'storage> BootstrapResult<'storage> {
                 blob_tombstone_grace,
                 transfer_limits,
                 device_id,
+                clock,
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
@@ -331,6 +334,7 @@ async fn stage_restore_circle_decisions(
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::blob::TransferLimits,
     device_id: &str,
+    clock: &crate::clock::ClockRef,
     migrations: &[Migration],
     history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     store_frontier: &crate::protocol::store_commit::CommitFrontier,
@@ -348,6 +352,7 @@ async fn stage_restore_circle_decisions(
             blob_tombstone_grace,
             transfer_limits,
             device_id.to_string(),
+            clock.clone(),
             migrations,
         )
         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
@@ -1773,6 +1778,7 @@ mod tests {
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 Some(&routing),
             )
@@ -2274,6 +2280,7 @@ mod tests {
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
                 &target_migrations,
                 Some(&routing),
             )
@@ -2529,6 +2536,7 @@ mod tests {
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 None,
             )

@@ -1028,6 +1028,7 @@ mod tests {
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 "founder-rollback-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
                 &test_migrations(),
             )
             .expect("open founder rollback database")

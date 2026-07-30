@@ -23,7 +23,10 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &successor_pubkey,
             None,
             MemberRole::Member,
@@ -82,7 +85,10 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
         .remove_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder-device".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &successor_pubkey,
             &encryption,
             &security,

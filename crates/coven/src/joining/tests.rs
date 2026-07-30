@@ -46,7 +46,10 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("owner-device".to_string()),
+            &Hlc::new(
+                "owner-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,

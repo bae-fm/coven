@@ -820,6 +820,7 @@ pub(crate) fn read_test_db_with_download_limit(namespace: &str, downloads: usize
         crate::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open test database");
@@ -981,6 +982,7 @@ pub(crate) fn open_test_db_schema(
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("open test database");

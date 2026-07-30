@@ -521,7 +521,10 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .invite_member(
             &db1,
             &founder,
-            &crate::sync::hlc::Hlc::new("resolve-closing-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "resolve-closing-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -773,7 +776,10 @@ async fn non_owner_resolution_is_refused() {
         .invite_member(
             &fixture.db1,
             &fixture.founder,
-            &crate::sync::hlc::Hlc::new("resolve-non-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "resolve-non-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &outsider_pubkey,
             None,
             MemberRole::Member,

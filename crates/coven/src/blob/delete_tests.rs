@@ -49,6 +49,7 @@ fn open_outbox_db() -> Database {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[],
     )
     .expect("open outbox database");
@@ -375,7 +376,10 @@ async fn publish_exact_remote_blob_binding(
     crate::local_blob::write_atomic(&source, bytes)
         .await
         .expect("write host blob source");
-    let hlc = crate::sync::hlc::Hlc::new("delete-tests".to_string());
+    let hlc = crate::sync::hlc::Hlc::new(
+        "delete-tests".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     let database = StoreDatabase::new(db);
     crate::blob::transition::make_remote(&database, store_dir, &hlc, "notes", root_id, false)
         .await
@@ -425,7 +429,10 @@ async fn storage_with_chain(db: &Database) -> (TestStore, UserKeypair, UserKeypa
         .invite_member(
             db,
             &founder,
-            &crate::sync::hlc::Hlc::new("founder".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "founder".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,

@@ -3710,6 +3710,7 @@ mod tests {
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
                 "pending-rotation-reopen-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
             )
             .expect("open pending-rotation database")

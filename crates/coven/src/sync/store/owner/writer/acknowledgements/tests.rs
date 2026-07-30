@@ -15,6 +15,7 @@ fn open(path: &Path, device_id: &str) -> Database {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
     )
     .expect("open acknowledgement test database")

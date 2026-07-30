@@ -33,7 +33,10 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .invite_member(
             &owner_database,
             &owner,
-            &crate::sync::hlc::Hlc::new("unresolved-second-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "unresolved-second-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::keys::public_key_hex(&second_owner),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -82,7 +85,10 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     let target_pubkey = crate::keys::public_key_hex(&target);
     founder_writer
         .invite_member(
-            &crate::sync::hlc::Hlc::new("unresolved-founder-assignment".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "unresolved-founder-assignment".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &target_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -94,7 +100,10 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .expect("publish the founder's assignment");
     second_writer
         .invite_member(
-            &crate::sync::hlc::Hlc::new("unresolved-second-assignment".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "unresolved-second-assignment".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &target_pubkey,
             None,
             crate::protocol::membership::MemberRole::Follower,

@@ -904,6 +904,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &store_dir,
         store_id,
         "device-late",
+        std::sync::Arc::new(crate::clock::SystemClock),
         store_root.clone(),
         RestoreBootstrapContext {
             keypair: &joiner_keypair,
@@ -1026,6 +1027,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &store_dir,
         store_id,
         "device-late",
+        std::sync::Arc::new(crate::clock::SystemClock),
         store_root,
         RestoreBootstrapContext {
             keypair: &joiner_keypair,
@@ -1193,6 +1195,7 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         config.device_id.clone(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("open recovered database");
@@ -1384,6 +1387,7 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         config.device_id.clone(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open B db");
@@ -1510,6 +1514,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         &tables,
         &test_migrations(),
         "B",
+        std::sync::Arc::new(crate::clock::SystemClock),
         None,
         None,
         None,
@@ -1526,6 +1531,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "B".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open B db");
@@ -1561,7 +1567,10 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .invite_member(
             &db_owner,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1589,7 +1598,10 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .remove_member(
             &db_owner,
             &owner,
-            &Hlc::new("owner".to_string()),
+            &Hlc::new(
+                "owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&member),
             &encryption,
             &security,
@@ -1837,6 +1849,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &lib_b,
         store_id,
         &restore_device_id,
+        std::sync::Arc::new(crate::clock::SystemClock),
         store_root,
         RestoreBootstrapContext {
             keypair: &joiner_keypair,
@@ -1876,6 +1889,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         config.device_id,
+        std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open restored database");

@@ -303,6 +303,7 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
         crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "scoped-replay-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("open scoped replay database")
@@ -432,7 +433,10 @@ async fn effective_access_fixture(
         .invite_member(
             &owner_database,
             &owner,
-            &crate::sync::hlc::Hlc::new(format!("{label}-owner")),
+            &crate::sync::hlc::Hlc::new(
+                format!("{label}-owner"),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -733,7 +737,10 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new("removed-member-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "removed-member-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
             &security,
@@ -954,7 +961,10 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new("readded-member-removal".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "readded-member-removal".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
             &security,
@@ -995,7 +1005,10 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .invite_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new("readded-member-invitation".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "readded-member-invitation".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::keys::public_key_hex(&fixture.member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1425,7 +1438,10 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .invite_member(
             &founder_db,
             &founder,
-            &crate::sync::hlc::Hlc::new("causal-membership-proof".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "causal-membership-proof".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             None,
             crate::protocol::membership::MemberRole::Member,

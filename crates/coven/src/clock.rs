@@ -5,10 +5,9 @@
 //! deterministic fake ([`FixedClock`] / [`SteppingClock`]) and pass it to the
 //! unit under test.
 //!
-//! Sibling to [`crate::sync::hlc::Hlc`]'s `wall_clock`: that one returns `u64`
-//! millis for hybrid-logical-clock math, this one returns `DateTime<Utc>` for
-//! `created_at` / `updated_at` / expiry comparisons. Both are injected wall
-//! sources rooted at the same composition point; neither subsumes the other.
+//! [`crate::sync::hlc::Hlc`] retains this same clock and derives epoch
+//! milliseconds for hybrid-logical-clock math. Other consumers use the full
+//! `DateTime<Utc>` for `created_at`, `updated_at`, and expiry comparisons.
 
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -23,6 +22,14 @@ pub trait Clock: Send + Sync {
 /// `CovenReadHandle`) so they clone the handle, not the implementation.
 pub type ClockRef = Arc<dyn Clock>;
 
+#[cfg(test)]
+pub(crate) fn clock_from_millis(source: impl Fn() -> u64 + Send + Sync + 'static) -> ClockRef {
+    Arc::new(ClosureClock(move || {
+        let millis: i64 = source().try_into().expect("test clock millis fit in i64");
+        DateTime::from_timestamp_millis(millis).expect("valid test clock instant")
+    }))
+}
+
 /// Production clock: real wall time.
 pub struct SystemClock;
 
@@ -35,6 +42,8 @@ impl Clock for SystemClock {
 // Test clock fakes are exposed to downstream crates' tests via the `test-utils`
 // feature, so any crate that consumes `Clock` tests against the same fakes
 // instead of mirroring them.
+#[cfg(test)]
+pub(crate) use fakes::ClosureClock;
 #[cfg(any(test, feature = "test-utils"))]
 pub use fakes::{FixedClock, SteppingClock};
 
@@ -43,6 +52,20 @@ mod fakes {
     use super::*;
     use chrono::Duration;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Delegates each read to a supplied test function.
+    #[cfg(test)]
+    pub(crate) struct ClosureClock<F>(pub F);
+
+    #[cfg(test)]
+    impl<F> Clock for ClosureClock<F>
+    where
+        F: Fn() -> DateTime<Utc> + Send + Sync,
+    {
+        fn now(&self) -> DateTime<Utc> {
+            (self.0)()
+        }
+    }
 
     /// Every `now()` returns the same instant.
     pub struct FixedClock(pub DateTime<Utc>);
@@ -83,6 +106,7 @@ mod fakes {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn fixed_clock_returns_same_instant() {
@@ -112,5 +136,20 @@ mod tests {
             .with_timezone(&Utc);
         let clock: ClockRef = Arc::new(FixedClock(instant));
         assert_eq!(clock.now(), instant);
+    }
+
+    #[test]
+    fn closure_clock_reads_the_supplied_source_each_time() {
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let calls = AtomicU64::new(0);
+        let clock = ClosureClock(|| {
+            let seconds = calls.fetch_add(1, Ordering::SeqCst) as i64;
+            start + Duration::seconds(seconds)
+        });
+
+        assert_eq!(clock.now(), start);
+        assert_eq!(clock.now(), start + Duration::seconds(1));
     }
 }

@@ -86,7 +86,10 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new(format!("{label}-owner")),
+            &crate::sync::hlc::Hlc::new(
+                format!("{label}-owner"),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -453,7 +456,10 @@ async fn re_adding_the_store_member_clears_rotation_required() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new("rotation-readd".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "rotation-readd".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &fixture.member_pubkey,
             None,
             MemberRole::Member,
@@ -839,7 +845,10 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new("rotation-outsider".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "rotation-outsider".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &outsider_pubkey,
             None,
             MemberRole::Member,
@@ -1044,7 +1053,10 @@ async fn setup_active_member_circle_snapshot(
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new(format!("{name}-owner")),
+            &crate::sync::hlc::Hlc::new(
+                format!("{name}-owner"),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1201,6 +1213,7 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "no-image-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1287,6 +1300,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "sabotaged-restore-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1348,6 +1362,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1387,7 +1402,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("snapshot-restore-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "snapshot-restore-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1538,6 +1556,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "restored-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1606,6 +1625,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "removed-member-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1679,7 +1699,10 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new("standalone-dominates-owner".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "standalone-dominates-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1831,6 +1854,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
             "standalone-restore-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -3742,7 +3766,10 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new("second-recipient".to_string()),
+            &crate::sync::hlc::Hlc::new(
+                "second-recipient".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &second_pubkey,
             None,
             MemberRole::Member,

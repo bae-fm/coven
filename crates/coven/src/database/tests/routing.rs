@@ -10,6 +10,7 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[],
     )
     .expect("open database");
@@ -75,6 +76,7 @@ async fn capture_scoped_write_then_reopen(
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("open scoped Store");
@@ -165,6 +167,7 @@ async fn capture_scoped_write_then_reopen(
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
     )
     .expect("reopen scoped Store");
@@ -339,6 +342,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "circle-only-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(
             1,
             "accounts",
@@ -475,6 +479,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "move-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(
             1,
             "accounts",
@@ -627,6 +632,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::one_at_a_time(),
         "foreign-key-move-device".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(
             1,
             "scoped relationship",

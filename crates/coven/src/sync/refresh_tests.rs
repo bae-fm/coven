@@ -112,7 +112,10 @@ async fn invite_exact_member(
         .invite_member(
             owner_db,
             owner,
-            &Hlc::new("refresh-owner".to_string()),
+            &Hlc::new(
+                "refresh-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(member),
             None,
             role,
@@ -233,7 +236,10 @@ async fn run_cycle_with_storage(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "refresh device has no exact Store registration".to_string())?;
-    let hlc = Hlc::new(device_id.to_string());
+    let hlc = Hlc::new(
+        device_id.to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
     run_single_sync_cycle(
         sync_storage,
         &exact_device_id,
@@ -457,7 +463,10 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new("refresh-owner".to_string()),
+            &Hlc::new(
+                "refresh-owner".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
             &pubkey_hex(&invited_member),
             None,
             MemberRole::Member,
@@ -1314,7 +1323,10 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let security = test_store_security(LIB_ID, Arc::new(ks.clone()));
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let pending_rotation = PendingRotation::none();
-    let hlc = Hlc::new("A".to_string());
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
 
     // The keyring is momentarily unwritable, so local adoption fails after the
     // cloud rotation commits.
