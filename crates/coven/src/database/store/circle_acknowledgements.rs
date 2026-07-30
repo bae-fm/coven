@@ -247,49 +247,47 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleAck>, DbError> {
         self.connection
-            .call(move |conn| Self::latest_published_circle_ack_on(conn, circle_id))
+            .call(move |conn| {
+                let row: Option<(String, String, String, String)> = conn
+                    .query_row(
+                        "SELECT ack_ref, successor_slot, store_cut, control_coord
+                         FROM published_circle_acks WHERE circle_id = ?1",
+                        [circle_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let Some((reference, successor_slot, store_cut, control)) = row else {
+                    return Ok(None);
+                };
+                let reference: CircleAckRef =
+                    serde_json::from_str(&reference).map_err(|error| {
+                        DbError::Message(format!("published Circle acknowledgement ref: {error}"))
+                    })?;
+                if reference.circle_id != circle_id || reference.sequence == 0 {
+                    return Err(DbError::Message(
+                        "published Circle acknowledgement names another Circle or sequence zero"
+                            .to_string(),
+                    ));
+                }
+                Ok(Some(PublishedCircleAck {
+                    reference,
+                    successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
+                        DbError::Message(format!(
+                            "published Circle acknowledgement successor slot: {error}"
+                        ))
+                    })?,
+                    store_cut: serde_json::from_str(&store_cut).map_err(|error| {
+                        DbError::Message(format!("published Circle acknowledgement cut: {error}"))
+                    })?,
+                    control: serde_json::from_str(&control).map_err(|error| {
+                        DbError::Message(format!(
+                            "published Circle acknowledgement control: {error}"
+                        ))
+                    })?,
+                }))
+            })
             .await
-    }
-
-    fn latest_published_circle_ack_on(
-        conn: &Connection,
-        circle_id: CircleId,
-    ) -> Result<Option<PublishedCircleAck>, DbError> {
-        let row: Option<(String, String, String, String)> = conn
-            .query_row(
-                "SELECT ack_ref, successor_slot, store_cut, control_coord
-                 FROM published_circle_acks WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let Some((reference, successor_slot, store_cut, control)) = row else {
-            return Ok(None);
-        };
-        let reference: CircleAckRef = serde_json::from_str(&reference).map_err(|error| {
-            DbError::Message(format!("published Circle acknowledgement ref: {error}"))
-        })?;
-        if reference.circle_id != circle_id || reference.sequence == 0 {
-            return Err(DbError::Message(
-                "published Circle acknowledgement names another Circle or sequence zero"
-                    .to_string(),
-            ));
-        }
-        Ok(Some(PublishedCircleAck {
-            reference,
-            successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
-                DbError::Message(format!(
-                    "published Circle acknowledgement successor slot: {error}"
-                ))
-            })?,
-            store_cut: serde_json::from_str(&store_cut).map_err(|error| {
-                DbError::Message(format!("published Circle acknowledgement cut: {error}"))
-            })?,
-            control: serde_json::from_str(&control).map_err(|error| {
-                DbError::Message(format!("published Circle acknowledgement control: {error}"))
-            })?,
-        }))
     }
 
     pub(crate) async fn stage_circle_ack(
