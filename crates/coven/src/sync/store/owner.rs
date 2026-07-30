@@ -3,6 +3,7 @@ use crate::database::BlockedWriteDiscard;
 use crate::protocol::store_commit::StoreRootRef;
 
 mod acknowledgements;
+mod circle_bootstrap;
 mod circle_operation;
 mod circles;
 pub(super) mod device_exclusion;

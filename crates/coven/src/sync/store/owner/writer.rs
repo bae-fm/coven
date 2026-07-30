@@ -572,6 +572,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         super::circle_operation::AuthorizedCircleOperation::new(&mut self.store)
     }
 
+    pub(super) fn circle_bootstrap_verifier(
+        &self,
+    ) -> super::circle_bootstrap::CircleBootstrapVerifier {
+        super::circle_bootstrap::CircleBootstrapVerifier::new(self.store.storage.clone())
+    }
+
     pub(super) fn join_operation(&mut self) -> super::device_join::AuthorizedJoin<'_, 'storage> {
         super::device_join::AuthorizedJoin::new(self)
     }

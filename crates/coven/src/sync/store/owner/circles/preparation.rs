@@ -1122,6 +1122,7 @@ pub(super) async fn prepare_circle_operation_request(
     request: CircleOperationRequest,
 ) -> Result<CircleOperationJournal, CircleOperationError> {
     let announcement_stream_id = operation.announcement_stream_id();
+    let bootstrap_verifier = operation.circle_bootstrap_verifier();
     let authority = &mut operation.store;
     let database = authority.database().clone();
     let current = authority.membership.clone();
@@ -1336,12 +1337,9 @@ pub(super) async fn prepare_circle_operation_request(
                     &request.member_pubkey,
                     request.circle_id,
                 )?;
-                let bootstrap_blobs = super::verified_circle_bootstrap_blobs(
-                    storage,
-                    request.circle_id,
-                    &request.bootstrap.snapshot,
-                )
-                .await?;
+                let bootstrap_blobs = bootstrap_verifier
+                    .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
+                    .await?;
                 let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
                 let image_prefix =
                     crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
@@ -1706,12 +1704,9 @@ pub(super) async fn prepare_circle_operation_request(
                     db.id_provider(),
                     signer,
                 )?;
-                let bootstrap_blobs = super::verified_circle_bootstrap_blobs(
-                    storage,
-                    request.circle_id,
-                    &request.bootstrap.snapshot,
-                )
-                .await?;
+                let bootstrap_blobs = bootstrap_verifier
+                    .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
+                    .await?;
                 let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
                 let successor_encryption = EncryptionService::from(
                     MasterKeyring::from_serialized(&draft.keyring).map_err(|error| {
