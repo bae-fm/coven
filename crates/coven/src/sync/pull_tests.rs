@@ -7418,8 +7418,19 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     .expect("revocation witness produces a Store commit");
 
     let (_pull_temp, pull_store_dir) = temp_store_dir();
-    storage.home.fail_exact_delete_on_call(1);
-    pull_into_result(&member_db, &storage, &pull_store_dir)
+    storage.home.fail_nth_exact_delete_of(
+        &[
+            candidate_graph.reference.object.slot(),
+            candidate_graph.head_object.slot(),
+        ],
+        1,
+    );
+    let member_device = storage
+        .bind_device(&member_db, &member)
+        .await
+        .expect("bind removed member for cleanup pull");
+    member_device
+        .pull_store(&pull_store_dir)
         .await
         .expect_err("interrupted cleanup retains the verified retraction journal");
     storage
