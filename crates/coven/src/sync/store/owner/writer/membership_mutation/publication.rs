@@ -49,7 +49,7 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
                 "membership author differs from the active exact device registration".to_string(),
             ));
         }
-        let storage = self.writer.storage();
+        let storage = self.writer.storage.as_ref();
         let (entry_object, entry_ref) =
             store_objects::prepare_membership_entry(storage, root.store_root_hash, &entry)
                 .await
@@ -188,7 +188,7 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
         let head_bytes = serde_json::to_vec(&head).map_err(|error| {
             InviteError::InvalidDurableMutation(format!("serialize membership head: {error}"))
         })?;
-        let head_object = self.writer.storage().prepare_protocol_object(
+        let head_object = self.writer.storage.as_ref().prepare_protocol_object(
             &context,
             prepared.transition.head_slot.clone(),
             &head_prefix,
@@ -217,7 +217,7 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
         wraps: &[PreparedWrappedStoreKey],
     ) -> Result<(), InviteError> {
         publish_prepared_merge_membership_authority(
-            self.writer.storage(),
+            self.writer.storage.as_ref(),
             self.writer.store_root().store_root_hash,
             transition,
             wraps,
@@ -258,7 +258,7 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
             ));
         }
         {
-            let storage = self.writer.storage();
+            let storage = self.writer.storage.as_ref();
             let root = self.writer.store_root();
             storage
                 .create_protocol_object(&publication.head_object)
@@ -273,7 +273,7 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         }
-        let database = self.writer.database().clone();
+        let database = self.writer.database.clone();
         database
             .mark_remote_object_uploaded(
                 completion

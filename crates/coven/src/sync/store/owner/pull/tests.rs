@@ -6,6 +6,7 @@ use crate::sync::store::owner::pull::{
 };
 use rusqlite::OptionalExtension;
 
+#[path = "tests/effective_access_failure.rs"]
 mod effective_access_failure;
 
 async fn one_retained_checkpoint() -> (

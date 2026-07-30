@@ -18,24 +18,24 @@ pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with(TEMP_BLOB_PREFIX))
 }
 
-pub struct PlaintextReader(Box<dyn PlaintextChunkReader>);
+pub(crate) struct PlaintextReader(Box<dyn PlaintextChunkReader>);
 
 impl PlaintextReader {
-    pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+    pub(crate) async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
         self.0
             .next_chunk(max)
             .await
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn from_test_reader(reader: impl PlaintextChunkReader + 'static) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_test_reader(reader: impl PlaintextChunkReader + 'static) -> Self {
         Self(Box::new(reader))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PlaintextChunkError {
+pub(crate) enum PlaintextChunkError {
     #[error(transparent)]
     Remote(#[from] crate::storage::StorageError),
     #[error("invalid remote content: {0}")]
@@ -60,7 +60,7 @@ pub(crate) enum ByteStreamWriteError<E> {
 }
 
 #[async_trait]
-pub trait PlaintextChunkReader: Send {
+pub(crate) trait PlaintextChunkReader: Send {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError>;
 }
 
@@ -78,7 +78,7 @@ struct AtomicTempFile {
 
 /// A provider download path that becomes visible at its destination only after
 /// the caller has verified the completed file.
-pub struct AtomicStagedFile {
+pub(crate) struct AtomicStagedFile {
     destination: PathBuf,
     staged: Option<AtomicTempFile>,
 }
@@ -90,7 +90,7 @@ pub(crate) struct PublishedAtomicFile {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CommitNewFileError {
+pub(crate) enum CommitNewFileError {
     #[error("destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("commit new file: {0}")]
@@ -114,7 +114,7 @@ impl AtomicStagedFile {
         })
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self
             .staged
             .as_ref()
@@ -258,7 +258,7 @@ impl AtomicStagedFile {
         }
     }
 
-    pub async fn commit(mut self) -> Result<(), String> {
+    pub(crate) async fn commit(mut self) -> Result<(), String> {
         let mut staged = self.take_stage();
         staged.close();
         let result = commit_staged_file(&staged.path, &self.destination, |path| {
@@ -278,7 +278,7 @@ impl AtomicStagedFile {
     /// Publish a verified user-owned destination without replacing an existing
     /// path. The staged file is a sibling, so the hard link exposes one complete
     /// inode atomically and fails if another file already owns the name.
-    pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
+    pub(crate) async fn commit_new(self) -> Result<(), CommitNewFileError> {
         self.commit_new_with_sync(|path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }

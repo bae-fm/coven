@@ -224,7 +224,8 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .authorize_writer()
         .await
         .expect("authorize reclaim writer");
-    let selected = AuthorizedReclaim::new(&mut writer)
+    let selected = writer
+        .reclaim()
         .choose_snapshot(&registrations)
         .await
         .expect("select the stable reclaim snapshot");
@@ -444,9 +445,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         .authorize_writer()
         .await
         .expect("authorize reclaim writer");
-    let deletion = AuthorizedReclaim::new(&mut writer)
-        .execute_delete(operation)
-        .await;
+    let deletion = writer.reclaim().execute_delete(operation).await;
     assert!(
         deletion.is_err(),
         "nonexistent snapshot and acknowledgement refs must not authorize deletion"
@@ -548,7 +547,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .authorize_writer()
         .await
         .expect("authorize reclaim writer");
-    let mut reclaim = AuthorizedReclaim::new(&mut writer);
+    let mut reclaim = writer.reclaim();
     reclaim
         .prepare_authorization(ReclaimClaim::StorePackage(StorePackageReclaimClaim {
             target: StorePackageReclaimTarget {

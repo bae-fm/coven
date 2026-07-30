@@ -36,8 +36,8 @@ impl super::AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
-        let keypair = self.identity();
-        let resumed = drain_outbound_store_snapshot(self.storage(), self.database())
+        let keypair = self.writer.identity;
+        let resumed = drain_outbound_store_snapshot(self.storage.as_ref(), &self.database)
             .await
             .map_err(|error| {
                 crate::sync::cycle::SyncCycleFailure::operation(
@@ -60,7 +60,7 @@ impl super::AuthorizedWriterOperation<'_> {
             .as_ref()
             .map_or(0, |reference| reference.coord.sequence());
         let last_snapshot = self
-            .database()
+            .database
             .latest_local_store_snapshot()
             .await
             .map_err(|error| {
@@ -122,19 +122,14 @@ impl super::AuthorizedWriterOperation<'_> {
         let snapshot = self
             .capture_snapshot_cut(
                 store_dir.as_ref().to_path_buf(),
-                self.db().synced_tables().to_vec(),
+                self.database.synced_tables().to_vec(),
                 routing_encryption,
             )
             .await;
         match snapshot {
             Ok(cut) => {
                 let meta = self
-                    .push_store_snapshot(
-                        cut.snapshot,
-                        cut.coverage,
-                        self.db().schema_version(),
-                        created_at.to_string(),
-                    )
+                    .push_snapshot_cut(cut, created_at.to_string())
                     .await
                     .map_err(|error| {
                         crate::sync::cycle::SyncCycleFailure::operation(
@@ -151,7 +146,7 @@ impl super::AuthorizedWriterOperation<'_> {
             Err(error) => warn!("Failed to create snapshot: {error}"),
         }
 
-        let schema_version = self.db().schema_version();
+        let schema_version = self.database.schema_version();
         if let Err(error) = self
             .circles()
             .snapshots()
@@ -186,7 +181,7 @@ impl super::AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<SnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self
-            .db()
+            .database
             .capture_store_snapshot_cut(
                 self.store_root().clone(),
                 temp_dir,
@@ -199,6 +194,20 @@ impl super::AuthorizedWriterOperation<'_> {
 }
 
 impl super::AuthorizedWriterOperation<'_> {
+    pub(crate) async fn push_snapshot_cut(
+        &mut self,
+        cut: SnapshotCut,
+        created_at: String,
+    ) -> Result<SnapshotMeta, SnapshotError> {
+        self.push_store_snapshot(
+            cut.snapshot,
+            cut.coverage,
+            self.database.schema_version(),
+            created_at,
+        )
+        .await
+    }
+
     pub(crate) async fn push_store_snapshot(
         &mut self,
         snapshot: CreatedSnapshot,
@@ -206,10 +215,10 @@ impl super::AuthorizedWriterOperation<'_> {
         schema_version: u32,
         created_at: String,
     ) -> Result<SnapshotMeta, SnapshotError> {
-        let storage = self.storage();
+        let storage = self.storage.as_ref();
         let store_root_hash = self.store_root().store_root_hash;
-        let membership = self.membership().clone();
-        let database = self.database().clone();
+        let membership = self.membership.clone();
+        let database = self.database.clone();
         let membership = &membership;
         let database = &database;
         let _publication = database.snapshot_publication_permit().await;
@@ -221,14 +230,9 @@ impl super::AuthorizedWriterOperation<'_> {
         {
             return publish_durable_snapshot(storage, database, pending).await;
         }
-        let (registration_ref, registration, device_signer) = {
-            let (registration_ref, registration, device_signer) = self.registration();
-            (
-                registration_ref.clone(),
-                registration.clone(),
-                device_signer.clone(),
-            )
-        };
+        let registration_ref = self.writer.registration_ref.clone();
+        let registration = self.writer.registration.clone();
+        let device_signer = self.writer.device_signer.clone();
         let device_id = registration_ref.device_id.to_string();
         let author = registration.author_pubkey.clone();
         if !membership.is_owner_now(&author) {
@@ -258,7 +262,7 @@ impl super::AuthorizedWriterOperation<'_> {
             devices,
         };
         let history_summary = self
-            .history()
+            .history
             .prepare_merge_snapshot_history_summary(
                 &coverage,
                 membership,
@@ -268,7 +272,7 @@ impl super::AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-        let storage = self.storage();
+        let storage = self.storage.as_ref();
         let previous = database
             .latest_local_store_snapshot()
             .await
@@ -401,9 +405,10 @@ impl super::AuthorizedWriterOperation<'_> {
         snapshot: CreatedSnapshot,
         owner: crate::protocol::remote_object::SnapshotObjectOwner,
     ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
-        let database = self.database();
-        let storage = self.storage();
-        let (registration_ref, registration, _) = self.registration();
+        let database = &self.database;
+        let storage = self.storage.as_ref();
+        let registration_ref = &self.writer.registration_ref;
+        let registration = &self.writer.registration;
         let authority = crate::storage::BlobWriteAuthority::new(registration_ref, registration)
             .map_err(SnapshotError::Bucket)?;
         let CreatedSnapshot {
@@ -689,7 +694,7 @@ impl super::AuthorizedWriterOperation<'_> {
     ) -> Result<SnapshotMeta, SnapshotError> {
         let registration_ref = self.writer.registration_ref.clone();
         let registration = self.writer.registration.clone();
-        self.history_verifier_mut()
+        self.history
             .load_store_snapshot(&registration_ref, &registration, reference)
             .await
             .map(|(_, meta)| meta)

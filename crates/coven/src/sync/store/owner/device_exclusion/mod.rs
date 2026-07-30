@@ -1,5 +1,8 @@
 //! Durable publication of Store-device exclusion proposals and outcomes.
 
+mod history;
+pub(super) use history::DeviceExclusionHistory;
+
 use serde::{Deserialize, Serialize};
 
 use super::operations::{
@@ -616,9 +619,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        AuthorizedDeviceExclusion::new(&mut authority)
-            .propose(target)
-            .await
+        authority.device_exclusion().propose(target).await
     }
 
     pub(crate) async fn cancel_device_exclusion(
@@ -629,7 +630,8 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        AuthorizedDeviceExclusion::new(&mut authority)
+        authority
+            .device_exclusion()
             .publish_outcome(proposal, OutcomeIntent::Cancel)
             .await
     }
@@ -642,7 +644,8 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        AuthorizedDeviceExclusion::new(&mut authority)
+        authority
+            .device_exclusion()
             .publish_outcome(proposal, OutcomeIntent::Exclude)
             .await
     }
@@ -650,17 +653,27 @@ impl Store {
 
 pub(super) struct AuthorizedDeviceExclusion<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    database: StoreDatabase,
+    storage: std::sync::Arc<dyn SyncStorage>,
 }
 
 impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
-    pub(super) fn new(writer: &'operation mut AuthorizedWriterOperation<'storage>) -> Self {
-        Self { writer }
+    pub(crate) fn new(
+        writer: &'operation mut AuthorizedWriterOperation<'storage>,
+        database: StoreDatabase,
+        storage: std::sync::Arc<dyn SyncStorage>,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+        }
     }
 
     pub(super) async fn resume(
         &mut self,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
         let Some(operation) = database.active_outbound_store_device_exclusion().await? else {
             return Ok(None);
@@ -672,7 +685,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         &mut self,
         target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
         reject_active_operation(&database).await?;
         let durable = self.prepare_proposal(target).await?;
@@ -683,7 +696,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         &mut self,
         target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let plan = Box::new(self.writer.prepare_plan().await?);
         if plan.registration_ref() == target {
             return Err(StoreDeviceExclusionError::CannotExcludeLocalDevice);
@@ -711,8 +724,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             ProtocolObjectDomain::StoreDeviceExclusionOutcome,
         );
         let outcome_slot = self
-            .writer
-            .storage()
+            .storage
             .allocate_protocol_slot(&outcome_context, &outcome_prefix, ".json")
             .await?;
         let proposal = StoreDeviceExclusionProposal::signed(
@@ -737,11 +749,10 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             ProtocolObjectDomain::StoreDeviceExclusionProposal,
         );
         let proposal_slot = self
-            .writer
-            .storage()
+            .storage
             .allocate_protocol_slot(&proposal_context, &proposal_prefix, ".json")
             .await?;
-        let prepared = self.writer.storage().prepare_protocol_object(
+        let prepared = self.storage.prepare_protocol_object(
             &proposal_context,
             proposal_slot,
             &proposal_prefix,
@@ -817,7 +828,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         proposal_ref: &StoreDeviceExclusionProposalRef,
         intent: OutcomeIntent,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
         reject_active_operation(&database).await?;
         let durable = self.prepare_outcome(proposal_ref, intent).await?;
@@ -829,7 +840,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         proposal_ref: &StoreDeviceExclusionProposalRef,
         intent: OutcomeIntent,
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let plan = self.writer.prepare_plan().await?;
         let owner_grant = plan
             .owner_grant()
@@ -837,8 +848,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?;
         let proposal = self
             .writer
-            .history_verifier_mut()
-            .load_device_exclusion_proposal(proposal_ref)
+            .device_exclusion_history()
+            .load_proposal(proposal_ref)
             .await?;
         let state = database
             .resolved_store_device_state(plan.device_state())
@@ -880,7 +891,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             plan.root().store_root_hash,
             ProtocolObjectDomain::StoreDeviceExclusionOutcome,
         );
-        let prepared = self.writer.storage().prepare_protocol_object(
+        let prepared = self.storage.prepare_protocol_object(
             &context,
             proposal.object.value.outcome_slot.clone(),
             &prefix,
@@ -958,7 +969,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         &mut self,
         operation: &mut Box<DurableStoreDeviceExclusionOperation>,
     ) -> Result<DeviceExclusionPublicationProgress, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let candidate = operation.candidate().cloned().ok_or_else(|| {
             StoreDeviceExclusionError::InvalidState(
                 "active exclusion operation has no activation candidate".to_string(),
@@ -1029,7 +1040,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         operation: &mut Box<DurableStoreDeviceExclusionOperation>,
         nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let replacement = self
             .prepare_replacement_candidate(operation.object())
             .await?;
@@ -1046,8 +1057,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         &mut self,
         operation: &DurableStoreDeviceExclusionOperation,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
-        match Box::pin(operation.create_exact_object(self.writer.storage())).await {
+        let database = self.database.clone();
+        match Box::pin(operation.create_exact_object(self.storage.as_ref())).await {
             Ok(()) => {}
             Err(StoreDeviceExclusionJournalError::Storage(
                 crate::storage::StorageError::SlotCollision(_),
@@ -1067,7 +1078,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         &mut self,
         operation: &mut Box<DurableStoreDeviceExclusionOperation>,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         match operation.as_ref() {
             DurableStoreDeviceExclusionOperation::CandidateNonactivating { .. } => {
                 for target in Box::pin(
@@ -1077,8 +1088,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                 )
                 .await?
                 {
-                    self.writer
-                        .storage()
+                    self.storage
                         .delete_protocol_object(&target.object)
                         .await
                         .map_err(crate::storage::StoreObjectError::from)?;
@@ -1101,8 +1111,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                 )
                 .await?
                 {
-                    self.writer
-                        .storage()
+                    self.storage
                         .delete_protocol_object(&target.object)
                         .await
                         .map_err(crate::storage::StoreObjectError::from)?;
@@ -1147,7 +1156,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         &mut self,
         object: &DurableStoreDeviceExclusionObject,
     ) -> Result<PreparedStoreOperationCommit, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let DurableStoreDeviceExclusionObject::Outcome {
             reference, value, ..
         } = object
@@ -1163,8 +1172,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         require_pending_proposal(&state, reference.proposal())?;
         let proposal = self
             .writer
-            .history_verifier_mut()
-            .load_device_exclusion_proposal(reference.proposal())
+            .device_exclusion_history()
+            .load_proposal(reference.proposal())
             .await?;
         let retained =
             crate::protocol::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
@@ -1187,11 +1196,10 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         &mut self,
         operation: DurableStoreDeviceExclusionOperation,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let intended = operation.object();
         let (bytes, prepared) = self
-            .writer
-            .storage()
+            .storage
             .read_prepared_protocol_slot(
                 &intended.context(),
                 intended.object().slot(),
@@ -1218,8 +1226,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         };
         let proposal = self
             .writer
-            .history_verifier_mut()
-            .load_device_exclusion_proposal(intended_ref.proposal())
+            .device_exclusion_history()
+            .load_proposal(intended_ref.proposal())
             .await?;
         let unverified: StoreDeviceExclusionOutcome =
             serde_json::from_slice(&bytes).map_err(|error| {
@@ -1234,8 +1242,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         )?;
         let winner = self
             .writer
-            .history_verifier_mut()
-            .load_device_exclusion_outcome(&winner_ref, &proposal)
+            .device_exclusion_history()
+            .load_outcome(&winner_ref, &proposal)
             .await?;
         if winner.object.value != unverified || winner.object.bytes != bytes {
             return Err(StoreDeviceExclusionError::InvalidState(
@@ -1259,7 +1267,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         proposal_ref: &StoreDeviceExclusionProposalRef,
         proposal: &StoreDeviceExclusionProposal,
     ) -> Result<StoreDeviceExclusionProof, StoreDeviceExclusionError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let frozen = database
             .resolved_store_device_state(&proposal.frozen_device_state)
             .await?;
@@ -1285,8 +1293,8 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                 .await?;
             let acknowledgement = self
                 .writer
-                .history_verifier_mut()
-                .load_store_ack(&reference, &registration)
+                .device_exclusion_history()
+                .load_acknowledgement(&reference, &registration)
                 .await?;
             let proposal_freezes = &acknowledgement.value.exclusions.proposal_freezes;
             let freeze = proposal_freezes

@@ -292,7 +292,9 @@ impl TransportFixture {
             .begin_device_join(&self.member_pubkey)
             .await
             .expect("begin join");
-        DeviceJoinOfferBundle::allocate(&*self.owner_storage, offer)
+        self.owner_store
+            .device_join_transport()
+            .allocate_bundle(offer)
             .await
             .expect("allocate the attempt's transport slots")
     }
@@ -311,16 +313,17 @@ impl TransportFixture {
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-        crate::sync::store::drive_device_join(
-            &self.owner_store,
-            bundle,
-            crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
-            self.access_administrator.as_ref().map(|administrator| {
-                administrator as &dyn crate::DeviceProviderAccessAdministrator
-            }),
-            timing,
-        )
-        .await
+        self.owner_store
+            .device_join_transport()
+            .drive(
+                bundle,
+                crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+                self.access_administrator.as_ref().map(|administrator| {
+                    administrator as &dyn crate::DeviceProviderAccessAdministrator
+                }),
+                timing,
+            )
+            .await
     }
 
     /// Drop this device's owner journal row for the attempt, leaving the store
@@ -840,12 +843,9 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
     );
 
     let closing_joiner = fixture.client();
+    let owner_transport = fixture.owner_store.device_join_transport();
     let (owner_unwind, joiner_unwind) = tokio::join!(
-        Box::pin(crate::sync::store::cancel_device_join_via_transport(
-            &fixture.owner_store,
-            &bundle,
-            timing(),
-        )),
+        Box::pin(owner_transport.cancel(&bundle, timing())),
         Box::pin(closing_joiner.close_device_join_via_transport(&bundle, timing())),
     );
     owner_unwind.expect("the owner carries the cancellation to its activated cleanup");
@@ -881,10 +881,12 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
-    let abandonment =
-        crate::sync::store::abandon_device_join_via_transport(&fixture.owner_store, &bundle)
-            .await
-            .expect("the owner abandons the attempt");
+    let abandonment = fixture
+        .owner_store
+        .device_join_transport()
+        .abandon(&bundle)
+        .await
+        .expect("the owner abandons the attempt");
     assert!(
         fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::Abandonment)
@@ -967,12 +969,11 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
         let fixture = &fixture;
         let bundle = &bundle;
         async move {
-            crate::sync::store::cancel_device_join_via_transport(
-                &fixture.owner_store,
-                bundle,
-                timing,
-            )
-            .await
+            fixture
+                .owner_store
+                .device_join_transport()
+                .cancel(bundle, timing)
+                .await
         }
     };
     match Box::pin(owner_cancel(one_shot())).await {
@@ -1130,14 +1131,16 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::DeviceJoinApproval::Refuse
     };
-    let refused = crate::sync::store::drive_device_join(
-        &fixture.owner_store,
-        &bundle,
-        crate::DeviceJoinApprovalPolicy::Ask(&refuse),
-        None,
-        one_shot(),
-    )
-    .await;
+    let refused = fixture
+        .owner_store
+        .device_join_transport()
+        .drive(
+            &bundle,
+            crate::DeviceJoinApprovalPolicy::Ask(&refuse),
+            None,
+            one_shot(),
+        )
+        .await;
     assert_eq!(
         asked.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -1166,14 +1169,16 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         crate::DeviceJoinApproval::Approve
     };
     assert_owner_waited_for(
-        crate::sync::store::drive_device_join(
-            &fixture.owner_store,
-            &bundle,
-            crate::DeviceJoinApprovalPolicy::Ask(&approve),
-            None,
-            one_shot(),
-        )
-        .await,
+        fixture
+            .owner_store
+            .device_join_transport()
+            .drive(
+                &bundle,
+                crate::DeviceJoinApprovalPolicy::Ask(&approve),
+                None,
+                one_shot(),
+            )
+            .await,
         DeviceJoinTransportKind::RegistrationRequest,
     );
     assert_eq!(

@@ -3,6 +3,24 @@ use tracing::debug;
 use super::*;
 
 impl StoreDatabase {
+    pub(crate) async fn drain_published_blob_drop_intents(
+        &self,
+        store_dir: &crate::store_dir::StoreDir,
+        max_seq: u64,
+    ) -> Result<(), String> {
+        let intents = self
+            .published_blob_drop_intents(max_seq)
+            .await
+            .map_err(|error| format!("Failed to load published blob drop intents: {error}"))?;
+        for intent in intents {
+            apply_published_blob_drop_intent(self, store_dir, &intent).await?;
+            self.clear_published_blob_drop_intent(&intent)
+                .await
+                .map_err(|error| format!("Failed to clear published blob drop intent: {error}"))?;
+        }
+        Ok(())
+    }
+
     /// Drain every committed cleanup obligation. A filesystem or database
     /// failure leaves the intent durable and fails the operation. `true` means
     /// every remaining intent is blocked by an active Store-write lease.
@@ -103,4 +121,109 @@ impl StoreDatabase {
             .await;
         Ok(pending)
     }
+}
+
+async fn apply_published_blob_drop_intent(
+    database: &StoreDatabase,
+    store_dir: &crate::store_dir::StoreDir,
+    intent: &crate::database::PublishedBlobDropIntent,
+) -> Result<(), String> {
+    apply_deferred_local_blob_drop(database, store_dir, &intent.drop)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn apply_deferred_local_blob_drop(
+    database: &StoreDatabase,
+    store_dir: &crate::store_dir::StoreDir,
+    deferred: &crate::sync::cycle::DeferredLocalBlobDrop,
+) -> Result<(), crate::sync::store::StorePreparationError> {
+    let local = crate::blob::local_files::path_if_present(
+        store_dir,
+        &deferred.namespace,
+        &deferred.id,
+        deferred.size,
+    )
+    .await
+    .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))?;
+    match (deferred.disposition, local) {
+        (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, Some(source)) => {
+            crate::blob::cache::populate_pinned_from_file(
+                store_dir,
+                &deferred.namespace,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
+                &source,
+            )
+            .await
+            .map_err(|error| {
+                crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+            })?;
+        }
+        (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, Some(source)) => {
+            crate::blob::cache::write_blob_from_file(
+                database,
+                store_dir,
+                &deferred.namespace,
+                deferred.locator_hash,
+                deferred.size,
+                deferred.plaintext_hash,
+                &source,
+            )
+            .await
+            .map_err(|error| {
+                crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+            })?;
+        }
+        (crate::sync::cycle::DeferredLocalBlobDisposition::Drop, _) => {}
+        (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, None) => {
+            let pinned = store_dir
+                .pinned_blob_path(&deferred.namespace, deferred.locator_hash)
+                .map_err(|error| {
+                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
+            return recognize_applied_disposition_or_fail(&pinned, deferred).await;
+        }
+        (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, None) => {
+            let cached = store_dir
+                .cache_blob_path(&deferred.namespace, deferred.locator_hash)
+                .map_err(|error| {
+                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
+            return recognize_applied_disposition_or_fail(&cached, deferred).await;
+        }
+    }
+    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
+        .await
+        .map(|_| ())
+        .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))
+}
+
+async fn recognize_applied_disposition_or_fail(
+    destination: &std::path::Path,
+    deferred: &crate::sync::cycle::DeferredLocalBlobDrop,
+) -> Result<(), crate::sync::store::StorePreparationError> {
+    match crate::local_blob::exists(destination).await {
+        Ok(true) => {
+            let (size, hash) = crate::local_blob::exact_file_facts(destination)
+                .await
+                .map_err(crate::sync::store::StorePreparationError::AssetUpload)?;
+            if size == deferred.size && hash == deferred.plaintext_hash {
+                return Ok(());
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return Err(crate::sync::store::StorePreparationError::AssetUpload(
+                error,
+            ))
+        }
+    }
+    Err(crate::sync::store::StorePreparationError::AssetUpload(
+        format!(
+            "published blob {}/{} is missing from both the local store and its {:?} destination",
+            deferred.namespace, deferred.id, deferred.disposition
+        ),
+    ))
 }

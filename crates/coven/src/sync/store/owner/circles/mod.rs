@@ -1,7 +1,4 @@
-use super::{
-    history, writer::StoreWriterAuthorizationError, AuthorizedStore, AuthorizedWriterOperation,
-    Store,
-};
+use super::{AuthorizedWriterOperation, Store};
 #[cfg(test)]
 use crate::sync::store::circle_controls::VerifiedCircleActivations;
 use crate::sync::store::circle_controls::{
@@ -10,59 +7,23 @@ use crate::sync::store::circle_controls::{
     CircleTransitionHistory, PreparedCircleOperation,
 };
 
-mod acknowledgements;
+pub(super) mod acknowledgements;
 pub(super) mod activation;
+mod authorized_writer;
 mod close_responses;
 mod commands;
-mod packages;
+mod discard;
+mod history;
+pub(super) mod packages;
 mod preparation;
 mod publication;
-mod snapshots;
+pub(super) mod snapshots;
 
-pub(super) use activation::VerifiedCircleHistory;
+pub(crate) use authorized_writer::AuthorizedCircleWriter;
+pub(crate) use commands::StoreCircleCommands;
+pub(crate) use discard::CircleOperationDiscarder;
+pub(super) use history::VerifiedCircleHistory;
 pub(crate) use packages::CirclePackageReadError;
-
-pub(crate) struct StoreCircleCommands<'store> {
-    store: &'store Store,
-}
-
-impl<'store> StoreCircleCommands<'store> {
-    pub(super) fn new(store: &'store Store) -> Self {
-        Self { store }
-    }
-}
-
-pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
-    writer: &'writer mut AuthorizedWriterOperation<'storage>,
-}
-
-impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
-    pub(super) fn new(writer: &'writer mut AuthorizedWriterOperation<'storage>) -> Self {
-        Self { writer }
-    }
-
-    fn publisher(&mut self) -> publication::CircleCandidatePublisher<'_, 'storage> {
-        publication::CircleCandidatePublisher::new(&mut self.writer.store)
-    }
-
-    fn preparer(&mut self) -> preparation::CircleCandidatePreparer<'_, 'storage> {
-        preparation::CircleCandidatePreparer::new(self.writer)
-    }
-
-    pub(crate) fn close(&mut self) -> close_responses::CircleCloseCoordinator<'_, 'storage> {
-        close_responses::CircleCloseCoordinator::new(self.writer)
-    }
-
-    pub(crate) fn acknowledgements(
-        &mut self,
-    ) -> acknowledgements::CircleAcknowledgementWriter<'_, 'storage> {
-        acknowledgements::CircleAcknowledgementWriter::new(self.writer)
-    }
-
-    pub(crate) fn snapshots(&mut self) -> snapshots::CircleSnapshotWriter<'_, 'storage> {
-        snapshots::CircleSnapshotWriter::new(self.writer)
-    }
-}
 
 #[cfg(test)]
 use commands::*;

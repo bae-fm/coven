@@ -2383,14 +2383,10 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         if published > 0 {
-            let store_database = device.store.database();
-            crate::sync::cycle::drain_published_blob_drop_intents(
-                store_database,
-                store_dir,
-                u64::MAX,
-            )
-            .await?;
-            store_database
+            database
+                .drain_published_blob_drop_intents(store_dir, u64::MAX)
+                .await?;
+            database
                 .drain_local_blob_cleanup(store_dir)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -2418,7 +2414,7 @@ pub(crate) async fn pull_into_result(
     let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
     let mut authorization = device
         .store
-        .authorize()
+        .authorize_writer()
         .await
         .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
     let result = authorization

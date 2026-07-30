@@ -40,18 +40,31 @@ use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 use crate::sync::{gate, hlc, session};
 
+#[path = "../pull/device_lifecycle_state.rs"]
 mod device_lifecycle_state;
+#[path = "../pull/device_operations.rs"]
 mod device_operations;
+#[path = "../pull/discovery.rs"]
 mod discovery;
+#[path = "../pull/join_activation.rs"]
 mod join_activation;
+#[path = "../pull/local_device_operations.rs"]
 mod local_device_operations;
+#[path = "../pull/materialization.rs"]
 mod materialization;
+#[path = "../pull/membership_control.rs"]
 mod membership_control;
+#[path = "../pull/model.rs"]
 mod model;
+#[path = "../pull/owner_promotion.rs"]
 mod owner_promotion;
+#[path = "../pull/replay.rs"]
 mod replay;
+#[path = "../pull/root_validation.rs"]
 mod root_validation;
+#[path = "../pull/snapshot_evidence.rs"]
 mod snapshot_evidence;
+#[path = "../pull/support.rs"]
 mod support;
 
 use super::verification::StoreCommitVerifier;
@@ -76,7 +89,6 @@ use support::{advance_max_updated_at, cache_eager_blobs, verify_package_blobs};
 pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};
 
 use super::verified_history::registration::*;
-use super::verified_history::*;
 pub(crate) use discovery::*;
 pub(crate) use local_device_operations::{
     derive_local_post_device_state, load_local_commit_device_operations,
@@ -87,6 +99,7 @@ pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_his
 use replay::verified_terminal_merge_retractions;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
 #[cfg(test)]
+#[path = "../pull/tests.rs"]
 mod tests;
 
 #[derive(Clone)]
@@ -124,30 +137,8 @@ impl LoadedMergePredecessorMemberships {
     }
 }
 
-impl AuthorizedStore<'_> {
-    pub(crate) async fn pull(
-        &mut self,
-        store_dir: &StoreDir,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-    ) -> Result<StorePullResult, SyncCycleFailure> {
-        let identity = self.identity.clone();
-        let membership = self.membership.clone();
-        let execution = self
-            .history
-            .pull(store_dir, &membership, Some(&identity), routing_encryption)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
-        self.membership = execution.membership;
-        Ok(execution.result)
-    }
-
-    pub(crate) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
-        Ok(false)
-    }
-}
-
 impl super::AuthorizedStoreHistory<'_> {
-    pub(super) async fn pull(
+    pub(crate) async fn pull(
         &mut self,
         store_dir: &StoreDir,
         membership: &crate::protocol::membership::MembershipChain,

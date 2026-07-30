@@ -558,6 +558,51 @@ impl DeviceJoinJournalDatabase {
         Ok(())
     }
 
+    pub(super) fn advance_joiner_cleanup_from_replacement(
+        &self,
+        previous: &DeviceJoinJournalRecord,
+        next: DeviceJoinJournalRecord,
+    ) -> Result<(), DeviceJoinError> {
+        if previous.attempt_id != next.attempt_id
+            || !matches!(
+                &*previous.progress,
+                DeviceJoinRoleProgress::Joiner(
+                    JoinerJoinProgress::RegistrationPrepared(_)
+                        | JoinerJoinProgress::ProviderReady(_)
+                        | JoinerJoinProgress::RegistrationCreateIntent(_)
+                        | JoinerJoinProgress::RegistrationCreated(_)
+                        | JoinerJoinProgress::AckCreateIntent(_)
+                        | JoinerJoinProgress::AckCreated(_)
+                        | JoinerJoinProgress::ResponseCreateIntent(_)
+                        | JoinerJoinProgress::Ready(_)
+                        | JoinerJoinProgress::CleanupIntent { .. }
+                )
+            )
+            || !matches!(
+                &*next.progress,
+                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(_))
+            )
+        {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        let previous_payload = serde_json::to_string(previous)?;
+        let next_payload = serde_json::to_string(&next)?;
+        let connection = Connection::open(&self.path)?;
+        let changed = connection.execute(
+            "UPDATE device_join_journals SET payload = ?1
+             WHERE attempt_id = ?2 AND role = 'joiner' AND payload = ?3",
+            (
+                &next_payload,
+                attempt_key(previous.attempt_id),
+                &previous_payload,
+            ),
+        )?;
+        if changed != 1 {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        Ok(())
+    }
+
     pub fn complete_joiner_cleanup(
         &self,
         activation: DeviceJoinCleanupActivation,

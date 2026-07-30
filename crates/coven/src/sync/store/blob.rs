@@ -49,11 +49,15 @@ impl<'a> StoreBlobOpening<'a> {
         })
     }
 
-    pub(super) fn for_store(store: &super::owner::AuthorizedStore<'a>) -> Self {
+    pub(super) fn from_authorized_parts(
+        database: StoreDatabase,
+        storage: &'a dyn SyncStorage,
+        root: StoreRootRef,
+    ) -> Self {
         Self {
-            database: store.database().clone(),
-            storage: store.storage(),
-            root: store.store_root().clone(),
+            database,
+            storage,
+            root,
         }
     }
 

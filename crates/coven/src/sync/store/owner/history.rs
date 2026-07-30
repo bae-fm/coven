@@ -2,18 +2,249 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub(super) mod abandonment;
+mod owner_promotion;
+pub(crate) mod pull;
+mod reclaim;
+mod restore;
 #[cfg(test)]
 pub(crate) use super::verified_history::prepare_merge_abandonment_history_summary as prepare_merge_abandonment_history_summary_for_test;
+use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
+pub(super) use owner_promotion::OwnerPromotionHistory;
+pub(super) use reclaim::ReclaimHistory;
+pub(super) use restore::RestoreHistory;
 
-pub(super) struct AuthorizedStoreHistory<'storage> {
-    pub(super) database: StoreDatabase,
-    pub(super) history_verifier: MergeHistoryVerifier<'storage>,
+pub(crate) struct AuthorizedStoreHistory<'storage> {
+    database: StoreDatabase,
+    history_verifier: MergeHistoryVerifier<'storage>,
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(super) async fn finish_initialization(
+        mut self,
+        storage: &Arc<dyn SyncStorage>,
+        identity: &UserKeypair,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let database = self.database.clone();
+        let mut device_id = database
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let identity_is_founder = self.verified_root_object().value.descriptor.founder_pubkey
+            == crate::keys::public_key_hex(identity);
+        if device_id.is_none() && !identity_is_founder {
+            return Err(StoreInitializationError::ProtocolRoot(
+                "opening a Store for a non-founder requires an installed local device".to_string(),
+            ));
+        }
+        let founder_pubkey = self
+            .verified_root_object()
+            .value
+            .descriptor
+            .founder_pubkey
+            .clone();
+        self.load_and_install_owner_membership(&founder_pubkey)
+            .await
+            .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
+
+        if device_id.is_none() && identity_is_founder {
+            self.history_verifier
+                .install_existing_founder_device(&database, identity)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            device_id = database
+                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        }
+        let device_id = device_id.ok_or_else(|| {
+            StoreInitializationError::ProtocolRoot(
+                "initialized Store has no local device registration id".to_string(),
+            )
+        })?;
+        let store_root = self.root().clone();
+        let protocol_root = self.verified_root_object().clone();
+        let store = Store::new(
+            database,
+            Arc::clone(storage),
+            identity.clone(),
+            Some(device_id.clone()),
+            store_root,
+            protocol_root,
+        )
+        .map_err(StoreInitializationError::ProtocolRoot)?;
+        Ok(InitializedStore { store, device_id })
+    }
+
+    pub(super) async fn authorize_store(
+        mut self,
+        storage: &'storage Arc<dyn SyncStorage>,
+        identity: &'storage UserKeypair,
+        device_id: Option<&str>,
+    ) -> Result<AuthorizedStore<'storage>, SyncCycleFailure> {
+        let owner = self
+            .database
+            .validated_store_owner(self.root())
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("validate Store owner authority", error)
+            })?;
+        let membership = self
+            .load_current_membership(&owner)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
+        let local_device = match device_id {
+            Some(device_id) => Some(
+                super::load_local_store_device(&self.database, self.root(), device_id)
+                    .await
+                    .map_err(|error| {
+                        SyncCycleFailure::operation("load local Store device authority", error)
+                    })?,
+            ),
+            None => None,
+        };
+        Ok(AuthorizedStore {
+            history: self,
+            storage,
+            identity,
+            local_device,
+            membership,
+        })
+    }
+
+    pub(super) fn bind_writer(
+        self,
+        storage: &'storage Arc<dyn SyncStorage>,
+        membership: crate::protocol::membership::MembershipChain,
+        writer: super::writer::LocalStoreWriter<'storage>,
+    ) -> super::writer::AuthorizedWriterOperation<'storage> {
+        super::writer::AuthorizedWriterOperation::from_parts(
+            self.database.clone(),
+            self,
+            storage,
+            membership,
+            writer,
+        )
+    }
+
     pub(super) fn circles(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {
-        super::circles::VerifiedCircleHistory::new(&self.database, &mut self.history_verifier)
+        super::circles::VerifiedCircleHistory::new(self)
+    }
+
+    pub(super) fn circle_operation_discarder(
+        &mut self,
+    ) -> super::circles::CircleOperationDiscarder<'_, 'storage> {
+        let database = self.database.clone();
+        let history = self.circles();
+        super::circles::CircleOperationDiscarder::new(database, history)
+    }
+
+    pub(super) fn circle_activations(
+        &mut self,
+    ) -> super::circles::activation::CircleActivationVerifier<'_, 'storage> {
+        super::circles::activation::CircleActivationVerifier::new(
+            &self.database,
+            &mut self.history_verifier,
+        )
+    }
+
+    pub(super) fn circle_packages(
+        &mut self,
+    ) -> super::circles::packages::CirclePackageReader<'_, 'storage> {
+        super::circles::packages::CirclePackageReader::new(
+            &self.database,
+            &mut self.history_verifier,
+        )
+    }
+
+    pub(super) fn circle_acknowledgements(
+        &mut self,
+    ) -> super::circles::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+        super::circles::acknowledgements::CircleAcknowledgementReader::new(
+            &self.database,
+            &self.history_verifier,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn circle_snapshots(
+        &mut self,
+    ) -> super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
+        super::circles::snapshots::CircleSnapshotReader::new(
+            &self.database,
+            &mut self.history_verifier,
+        )
+    }
+
+    pub(super) fn device_join(
+        &mut self,
+    ) -> super::device_join::history::DeviceJoinHistory<'_, 'storage> {
+        super::device_join::history::DeviceJoinHistory::new(
+            self.database.clone(),
+            &mut self.history_verifier,
+        )
+    }
+
+    pub(super) fn device_exclusion(
+        &mut self,
+    ) -> super::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
+        super::device_exclusion::DeviceExclusionHistory::new(&mut self.history_verifier)
+    }
+
+    pub(super) fn reclaim(&mut self) -> ReclaimHistory<'_, 'storage> {
+        ReclaimHistory::new(self.database.clone(), &mut self.history_verifier)
+    }
+
+    pub(super) fn restore_history(&self) -> RestoreHistory<'_, 'storage> {
+        RestoreHistory::new(&self.history_verifier)
+    }
+
+    pub(super) fn owner_promotion(&mut self) -> OwnerPromotionHistory<'_, 'storage> {
+        OwnerPromotionHistory::new(&mut self.history_verifier)
+    }
+
+    pub(super) fn bind_restore(
+        self,
+        storage: &'storage dyn SyncStorage,
+        membership: crate::protocol::membership::MembershipChain,
+        identity: UserKeypair,
+        target_path: std::path::PathBuf,
+    ) -> super::RestoringStore<'storage> {
+        let database = self.database.clone();
+        let root = self.root().clone();
+        let protocol = self.verified_root_object().value.clone();
+        super::RestoringStore::from_parts(
+            self,
+            database,
+            storage,
+            root,
+            protocol,
+            membership,
+            identity,
+            target_path,
+        )
+    }
+
+    pub(super) fn from_pending_device_join(
+        _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
+        database: StoreDatabase,
+        history_verifier: MergeHistoryVerifier<'storage>,
+    ) -> Self {
+        Self {
+            database,
+            history_verifier,
+        }
+    }
+
+    pub(super) fn from_snapshot(
+        _authority: super::writer::SnapshotHistoryConstruction,
+        database: StoreDatabase,
+        history_verifier: MergeHistoryVerifier<'storage>,
+    ) -> Self {
+        Self {
+            database,
+            history_verifier,
+        }
     }
 }
 
@@ -327,18 +558,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         })
     }
 
-    pub(super) fn database(&self) -> &StoreDatabase {
-        &self.database
-    }
-
-    pub(super) fn history_verifier_mut(&mut self) -> &mut MergeHistoryVerifier<'storage> {
-        &mut self.history_verifier
-    }
-
-    pub(super) fn storage(&self) -> &'storage dyn SyncStorage {
-        self.history_verifier.storage()
-    }
-
     pub(super) fn root(&self) -> &StoreRootRef {
         self.history_verifier.root()
     }
@@ -347,6 +566,202 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
     ) -> &crate::storage::VerifiedObject<StoreProtocolRoot> {
         self.history_verifier.verified_root_object()
+    }
+
+    pub(super) fn keyring<'operation>(
+        &'operation self,
+        identity: &'operation UserKeypair,
+        membership: &'operation MembershipChain,
+    ) -> super::keyring::AuthorizedMembershipKeyring<'operation, 'storage> {
+        super::keyring::AuthorizedMembershipKeyring::bind(
+            &self.history_verifier,
+            identity,
+            membership,
+        )
+    }
+
+    pub(super) async fn authenticate_commit_bytes(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+        bytes: &[u8],
+    ) -> Result<
+        crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        crate::storage::StoreObjectError,
+    > {
+        self.history_verifier
+            .authenticate_bytes(reference, bytes)
+            .await
+    }
+
+    pub(super) async fn authenticate_blocked_candidate(
+        &mut self,
+        candidate: &crate::database::BlockedMergeCandidate,
+    ) -> Result<
+        crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        crate::sync::store::StoreError,
+    > {
+        self.history_verifier
+            .authenticate_blocked_candidate(candidate)
+            .await
+    }
+
+    pub(super) async fn load_commit(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<crate::protocol::store_commit::VerifiedStoreBatchCommit, pull::StorePullError> {
+        self.history_verifier.load_ref(reference).await
+    }
+
+    pub(super) async fn load_registration(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<
+        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        crate::storage::StoreObjectError,
+    > {
+        self.history_verifier.load_registration(reference).await
+    }
+
+    pub(super) async fn verify_membership_control(
+        &mut self,
+        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<crate::sync::store::circle_controls::activation::VerifiedCircleActivations, String>
+    {
+        let root = self.history_verifier.root().clone();
+        if verified_commit.store_root_hash() != root.store_root_hash {
+            return Err(
+                "authenticated Merge membership control belongs to another Store root".into(),
+            );
+        }
+        let commit_ref = verified_commit.reference();
+        let commit = verified_commit.value();
+        self.history_verifier
+            .verify_refs(pull::commit_predecessor_references(commit))
+            .await
+            .map_err(|error| error.to_string())?;
+        let history = self.history_verifier.history();
+        let states = history
+            .commits
+            .iter()
+            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let predecessor_state =
+            pull::verified_merge_predecessor_state(&history.genesis, &states, commit)
+                .map_err(|error| error.to_string())?;
+        let verified_membership_activations = verified_merge_membership_prefix(
+            &history.commits,
+            pull::commit_predecessor_references(commit),
+        )
+        .map_err(|error| error.to_string())?;
+        let pending_resolution = self
+            .history_verifier
+            .verify_resolution_activation_acceptance(commit)
+            .await
+            .map_err(|error| error.to_string())?;
+        let predecessor_membership = load_merge_predecessor_membership_with_retained_history(
+            &self.history_verifier,
+            &commit.membership_state,
+            &verified_membership_activations,
+            pending_resolution.as_ref(),
+        )
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => error.to_string(),
+            RegistrationLoadError::Invalid(error) => error,
+        })?;
+        verify_merge_membership_state_ref(
+            &commit.membership_state,
+            &predecessor_membership,
+            &predecessor_state,
+        )
+        .map_err(|error| error.to_string())?;
+        self.history_verifier
+            .verify_membership_control_with_retained_history(
+                commit_ref,
+                commit,
+                &predecessor_membership,
+                &predecessor_state,
+                pending_resolution.as_ref(),
+            )
+            .await
+            .map(|(activations, _)| activations)
+    }
+
+    pub(super) async fn load_local_device_operations(
+        &mut self,
+        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        membership: &MembershipChain,
+        state_ref: &StoreDeviceStateRef,
+        state: ResolvedStoreDeviceState,
+    ) -> Result<crate::protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
+    {
+        self.history_verifier
+            .load_local_device_operations(
+                &self.database,
+                verified_commit,
+                membership,
+                state_ref,
+                state,
+            )
+            .await
+    }
+
+    pub(super) async fn retain_acknowledgement(
+        &self,
+        activating_commit: &StoreBatchCommitRef,
+        activating_commit_value: &crate::protocol::store_commit::StoreBatchCommit,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        reference: crate::protocol::store_commit::StoreAckRef,
+        value: crate::protocol::store_commit::StoreAck,
+    ) -> Result<crate::protocol::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError>
+    {
+        self.history_verifier
+            .retain_acknowledgement(
+                activating_commit,
+                activating_commit_value,
+                registration,
+                reference,
+                value,
+            )
+            .await
+    }
+
+    pub(super) async fn derive_local_post_device_state(
+        &self,
+        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        predecessor_state: ResolvedStoreDeviceState,
+        registrations: &[(
+            crate::protocol::store_commit::StoreDeviceRegistration,
+            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
+        )],
+        device_operations: crate::protocol::store_commit::VerifiedStoreDeviceOperations,
+    ) -> Result<ResolvedStoreDeviceState, pull::StorePullError> {
+        self.history_verifier
+            .derive_local_post_device_state(
+                commit,
+                predecessor_state,
+                registrations,
+                device_operations,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn load_store_snapshot(
+        &self,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<
+        (
+            crate::protocol::store_commit::StoreSnapshotRef,
+            crate::protocol::store_commit::SnapshotMeta,
+        ),
+        crate::storage::StoreObjectError,
+    > {
+        self.history_verifier
+            .load_store_snapshot(registration_ref, registration, reference)
+            .await
     }
 
     pub(super) async fn verify_snapshots_for_acknowledgement(
@@ -837,36 +1252,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
             crate::database::MergeAbandonmentState::CandidateWon => Ok(None),
         }
-    }
-}
-
-impl AuthorizedWriterOperation<'_> {
-    pub(super) async fn cleanup_merge_candidate(
-        &mut self,
-        write_id: crate::WriteId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.store.history.cleanup_merge_candidate(write_id).await
-    }
-
-    pub(super) async fn cleanup_circle_operation_candidate(
-        &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.store
-            .history
-            .cleanup_circle_operation_candidate(operation_id)
-            .await
-    }
-}
-
-impl AuthorizedStore<'_> {
-    pub(super) async fn cleanup_circle_operation_candidate(
-        &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.history
-            .cleanup_circle_operation_candidate(operation_id)
-            .await
     }
 }
 
@@ -1605,6 +1990,202 @@ impl AuthorizedStoreHistory<'_> {
                 candidate_head_object,
             )
             .await
+    }
+}
+
+#[cfg(test)]
+impl AuthorizedStoreHistory<'_> {
+    pub(super) async fn verify_device_join_attempt_for_test(
+        &mut self,
+        reference: &crate::protocol::store_commit::DeviceJoinAttemptRef,
+        owner: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<(), StoreError> {
+        self.history_verifier
+            .load_verified_device_join_attempt(reference, owner)
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn exact_next_announcement_slot_for_test(
+        &mut self,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
+    ) -> Result<
+        (
+            crate::storage::cloud::ObjectSlot,
+            Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
+        ),
+        StoreError,
+    > {
+        let previous = match previous {
+            Some(reference) => Some(
+                self.load_commit(reference)
+                    .await
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+            ),
+            None => None,
+        };
+        self.history_verifier
+            .exact_next_announcement_slot(registration_ref, registration, previous.as_ref())
+            .await
+    }
+
+    pub(super) async fn load_commit_ancestry_until_for_test(
+        &mut self,
+        start: crate::protocol::store_commit::StoreBatchCommitRef,
+        coverage: &crate::protocol::store_commit::CommitFrontier,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::StoreBatchCommitRef,
+            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        )>,
+        StoreError,
+    > {
+        let mut ancestry = Vec::new();
+        let mut cursor = start;
+        while !coverage.0.values().any(|covered| covered == &cursor) {
+            let commit = self
+                .load_commit(&cursor)
+                .await
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let predecessor = commit.order.predecessor().cloned().ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "commit ancestry ended before snapshot coverage".to_string(),
+                )
+            })?;
+            ancestry.push((cursor, commit));
+            cursor = predecessor;
+        }
+        Ok(ancestry)
+    }
+
+    pub(super) async fn open_circle_package_for_test(
+        &self,
+        access: &crate::sync::store::circle_controls::CirclePackageAccess,
+        commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        reference: &crate::protocol::store_commit::CirclePackageRef,
+    ) -> Result<Vec<u8>, StoreError> {
+        let opened = access
+            .open_package(
+                self.history_verifier.storage(),
+                commit,
+                reference,
+                commit.author(),
+            )
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        Ok(opened.object.value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn pull_readiness_for_test(
+        &mut self,
+        coverage: &crate::protocol::store_commit::CommitFrontier,
+        frontier: &std::collections::BTreeMap<
+            String,
+            crate::protocol::store_commit::StoreBatchCommitRef,
+        >,
+        device_state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
+        exclusion_freezes: &[crate::protocol::store_commit::StoreDeviceProposalAck],
+        commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
+        commit: &crate::protocol::store_commit::StoreBatchCommit,
+    ) -> Result<pull::Readiness, pull::StorePullError> {
+        self.history_verifier
+            .readiness(
+                &self.database,
+                coverage,
+                frontier,
+                device_state,
+                exclusion_freezes,
+                commit_ref,
+                commit,
+            )
+            .await
+    }
+
+    pub(super) async fn verified_merge_membership_prefix_for_test(
+        &mut self,
+        references: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
+        predecessors: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
+    ) -> Result<VerifiedMergeMembershipPrefix, pull::StorePullError> {
+        self.history_verifier.verify_refs(references).await?;
+        verified_merge_membership_prefix(&self.history_verifier.history().commits, predecessors)
+    }
+
+    pub(super) async fn load_founder_registration_for_test(
+        &mut self,
+    ) -> Result<
+        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        StoreError,
+    > {
+        Ok(self.history_verifier.load_founder_registration().await?)
+    }
+
+    pub(super) async fn prepare_merge_history_successor_for_test(
+        &mut self,
+        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        membership: &MembershipChain,
+        recovery_author: Option<&crate::protocol::store_commit::StoreDeviceRegistrationRef>,
+        evidence: MergeHistorySuccessorEvidence,
+    ) -> Result<PreparedMergeHistorySuccessor, StoreError> {
+        let (_, state_after) = self
+            .database
+            .store_device_state_for_order(&verified_commit.value().order)
+            .await?;
+        self.prepare_merge_history_successor(
+            verified_commit,
+            membership,
+            recovery_author,
+            state_after,
+            evidence,
+        )
+        .await
+        .map_err(StoreError::from)
+    }
+
+    pub(super) async fn prepare_device_join_bootstrap_for_test(
+        &mut self,
+        coverage: &crate::protocol::store_commit::StoreHistoryCut,
+        attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
+        membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
+    ) -> Result<crate::sync::store::owner::pull::DeviceJoinBootstrapPlan, StoreError> {
+        self.history_verifier
+            .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
+            .await
+            .map_err(StoreError::from)
+    }
+
+    pub(super) async fn load_store_package_for_test(
+        &mut self,
+        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<Option<crate::storage::VerifiedObject<Vec<u8>>>, StoreError> {
+        Ok(self.history_verifier.load_store_package(reference).await?)
+    }
+
+    pub(super) async fn load_store_ack_for_test(
+        &mut self,
+        reference: &crate::protocol::store_commit::StoreAckRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<crate::protocol::store_commit::StoreAck, StoreError> {
+        Ok(self
+            .history_verifier
+            .load_store_ack(reference, registration)
+            .await?
+            .value)
+    }
+
+    pub(super) async fn load_head_for_test(
+        &mut self,
+        reference: &crate::protocol::store_commit::StoreDeviceHeadRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        commit: &crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceHead, StoreError> {
+        Ok(self
+            .history_verifier
+            .load_head(reference, registration, commit)
+            .await?
+            .value)
     }
 }
 

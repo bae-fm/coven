@@ -36,8 +36,8 @@ pub(super) async fn prepare_store_write(
     store_dir: &StoreDir,
 ) -> Result<bool, StoreError> {
     let stream_id = operation.announcement_stream_id();
-    let database = operation.store.database().clone();
-    let membership = operation.store.membership.clone();
+    let database = operation.database.clone();
+    let membership = operation.membership.clone();
     let registration_ref = operation.writer.registration_ref.clone();
     let registration = operation.writer.registration.clone();
     let device_signer = operation.writer.device_signer.clone();
@@ -76,7 +76,7 @@ pub(super) async fn prepare_store_write(
             dependencies,
         };
         let authorization = operation
-            .history()
+            .history
             .authorize_retained_outbound(&order, membership.head_refs(), &registration_ref)
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -130,7 +130,7 @@ pub(super) async fn prepare_store_write(
                 .await?,
             );
         }
-        let storage = operation.storage();
+        let storage = operation.storage.as_ref();
         let commit_context = ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             ProtocolObjectDomain::StoreCommit,
@@ -238,7 +238,7 @@ pub(super) async fn prepare_store_write(
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let commit_ref = commit.reference().clone();
         let successor = operation
-            .history()
+            .history
             .prepare_merge_history_successor(
                 &commit,
                 &authorization.membership,
@@ -248,7 +248,7 @@ pub(super) async fn prepare_store_write(
             )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let storage = operation.storage();
+        let storage = operation.storage.as_ref();
         let activation = registration
             .store_announcement_activation(&registration_ref)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?

@@ -41,7 +41,7 @@ async fn build_revoke_mutation(
     timestamp: &str,
     current_encryption: &EncryptionService,
 ) -> Result<RevokeMutationPlan, InviteError> {
-    let owner_keypair = operation.identity().clone();
+    let owner_keypair = operation.writer.identity.clone();
     if chain.store_id() != Some(store_id) {
         return Err(InviteError::InvalidDurableMutation(format!(
             "membership chain store {:?} differs from requested store {store_id:?}",
@@ -60,7 +60,10 @@ async fn build_revoke_mutation(
     if current_owners.is_empty() {
         return Err(InviteError::LastOwner);
     }
-    let current_keyring = operation.keyring(chain).open_or(current_encryption).await?;
+    let current_keyring = operation
+        .keyring_for_membership(chain)
+        .open_or(current_encryption)
+        .await?;
     let new_keyring = current_keyring
         .with_appended_generation(
             current_keyring
@@ -80,7 +83,7 @@ async fn build_revoke_mutation(
         let recipient_key = keys::ed25519_hex_to_x25519_public_key(&recipient)?;
         wraps.push(ReplacementWrappedKey {
             prepared: operation
-                .keyring(chain)
+                .keyring_for_membership(chain)
                 .prepare(
                     &recipient,
                     WrappedStoreKey::seal_keyring(
@@ -137,7 +140,7 @@ async fn build_revoke_mutation(
             )
             .await?;
         candidate
-            .attach_merge_membership_proof(operation.storage(), &head, None, &owner_keypair)
+            .attach_merge_membership_proof(operation.storage.as_ref(), &head, None, &owner_keypair)
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
         RevokeMembershipPublication::StoreActivated {
             transition: Box::new(transition),
@@ -513,7 +516,8 @@ async fn execute_revoke_mutation(
                 "membership nonactivation names another candidate".to_string(),
             ));
         }
-        finish_nonactivating_revoke(&plan, &persistence, operation.storage(), cloud_home).await?;
+        finish_nonactivating_revoke(&plan, &persistence, operation.storage.as_ref(), cloud_home)
+            .await?;
         let generation = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
             .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
             .current_generation();
@@ -526,7 +530,7 @@ async fn execute_revoke_mutation(
     }
     let publication = plan.publication.publication().clone();
     let author = operation
-        .history_verifier_mut()
+        .history
         .load_registration(&publication.head.body.author_registration)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?
@@ -607,24 +611,26 @@ async fn execute_revoke_mutation(
         RevokeMembershipPublication::Direct { .. } => {
             for wrapped in &plan.wraps {
                 operation
-                    .storage()
+                    .storage
+                    .as_ref()
                     .create_protocol_object(&wrapped.prepared.object)
                     .await
                     .map_err(|error| InviteError::Crypto(error.to_string()))?;
                 load_wrapped_store_key(
-                    operation.storage(),
+                    operation.storage.as_ref(),
                     store_root_hash,
                     &wrapped.prepared.reference,
                 )
                 .await?;
             }
             operation
-                .storage()
+                .storage
+                .as_ref()
                 .create_protocol_object(&publication.entry_object)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
             store_objects::load_membership_entry_ref(
-                operation.storage(),
+                operation.storage.as_ref(),
                 store_root_hash,
                 &publication.entry_ref,
             )
@@ -666,12 +672,13 @@ async fn execute_revoke_mutation(
     match plan.publication.clone() {
         RevokeMembershipPublication::Direct { publication } => {
             operation
-                .storage()
+                .storage
+                .as_ref()
                 .create_protocol_object(&publication.head_object)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
             store_objects::load_membership_head_ref(
-                operation.storage(),
+                operation.storage.as_ref(),
                 store_root_hash,
                 &publication.head_ref,
                 &author,
@@ -711,7 +718,7 @@ async fn execute_revoke_mutation(
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            crate::sync::store::operations::upload_commit(operation.storage(), &candidate)
+            crate::sync::store::operations::upload_commit(operation.storage.as_ref(), &candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
             persistence
@@ -866,7 +873,7 @@ async fn execute_revoke_mutation(
                         finish_nonactivating_revoke_with_targets(
                             &plan,
                             &persistence,
-                            operation.storage(),
+                            operation.storage.as_ref(),
                             cloud_home,
                             cleanup,
                         )
@@ -914,7 +921,7 @@ async fn complete_already_removed_member(
     {
         return Err(InviteError::LastOwner);
     }
-    let keyring = operation.keyring(chain).open().await?;
+    let keyring = operation.keyring_for_membership(chain).open().await?;
     revoke_provider_access(
         cloud_home,
         CloudAccessState::Absent {
@@ -937,8 +944,8 @@ pub(crate) async fn revoke_member_durable(
     current_encryption: &EncryptionService,
     pending_rotation: &cloud_storage::PendingRotation,
 ) -> Result<EncryptionService, InviteError> {
-    let database = operation.database().clone();
-    let owner_keypair = operation.identity().clone();
+    let database = operation.database.clone();
+    let owner_keypair = operation.writer.identity.clone();
     let _mutation = database.membership_mutation_permit().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {

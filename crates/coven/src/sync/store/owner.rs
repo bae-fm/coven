@@ -10,7 +10,7 @@ pub(super) mod history;
 mod host_write;
 mod keyring;
 pub(super) mod owner_promotion;
-pub(super) mod pull;
+pub(crate) use history::pull;
 mod registration;
 mod registration_outbox;
 mod restore;
@@ -18,12 +18,12 @@ mod verification;
 mod verified_history;
 pub(super) mod writer;
 
-use circles::VerifiedCircleHistory;
+use super::prepare_registration_object;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 use history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use host_write::HostWriteBlobStaging;
 pub(crate) use registration::StoreRegistrationError;
-pub(crate) use registration::{bootstrap_pending_device, prepare_registration_for_origin};
+use registration_outbox::RegistrationOutbox;
 pub(crate) use restore::RestoringStore;
 use verification::StoreCommitVerifier;
 pub(super) use writer::{operations, reclaim, snapshot};
@@ -59,12 +59,6 @@ pub(crate) enum StoreInitializationError {
     MembershipAnchor(String),
 }
 
-struct BootstrappedStore<'storage> {
-    history: AuthorizedStoreHistory<'storage>,
-    membership: crate::protocol::membership::MembershipChain,
-    identity: UserKeypair,
-}
-
 struct LocalStoreDevice {
     registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
     registration: crate::protocol::store_commit::StoreDeviceRegistration,
@@ -98,17 +92,38 @@ impl BlobDownload {
 }
 
 impl Store {
+    pub(crate) fn device_join_transport(
+        &self,
+    ) -> super::device_join_transport::StoreDeviceJoinTransport<'_> {
+        super::device_join_transport::StoreDeviceJoinTransport::new(
+            self,
+            self.database.clone(),
+            self.storage.as_ref(),
+        )
+    }
+
     pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {
-        StoreCircleCommands::new(self)
+        StoreCircleCommands::from_parts(
+            self,
+            self.database.clone(),
+            self.storage.clone(),
+            &self.identity,
+            self.storage.blob_path_scheme(),
+        )
     }
 
     #[doc(hidden)]
     pub(crate) fn host_write_blob_staging(
-        self: &Arc<Self>,
+        &self,
         runtime: tokio::runtime::Handle,
         store_dir: StoreDir,
     ) -> HostWriteBlobStaging {
-        HostWriteBlobStaging::new(runtime, self.clone(), store_dir)
+        HostWriteBlobStaging::new(
+            runtime,
+            Arc::clone(&self.storage),
+            self.store_root.clone(),
+            store_dir,
+        )
     }
 
     pub(crate) async fn open_invitation_keyring(
@@ -251,7 +266,7 @@ impl Store {
                 "published Store founder history differs from its durable exact root".to_string(),
             ));
         }
-        Self::finish_authorized_initialization(&storage, identity, history).await
+        history.finish_initialization(&storage, identity).await
     }
 
     pub(crate) async fn open(
@@ -271,7 +286,7 @@ impl Store {
         )
         .await
         .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        Self::finish_authorized_initialization(&storage, identity, history).await
+        history.finish_initialization(&storage, identity).await
     }
 
     async fn open_protocol_root(
@@ -338,69 +353,6 @@ impl Store {
         Ok(verified)
     }
 
-    async fn finish_authorized_initialization(
-        storage: &Arc<dyn SyncStorage>,
-        identity: &UserKeypair,
-        mut history: AuthorizedStoreHistory<'_>,
-    ) -> Result<InitializedStore, StoreInitializationError> {
-        let database = history.database().clone();
-        let mut device_id = database
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let identity_is_founder = history
-            .verified_root_object()
-            .value
-            .descriptor
-            .founder_pubkey
-            == crate::keys::public_key_hex(identity);
-        if device_id.is_none() && !identity_is_founder {
-            return Err(StoreInitializationError::ProtocolRoot(
-                "opening a Store for a non-founder requires an installed local device".to_string(),
-            ));
-        }
-        let founder_pubkey = history
-            .verified_root_object()
-            .value
-            .descriptor
-            .founder_pubkey
-            .clone();
-        history
-            .load_and_install_owner_membership(&founder_pubkey)
-            .await
-            .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
-
-        if device_id.is_none() && identity_is_founder {
-            history
-                .history_verifier_mut()
-                .install_existing_founder_device(&database, identity)
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-            device_id = database
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        }
-        let device_id = device_id.ok_or_else(|| {
-            StoreInitializationError::ProtocolRoot(
-                "initialized Store has no local device registration id".to_string(),
-            )
-        })?;
-        let store_root = history.root().clone();
-        let protocol_root = history.verified_root_object().clone();
-        drop(history);
-        let store = Self::new(
-            database,
-            Arc::clone(storage),
-            identity.clone(),
-            Some(device_id.clone()),
-            store_root,
-            protocol_root,
-        )
-        .map_err(StoreInitializationError::ProtocolRoot)?;
-        Ok(InitializedStore { store, device_id })
-    }
-
     #[doc(hidden)]
     pub(crate) async fn load(
         database: StoreDatabase,
@@ -453,32 +405,16 @@ impl Store {
             protocol_root,
         })
     }
-    pub(crate) fn storage(&self) -> &Arc<dyn SyncStorage> {
-        &self.storage
-    }
-
     pub(crate) fn store_root(&self) -> &StoreRootRef {
         &self.store_root
     }
 
-    pub(crate) fn database(&self) -> &StoreDatabase {
-        &self.database
-    }
-
-    pub(crate) fn identity(&self) -> &UserKeypair {
-        &self.identity
-    }
-
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
-        self.storage().blob_path_scheme()
+        self.storage.blob_path_scheme()
     }
 
     pub(crate) fn self_uploader(&self) -> String {
-        self.storage().self_uploader()
-    }
-
-    pub(crate) fn cloud_home(&self) -> &dyn CloudHome {
-        self.storage().cloud_home()
+        self.storage.self_uploader()
     }
 
     #[cfg(test)]
@@ -501,7 +437,7 @@ impl Store {
         write_id: crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, crate::sync::store::StoreError> {
         if let BlockedWriteDiscard::Discarded(discarded) =
-            self.database().discard_blocked_write(&write_id).await?
+            self.database.discard_blocked_write(&write_id).await?
         {
             return Ok(discarded);
         }
@@ -521,7 +457,7 @@ impl Store {
             }
         }
 
-        match self.database().discard_blocked_write(&write_id).await? {
+        match self.database.discard_blocked_write(&write_id).await? {
             BlockedWriteDiscard::Discarded(discarded) => Ok(discarded),
             BlockedWriteDiscard::RemoteResolutionRequired => Err(StoreError::InvalidOutbound(
                 "Merge candidate remains unresolved after abandonment".to_string(),
@@ -551,7 +487,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        history::abandonment::abandon_merge_candidate(&mut writer, write_id).await
+        writer.abandon_merge_candidate(write_id).await
     }
 
     #[doc(hidden)]
@@ -635,46 +571,17 @@ impl Store {
     }
 
     pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
-        let mut authority = self.authorize_history().await?;
-        let owner = authority
-            .database
-            .validated_store_owner(&self.store_root)
+        self.authorize_history()
+            .await?
+            .authorize_store(&self.storage, &self.identity, self.device_id.as_deref())
             .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("validate Store owner authority", error)
-            })?;
-        let membership = authority
-            .load_current_membership(&owner)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
-        let local_device = match self.device_id.as_deref() {
-            Some(device_id) => Some(
-                load_local_store_device(
-                    &authority.database,
-                    authority.history_verifier.root(),
-                    device_id,
-                )
-                .await
-                .map_err(|error| {
-                    SyncCycleFailure::operation("load local Store device authority", error)
-                })?,
-            ),
-            None => None,
-        };
-        Ok(AuthorizedStore {
-            history: authority,
-            storage: &self.storage,
-            identity: &self.identity,
-            local_device,
-            membership,
-        })
     }
 
     #[cfg(test)]
     pub(super) async fn restoring_for_test(&self) -> Result<RestoringStore<'_>, SyncCycleFailure> {
         let authorization = self.authorize().await?;
-        Ok(RestoringStore::from_authorized_history(
-            authorization.history,
+        Ok(authorization.history.bind_restore(
+            authorization.storage.as_ref(),
             authorization.membership,
             authorization.identity.clone(),
             std::path::PathBuf::new(),
@@ -684,7 +591,8 @@ impl Store {
     pub(crate) async fn authorize_writer(
         &self,
     ) -> Result<AuthorizedWriterOperation<'_>, writer::StoreWriterAuthorizationError> {
-        registration_outbox::drain(&self.database, &*self.storage)
+        RegistrationOutbox::new(self.database.clone(), &*self.storage)
+            .drain()
             .await
             .map_err(writer::StoreWriterAuthorizationError::Registration)?;
         self.authorize()
@@ -730,16 +638,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?;
-        let provider_admin_grant = writer
-            .protocol_root()
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
-        writer
-            .join_operation()
-            .begin(member_pubkey, provider_admin_grant)
-            .await
+        writer.join_operation().begin(member_pubkey).await
     }
 
     pub(crate) async fn begin_device_join_bundle(
@@ -753,17 +652,8 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?;
-        let provider_admin_grant = writer
-            .protocol_root()
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
-        let offer = writer
-            .join_operation()
-            .begin(member_pubkey, provider_admin_grant)
-            .await?;
-        crate::sync::store::DeviceJoinOfferBundle::allocate(writer.storage(), offer).await
+        let offer = writer.join_operation().begin(member_pubkey).await?;
+        self.device_join_transport().allocate_bundle(offer).await
     }
 
     pub(crate) async fn begin_owner_promotion_for_device(
@@ -796,7 +686,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
-        owner_promotion::begin(&mut writer, member_registration).await
+        writer.owner_promotion().begin(member_registration).await
     }
 
     pub(crate) async fn accept_owner_promotion(
@@ -810,7 +700,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
-        owner_promotion::accept(&mut writer, request).await
+        writer.owner_promotion().accept(request).await
     }
 
     pub(crate) async fn finalize_owner_promotion(
@@ -825,7 +715,10 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
-        owner_promotion::finalize(&mut writer, encryption, acceptance).await
+        writer
+            .owner_promotion()
+            .finalize(encryption, acceptance)
+            .await
     }
 
     #[cfg(test)]
@@ -867,8 +760,7 @@ impl Store {
             .await
             .map_err(|error| error.to_string())?;
         let commit = history
-            .history_verifier_mut()
-            .load_ref(&reference)
+            .load_commit(&reference)
             .await
             .map_err(|error| error.to_string())?;
         Ok(Some((reference, commit)))
@@ -896,15 +788,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        crate::protocol::store_commit::StoreDeviceHead::signed(
-            writer.store_root().store_root_hash,
-            writer.writer.registration_ref.clone(),
-            commit,
-            history_summary,
-            successor,
-            &writer.writer.device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        writer.sign_device_head_for_test(commit, history_summary, successor)
     }
 
     #[cfg(test)]
@@ -916,28 +800,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        if meta.store_root_hash != writer.store_root().store_root_hash
-            || meta.author_registration != writer.writer.registration_ref
-        {
-            return Err(StoreError::InvalidOutbound(
-                "snapshot test input belongs to another Store writer".to_string(),
-            ));
-        }
-        crate::protocol::store_commit::SnapshotMeta::signed(
-            meta.store_root_hash,
-            writer.writer.registration_ref.clone(),
-            meta.generation,
-            meta.predecessor,
-            meta.image,
-            meta.coverage,
-            meta.state,
-            meta.history_summary,
-            meta.schema_version,
-            meta.created_at,
-            meta.successor,
-            &writer.writer.device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        writer.resign_snapshot_meta_for_test(meta)
     }
 
     #[cfg(test)]
@@ -950,13 +813,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        crate::protocol::store_commit::SnapshotMeta::parse_at(
-            bytes,
-            writer.store_root().store_root_hash,
-            reference,
-            &writer.writer.registration,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        writer.parse_snapshot_meta_for_test(bytes, reference)
     }
 
     #[cfg(test)]
@@ -1005,7 +862,7 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(writer.writer.registration_ref.clone())
+        Ok(writer.local_registration_ref_for_test())
     }
 
     #[cfg(test)]
@@ -1020,8 +877,7 @@ impl Store {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let verified_commit = history
-            .history_verifier_mut()
-            .authenticate_bytes(&candidate.commit, &candidate_commit.to_bytes())
+            .authenticate_commit_bytes(&candidate.commit, &candidate_commit.to_bytes())
             .await?;
         history
             .observe_excluded_candidate_head(candidate, &verified_commit, candidate_object)
@@ -1174,10 +1030,8 @@ impl Store {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         history
-            .history_verifier_mut()
-            .load_verified_device_join_attempt(reference, owner)
-            .await?;
-        Ok(())
+            .verify_device_join_attempt_for_test(reference, owner)
+            .await
     }
 
     #[cfg(test)]
@@ -1197,19 +1051,8 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let previous = match previous {
-            Some(reference) => Some(
-                history
-                    .history_verifier_mut()
-                    .load_ref(reference)
-                    .await
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
-            ),
-            None => None,
-        };
         history
-            .history_verifier_mut()
-            .exact_next_announcement_slot(registration_ref, registration, previous.as_ref())
+            .exact_next_announcement_slot_for_test(registration_ref, registration, previous)
             .await
     }
 
@@ -1223,8 +1066,7 @@ impl Store {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         history
-            .history_verifier_mut()
-            .load_ref(reference)
+            .load_commit(reference)
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
@@ -1245,23 +1087,9 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let mut ancestry = Vec::new();
-        let mut cursor = start;
-        while !coverage.0.values().any(|covered| covered == &cursor) {
-            let commit = history
-                .history_verifier_mut()
-                .load_ref(&cursor)
-                .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-            let predecessor = commit.order.predecessor().cloned().ok_or_else(|| {
-                StoreError::InvalidOutbound(
-                    "commit ancestry ended before snapshot coverage".to_string(),
-                )
-            })?;
-            ancestry.push((cursor, commit));
-            cursor = predecessor;
-        }
-        Ok(ancestry)
+        history
+            .load_commit_ancestry_until_for_test(start, coverage)
+            .await
     }
 
     #[cfg(test)]
@@ -1273,11 +1101,7 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
-            .history_verifier
-            .load_registration(reference)
-            .await?
-            .value)
+        Ok(history.load_registration(reference).await?.value)
     }
 
     #[cfg(test)]
@@ -1306,11 +1130,9 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let opened = access
-            .open_package(history.storage(), commit, reference, commit.author())
+        history
+            .open_circle_package_for_test(access, commit, reference)
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(opened.object.value)
     }
 
     #[cfg(test)]
@@ -1332,9 +1154,7 @@ impl Store {
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         history
-            .history_verifier_mut()
-            .readiness(
-                &self.database,
+            .pull_readiness_for_test(
                 coverage,
                 frontier,
                 device_state,
@@ -1356,13 +1176,8 @@ impl Store {
             .await
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         history
-            .history_verifier_mut()
-            .verify_refs(references)
-            .await?;
-        verified_history::verified_merge_membership_prefix(
-            &history.history_verifier_mut().history().commits,
-            predecessors,
-        )
+            .verified_merge_membership_prefix_for_test(references, predecessors)
+            .await
     }
 
     #[cfg(test)]
@@ -1442,7 +1257,8 @@ impl Store {
         })?;
         history
             .circles()
-            .load_activations(&verified, &self.identity, routing_key)
+            .activations()
+            .load(&verified, &self.identity, routing_key)
             .await
     }
 
@@ -1560,10 +1376,7 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
-            .history_verifier_mut()
-            .load_founder_registration()
-            .await?)
+        history.load_founder_registration_for_test().await
     }
 
     #[cfg(test)]
@@ -1578,21 +1391,15 @@ impl Store {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let membership = authorized.membership().clone();
-        let (_, state_after) = authorized
-            .database()
-            .store_device_state_for_order(&verified_commit.value().order)
-            .await?;
         authorized
             .history()
-            .prepare_merge_history_successor(
+            .prepare_merge_history_successor_for_test(
                 verified_commit,
                 &membership,
                 recovery_author,
-                state_after,
                 evidence,
             )
             .await
-            .map_err(StoreError::from)
     }
 
     #[cfg(test)]
@@ -1607,10 +1414,8 @@ impl Store {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         history
-            .history_verifier_mut()
-            .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
+            .prepare_device_join_bootstrap_for_test(coverage, attempt_activation, membership_state)
             .await
-            .map_err(StoreError::from)
     }
 
     #[cfg(test)]
@@ -1622,10 +1427,7 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
-            .history_verifier_mut()
-            .load_store_package(reference)
-            .await?)
+        history.load_store_package_for_test(reference).await
     }
 
     #[cfg(test)]
@@ -1638,11 +1440,9 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
-            .history_verifier_mut()
-            .load_store_ack(reference, registration)
-            .await?
-            .value)
+        history
+            .load_store_ack_for_test(reference, registration)
+            .await
     }
 
     #[cfg(test)]
@@ -1656,11 +1456,9 @@ impl Store {
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history
-            .history_verifier_mut()
-            .load_head(reference, registration, commit)
-            .await?
-            .value)
+        history
+            .load_head_for_test(reference, registration, commit)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1722,27 +1520,30 @@ impl Store {
 }
 
 impl<'storage> AuthorizedStore<'storage> {
+    fn circle_operation_discarder(&mut self) -> circles::CircleOperationDiscarder<'_, 'storage> {
+        self.history.circle_operation_discarder()
+    }
+
+    pub(super) async fn discard_circle_operation(
+        &mut self,
+        operation_id: &crate::protocol::circle::CircleOperationId,
+    ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
+        self.circle_operation_discarder()
+            .discard(operation_id)
+            .await
+    }
+
+    #[cfg(test)]
     fn keyring<'operation>(
         &'operation self,
         membership: &'operation crate::protocol::membership::MembershipChain,
     ) -> keyring::AuthorizedMembershipKeyring<'operation, 'storage> {
-        keyring::AuthorizedMembershipKeyring::bind(
-            &self.history.history_verifier,
-            self.identity,
-            membership,
-        )
+        self.history.keyring(self.identity, membership)
     }
 
+    #[cfg(test)]
     fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
         &mut self.history
-    }
-
-    pub(crate) fn db(&self) -> &StoreDatabase {
-        &self.history.database
-    }
-
-    pub(crate) fn database(&self) -> &StoreDatabase {
-        &self.history.database
     }
 
     pub(super) fn membership(&self) -> &crate::protocol::membership::MembershipChain {
@@ -1869,30 +1670,6 @@ impl<'storage> AuthorizedStore<'storage> {
             ),
         }
     }
-
-    fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
-        if self.membership.is_owner_now(author_pubkey) {
-            Ok(())
-        } else {
-            Err(format!("author {author_pubkey} is not a current owner"))
-        }
-    }
-
-    pub(crate) fn storage(&self) -> &'storage dyn SyncStorage {
-        self.history.history_verifier.storage()
-    }
-
-    pub(super) fn storage_arc(&self) -> &'storage Arc<dyn SyncStorage> {
-        self.storage
-    }
-
-    pub(crate) fn store_root(&self) -> &StoreRootRef {
-        self.history.history_verifier.root()
-    }
-
-    pub(crate) fn protocol_root(&self) -> &StoreProtocolRoot {
-        self.history.history_verifier.verified_root()
-    }
 }
 
 fn membership_conflict_choice_id(
@@ -1975,86 +1752,6 @@ async fn load_local_store_device(
         registration,
         activation,
     })
-}
-
-impl AuthorizedWriterOperation<'_> {
-    pub(crate) async fn drain_uploads(
-        &self,
-        store_dir: &StoreDir,
-        clock: &dyn crate::clock::Clock,
-        hlc: &crate::sync::hlc::Hlc,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-        StoreDatabase::validate_store_write_routing(
-            self.db().gates().as_ref(),
-            routing_encryption,
-        )?;
-        let (registration_ref, registration) = self.database().local_blob_write_authority().await?;
-        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-            .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-        crate::blob::upload::drain_uploads(
-            self.database(),
-            self.storage(),
-            authority,
-            store_dir,
-            clock,
-            hlc,
-            routing_encryption,
-            observer,
-        )
-        .await
-    }
-
-    pub(crate) async fn drain_tombstones(
-        &self,
-        cloud_home: &dyn CloudHome,
-        cipher: &dyn CloudCipherAccess,
-        pending_rotation: &crate::storage::PendingRotation,
-        store_id: &str,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<usize, String> {
-        crate::blob::delete::drain_tombstones(
-            self.db(),
-            cloud_home,
-            cipher,
-            pending_rotation,
-            store_id,
-            self.identity(),
-            clock,
-        )
-        .await
-    }
-
-    pub(crate) async fn gc_tombstones(
-        &self,
-        cloud_home: &dyn CloudHome,
-        cipher: &dyn CloudCipherAccess,
-        store_id: &str,
-        clock: &dyn crate::clock::Clock,
-        grace: chrono::Duration,
-    ) -> Result<usize, String> {
-        let activated_uploaders = self
-            .database()
-            .activated_store_device_registration_records()
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .collect();
-        crate::blob::delete::gc_tombstones(
-            self.db(),
-            cloud_home,
-            self.storage(),
-            cipher,
-            store_id,
-            &crate::keys::public_key_hex(self.identity()),
-            &activated_uploaders,
-            &self.membership,
-            clock,
-            grace,
-        )
-        .await
-    }
 }
 
 #[cfg(test)]

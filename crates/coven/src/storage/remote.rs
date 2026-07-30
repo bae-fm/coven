@@ -44,11 +44,20 @@ pub(crate) const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the store key (the default); a `Plaintext` home stores
 /// objects in the clear so the bucket is browsable, and drops the `.enc` suffix.
-#[derive(Clone)]
-pub enum CloudCipher {
-    Encrypted(EncryptionService),
-    Plaintext,
+macro_rules! define_cloud_cipher {
+    ($visibility:vis) => {
+        #[derive(Clone)]
+        $visibility enum CloudCipher {
+            Encrypted(EncryptionService),
+            Plaintext,
+        }
+    };
 }
+
+#[cfg(feature = "test-utils")]
+define_cloud_cipher!(pub);
+#[cfg(not(feature = "test-utils"))]
+define_cloud_cipher!(pub(crate));
 
 /// A sync session's fixed at-rest representation. The mode is selected once at
 /// construction: plaintext has no mutable key state, while encrypted sessions
@@ -697,7 +706,7 @@ pub(crate) const ROTATION_GATE_STATE_KEY: &str = "rotation_gate";
 /// [`CloudCipher`] by the home's [`HomeStorage`](crate::config::HomeStorage): an
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
 #[derive(Clone, Copy)]
-pub enum BlobPathScheme {
+pub(crate) enum BlobPathScheme {
     /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (an opaque home).
     Hashed,
     /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`
@@ -709,7 +718,7 @@ pub enum BlobPathScheme {
 impl BlobPathScheme {
     /// The blob-path scheme a home's storage mode selects: an opaque home
     /// obfuscates (`Hashed`), a browsable home is readable (`Plain`).
-    pub fn for_storage(storage: crate::config::HomeStorage) -> Self {
+    pub(crate) fn for_storage(storage: crate::config::HomeStorage) -> Self {
         if storage.is_opaque() {
             BlobPathScheme::Hashed
         } else {
@@ -731,7 +740,7 @@ impl CloudCipher {
     /// `Plaintext` regardless. A host streaming a Remote blob opens a
     /// [`BlobRangeReader`] under this cipher, so a read applies the same
     /// protection the upload sealed under.
-    pub fn for_storage(
+    pub(crate) fn for_storage(
         storage: crate::config::HomeStorage,
         encryption: Option<EncryptionService>,
     ) -> Option<Self> {
@@ -746,7 +755,7 @@ impl CloudCipher {
     /// storage. Encrypted homes seal under the current store-key generation and
     /// prefix that generation in cleartext; plaintext homes return the bytes
     /// unchanged.
-    pub fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
+    pub(crate) fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
         // maps `Master` to the store key itself.
@@ -754,7 +763,11 @@ impl CloudCipher {
     }
 
     /// Recover a control object read from storage. Inverse of [`Self::seal`].
-    pub fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    pub(crate) fn open(
+        &self,
+        stored: Vec<u8>,
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
         self.open_scoped(crate::blob::BlobScope::Master, stored, aad_context)
     }
 
@@ -789,7 +802,7 @@ impl CloudCipher {
     /// The object-key suffix this cipher implies: `.enc` for an encrypted home,
     /// empty for a plaintext one. Note `"x".strip_suffix("")` returns `Some("x")`,
     /// so the listing parsers strip an empty suffix as a clean no-op.
-    pub fn suffix(&self) -> &'static str {
+    pub(crate) fn suffix(&self) -> &'static str {
         match self {
             CloudCipher::Encrypted(_) => ".enc",
             CloudCipher::Plaintext => "",
@@ -797,7 +810,7 @@ impl CloudCipher {
     }
 
     /// Whether this is a plaintext (unencrypted) home.
-    pub fn is_plaintext(&self) -> bool {
+    pub(crate) fn is_plaintext(&self) -> bool {
         matches!(self, CloudCipher::Plaintext)
     }
 
@@ -805,7 +818,7 @@ impl CloudCipher {
     /// the key tag plus the sealed body for an encrypted home, the plaintext
     /// length verbatim for a browsable one. Known before a byte is sealed, so a
     /// streaming upload can declare its length up front.
-    pub fn body_len(&self, header: SealedBlobHeader) -> u64 {
+    pub(crate) fn body_len(&self, header: SealedBlobHeader) -> u64 {
         match self {
             CloudCipher::Encrypted(_) => KEY_TAG_LEN as u64 + header.sealed_len(),
             CloudCipher::Plaintext => header.plaintext_len(),
@@ -889,7 +902,7 @@ impl BlobChunking {
 /// [window](BlobChunking::window)-worth of chunks. A chunk that opens is
 /// authentic — its tag covers its bytes, its index, and the header — so there is
 /// nothing else to check and no whole-object pass to amortize.
-pub struct BlobRangeReader {
+pub(crate) struct BlobRangeReader {
     exact: Arc<dyn ExactSlotStorage>,
     slot: crate::storage::cloud::ObjectSlot,
     opener: crate::encryption::SealedBlobOpener,
@@ -899,13 +912,13 @@ pub struct BlobRangeReader {
 
 impl BlobRangeReader {
     /// The blob's whole plaintext length, as its row declares it.
-    pub fn plaintext_size(&self) -> u64 {
+    pub(crate) fn plaintext_size(&self) -> u64 {
         self.plaintext_size
     }
 
     /// Read exactly `len` plaintext bytes at `offset`. A range past the blob's
     /// end is an error, never a short read.
-    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, StorageError> {
+    pub(crate) async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, StorageError> {
         if len == 0 {
             return Ok(Vec::new());
         }

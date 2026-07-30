@@ -54,14 +54,10 @@ impl StoreJoining {
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
         let store = self.store()?;
-        Ok(crate::sync::store::drive_device_join(
-            &store,
-            &invite.bundle,
-            policy,
-            access_administrator,
-            timing,
-        )
-        .await?)
+        Ok(store
+            .device_join_transport()
+            .drive(&invite.bundle, policy, access_administrator, timing)
+            .await?)
     }
 
     pub(crate) async fn cancel_invite(
@@ -70,10 +66,10 @@ impl StoreJoining {
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
         let store = self.store()?;
-        Ok(
-            crate::sync::store::cancel_device_join_via_transport(&store, &invite.bundle, timing)
-                .await?,
-        )
+        Ok(store
+            .device_join_transport()
+            .cancel(&invite.bundle, timing)
+            .await?)
     }
 
     pub(crate) async fn abandon_invite(
@@ -81,7 +77,10 @@ impl StoreJoining {
         invite: &crate::joining::DeviceJoinInvite,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
         let store = self.store()?;
-        Ok(crate::sync::store::abandon_device_join_via_transport(&store, &invite.bundle).await?)
+        Ok(store
+            .device_join_transport()
+            .abandon(&invite.bundle)
+            .await?)
     }
 
     pub(crate) async fn begin(

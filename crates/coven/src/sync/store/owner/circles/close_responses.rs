@@ -1,5 +1,4 @@
 use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
-use super::AuthorizedWriterOperation;
 use super::{CircleOperationError, CircleOperationIntent};
 use crate::protocol::circle::{
     circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseExclusionRef,
@@ -11,12 +10,87 @@ use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 
 pub(crate) struct CircleCloseCoordinator<'operation, 'storage> {
-    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
+    database: crate::database::StoreDatabase,
+    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+    root: crate::protocol::store_commit::StoreRootRef,
+    membership: crate::protocol::membership::MembershipChain,
+    identity: &'storage crate::keys::UserKeypair,
+    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    registration: crate::protocol::store_commit::StoreDeviceRegistration,
+    device_signer: crate::keys::UserKeypair,
 }
 
 impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
-    pub(super) fn new(writer: &'operation mut AuthorizedWriterOperation<'storage>) -> Self {
-        Self { writer }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
+        database: crate::database::StoreDatabase,
+        storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+        root: crate::protocol::store_commit::StoreRootRef,
+        membership: crate::protocol::membership::MembershipChain,
+        identity: &'storage crate::keys::UserKeypair,
+        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: crate::protocol::store_commit::StoreDeviceRegistration,
+        device_signer: crate::keys::UserKeypair,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+            root,
+            membership,
+            identity,
+            registration_ref,
+            registration,
+            device_signer,
+        }
+    }
+
+    fn snapshots(&mut self) -> super::snapshots::CircleSnapshotWriter<'_, 'storage> {
+        super::snapshots::CircleSnapshotWriter::new(
+            self.writer,
+            self.database.clone(),
+            self.storage.clone(),
+            self.root.clone(),
+            self.registration_ref.clone(),
+            self.registration.clone(),
+            self.device_signer.clone(),
+        )
+    }
+
+    fn history(&mut self) -> super::VerifiedCircleHistory<'_, 'storage> {
+        self.writer.circle_history()
+    }
+
+    fn preparer(&mut self) -> super::preparation::CircleCandidatePreparer<'_, 'storage> {
+        let announcement_stream_id = self.writer.announcement_stream_id();
+        let bootstrap_verifier = self.writer.circle_bootstrap_verifier();
+        let history = self.writer.circle_history();
+        super::preparation::CircleCandidatePreparer::new(
+            announcement_stream_id,
+            bootstrap_verifier,
+            self.database.clone(),
+            self.membership.clone(),
+            self.root.clone(),
+            self.storage.clone(),
+            self.registration_ref.clone(),
+            self.registration.clone(),
+            self.device_signer.clone(),
+            self.identity,
+            history,
+        )
+    }
+
+    fn publisher(&mut self) -> super::publication::CircleCandidatePublisher<'_, 'storage> {
+        let history = self.writer.circle_history();
+        super::publication::CircleCandidatePublisher::new(
+            self.database.clone(),
+            self.storage.clone(),
+            self.membership.clone(),
+            self.identity,
+            history,
+        )
     }
 
     pub(crate) async fn finalize_ready_circle_epoch_closes(
@@ -25,7 +99,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
         store_dir: &crate::store_dir::StoreDir,
         routing_encryption: &crate::encryption::EncryptionService,
     ) -> Result<(), CircleOperationError> {
-        let journals = self.writer.database().waiting_circle_operations().await?;
+        let journals = self.database.waiting_circle_operations().await?;
         if journals.is_empty() {
             return Ok(());
         }
@@ -39,10 +113,9 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                     )));
                 }
             };
-            let identity_pubkey = crate::keys::public_key_hex(self.writer.writer.identity);
+            let identity_pubkey = crate::keys::public_key_hex(self.identity);
             let (current, activation_commit_ref) = self
-                .writer
-                .database()
+                .database
                 .circle_closing_context(journal.circle_id, &identity_pubkey)
                 .await?;
             let CircleControlState::EpochClose(close) = current.control.value.state() else {
@@ -74,7 +147,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                         .join(frontier.clone())
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
                 })?;
-            let bootstrap = super::AuthorizedCircleWriter::new(self.writer)
+            let bootstrap = self
                 .snapshots()
                 .capture_circle_snapshot_at_cutoff(
                     store_dir.as_ref().to_path_buf(),
@@ -84,9 +157,8 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                 )
                 .await?;
             let activation = self
-                .writer
-                .history_verifier_mut()
-                .load_ref(&activation_commit_ref)
+                .history()
+                .load_commit(&activation_commit_ref)
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let activation_commit = activation.value();
@@ -118,9 +190,8 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                 }
             };
             let roster_chain = self
-                .writer
                 .history()
-                .circles()
+                .activations()
                 .load_control_roster_chain(&activation, reference, &current.control, keyring)
                 .await?;
             let intent = journal
@@ -134,7 +205,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                         journal.operation_id
                     ))
                 })?;
-            let prepared = super::AuthorizedCircleWriter::new(self.writer)
+            let prepared = self
                 .preparer()
                 .prepare_request(CircleOperationRequest::FinalizeEpochClose(Box::new(
                     CircleFinalizeEpochCloseRequest {
@@ -164,17 +235,15 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                 )));
             }
             journal.begin_finalization(prepared.operation().clone())?;
-            self.writer
-                .database()
+            self.database
                 .begin_circle_operation_finalization(journal.clone())
                 .await?;
             let routing_key = crate::protocol::circle::derive_row_routing_key(
                 routing_encryption,
-                self.writer.history_verifier_mut().root().store_root_hash,
+                self.root.store_root_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            super::AuthorizedCircleWriter::new(self.writer)
-                .publisher()
+            self.publisher()
                 .publish(&journal.operation_id, Some(&routing_key))
                 .await?;
         }
@@ -210,8 +279,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                 participant.registration.device_id,
             );
             let (bytes, object) = match self
-                .writer
-                .storage()
+                .storage
                 .read_protocol_slot(&context, &participant.response_slot, &prefix)
                 .await
             {
@@ -228,8 +296,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             let settlement = match &slot_value {
                 CircleEpochCloseResponseSlotValue::Response(response) => {
                     let registration = self
-                        .writer
-                        .database()
+                        .database
                         .activated_store_device_registration(participant.registration.clone())
                         .await?;
                     if !response.verify_for(control, &registration) {
@@ -277,18 +344,17 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
     pub(crate) async fn publish_circle_epoch_close_responses(
         &mut self,
     ) -> Result<(), CircleOperationError> {
-        let controls = self.writer.database().closing_circle_controls().await?;
+        let controls = self.database.closing_circle_controls().await?;
         if controls.is_empty() {
             return Ok(());
         }
-        let root = self.writer.store_root().clone();
-        let registration_ref = self.writer.writer.registration_ref.clone();
-        let registration = self.writer.writer.registration.clone();
-        let device_signer = self.writer.writer.device_signer.clone();
-        let storage = self.writer.storage();
-        let frontier =
-            CommitFrontier::from_refs(self.writer.database().materialized_frontier().await?)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let root = self.root.clone();
+        let registration_ref = self.registration_ref.clone();
+        let registration = self.registration.clone();
+        let device_signer = self.device_signer.clone();
+        let storage = self.storage.clone();
+        let frontier = CommitFrontier::from_refs(self.database.materialized_frontier().await?)
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for control in controls {
             let CircleControlState::EpochClose(close) = control.value.state() else {
                 return Err(CircleOperationError::InvalidState(

@@ -12,7 +12,7 @@ pub use protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
     ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use remote::CloudCipher;
 
 pub use cloud::cloudkit::{

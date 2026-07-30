@@ -24,7 +24,13 @@ use crate::storage::{PreparedExactObject, ProtocolObjectDomain};
 /// verify the image. Restore-only operations consume this authority directly
 /// instead of reconstructing it from database rows and cloud objects.
 pub(crate) struct RestoringStore<'storage> {
-    bootstrap: BootstrappedStore<'storage>,
+    history: AuthorizedStoreHistory<'storage>,
+    database: StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    root: StoreRootRef,
+    protocol: StoreProtocolRoot,
+    membership: crate::protocol::membership::MembershipChain,
+    identity: UserKeypair,
     target_path: PathBuf,
 }
 
@@ -43,16 +49,13 @@ impl<'storage> RestoringStore<'storage> {
         ),
         StoreRegistrationError,
     > {
-        let root = self.bootstrap.history.history_verifier.root();
+        let root = &self.root;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
         match self
-            .bootstrap
-            .history
-            .history_verifier
-            .storage()
+            .storage
             .read_prepared_protocol_slot(&context, &slot, semantic_prefix)
             .await
         {
@@ -74,10 +77,7 @@ impl<'storage> RestoringStore<'storage> {
             }
             Err(crate::storage::StorageError::NotFound(_)) => {
                 let prepared = self
-                    .bootstrap
-                    .history
-                    .history_verifier
-                    .storage()
+                    .storage
                     .prepare_protocol_object(&context, slot, semantic_prefix, expected.to_bytes())
                     .map_err(StoreObjectError::from)?;
                 let reference = StoreDeviceRegistrationRef::from_registration(
@@ -98,10 +98,7 @@ impl<'storage> RestoringStore<'storage> {
         expected_bytes: &[u8],
     ) -> Result<bool, StoreRegistrationError> {
         match self
-            .bootstrap
-            .history
-            .history_verifier
-            .storage()
+            .storage
             .read_prepared_protocol_slot(context, prepared.reference().slot(), semantic_prefix)
             .await
         {
@@ -129,8 +126,8 @@ impl<'storage> RestoringStore<'storage> {
         device_signer: &UserKeypair,
     ) -> Result<(StoreAck, Vec<u8>, StoreAckRef, PreparedExactObject, bool), StoreRegistrationError>
     {
-        let root = self.bootstrap.history.history_verifier.root();
-        let storage = self.bootstrap.history.history_verifier.storage();
+        let root = &self.root;
+        let storage = self.storage;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
@@ -240,8 +237,8 @@ impl<'storage> RestoringStore<'storage> {
         ),
         StoreRegistrationError,
     > {
-        let root = self.bootstrap.history.history_verifier.root();
-        let storage = self.bootstrap.history.history_verifier.storage();
+        let root = &self.root;
+        let storage = self.storage;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::OwnerRecoveryNode,
@@ -335,10 +332,10 @@ impl<'storage> RestoringStore<'storage> {
         sequence: u64,
         predecessor: &Option<OwnerRecoveryNodeRef>,
     ) -> Result<Option<StoreDeviceRegistrationRef>, StoreRegistrationError> {
-        let database = &self.bootstrap.history.database;
-        let history_verifier = &self.bootstrap.history.history_verifier;
-        let storage = history_verifier.storage();
-        let root = history_verifier.root();
+        let database = &self.database;
+        let history = self.history.restore_history();
+        let storage = self.storage;
+        let root = &self.root;
         let Some((registration_ref, registration, activation)) = database
             .activated_store_device_registration_for_device(device_id)
             .await
@@ -378,7 +375,7 @@ impl<'storage> RestoringStore<'storage> {
                     .into(),
             ));
         }
-        let node = history_verifier.load_owner_recovery_node(&node_ref).await?;
+        let node = history.load_owner_recovery_node(&node_ref).await?;
         if node.value.recovery_id != recovery_id
             || node.value.predecessor != *predecessor
             || node.value.readiness.registration != registration_ref
@@ -388,7 +385,7 @@ impl<'storage> RestoringStore<'storage> {
             ));
         }
         let initial_ack_ref = node.value.readiness.initial_ack;
-        let initial_ack = history_verifier
+        let initial_ack = history
             .load_store_ack(&initial_ack_ref, &registration)
             .await?;
         if initial_ack.value.store_cut != node.value.readiness.bootstrap_cut {
@@ -471,17 +468,12 @@ impl<'storage> RestoringStore<'storage> {
         &mut self,
         authority: &crate::restoration::OwnerRecoveryAuthority,
     ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
-        let database = self.bootstrap.history.database.clone();
-        let storage = self.bootstrap.history.history_verifier.storage();
-        let identity_signer = &self.bootstrap.identity;
-        let membership = &self.bootstrap.membership;
-        let root = self.bootstrap.history.history_verifier.root().clone();
-        let protocol = self
-            .bootstrap
-            .history
-            .history_verifier
-            .verified_root()
-            .clone();
+        let database = self.database.clone();
+        let storage = self.storage;
+        let identity_signer = &self.identity;
+        let membership = &self.membership;
+        let root = self.root.clone();
+        let protocol = self.protocol.clone();
         let owner_pubkey = crate::keys::public_key_hex(identity_signer);
         if owner_pubkey != protocol.descriptor.founder_pubkey
             || authority.owner_grant != protocol.descriptor.founder_grant
@@ -517,9 +509,8 @@ impl<'storage> RestoringStore<'storage> {
             }
             OwnerRecoveryPosition::At { node } => {
                 let loaded = self
-                    .bootstrap
                     .history
-                    .history_verifier
+                    .restore_history()
                     .load_owner_recovery_node(node)
                     .await?;
                 if loaded.value.owner_pubkey != owner_pubkey
@@ -952,7 +943,6 @@ impl<'storage> RestoringStore<'storage> {
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let prepared_history = self
-            .bootstrap
             .history
             .prepare_merge_history_successor(
                 &verified_commit,
@@ -1033,34 +1023,52 @@ impl<'storage> RestoringStore<'storage> {
         Ok(registration_ref)
     }
 
-    pub(super) fn into_bootstrapped_store(self) -> BootstrappedStore<'storage> {
-        self.bootstrap
+    pub(crate) async fn begin_device_join(
+        self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        offer: crate::sync::store::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::JoiningStore<'storage>, crate::sync::store::DeviceJoinError>
+    {
+        crate::sync::store::JoiningStore::begin_from_restored_history(
+            self.history,
+            self.identity,
+            pending,
+            offer,
+        )
+        .await
     }
 
-    pub(super) fn from_authorized_history(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_parts(
         history: AuthorizedStoreHistory<'storage>,
+        database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: StoreRootRef,
+        protocol: StoreProtocolRoot,
         membership: crate::protocol::membership::MembershipChain,
         identity: UserKeypair,
         target_path: PathBuf,
     ) -> Self {
         Self {
-            bootstrap: BootstrappedStore {
-                history,
-                membership,
-                identity,
-            },
+            history,
+            database,
+            storage,
+            root,
+            protocol,
+            membership,
+            identity,
             target_path,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn database(&self) -> &StoreDatabase {
-        &self.bootstrap.history.database
+        &self.database
     }
 
     #[cfg(test)]
     pub(crate) fn into_database(self) -> StoreDatabase {
-        self.bootstrap.history.database
+        self.database
     }
 
     pub(crate) async fn pull(
@@ -1069,16 +1077,15 @@ impl<'storage> RestoringStore<'storage> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<pull::StorePullResult, pull::StorePullError> {
         let execution = self
-            .bootstrap
             .history
             .pull(
                 store_dir,
-                &self.bootstrap.membership,
-                Some(&self.bootstrap.identity),
+                &self.membership,
+                Some(&self.identity),
                 routing_encryption,
             )
             .await?;
-        self.bootstrap.membership = execution.membership;
+        self.membership = execution.membership;
         Ok(execution.result)
     }
 
@@ -1088,23 +1095,18 @@ impl<'storage> RestoringStore<'storage> {
     ) -> Result<(), StoreRegistrationError> {
         let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
             &continuation.registration_bytes,
-            self.bootstrap.history.history_verifier.root(),
+            &self.root,
             continuation.registration.device_id,
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let device_signer = registration
-            .device_signer(&self.bootstrap.identity)
+            .device_signer(&self.identity)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let latest = self
-            .bootstrap
-            .history
-            .history_verifier
+        let history = self.history.restore_history();
+        let latest = history
             .load_store_ack(&continuation.latest_ack, &registration)
             .await?;
-        let chain = self
-            .bootstrap
-            .history
-            .history_verifier
+        let chain = history
             .load_acknowledgement_proof_chain(
                 continuation.latest_ack.clone(),
                 latest.value,
@@ -1125,20 +1127,16 @@ impl<'storage> RestoringStore<'storage> {
             .collect();
         let latest_snapshot = match &continuation.latest_snapshot {
             Some(reference) => Some(
-                self.bootstrap
-                    .history
-                    .history_verifier
+                history
                     .load_store_snapshot(&continuation.registration, &registration, reference)
                     .await?,
             ),
             None => None,
         };
-        self.bootstrap
-            .history
-            .database
+        self.database
             .install_activated_device_continuation(
                 continuation,
-                &self.bootstrap.identity,
+                &self.identity,
                 &device_signer,
                 chain,
                 latest_snapshot,
@@ -1152,7 +1150,7 @@ impl<'storage> RestoringStore<'storage> {
         store_dir: &crate::store_dir::StoreDir,
         cancel: &watch::Receiver<bool>,
     ) -> Result<super::writer::snapshot::SnapshotBlobReconcile, crate::database::DbError> {
-        let db = &self.bootstrap.history.database;
+        let db = &self.database;
         let row_ids: Vec<(String, String)> = {
             let conn =
                 Connection::open(&self.target_path).map_err(crate::database::DbError::from)?;
@@ -1220,11 +1218,11 @@ impl<'storage> RestoringStore<'storage> {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
-        let storage = self.bootstrap.history.history_verifier.storage();
+        let storage = self.storage;
         let protection = crate::sync::store::blob::opening_protection(
-            &self.bootstrap.history.database,
+            &self.database,
             storage,
-            self.bootstrap.history.history_verifier.root(),
+            &self.root,
             &authority,
             &stored,
         )
@@ -1239,7 +1237,7 @@ impl<'storage> RestoringStore<'storage> {
             }
         })?;
         crate::blob::cache::verify_blob_plaintext(
-            &self.bootstrap.history.database,
+            &self.database,
             storage,
             store_dir,
             &stored,

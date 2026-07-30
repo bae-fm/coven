@@ -5,6 +5,7 @@ use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
+use crate::database::StoreDatabase;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{
@@ -25,8 +26,6 @@ use crate::protocol::store_commit::{
 use crate::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
-use crate::sync::store::owner::AuthorizedWriterOperation;
-
 pub(super) fn signed_circle_commit(
     store_root_hash: ObjectHash,
     operation_id: crate::WriteId,
@@ -1103,12 +1102,47 @@ pub(super) async fn prepare_circle_activation_objects(
     ))
 }
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
-    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    announcement_stream_id: crate::protocol::membership::AuthorStreamId,
+    bootstrap_verifier: super::super::circle_bootstrap::CircleBootstrapVerifier,
+    database: StoreDatabase,
+    membership: crate::protocol::membership::MembershipChain,
+    root: crate::protocol::store_commit::StoreRootRef,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    registration_ref: StoreDeviceRegistrationRef,
+    registration: StoreDeviceRegistration,
+    device_signer: UserKeypair,
+    identity: &'storage UserKeypair,
+    history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
 impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
-    pub(super) fn new(writer: &'operation mut AuthorizedWriterOperation<'storage>) -> Self {
-        Self { writer }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        announcement_stream_id: crate::protocol::membership::AuthorStreamId,
+        bootstrap_verifier: super::super::circle_bootstrap::CircleBootstrapVerifier,
+        database: StoreDatabase,
+        membership: crate::protocol::membership::MembershipChain,
+        root: crate::protocol::store_commit::StoreRootRef,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        registration_ref: StoreDeviceRegistrationRef,
+        registration: StoreDeviceRegistration,
+        device_signer: UserKeypair,
+        identity: &'storage UserKeypair,
+        history: super::VerifiedCircleHistory<'operation, 'storage>,
+    ) -> Self {
+        Self {
+            announcement_stream_id,
+            bootstrap_verifier,
+            database,
+            membership,
+            root,
+            storage,
+            registration_ref,
+            registration,
+            device_signer,
+            identity,
+            history,
+        }
     }
 
     pub(super) async fn prepare_create(
@@ -1127,22 +1161,24 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         &mut self,
         request: CircleOperationRequest,
     ) -> Result<CircleOperationJournal, CircleOperationError> {
-        let operation = &mut *self.writer;
-        let announcement_stream_id = operation.announcement_stream_id();
-        let bootstrap_verifier = operation.circle_bootstrap_verifier();
-        let authority = &mut operation.store;
-        let database = authority.database().clone();
-        let current = authority.membership.clone();
-        let root = authority.history().history_verifier_mut().root().clone();
+        let announcement_stream_id = self.announcement_stream_id;
+        let bootstrap_verifier = &self.bootstrap_verifier;
+        let database = self.database.clone();
+        let current = self.membership.clone();
+        let root = self.root.clone();
+        let storage = self.storage.clone();
+        let author_registration = self.registration_ref.clone();
+        let author = self.registration.clone();
+        let device_signer = self.device_signer.clone();
+        let signer = self.identity;
         let database = &database;
         let current = &current;
         let root = &root;
-        let storage = authority.history().history_verifier_mut().storage();
+        let storage = storage.as_ref();
         let db = &database;
-        let author_registration = &operation.writer.registration_ref;
-        let author = &operation.writer.registration;
-        let device_signer = &operation.writer.device_signer;
-        let signer = &operation.writer.identity;
+        let author_registration = &author_registration;
+        let author = &author;
+        let device_signer = &device_signer;
         let store_root_hash = root.store_root_hash;
         let circle_device_id = author.device_id.to_string();
         let author_pubkey = keys::public_key_hex(signer);
@@ -1875,9 +1911,9 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 )
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let commit_ref = verified_commit.reference().clone();
-            let history_summary = authority
-            .history()
-            .prepare_merge_history_successor(
+            let history_summary = self
+                .history
+                .prepare_successor(
                 &verified_commit,
                 current,
                 None,
@@ -1887,7 +1923,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             prepared_objects.insert("store-commit".to_string(), commit_prepared);
-            let storage = authority.history().history_verifier_mut().storage();
             let head_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
                 ProtocolObjectDomain::StoreHead,

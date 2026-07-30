@@ -38,13 +38,13 @@ use crate::sync::store::circle_controls::activation::{
 use metadata::load_circle_metadata_state;
 use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle_roster_state};
 
-pub(crate) struct VerifiedCircleHistory<'operation, 'storage> {
+pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
 
-impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
@@ -134,7 +134,7 @@ fn verify_loaded_control_membership(
     Ok(chain.current_members())
 }
 
-impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) async fn load_control_roster_chain(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
@@ -1456,7 +1456,7 @@ pub(crate) enum LocalCircleAccess {
 /// when the leaf names a bootstrap — downloading and verifying that image. Used by
 /// snapshot-restore selection to decide, per Circle, whether the restoring
 /// identity can decrypt it and what baseline image it can stage.
-impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) async fn resolve_local_access(
         &mut self,
         commit: &StoreBatchCommit,
@@ -1523,8 +1523,8 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     }
 }
 
-impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
-    pub(crate) async fn load_payload_activations(
+impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
+    pub(crate) async fn load_payload(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: Option<&UserKeypair>,
@@ -1537,7 +1537,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             return VerifiedCircleActivations::none(commit, verified.reference())
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()));
         }
-        self.load_activations_with_prefix(
+        self.load_with_prefix(
             verified,
             identity,
             routing_key,
@@ -1547,21 +1547,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         .await
     }
 
-    pub(crate) fn packages(&mut self) -> super::packages::CirclePackageReader<'_, 'storage> {
-        super::packages::CirclePackageReader::new(self.database, self.history)
-    }
-
-    pub(crate) fn acknowledgements(
-        &mut self,
-    ) -> super::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
-        super::acknowledgements::CircleAcknowledgementReader::new(self.database, self.history)
-    }
-
-    pub(crate) fn snapshots(&mut self) -> super::snapshots::CircleSnapshotReader<'_, 'storage> {
-        super::snapshots::CircleSnapshotReader::new(self.database, self.history)
-    }
-
-    pub(crate) async fn load_activations(
+    pub(crate) async fn load(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: &UserKeypair,
@@ -1580,7 +1566,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let verified_prefix = VerifiedStreamActivationPrefix::empty();
-        Box::pin(self.load_activations_with_prefix(
+        Box::pin(self.load_with_prefix(
             verified,
             Some(identity),
             routing_key,
@@ -1590,7 +1576,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         .await
     }
 
-    pub(super) async fn load_activations_with_prefix(
+    async fn load_with_prefix(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: Option<&UserKeypair>,

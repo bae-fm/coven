@@ -18,12 +18,28 @@ use crate::sync::store::circle_controls::{
 use std::collections::BTreeSet;
 
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
-    store: &'operation mut super::AuthorizedStore<'storage>,
+    database: StoreDatabase,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    membership: crate::protocol::membership::MembershipChain,
+    identity: &'storage crate::keys::UserKeypair,
+    history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
 impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
-    pub(super) fn new(store: &'operation mut super::AuthorizedStore<'storage>) -> Self {
-        Self { store }
+    pub(super) fn new(
+        database: StoreDatabase,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        membership: crate::protocol::membership::MembershipChain,
+        identity: &'storage crate::keys::UserKeypair,
+        history: super::VerifiedCircleHistory<'operation, 'storage>,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            membership,
+            identity,
+            history,
+        }
     }
 
     pub(super) async fn publish(
@@ -31,15 +47,21 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         operation_id: &CircleOperationId,
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
-        let current_membership = self
-            .store
-            .resolved_membership()
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-            .clone();
-        let identity = self.store.identity;
-        let history = &mut self.store.history;
-        let mut journal = history
-            .database
+        let current_membership = match self.membership.conflict() {
+            Some(conflict) => {
+                return Err(CircleOperationError::InvalidState(
+                    crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
+                        conflict.clone(),
+                    ))
+                    .to_string(),
+                ));
+            }
+            None => self.membership.clone(),
+        };
+        let identity = self.identity;
+        let storage = self.storage.clone();
+        let database = self.database.clone();
+        let mut journal = database
             .circle_operation(operation_id)
             .await?
             .ok_or_else(|| {
@@ -51,7 +73,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         }
         let creation = journal.operation().creation.clone();
         let store_root_hash = creation.control.value.store_root_hash;
-        if history.history_verifier.root().store_root_hash != store_root_hash {
+        let history = &mut self.history;
+        if history.root().store_root_hash != store_root_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle commit names a different Store root".to_string(),
             ));
@@ -61,8 +84,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 |error| CircleOperationError::Journal(format!("circle keyring: {error}")),
             )?);
         let verified_commit = history
-            .history_verifier
-            .authenticate_bytes(
+            .authenticate_commit_bytes(
                 &journal.operation().commit_ref,
                 &journal.operation().commit_bytes,
             )
@@ -100,15 +122,9 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .retained_device_state_for_order(&commit.order)
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        let database = &history.database;
-        let history_verifier = &mut history.history_verifier;
-        let storage = history_verifier.storage();
-        if let CurrentMergeAuthority::Revoked { grant_id } = current_merge_authority(
-            history_verifier.root(),
-            &current_membership,
-            commit,
-            &author,
-        )? {
+        if let CurrentMergeAuthority::Revoked { grant_id } =
+            current_merge_authority(history.root(), &current_membership, commit, &author)?
+        {
             let block = crate::protocol::circle::CircleOperationBlock::AuthorityLost { grant_id };
             database
                 .block_circle_operation(operation_id, block.clone())
@@ -158,8 +174,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     ))
                 })?;
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "metadata",
                 &ProtocolObjectContext::circle(
@@ -176,8 +192,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             )
             .await?;
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "metadata-head",
                 &ProtocolObjectContext::circle(
@@ -211,8 +227,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 circle_encryption.clone(),
             );
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "roster-entry",
                 &roster_context,
@@ -225,8 +241,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             )
             .await?;
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "roster-head",
                 &roster_context,
@@ -276,12 +292,16 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         "Circle bootstrap row blob has no exact stored locator".to_string(),
                     )
                 })?;
-                storage.verify_blob_object(stored).await.map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "verify Circle bootstrap blob {}: {error}",
-                        crate::protocol::remote_object::remote_object_id(stored.object())
-                    ))
-                })?;
+                storage
+                    .as_ref()
+                    .verify_blob_object(stored)
+                    .await
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "verify Circle bootstrap blob {}: {error}",
+                            crate::protocol::remote_object::remote_object_id(stored.object())
+                        ))
+                    })?;
             }
             let mut matching_steps = journal
                 .operation()
@@ -310,8 +330,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 bootstrap.image.image_hash,
             );
             append_hashed_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 &step,
                 &ProtocolObjectContext::circle(
@@ -330,8 +350,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     && intent.intent_hash() == intent_ref.intent_hash =>
             {
                 append_step(
-                    database,
-                    storage,
+                    &database,
+                    storage.as_ref(),
                     &mut journal,
                     "epoch-close-intent",
                     &ProtocolObjectContext::circle(
@@ -362,8 +382,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     && outcome.outcome_hash() == outcome_ref.outcome_hash =>
             {
                 append_step(
-                    database,
-                    storage,
+                    &database,
+                    storage.as_ref(),
                     &mut journal,
                     "epoch-close-outcome",
                     &ProtocolObjectContext::store_encrypted(
@@ -395,8 +415,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     && cancellation.cancellation_hash() == cancellation_ref.cancellation_hash =>
             {
                 append_step(
-                    database,
-                    storage,
+                    &database,
+                    storage.as_ref(),
                     &mut journal,
                     "epoch-close-cancellation",
                     &ProtocolObjectContext::store_encrypted(
@@ -424,8 +444,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         }
         for (index, access) in creation.access.iter().enumerate() {
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 &format!("access-leaf-{index}"),
                 &ProtocolObjectContext::recipient_sealed(
@@ -445,8 +465,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .await?;
         }
         append_step(
-            database,
-            storage,
+            &database,
+            storage.as_ref(),
             &mut journal,
             "control",
             &ProtocolObjectContext::store_encrypted(
@@ -462,8 +482,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         .await?;
         let control_head = &creation.policy_objects.control_head;
         append_step(
-            database,
-            storage,
+            &database,
+            storage.as_ref(),
             &mut journal,
             "control-head",
             &ProtocolObjectContext::store_encrypted(
@@ -480,8 +500,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         .await?;
         for (index, access) in creation.access.iter().enumerate() {
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 &format!("access-envelope-{index}"),
                 &ProtocolObjectContext::store_encrypted(
@@ -500,8 +520,9 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             )
             .await?;
         }
-        let verified = super::VerifiedCircleHistory::new(database, history_verifier)
-            .load_activations(&verified_commit, identity, routing_key)
+        let verified = history
+            .activations()
+            .load(&verified_commit, identity, routing_key)
             .await?;
         let expected =
             expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
@@ -521,8 +542,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             let commit_hash = journal.operation().commit_ref.commit_hash;
             let stream_id = journal.operation().commit_ref.coord.stream_id;
             append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "store-commit",
                 &ProtocolObjectContext::signed_plaintext(
@@ -539,8 +560,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             )
             .await?;
             let published_head = append_step(
-                database,
-                storage,
+                &database,
+                storage.as_ref(),
                 &mut journal,
                 "store-head",
                 &ProtocolObjectContext::signed_plaintext(
@@ -569,7 +590,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                             "Merge Circle operation lacks its prepared Store head".to_string(),
                         )
                     })?;
-                if let super::history::abandonment::ExcludedCandidateHeadObservation::MergeWinner(
+                if let crate::sync::store::owner::history::abandonment::ExcludedCandidateHeadObservation::MergeWinner(
                     winner,
                 ) = history
                     .observe_excluded_candidate_head(
@@ -582,16 +603,14 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     let block = crate::protocol::circle::CircleOperationBlock::PositionLost {
                         winner_commit: winner.winner().commit.commit_hash,
                     };
-                    history
-                        .database
+                    database
                         .block_circle_operation(operation_id, block.clone())
                         .await?;
                     return Err(CircleOperationError::Blocked { circle_id, block });
                 }
             }
             published_head?;
-            history
-                .database
+            database
                 .activate_circle_operation(journal, verified)
                 .await?;
         }

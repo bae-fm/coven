@@ -1027,12 +1027,7 @@ async fn publish_store_snapshot_cut(
     created_at: &str,
 ) {
     authorized
-        .push_store_snapshot(
-            cut.snapshot,
-            cut.coverage,
-            authorized.database().schema_version(),
-            created_at.to_string(),
-        )
+        .push_snapshot_cut(cut, created_at.to_string())
         .await
         .expect("publish the Store snapshot");
 }
@@ -2811,13 +2806,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         .authorize_writer()
         .await
         .expect("authorize the Owner Store")
-        .gc_tombstones(
-            fixture.store.home.as_ref(),
-            &cipher,
-            fixture.store.storage.store_id(),
-            &past,
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-        )
+        .gc_tombstones(fixture.store.home.as_ref(), &cipher, &past)
         .await
         .expect("run the graced tombstone GC over an audience-scoped blob");
 
@@ -3168,29 +3157,14 @@ async fn owner_circle_snapshot_stream(
         .expect("resolve Circle snapshot access")
         .expect("the Circle access is retained")
         .into_encryption();
-    let registration_ref = database
-        .local_activated_registration_ref()
-        .await
-        .expect("read the local registration reference")
-        .expect("the local device is activated");
-    let registration = database
-        .activated_store_device_registration(registration_ref.clone())
-        .await
-        .expect("read the local activated registration");
     device
         .store
         .authorize_writer()
         .await
         .expect("authorize Circle snapshot stream reader")
-        .history()
         .circles()
         .snapshots()
-        .load_stream_refs(
-            fixture.circle_id,
-            encryption,
-            &registration_ref,
-            &registration,
-        )
+        .load_circle_snapshot_refs_for_test(fixture.circle_id, encryption)
         .await
         .expect("walk the owner's Circle snapshot stream")
 }

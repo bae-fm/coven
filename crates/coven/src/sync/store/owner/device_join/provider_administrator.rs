@@ -3,7 +3,92 @@ use super::joiner::cross_challenge_context;
 use super::journal::provider_error;
 use super::*;
 
-impl AuthorizedProviderAdministratorJoin<'_, '_> {
+pub(crate) struct AuthorizedProviderAdministratorJoin<'operation, 'storage> {
+    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    database: StoreDatabase,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    protocol_root: StoreProtocolRoot,
+    verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    membership: crate::protocol::membership::MembershipChain,
+    registration_ref: StoreDeviceRegistrationRef,
+    registration: StoreDeviceRegistration,
+    device_signer: UserKeypair,
+    grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
+}
+
+impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'storage> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_parts(
+        writer: &'operation mut AuthorizedWriterOperation<'storage>,
+        database: StoreDatabase,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        protocol_root: StoreProtocolRoot,
+        verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+        membership: crate::protocol::membership::MembershipChain,
+        registration_ref: StoreDeviceRegistrationRef,
+        registration: StoreDeviceRegistration,
+        device_signer: UserKeypair,
+        grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+            protocol_root,
+            verified_root,
+            membership,
+            registration_ref,
+            registration,
+            device_signer,
+            grants,
+        }
+    }
+
+    fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
+        self.writer.device_join_history()
+    }
+
+    fn verify_device_admission_approval(
+        &self,
+        approval: &DeviceProviderAdmissionApproval,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<(), DeviceJoinError> {
+        approval.verify(&self.verified_root, owner, &self.registration)
+    }
+
+    fn sign_device_admission_approval(
+        &self,
+        request: DeviceProviderAccessRequest,
+        access_grant: ActivatedStoreMemberProviderAccessGrant,
+        admission: DeviceProviderAdmissionChallenge,
+    ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
+        DeviceProviderAdmissionApproval::signed(
+            request,
+            access_grant,
+            admission,
+            &self.verified_root,
+            &self.registration,
+            &self.device_signer,
+        )
+    }
+
+    async fn activate(
+        &mut self,
+        batch: crate::sync::store::operations::StoreOperationBatch,
+    ) -> Result<StoreBatchCommitRef, crate::sync::store::StoreError> {
+        let plan = self.writer.prepare_plan().await?;
+        self.writer.activate(plan, batch).await
+    }
+
+    fn require_grant(
+        &self,
+        grant_id: &ProviderAdminGrantId,
+    ) -> Result<&ProviderAdminGrantRecord, DeviceJoinError> {
+        self.grants
+            .get(grant_id)
+            .ok_or(DeviceJoinError::ProviderAdministratorRequired)
+    }
+
     async fn publish_cross_principal_challenge(
         &mut self,
         authorization: &DeviceJoinChallengePublicationAuthorization,
@@ -12,8 +97,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         store: &StoreProviderBinding,
         attempt_owner: &StoreDeviceRegistration,
     ) -> Result<CrossPrincipalProbeChallenge, DeviceJoinError> {
-        let administrator_signing_pubkey =
-            self.writer.registration().1.device_signing_pubkey.clone();
+        let administrator_signing_pubkey = self.registration.device_signing_pubkey.clone();
         challenge
             .verify(context, store, &administrator_signing_pubkey)
             .map_err(provider_error)?;
@@ -21,9 +105,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let attempt = self
-            .writer
-            .history_verifier_mut()
-            .load_verified_device_join_attempt(&authorization.attempt, attempt_owner)
+            .history()
+            .load_verified_attempt(&authorization.attempt, attempt_owner)
             .await?;
         if attempt.value.store_root != context.root
             || attempt.value.attempt_id != context.attempt_id
@@ -32,9 +115,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let activation = self
-            .writer
-            .history_verifier_mut()
-            .load_ref(&authorization.attempt_activation)
+            .history()
+            .load_commit(&authorization.attempt_activation)
             .await?;
         if activation.author() != attempt_owner
             || !activation
@@ -51,8 +133,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         crate::protocol::provider::settle_cross_principal_challenge(
-            self.writer.storage().exact_slot_storage(),
-            self.writer.database(),
+            self.storage.exact_slot_storage(),
+            &self.database,
             authorization,
             challenge,
             context,
@@ -74,20 +156,18 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .writer
-            .history_verifier_mut()
+            .history()
             .load_registration(&request.offer.owner_registration)
             .await?
             .value;
         request.verify(&owner)?;
-        let (administrator_ref, administrator, administrator_signer) = {
-            let (reference, registration, signer) = self.writer.registration();
-            (reference.clone(), registration.clone(), signer.clone())
-        };
+        let administrator_ref = self.registration_ref.clone();
+        let administrator = self.registration.clone();
+        let administrator_signer = self.device_signer.clone();
         if administrator_ref != provider_admin.administrator {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let initial = DeviceJoinJournalRecord {
             attempt_id: request.offer.attempt_id,
@@ -125,8 +205,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
                     administrator
                         .grant_member_access(
                             &request.offer.member_pubkey,
-                            self.writer
-                                .membership()
+                            self.membership
                                 .current_member_provider_email(&request.offer.member_pubkey),
                             &request.peer_provider,
                         )
@@ -156,11 +235,10 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
                     &grant.grant_id,
                 );
                 let slot = self
-                    .writer
-                    .storage()
+                    .storage
                     .allocate_protocol_slot(&context, &prefix, ".json")
                     .await?;
-                let prepared = self.writer.storage().prepare_protocol_object(
+                let prepared = self.storage.prepare_protocol_object(
                     &context,
                     slot,
                     &prefix,
@@ -187,13 +265,9 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         );
         let prefix =
             crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != grant.to_bytes() {
@@ -203,11 +277,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         }
         let grant_ref =
             StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
-        let plan = self.writer.prepare_plan().await?;
         let activation = self
-            .writer
             .activate(
-                plan,
                 crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(
                     grant_ref.clone(),
                 ),
@@ -216,7 +287,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         let admission = if provider_admin.provider == request.peer_provider {
             DeviceProviderAdmissionChallenge::SamePrincipal
         } else {
-            let exact = self.writer.storage().exact_slot_storage();
+            let exact = self.storage.exact_slot_storage();
             let challenge_context = crate::protocol::provider::CrossPrincipalChallengeContext {
                 root: request.offer.store_root.clone(),
                 attempt_id: request.offer.attempt_id,
@@ -243,7 +314,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
                 .map_err(provider_error)?,
             )
         };
-        let approval = self.writer.sign_device_admission_approval(
+        let approval = self.sign_device_admission_approval(
             request,
             ActivatedStoreMemberProviderAccessGrant {
                 grant,
@@ -275,17 +346,11 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .writer
-            .history_verifier_mut()
+            .history()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
-        let administrator = self.writer.registration().1.clone();
-        self.writer.verify_device_admission_approval(
-            &bootstrap.request.approval,
-            &owner,
-            &administrator,
-        )?;
+        self.verify_device_admission_approval(&bootstrap.request.approval, &owner)?;
         let challenge_publication = match &bootstrap.request.approval.admission {
             DeviceProviderAdmissionChallenge::SamePrincipal => {
                 DeviceProviderChallengePublication::SamePrincipal
@@ -318,7 +383,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             bootstrap: Box::new(bootstrap),
             challenge_publication,
         };
-        let journal = self.writer.database().device_join_journal();
+        let journal = self.database.device_join_journal();
         if let Some(current) = journal
             .load(attempt_id, DeviceJoinRole::ProviderAdministrator)
             .await?
@@ -369,7 +434,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         readiness: DeviceJoinReadiness,
     ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
         let attempt_id = readiness.proof.attempt.attempt_id;
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(attempt_id, DeviceJoinRole::ProviderAdministrator)
@@ -398,7 +463,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         if provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let administrator_signer = self.writer.registration().2.clone();
+        let administrator_signer = self.device_signer.clone();
         let admission = match (
             &bootstrap.bootstrap.request.approval.admission,
             &bootstrap.bootstrap.request.response,
@@ -427,7 +492,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
                 };
                 DeviceProviderAdmission::CrossPrincipal(
                     crate::protocol::provider::complete_cross_principal_probe(
-                        self.writer.storage().exact_slot_storage(),
+                        self.storage.exact_slot_storage(),
                         &database,
                         challenge,
                         response,
@@ -473,7 +538,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
     ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(
@@ -494,15 +559,10 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             ) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
             _ => {}
         }
-        let (attempt, owner) = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_attempt_and_owner(&attempt_ref)
-            .await?;
+        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
         let outcome = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(
@@ -516,8 +576,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         if provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let administrator = self.writer.registration().1.clone();
-        let administrator_signer = self.writer.registration().2.clone();
+        let administrator = self.registration.clone();
+        let administrator_signer = self.device_signer.clone();
         let (challenge, prior_state_hash) = match &*current.progress {
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::CleanupIntent {
@@ -539,8 +599,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
                     }
                     DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
                         match self
-                            .writer
-                            .storage()
+                            .storage
                             .exact_slot_storage()
                             .observe_at(&challenge.administrator_object.slot)
                             .await
@@ -575,8 +634,7 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         if let DeviceProviderAdmissionChallenge::CrossPrincipal(probe) =
             &attempt.value.provider_approval.admission
         {
-            self.writer
-                .storage()
+            self.storage
                 .exact_slot_storage()
                 .delete_and_verify_absent(&probe.administrator_object.slot)
                 .await
@@ -620,15 +678,10 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
     ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let (attempt, owner) = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_attempt_and_owner(&attempt_ref)
-            .await?;
+        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
         let outcome = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(
@@ -638,8 +691,8 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let executor_admin = self.require_grant(executor_grant)?.clone();
-        let executor = self.writer.registration().1.clone();
-        let executor_signer = self.writer.registration().2.clone();
+        let executor = self.registration.clone();
+        let executor_signer = self.device_signer.clone();
         let (authority, protected_slots, locator) = match producer {
             DeviceJoinProducer::ProviderAdministrator => {
                 let DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
@@ -720,10 +773,15 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         &mut self,
         cancellation: DeviceJoinCancellation,
         revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
-        executor_grant: ProviderAdminGrantId,
     ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
+        let executor_grant = self
+            .protocol_root
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone();
         let attempt_id = cancellation.outcome.attempt().attempt_id;
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(attempt_id, DeviceJoinRole::ProviderAdministrator)
@@ -776,10 +834,15 @@ impl AuthorizedProviderAdministratorJoin<'_, '_> {
         &mut self,
         cancellation: DeviceJoinCancellation,
         revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
-        executor_grant: ProviderAdminGrantId,
     ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
+        let executor_grant = self
+            .protocol_root
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone();
         let attempt_id = cancellation.outcome.attempt().attempt_id;
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         if let Some(current) = journal.load(attempt_id, DeviceJoinRole::Joiner).await? {
             return match &*current.progress {
@@ -881,15 +944,9 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        let executor_grant = writer
-            .protocol_root()
-            .descriptor
-            .founder_provider_admin
-            .grant_id
-            .clone();
         writer
             .provider_administrator_join()?
-            .revoke_writes(cancellation, revocation_executor, executor_grant)
+            .revoke_writes(cancellation, revocation_executor)
             .await
     }
 }

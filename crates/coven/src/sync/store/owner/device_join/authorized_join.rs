@@ -2,32 +2,129 @@ use super::joiner::cross_challenge_context;
 use super::journal::{database_error, provider_error};
 use super::*;
 
+pub(crate) struct AuthorizedJoin<'operation, 'storage> {
+    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    database: StoreDatabase,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    root: StoreRootRef,
+    protocol_root: StoreProtocolRoot,
+    verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    membership: crate::protocol::membership::MembershipChain,
+    identity: &'storage UserKeypair,
+    registration_ref: StoreDeviceRegistrationRef,
+    registration: StoreDeviceRegistration,
+    device_signer: UserKeypair,
+}
+
 impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        writer: &'operation mut AuthorizedWriterOperation<'storage>,
+        database: StoreDatabase,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        root: StoreRootRef,
+        protocol_root: StoreProtocolRoot,
+        verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+        membership: crate::protocol::membership::MembershipChain,
+        identity: &'storage UserKeypair,
+        registration_ref: StoreDeviceRegistrationRef,
+        registration: StoreDeviceRegistration,
+        device_signer: UserKeypair,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+            root,
+            protocol_root,
+            verified_root,
+            membership,
+            identity,
+            registration_ref,
+            registration,
+            device_signer,
+        }
+    }
+
+    pub(crate) fn into_provider_administrator(
+        self,
+    ) -> Result<AuthorizedProviderAdministratorJoin<'operation, 'storage>, DeviceJoinError> {
+        let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+            self.membership.status()
+        else {
+            return Err(DeviceJoinError::MembershipConflict);
+        };
+        let state = resolved.provider_admin.combined_state();
+        let administrator = &self.registration_ref;
+        let grants = state
+            .records()
+            .iter()
+            .filter(|(grant_id, record)| {
+                &record.administrator == administrator
+                    && state.authorizes(grant_id, &record.administrator)
+            })
+            .map(|(grant_id, record)| (grant_id.clone(), record.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if grants.is_empty() {
+            return Err(DeviceJoinError::ProviderAdministratorRequired);
+        }
+        Ok(AuthorizedProviderAdministratorJoin::from_parts(
+            self.writer,
+            self.database,
+            self.storage,
+            self.protocol_root,
+            self.verified_root,
+            self.membership,
+            self.registration_ref,
+            self.registration,
+            self.device_signer,
+            grants,
+        ))
+    }
+
+    fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
+        self.writer.device_join_history()
+    }
+
+    fn verify_device_admission_approval(
+        &self,
+        approval: &DeviceProviderAdmissionApproval,
+        owner: &StoreDeviceRegistration,
+        administrator: &StoreDeviceRegistration,
+    ) -> Result<(), DeviceJoinError> {
+        approval.verify(&self.verified_root, owner, administrator)
+    }
+
     pub(crate) async fn begin(
         &self,
         member_pubkey: &str,
-        provider_admin_grant: ProviderAdminGrantId,
     ) -> Result<DeviceJoinOffer, DeviceJoinError> {
         self.require_eligible_member(member_pubkey)?;
-        let owner_pubkey = keys::public_key_hex(self.writer.identity());
+        let provider_admin_grant = self
+            .protocol_root
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone();
+        let owner_pubkey = keys::public_key_hex(self.identity);
         let owner_grant = self
-            .writer
-            .membership()
+            .membership
             .active_owner_grant(&owner_pubkey)
             .ok_or(DeviceJoinError::OwnerAuthorityRequired)?;
         let provider_admin = self.resolve_provider_admin(&provider_admin_grant)?;
-        let (owner_registration, owner, owner_device_signer) = self.writer.registration();
-        let root = self.writer.store_root().clone();
-        let binding = self.writer.storage().provider_binding().await?;
-        let journal = self.writer.database().device_join_journal();
+        let owner_registration = &self.registration_ref;
+        let owner = &self.registration;
+        let owner_device_signer = &self.device_signer;
+        let root = self.root.clone();
+        let binding = self.storage.provider_binding().await?;
+        let journal = self.database.device_join_journal();
         let attempt_id = journal.new_attempt_id();
         let attempt_context = crate::storage::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
         let attempt_slot = self
-            .writer
-            .storage()
+            .storage
             .allocate_protocol_slot(
                 &attempt_context,
                 &crate::protocol::store_commit::device_join_attempt_semantic_prefix(attempt_id),
@@ -39,8 +136,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
         let outcome_slot = self
-            .writer
-            .storage()
+            .storage
             .allocate_protocol_slot(
                 &outcome_context,
                 &crate::protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id),
@@ -68,8 +164,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
 
     fn require_eligible_member(&self, member_pubkey: &str) -> Result<(), DeviceJoinError> {
         if self
-            .writer
-            .membership()
+            .membership
             .current_members()
             .iter()
             .any(|(pubkey, role)| pubkey == member_pubkey && role.can_write())
@@ -85,7 +180,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         grant_id: &ProviderAdminGrantId,
     ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
         let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
-            self.writer.membership().status()
+            self.membership.status()
         else {
             return Err(DeviceJoinError::MembershipConflict);
         };
@@ -102,7 +197,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         offer: DeviceJoinOffer,
     ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(offer.attempt_id, DeviceJoinRole::Owner)
@@ -113,15 +208,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Ok(existing.clone());
         }
-        let (owner_registration, owner, owner_signer) = self.writer.registration();
+        let owner_registration = &self.registration_ref;
+        let owner = &self.registration;
+        let owner_signer = &self.device_signer;
         if owner_registration != &offer.owner_registration {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         offer.verify(owner)?;
         if !self
-            .writer
-            .membership()
-            .is_owner_now(&keys::public_key_hex(self.writer.identity()))
+            .membership
+            .is_owner_now(&keys::public_key_hex(self.identity))
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
@@ -133,7 +229,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let prefix = crate::protocol::store_commit::device_join_abandonment_semantic_prefix(
             offer.attempt_id,
         );
-        let prepared = self.writer.storage().prepare_protocol_object(
+        let prepared = self.storage.prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
             &prefix,
@@ -174,13 +270,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != abandonment_object.to_bytes() {
@@ -221,13 +313,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
         request.verify()?;
         let offer = &request.approval.request.offer;
-        if self.writer.store_root() != &offer.store_root {
+        if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
-        let (owner_registration, owner, owner_signer) = {
-            let (reference, registration, signer) = self.writer.registration();
-            (reference.clone(), registration.clone(), signer.clone())
-        };
+        let owner_registration = self.registration_ref.clone();
+        let owner = self.registration.clone();
+        let owner_signer = self.device_signer.clone();
         if owner_registration != offer.owner_registration {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
@@ -236,15 +327,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let administrator = self
-            .writer
-            .history_verifier_mut()
+            .history()
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
-        self.writer
-            .verify_device_admission_approval(&request.approval, &owner, &administrator)?;
-        self.writer
-            .history_verifier_mut()
+        self.verify_device_admission_approval(&request.approval, &owner, &administrator)?;
+        self.history()
             .verify_accepted_provider_access_activation(
                 &request.approval.access_grant,
                 &provider_admin,
@@ -252,13 +340,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             )
             .await?;
         if !self
-            .writer
-            .membership()
-            .is_owner_now(&keys::public_key_hex(self.writer.identity()))
+            .membership
+            .is_owner_now(&keys::public_key_hex(self.identity))
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let offered = DeviceJoinJournalRecord {
             attempt_id: offer.attempt_id,
@@ -285,8 +372,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await;
         let cut = plan.predecessor_cut()?;
         if !self
-            .writer
-            .history_verifier_mut()
+            .history()
             .history_cut_covers(&cut, &request.approval.access_grant.activation)
             .await?
         {
@@ -322,19 +408,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         );
         let prefix =
             crate::protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
-        let prepared = self.writer.storage().prepare_protocol_object(
+        let prepared = self.storage.prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
             &prefix,
             attempt.to_bytes(),
         )?;
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != attempt.to_bytes() {
@@ -378,7 +460,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         attempt_ref: DeviceJoinAttemptRef,
     ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(attempt_ref.attempt_id, DeviceJoinRole::Owner)
@@ -405,21 +487,18 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if expected_attempt != &attempt_ref {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let (owner_registration, owner, owner_signer) = {
-            let (reference, registration, signer) = self.writer.registration();
-            (reference.clone(), registration.clone(), signer.clone())
-        };
+        let owner_registration = self.registration_ref.clone();
+        let owner = self.registration.clone();
+        let owner_signer = self.device_signer.clone();
         let attempt = self
-            .writer
-            .history_verifier_mut()
-            .load_verified_device_join_attempt(&attempt_ref, &owner)
+            .history()
+            .load_verified_attempt(&attempt_ref, &owner)
             .await?
             .value;
         if attempt.owner_registration != owner_registration
             || !self
-                .writer
-                .membership()
-                .is_owner_now(&keys::public_key_hex(self.writer.identity()))
+                .membership
+                .is_owner_now(&keys::public_key_hex(self.identity))
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
@@ -432,13 +511,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             &owner_signer,
         )?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            self.writer.store_root().store_root_hash,
+            self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
         let prefix = crate::protocol::store_commit::device_join_outcome_semantic_prefix(
             attempt_ref.attempt_id,
         );
-        let prepared = self.writer.storage().prepare_protocol_object(
+        let prepared = self.storage.prepare_protocol_object(
             &context,
             attempt.outcome_slot.clone(),
             &prefix,
@@ -472,23 +551,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != outcome.to_bytes() {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let verified_outcome = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_outcome(&outcome_ref, &owner)
-            .await?;
+        let verified_outcome = self.history().load_outcome(&outcome_ref, &owner).await?;
         if verified_outcome.value != outcome {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -525,7 +596,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         completion: DeviceProviderAdmissionCompletion,
     ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let attempt_ref = completion.readiness.proof.attempt.clone();
         let attempt_id = attempt_ref.attempt_id;
@@ -555,32 +626,28 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::JournalConflict),
         };
         let offer = &provisional.request.approval.request.offer;
-        if self.writer.store_root() != &offer.store_root {
+        if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
-        let (owner_registration, owner, owner_signer) = {
-            let (reference, registration, signer) = self.writer.registration();
-            (reference.clone(), registration.clone(), signer.clone())
-        };
+        let owner_registration = self.registration_ref.clone();
+        let owner = self.registration.clone();
+        let owner_signer = self.device_signer.clone();
         if owner_registration != offer.owner_registration {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let attempt = self
-            .writer
-            .history_verifier_mut()
-            .load_verified_device_join_attempt(&attempt_ref, &owner)
+            .history()
+            .load_verified_attempt(&attempt_ref, &owner)
             .await?
             .value;
         let registration = self
-            .writer
-            .history_verifier_mut()
+            .history()
             .load_registration(&completion.readiness.proof.registration)
             .await?
             .value;
         let ack = self
-            .writer
-            .history_verifier_mut()
-            .load_store_ack(&completion.readiness.proof.initial_ack, &registration)
+            .history()
+            .load_ack(&completion.readiness.proof.initial_ack, &registration)
             .await?
             .value;
         completion.readiness.proof.verify(
@@ -604,8 +671,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     return Err(DeviceJoinError::ProviderAdministratorRequired);
                 }
                 let administrator = self
-                    .writer
-                    .history_verifier_mut()
+                    .history()
                     .load_registration(&provider_admin.administrator)
                     .await?
                     .value;
@@ -654,7 +720,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let outcome_hash = outcome.outcome_hash();
         let (prepared, outcome_ref, intent) = match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
-                let prepared = self.writer.storage().prepare_protocol_object(
+                let prepared = self.storage.prepare_protocol_object(
                     &context,
                     attempt.outcome_slot.clone(),
                     &prefix,
@@ -700,13 +766,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != outcome.to_bytes() {
@@ -764,7 +826,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         activation: DeviceJoinCleanupActivation,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let journal = self.writer.database().device_join_journal();
+        let journal = self.database.device_join_journal();
         let attempt_id = activation.receipt.attempt_id;
         let current = journal
             .load(attempt_id, DeviceJoinRole::Owner)
@@ -808,7 +870,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
         super::cleanup::require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(attempt_ref.attempt_id, DeviceJoinRole::Owner)
@@ -830,15 +892,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if durable_cancellation != &cancellation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let (attempt, owner) = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_attempt_and_owner(&attempt_ref)
-            .await?;
+        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
         let outcome = self
-            .writer
-            .history_verifier_mut()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(
@@ -854,15 +911,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         )?;
         self.verify_cleanup_terminals(&administrator_terminal, &joiner_terminal)
             .await?;
-        let (executor_ref, executor, executor_signer) = {
-            let (reference, registration, signer) = self.writer.registration();
-            (reference.clone(), registration.clone(), signer.clone())
-        };
-        if !self
-            .writer
-            .membership()
-            .is_owner_now(&executor.author_pubkey)
-        {
+        let executor_ref = self.registration_ref.clone();
+        let executor = self.registration.clone();
+        let executor_signer = self.device_signer.clone();
+        if !self.membership.is_owner_now(&executor.author_pubkey) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let executor_admin = self.resolve_provider_admin(
@@ -881,7 +933,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            self.writer.store_root().store_root_hash,
+            self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
         let prefix = crate::protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
@@ -910,11 +962,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     &executor_signer,
                 )?;
                 let slot = self
-                    .writer
-                    .storage()
+                    .storage
                     .allocate_protocol_slot(&context, &prefix, ".json")
                     .await?;
-                let prepared = self.writer.storage().prepare_protocol_object(
+                let prepared = self.storage.prepare_protocol_object(
                     &context,
                     slot,
                     &prefix,
@@ -971,20 +1022,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         };
         receipt_object.verify(&attempt.value, &executor)?;
         for slot in &receipt_object.deleted_slots {
-            self.writer
-                .storage()
+            self.storage
                 .exact_slot_storage()
                 .delete_and_verify_absent(slot)
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }
-        self.writer
-            .storage()
-            .create_protocol_object(&prepared)
-            .await?;
+        self.storage.create_protocol_object(&prepared).await?;
         let opened = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, prepared.reference(), &prefix)
             .await?;
         if opened != receipt_object.to_bytes() {
@@ -1017,8 +1063,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             ProviderAdminJoinTerminal::Completed(_) => {}
             ProviderAdminJoinTerminal::Cancelled(closure) => {
                 let registration = self
-                    .writer
-                    .database()
+                    .database
                     .activated_store_device_registration(closure.administrator_registration.clone())
                     .await
                     .map_err(database_error)?;
@@ -1026,8 +1071,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
                 let registration = self
-                    .writer
-                    .database()
+                    .database
                     .activated_store_device_registration(revocation.executor.clone())
                     .await
                     .map_err(database_error)?;
@@ -1039,8 +1083,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             JoinerJoinTerminal::Cancelled(closure) => closure.verify()?,
             JoinerJoinTerminal::WriteRevoked(revocation) => {
                 let registration = self
-                    .writer
-                    .database()
+                    .database
                     .activated_store_device_registration(revocation.executor.clone())
                     .await
                     .map_err(database_error)?;
@@ -1055,7 +1098,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         receipt: DeviceJoinCleanupReceipt,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
         let attempt_id = receipt.receipt.attempt_id;
-        let database = self.writer.database().clone();
+        let database = self.database.clone();
         let journal = database.device_join_journal();
         let current = journal
             .load(attempt_id, DeviceJoinRole::Owner)
@@ -1079,15 +1122,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let plan = self.writer.prepare_plan().await?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            self.writer.store_root().store_root_hash,
+            self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
         let prefix = crate::protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
             receipt.receipt.attempt_id,
         );
         let bytes = self
-            .writer
-            .storage()
+            .storage
             .read_protocol_object(&context, &receipt.receipt.object, &prefix)
             .await?;
         let receipt_object: DeviceJoinCleanupReceiptObject = serde_json::from_slice(&bytes)?;
@@ -1096,7 +1138,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await
             .map_err(database_error)?;
         receipt.receipt.verify(&receipt_object, &executor)?;
-        if receipt_object.store_root_hash != self.writer.store_root().store_root_hash
+        if receipt_object.store_root_hash != self.root.store_root_hash
             || plan.membership_state() != &receipt_object.membership
         {
             return Err(DeviceJoinError::CleanupMismatch);

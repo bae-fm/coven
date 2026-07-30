@@ -512,20 +512,20 @@ impl ProtectedObjectDomain {
 
 /// A domain protected by the Store key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain);
+pub(crate) struct StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain);
 
 /// A signed Store control-plane domain whose bytes must remain readable before
 /// the reader has adopted the Store data key named by those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SignedStoreProtocolObjectDomain(ProtectedObjectDomain);
+pub(crate) struct SignedStoreProtocolObjectDomain(ProtectedObjectDomain);
 
 /// A domain protected by a Circle epoch key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CircleProtocolObjectDomain(ProtectedObjectDomain);
+pub(crate) struct CircleProtocolObjectDomain(ProtectedObjectDomain);
 
 /// A domain whose canonical bytes already carry recipient-specific encryption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecipientSealedProtocolObjectDomain(ProtectedObjectDomain);
+pub(crate) struct RecipientSealedProtocolObjectDomain(ProtectedObjectDomain);
 
 /// Typed protocol-object domain names. Each name's value carries the only
 /// protection class its object kind permits.
@@ -639,7 +639,7 @@ impl ProtocolObjectDomain {
 ///     encryption,
 /// );
 /// ```
-pub struct ProtocolObjectContext {
+pub(crate) struct ProtocolObjectContext {
     store_root_hash: ObjectHash,
     domain: ProtectedObjectDomain,
     protection: ProtocolObjectProtection,
@@ -654,7 +654,7 @@ pub(crate) enum ProtocolObjectProtection {
 }
 
 impl ProtocolObjectContext {
-    pub fn store_encrypted(
+    pub(crate) fn store_encrypted(
         store_root_hash: ObjectHash,
         domain: StoreEncryptedProtocolObjectDomain,
     ) -> Self {
@@ -665,7 +665,7 @@ impl ProtocolObjectContext {
         }
     }
 
-    pub fn signed_plaintext(
+    pub(crate) fn signed_plaintext(
         store_root_hash: ObjectHash,
         domain: SignedStoreProtocolObjectDomain,
     ) -> Self {
@@ -676,7 +676,7 @@ impl ProtocolObjectContext {
         }
     }
 
-    pub fn circle(
+    pub(crate) fn circle(
         store_root_hash: ObjectHash,
         domain: CircleProtocolObjectDomain,
         encryption: crate::encryption::EncryptionService,
@@ -688,7 +688,7 @@ impl ProtocolObjectContext {
         }
     }
 
-    pub fn recipient_sealed(
+    pub(crate) fn recipient_sealed(
         store_root_hash: ObjectHash,
         domain: RecipientSealedProtocolObjectDomain,
     ) -> Self {
@@ -699,7 +699,7 @@ impl ProtocolObjectContext {
         }
     }
 
-    pub fn store_root_hash(&self) -> ObjectHash {
+    pub(crate) fn store_root_hash(&self) -> ObjectHash {
         self.store_root_hash
     }
 
@@ -711,7 +711,7 @@ impl ProtocolObjectContext {
         &self.protection
     }
 
-    pub fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
+    pub(crate) fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
         let metadata = self.domain.metadata();
         if semantic_prefix.contains("/copies/") || !metadata.path.accepts(semantic_prefix) {
             return Err(StorageError::Parse(format!(
@@ -722,7 +722,7 @@ impl ProtocolObjectContext {
         Ok(())
     }
 
-    pub fn validate_extension(&self, extension: &str) -> Result<(), StorageError> {
+    pub(crate) fn validate_extension(&self, extension: &str) -> Result<(), StorageError> {
         if extension != self.domain.extension() {
             return Err(StorageError::Parse(format!(
                 "object domain {:?} does not accept extension {extension:?}",
@@ -732,7 +732,7 @@ impl ProtocolObjectContext {
         Ok(())
     }
 
-    pub fn validate_reference(
+    pub(crate) fn validate_reference(
         &self,
         object: &ExactObjectRef,
         semantic_prefix: &str,
@@ -740,7 +740,7 @@ impl ProtocolObjectContext {
         self.validate_slot(object.slot(), semantic_prefix)
     }
 
-    pub fn validate_slot(
+    pub(crate) fn validate_slot(
         &self,
         slot: &ObjectSlot,
         semantic_prefix: &str,
@@ -759,25 +759,25 @@ impl ProtocolObjectContext {
 
 /// Protection selected by the audience authority that prepares a blob spool.
 #[derive(Clone)]
-pub enum BlobSpoolProtection {
+pub(crate) enum BlobSpoolProtection {
     Opaque(crate::encryption::EncryptionService),
     Browsable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlobSpoolWrite {
+pub(crate) enum BlobSpoolWrite {
     Created,
     Reused,
 }
 
 #[derive(Clone, Copy)]
-pub struct BlobWriteAuthority<'a> {
+pub(crate) struct BlobWriteAuthority<'a> {
     pub reference: &'a crate::protocol::store_commit::StoreDeviceRegistrationRef,
     pub registration: &'a crate::protocol::store_commit::StoreDeviceRegistration,
 }
 
 impl<'a> BlobWriteAuthority<'a> {
-    pub fn new(
+    pub(crate) fn new(
         reference: &'a crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: &'a crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<Self, StorageError> {
@@ -1266,7 +1266,7 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
 }
 
 #[async_trait]
-pub trait SyncStorage: Send + Sync {
+pub(crate) trait SyncStorage: Send + Sync {
     /// Return the cloud home's fixed blob path representation.
     fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme;
 

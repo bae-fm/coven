@@ -252,7 +252,7 @@ impl AuthorStreamId {
         Self(*digest.as_bytes())
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "invariant-tests"))]
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }

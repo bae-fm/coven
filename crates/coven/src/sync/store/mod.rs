@@ -27,10 +27,12 @@ mod package_preparation;
 mod protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
 pub(super) mod protocol_root;
+mod registration_object;
 mod retained_replay;
 #[cfg(test)]
 use owner::reclaim;
 use owner::snapshot;
+use registration_object::prepare_registration_object;
 
 pub(crate) use crate::database::DurableStoreReclaimObject;
 pub(crate) use circle_controls::CircleOperationError;
@@ -41,15 +43,12 @@ pub(crate) use circle_controls::{
 };
 #[cfg(test)]
 pub(crate) use circle_controls::{VerifiedCircleAccess, VerifiedCircleActive};
-pub(crate) use device_join_transport::{
-    abandon_device_join_via_transport, cancel_device_join_via_transport, drive_device_join,
-    DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport,
-};
 pub use device_join_transport::{
     DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
     DeviceJoinTransportTiming,
 };
+pub(crate) use device_join_transport::{DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport};
 pub(crate) use error::StoreError;
 pub(crate) use error::StorePreparationError;
 #[cfg(test)]
@@ -120,10 +119,8 @@ pub(crate) use owner::snapshot::{
 };
 #[cfg(test)]
 pub(crate) use owner::StoreAckError;
-pub(crate) use owner::{bootstrap_pending_device, prepare_registration_for_origin};
 pub(crate) use owner::{
-    AuthorizedStore, AuthorizedWriterOperation, HostWriteBlobStaging, Store,
-    StoreInitializationError,
+    AuthorizedWriterOperation, HostWriteBlobStaging, Store, StoreInitializationError,
 };
 pub(crate) use owner::{RestoringStore, StoreRegistrationError};
 pub(crate) use protocol_root::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};

@@ -27,7 +27,7 @@ async fn build_invite_mutation(
     store_id: &str,
     timestamp: &str,
 ) -> Result<InviteMutationPlan, InviteError> {
-    let owner_keypair = operation.identity().clone();
+    let owner_keypair = operation.writer.identity.clone();
     if role == MemberRole::Owner {
         return Err(MembershipError::OwnerPromotionRequired.into());
     }
@@ -38,7 +38,10 @@ async fn build_invite_mutation(
         )));
     }
     let invitee_x25519_pk = keys::ed25519_hex_to_x25519_public_key(invitee_ed25519_pubkey)?;
-    let authorized_keyring = operation.keyring(chain).open_or(encryption).await?;
+    let authorized_keyring = operation
+        .keyring_for_membership(chain)
+        .open_or(encryption)
+        .await?;
     let signing_store_id = store_id.to_string();
     let signing_recipient = invitee_ed25519_pubkey.to_string();
     let signing_keyring = authorized_keyring.clone();
@@ -56,7 +59,7 @@ async fn build_invite_mutation(
     .await
     .map_err(|error| InviteError::Crypto(format!("seal invited member Store key: {error}")))??;
     let wrapped_key = operation
-        .keyring(chain)
+        .keyring_for_membership(chain)
         .prepare(invitee_ed25519_pubkey, signed)
         .await?;
     let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
@@ -128,7 +131,7 @@ async fn execute_invite_mutation(
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let author = operation
-        .history_verifier_mut()
+        .history
         .load_registration(&plan.publication.head.body.author_registration)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?
@@ -165,7 +168,7 @@ async fn execute_invite_mutation(
             "provider returned absent outcome for present access request".to_string(),
         ));
     };
-    let storage = operation.storage();
+    let storage = operation.storage.as_ref();
     let join_info = match progress {
         MembershipMutationProgress::Pending => {
             progress = MembershipMutationProgress::InviteGranted {
@@ -233,9 +236,9 @@ pub(crate) async fn create_invitation_with_encryption_durable(
     store_id: &str,
     timestamp: &str,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
-    let database = operation.database().clone();
-    let owner_keypair = operation.identity().clone();
-    let mut chain = operation.store.membership.clone();
+    let database = operation.database.clone();
+    let owner_keypair = operation.writer.identity.clone();
+    let mut chain = operation.membership.clone();
     let _mutation = database.membership_mutation_permit().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {
@@ -296,6 +299,6 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         },
     ))
     .await?;
-    operation.store.membership = chain;
+    operation.membership = chain;
     Ok(result)
 }

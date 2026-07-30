@@ -83,7 +83,7 @@ async fn build_resolution_mutation(
     selection: membership::MembershipConflictSelection,
     created_at: &str,
 ) -> Result<ResolveMutationPlan, InviteError> {
-    let signer = operation.identity().clone();
+    let signer = operation.writer.identity.clone();
     let base = operation
         .prepare_conflict_resolution_plan(chain.head_refs())
         .await
@@ -113,7 +113,8 @@ async fn build_resolution_mutation(
         ProtocolObjectDomain::StoreMembershipHead,
     );
     let membership_slot = operation
-        .storage()
+        .storage
+        .as_ref()
         .allocate_protocol_slot(
             &membership_context,
             &membership_head_slot_prefix(&resolver_pubkey, &replacement_grant, stream_id, 1),
@@ -125,7 +126,8 @@ async fn build_resolution_mutation(
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
     let recovery_slot = operation
-        .storage()
+        .storage
+        .as_ref()
         .allocate_protocol_slot(
             &recovery_context,
             &store_commit::owner_recovery_semantic_prefix(
@@ -174,10 +176,11 @@ async fn build_resolution_mutation(
         resolution_hash,
     );
     let resolution_slot = operation
-        .storage()
+        .storage
+        .as_ref()
         .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
         .await?;
-    let resolution_object = operation.storage().prepare_protocol_object(
+    let resolution_object = operation.storage.as_ref().prepare_protocol_object(
         &resolution_context,
         resolution_slot,
         &resolution_prefix,
@@ -238,7 +241,7 @@ async fn build_resolution_mutation(
         .await?;
     candidate
         .attach_merge_membership_proof(
-            operation.storage(),
+            operation.storage.as_ref(),
             &publication,
             Some(&resolution),
             &signer,
@@ -319,7 +322,7 @@ async fn execute_resolution_mutation(
                 "resolution nonactivation names another candidate".to_string(),
             ));
         }
-        finish_nonactivating_resolution(&plan, &persistence, operation.storage()).await?;
+        finish_nonactivating_resolution(&plan, &persistence, operation.storage.as_ref()).await?;
         return Err(InviteError::InvalidDurableMutation(
             "membership resolution candidate did not activate".to_string(),
         ));
@@ -354,12 +357,13 @@ async fn execute_resolution_mutation(
     let store_root_hash = operation.store_root().store_root_hash;
     let remotes = plan.remote_objects()?;
     operation
-        .storage()
+        .storage
+        .as_ref()
         .create_protocol_object(&plan.resolution_object)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
     store_objects::load_membership_resolution_ref(
-        operation.storage(),
+        operation.storage.as_ref(),
         store_root_hash,
         &plan.reference,
     )
@@ -379,7 +383,7 @@ async fn execute_resolution_mutation(
             &plan.transition.entry_ref.object,
         )?)
         .await?;
-    operations::upload_commit(operation.storage(), &plan.candidate)
+    operations::upload_commit(operation.storage.as_ref(), &plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence
@@ -464,7 +468,8 @@ async fn execute_resolution_mutation(
                     .await?;
                 for target in cleanup {
                     operation
-                        .storage()
+                        .storage
+                        .as_ref()
                         .delete_protocol_object(&target.object)
                         .await
                         .map_err(|error| InviteError::Crypto(error.to_string()))?;
@@ -473,7 +478,8 @@ async fn execute_resolution_mutation(
                         .mark_candidate_cleanup_absent(target.object)
                         .await?;
                 }
-                finish_nonactivating_resolution(&plan, &persistence, operation.storage()).await?;
+                finish_nonactivating_resolution(&plan, &persistence, operation.storage.as_ref())
+                    .await?;
                 return Err(InviteError::InvalidDurableMutation(
                     "membership resolution candidate did not activate".to_string(),
                 ));
@@ -496,8 +502,8 @@ pub(crate) async fn resolve_membership_conflict(
     selection: membership::MembershipConflictSelection,
     created_at: &str,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
-    let database = operation.database().clone();
-    let signer = operation.identity().clone();
+    let database = operation.database.clone();
+    let signer = operation.writer.identity.clone();
     let _mutation = database.membership_mutation_permit().await;
     let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
         Some(row) => {

@@ -16,7 +16,7 @@ pub(crate) struct CirclePackageReader<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
-    pub(super) fn new(
+    pub(crate) fn new(
         database: &'operation StoreDatabase,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
@@ -159,15 +159,16 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                             reference.circle_id
                         ))
                     })?;
-                let roster_chain = super::VerifiedCircleHistory::new(self.database, self.history)
-                    .load_control_roster_chain(
-                        &historical_commit,
-                        &historical.reference,
-                        &historical.control,
-                        &keyring,
-                    )
-                    .await
-                    .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+                let roster_chain =
+                    super::activation::CircleActivationVerifier::new(self.database, self.history)
+                        .load_control_roster_chain(
+                            &historical_commit,
+                            &historical.reference,
+                            &historical.control,
+                            &keyring,
+                        )
+                        .await
+                        .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
                 let roster = roster_chain.try_resolved().map_err(|error| {
                     CirclePackageReadError::Invalid(format!(
                         "resolve Circle {} historical package roster: {error}",

@@ -6,17 +6,16 @@ use crate::keys::UserKeypair;
 
 use crate::database::StoreDatabase;
 use crate::protocol::store_commit::{
-    ack_slot_prefix, DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptRef,
-    DeviceReadinessProof, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, SuccessorLink,
+    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef,
 };
+use crate::storage::ProtocolObjectDomain;
 use crate::storage::StoreObjectError;
-use crate::storage::{PreparedExactObject, ProtocolObjectDomain, SyncStorage};
 
 #[cfg(test)]
 use crate::protocol::store_commit::{
     owner_recovery_semantic_prefix, ObjectHash, OwnerRecoveryPosition, StoreCommitCoord,
+    StoreDeviceRegistration,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -143,283 +142,6 @@ pub(crate) async fn install_existing_founder_device(
         .map_err(database_error)
 }
 
-pub(crate) async fn prepare_registration_for_origin(
-    storage: &dyn SyncStorage,
-    identity_signer: &UserKeypair,
-    store_root: crate::protocol::store_commit::StoreRootRef,
-    origin: StoreDeviceRegistrationOrigin,
-    reserved_slot: crate::storage::cloud::ObjectSlot,
-    expected_provider: crate::storage::ProviderDeviceBinding,
-    store_commits: DeviceStreamAnchor,
-    acknowledgements: DeviceStreamAnchor,
-    snapshots: DeviceStreamAnchor,
-) -> Result<(StoreDeviceRegistration, PreparedExactObject), StoreRegistrationError> {
-    let provider = storage
-        .provider_binding()
-        .await
-        .map_err(StoreObjectError::from)?
-        .device;
-    if provider != expected_provider {
-        return Err(StoreRegistrationError::Invalid(
-            "live provider principal differs from the reserved founder authority".to_string(),
-        ));
-    }
-    let registration = StoreDeviceRegistration::signed(
-        store_root,
-        origin,
-        provider,
-        store_commits,
-        acknowledgements,
-        snapshots,
-        identity_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let prepared = prepare_registration_object(storage, &registration, reserved_slot)?;
-    Ok((registration, prepared))
-}
-
-fn prepare_registration_object(
-    storage: &dyn SyncStorage,
-    registration: &StoreDeviceRegistration,
-    slot: crate::storage::cloud::ObjectSlot,
-) -> Result<PreparedExactObject, StoreRegistrationError> {
-    let semantic_prefix = slot
-        .logical_key()
-        .strip_suffix(".json")
-        .ok_or_else(|| {
-            StoreRegistrationError::Invalid(
-                "reserved registration slot has no .json suffix".to_string(),
-            )
-        })?
-        .to_string();
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-        registration.store_root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceRegistration,
-    );
-    storage
-        .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
-        .map_err(StoreObjectError::from)
-        .map_err(StoreRegistrationError::from)
-}
-
-pub(crate) async fn bootstrap_pending_device(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    identity_signer: &UserKeypair,
-    attempt_ref: DeviceJoinAttemptRef,
-    verified_attempt: crate::storage::VerifiedObject<DeviceJoinAttempt>,
-    bootstrap_plan: crate::sync::store::owner::pull::DeviceJoinBootstrapPlan,
-    attempt_activation: StoreBatchCommitRef,
-    owner: &StoreDeviceRegistration,
-    published_at: &str,
-) -> Result<DeviceReadinessProof, StoreRegistrationError> {
-    if verified_attempt.semantic_hash != attempt_ref.attempt_hash
-        || verified_attempt.object != attempt_ref.object
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "verified device join attempt differs from its exact reference".to_string(),
-        ));
-    }
-    let attempt = verified_attempt.value;
-    let activation_stream = attempt_activation.coord.stream_id.to_string();
-    let verified_activation = bootstrap_plan
-        .verified_commit(&attempt_activation)
-        .cloned()
-        .ok_or_else(|| {
-            StoreRegistrationError::Invalid(
-                "device join bootstrap omits its attempt activation".to_string(),
-            )
-        })?;
-    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
-        .await
-        .map_err(database_error)?;
-    if Box::pin(
-        database.exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()),
-    )
-    .await
-    .map_err(database_error)?
-    .as_ref()
-        != Some(&attempt_activation)
-    {
-        return Err(StoreRegistrationError::ActivationRequired);
-    }
-    let activation_commit = verified_activation.value();
-    if verified_activation.author() != owner
-        || activation_commit.author_registration != attempt.owner_registration
-        || !activation_commit
-            .device_join_attempt_decisions()
-            .iter()
-            .any(|decision| {
-                matches!(
-                    decision,
-                    DeviceJoinAttemptDecisionRef::Attempt(reference)
-                        if reference == &attempt_ref
-                )
-            })
-        || activation_commit
-            .order
-            .predecessor_cut()
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
-            != attempt.bootstrap_cut
-        || activation_commit.membership_state != attempt.membership
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "device join attempt is not activated by the named exact Store commit".to_string(),
-        ));
-    }
-    let provider = Box::pin(storage.provider_binding())
-        .await
-        .map_err(StoreObjectError::from)?;
-    if provider.device != attempt.expected_registration.provider {
-        return Err(StoreRegistrationError::Invalid(
-            "joiner provider principal differs from the signed device join attempt".to_string(),
-        ));
-    }
-    let expected_registration = attempt.expected_registration.clone();
-    if expected_registration.author_pubkey != crate::keys::public_key_hex(identity_signer) {
-        return Err(StoreRegistrationError::Invalid(
-            "joiner identity differs from the signed device registration request".to_string(),
-        ));
-    }
-    let existing = Box::pin(database.latest_local_store_device_registration())
-        .await
-        .map_err(database_error)?;
-    if let Some(existing) = existing.as_ref() {
-        if existing.registration_bytes != expected_registration.to_bytes()
-            || existing.prepared.reference().slot() != &attempt.registration_slot
-            || existing.initial_ack.value.store_cut != attempt.bootstrap_cut
-        {
-            return Err(StoreRegistrationError::Invalid(
-                "local join journal owns different exact registration bytes".to_string(),
-            ));
-        }
-    } else {
-        let registration_prepared = prepare_registration_object(
-            storage,
-            &expected_registration,
-            attempt.registration_slot.clone(),
-        )?;
-        let registration_ref =
-            crate::protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
-                &expected_registration,
-                registration_prepared.reference().clone(),
-            );
-        let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
-            &expected_registration.acknowledgements
-        else {
-            return Err(StoreRegistrationError::Invalid(
-                "join registration has no acknowledgement anchor".to_string(),
-            ));
-        };
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            attempt.store_root.store_root_hash,
-            ProtocolObjectDomain::StoreAck,
-        );
-        let next_slot = Box::pin(storage.allocate_protocol_slot(
-            &ack_context,
-            &ack_slot_prefix(&expected_registration.device_id.to_string(), 2),
-            ".json",
-        ))
-        .await
-        .map_err(StoreObjectError::from)?;
-        let device_signer = expected_registration
-            .device_signer(identity_signer)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let (device_state, _) =
-            Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
-                .await
-                .map_err(database_error)?;
-        let initial_ack = StoreAck::signed(
-            attempt.store_root.store_root_hash,
-            registration_ref.clone(),
-            1,
-            attempt.bootstrap_cut.clone(),
-            device_state,
-            None,
-            StoreAckExclusionState {
-                proposal_freezes: Vec::new(),
-            },
-            published_at.to_string(),
-            SuccessorLink {
-                activation: expected_registration
-                    .store_acknowledgement_activation(&registration_ref)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
-                    .activation_id(),
-                predecessor: None,
-                next_slot,
-            },
-            &device_signer,
-        )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let ack_prepared = storage
-            .prepare_protocol_object(
-                &ack_context,
-                first_slot.clone(),
-                &ack_slot_prefix(&expected_registration.device_id.to_string(), 1),
-                initial_ack.to_bytes(),
-            )
-            .map_err(StoreObjectError::from)?;
-        let initial_ack_ref = StoreAckRef {
-            registration: registration_ref,
-            sequence: 1,
-            ack_hash: initial_ack.ack_hash(),
-            object: ack_prepared.reference().clone(),
-        };
-        Box::pin(database.stage_local_store_device_registration(
-            crate::database::ExactProtocolObject {
-                value: expected_registration.clone(),
-                bytes: expected_registration.to_bytes(),
-                object: registration_prepared.reference().clone(),
-                prepared: registration_prepared,
-            },
-            initial_ack_ref,
-            crate::database::ExactProtocolObject {
-                value: initial_ack.clone(),
-                bytes: initial_ack.to_bytes(),
-                object: ack_prepared.reference().clone(),
-                prepared: ack_prepared,
-            },
-        ))
-        .await
-        .map_err(database_error)?;
-    }
-    Box::pin(super::registration_outbox::drain(database, storage)).await?;
-    let durable = Box::pin(database.latest_local_store_device_registration())
-        .await
-        .map_err(database_error)?
-        .ok_or(StoreRegistrationError::ActivationRequired)?;
-    if !matches!(
-        durable.state,
-        crate::database::LocalDeviceRegistrationState::Created
-            | crate::database::LocalDeviceRegistrationState::Activated { .. }
-    ) {
-        return Err(StoreRegistrationError::ActivationRequired);
-    }
-    let registration = StoreDeviceRegistration::parse_at(
-        &durable.registration_bytes,
-        &attempt.store_root,
-        durable.device_id,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let registration_ref =
-        crate::protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
-            &registration,
-            durable.prepared.reference().clone(),
-        );
-    let device_signer = registration
-        .device_signer(identity_signer)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    DeviceReadinessProof::signed(
-        attempt_ref,
-        registration_ref,
-        durable.initial_ack_ref,
-        attempt.bootstrap_cut,
-        &registration,
-        &device_signer,
-    )
-    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))
-}
-
 fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
     StoreRegistrationError::Database(error.to_string())
 }
@@ -427,6 +149,8 @@ fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::store_commit::StoreBatchCommitRef;
+    use crate::storage::SyncStorage;
     use crate::sync::test_helpers::{open_test_db, TestStore};
 
     async fn founder_recovery_authority(
@@ -602,7 +326,9 @@ mod tests {
         let store = TestStore::for_store("registration-missing-root-storage").await;
 
         assert!(matches!(
-            super::super::registration_outbox::drain(&database, &store.storage).await,
+            super::super::RegistrationOutbox::new(database, &store.storage)
+                .drain()
+                .await,
             Err(StoreRegistrationError::ExactRootAuthorityMissing)
         ));
     }

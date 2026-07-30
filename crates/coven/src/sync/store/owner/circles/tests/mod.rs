@@ -115,7 +115,7 @@ async fn publish_circle_operation(
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
     let routing_key = crate::protocol::circle::derive_row_routing_key(
         &crate::encryption::EncryptionService::from_key([42; 32]),
-        authority.store_root().store_root_hash,
+        store.store_root().store_root_hash,
     )
     .expect("derive Circle test routing key");
     authority

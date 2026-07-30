@@ -17,19 +17,22 @@ use crate::sync::gate::{AudienceMove, AudiencePartition};
 #[doc(hidden)]
 pub(crate) struct HostWriteBlobStaging {
     runtime: tokio::runtime::Handle,
-    store: std::sync::Arc<crate::sync::store::Store>,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    store_root: crate::protocol::store_commit::StoreRootRef,
     store_dir: StoreDir,
 }
 
 impl HostWriteBlobStaging {
     pub(super) fn new(
         runtime: tokio::runtime::Handle,
-        store: std::sync::Arc<crate::sync::store::Store>,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        store_root: crate::protocol::store_commit::StoreRootRef,
         store_dir: StoreDir,
     ) -> Self {
         Self {
             runtime,
-            store,
+            storage,
+            store_root,
             store_dir,
         }
     }
@@ -96,8 +99,8 @@ impl HostWriteBlobStaging {
         partitions: &[AudiencePartition],
         files: &mut StagedAudienceBlobFiles,
     ) -> Result<(), DbError> {
-        let storage = self.store.storage().as_ref();
-        let store_root = self.store.store_root();
+        let storage = self.storage.as_ref();
+        let store_root = &self.store_root;
         let store_dir = &self.store_dir;
         let moved_rows = audience_moves_by_row(moves)?;
         if moved_rows.is_empty() {

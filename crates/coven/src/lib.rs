@@ -124,7 +124,7 @@ pub use restoration::{
 };
 #[cfg(feature = "oauth-providers")]
 pub use storage::fetch_account_email;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use storage::InMemoryCloudHome;

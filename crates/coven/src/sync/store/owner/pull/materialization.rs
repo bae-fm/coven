@@ -294,9 +294,8 @@ pub(super) async fn apply_candidate(
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let database = history.database.clone();
-    let history_verifier = &mut history.history_verifier;
-    let storage = history_verifier.storage();
-    let root = history_verifier.root().clone();
+    let storage = history.history_verifier.storage();
+    let root = history.root().clone();
     let db = &database;
     let candidate = &merge_candidate.candidate;
     let commit = candidate.commit();
@@ -314,7 +313,8 @@ pub(super) async fn apply_candidate(
             ));
         }
     }
-    let membership_objects = history_verifier
+    let membership_objects = history
+        .history_verifier
         .verified_membership_objects(commit_ref, commit)
         .await?;
     let (local_store_membership, membership_after_candidate) =
@@ -334,8 +334,10 @@ pub(super) async fn apply_candidate(
             )
         })
     } else {
-        super::super::circles::VerifiedCircleHistory::new(&database, history_verifier)
-            .load_payload_activations(
+        history
+            .circles()
+            .activations()
+            .load_payload(
                 &candidate.verified,
                 identity.filter(|_| local_store_membership.allows_circle_access()),
                 routing_key,
@@ -374,27 +376,27 @@ pub(super) async fn apply_candidate(
             "excluded device awaiting its successor bootstrap to reset".to_string(),
         )));
     }
-    let circle_packages =
-        match super::super::circles::VerifiedCircleHistory::new(&database, history_verifier)
-            .packages()
-            .load_applicable(
-                &candidate.verified,
-                verified_circle_activations.circles(),
-                author,
-                local_store_membership,
-            )
-            .await
-        {
-            Ok(packages) => packages,
-            Err(super::super::circles::CirclePackageReadError::Database(error)) => {
-                return Err(error.into())
-            }
-            Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
-                return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
-                    error,
-                )))
-            }
-        };
+    let circle_packages = match history
+        .circles()
+        .packages()
+        .load_applicable(
+            &candidate.verified,
+            verified_circle_activations.circles(),
+            author,
+            local_store_membership,
+        )
+        .await
+    {
+        Ok(packages) => packages,
+        Err(super::super::circles::CirclePackageReadError::Database(error)) => {
+            return Err(error.into())
+        }
+        Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
+            return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                error,
+            )))
+        }
+    };
     let mut packages =
         Vec::with_capacity(usize::from(candidate.package.is_some()) + circle_packages.len());
     if let Some(bytes) = candidate.package.as_ref() {

@@ -208,7 +208,7 @@ impl AuthorizedWriterOperation<'_> {
                 SyncCycleFailure::operation("publish queued Store acknowledgement", error)
             })?;
         let frontier = CommitFrontier::from_refs(
-            self.database()
+            self.database
                 .materialized_frontier()
                 .await
                 .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?,
@@ -238,26 +238,25 @@ impl AuthorizedWriterOperation<'_> {
         let commits = frontier.commits();
         let device_id = self.local_device_id().to_string();
         let root = self.store_root().clone();
-        let (registration_ref, registration, device_signer) = self.registration();
-        let registration_ref = registration_ref.clone();
-        let registration = registration.clone();
-        let device_signer = device_signer.clone();
+        let registration_ref = self.writer.registration_ref.clone();
+        let registration = self.writer.registration.clone();
+        let device_signer = self.writer.device_signer.clone();
         let history_cut =
             crate::protocol::store_commit::StoreHistoryCut::from_commits(commits.clone());
         let (device_state, _) = self
-            .database()
+            .database
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let snapshot = self
-            .history()
+            .history
             .select_acknowledgement_snapshot(&frontier, &device_state)
             .await?;
         let exclusions = crate::protocol::store_commit::StoreAckExclusionState {
-            proposal_freezes: self.database().store_device_exclusion_freezes().await?,
+            proposal_freezes: self.database.store_device_exclusion_freezes().await?,
         };
         stage_resolved_store_ack(
-            self.database(),
-            self.storage(),
+            &self.database,
+            self.storage.as_ref(),
             ResolvedStoreAckPlan {
                 root,
                 registration_ref,
@@ -277,14 +276,14 @@ impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {
         let device_id = self.local_device_id().to_string();
         let mut published = 0_u64;
-        while let Some(outbound) = self.database().oldest_outbound_store_ack().await? {
+        while let Some(outbound) = self.database.oldest_outbound_store_ack().await? {
             if let Some(activated) = self
-                .database()
+                .database
                 .activated_store_ack(&outbound.reference.registration)
                 .await?
             {
                 if activated == outbound.reference {
-                    self.database()
+                    self.database
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                     published = published.checked_add(1).ok_or_else(|| {
@@ -313,7 +312,7 @@ impl AuthorizedWriterOperation<'_> {
                         },
                     ))
                     .await?;
-                    self.database()
+                    self.database
                         .prepare_acknowledgement_activation(outbound.reference.clone(), candidate)
                         .await?;
                     continue;
@@ -329,8 +328,8 @@ impl AuthorizedWriterOperation<'_> {
                 }
             };
             if !publish_acknowledgement_object(
-                self.database(),
-                self.storage(),
+                &self.database,
+                self.storage.as_ref(),
                 &device_id,
                 &outbound,
                 &candidate,
@@ -343,13 +342,13 @@ impl AuthorizedWriterOperation<'_> {
                 .acknowledgements()
                 .publish_objects(&outbound, &candidate)
                 .await?;
-            let _authorship = self.database().author_own_stream().await;
+            let _authorship = self.database.author_own_stream().await;
             let publication =
                 Box::pin(self.publish_prepared(Box::new(candidate), None, None)).await?;
             match publication
             {
                 crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {
-                    self.database()
+                    self.database
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                 }

@@ -264,6 +264,7 @@ pub(crate) struct BootstrapResult<'storage> {
     database_image: StagedDatabaseImage,
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    storage: &'storage dyn SyncStorage,
     founder_registration:
         crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
     restorer_identity: crate::keys::UserKeypair,
@@ -331,6 +332,7 @@ impl<'storage> BootstrapResult<'storage> {
             database_image,
             db_hash,
             mut history_verifier,
+            storage,
             founder_registration,
             restorer_identity,
             snapshot,
@@ -419,15 +421,14 @@ impl<'storage> BootstrapResult<'storage> {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            Ok(crate::sync::store::RestoringStore::from_authorized_history(
-                crate::sync::store::owner::history::AuthorizedStoreHistory {
-                    database: crate::database::StoreDatabase::from_database(db),
+            Ok(
+                crate::sync::store::owner::history::AuthorizedStoreHistory::from_snapshot(
+                    super::SnapshotHistoryConstruction,
+                    crate::database::StoreDatabase::from_database(db),
                     history_verifier,
-                },
-                membership,
-                restorer_identity,
-                requested,
-            ))
+                )
+                .bind_restore(storage, membership, restorer_identity, requested),
+            )
         }
         .await;
         match result {
@@ -480,10 +481,12 @@ async fn stage_restore_circle_decisions(
         )
         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
         let store_database = crate::database::StoreDatabase::from_database(query_db);
-        crate::sync::store::owner::VerifiedCircleHistory::new(&store_database, history_verifier)
-            .snapshots()
-            .select_staged_decisions(store_frontier, restorer_identity, routing_key)
-            .await
+        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+            &store_database,
+            history_verifier,
+        )
+        .select_staged_decisions(store_frontier, restorer_identity, routing_key)
+        .await
     }
     .await;
     query_image.finish(staged)
@@ -1263,6 +1266,7 @@ pub(crate) async fn bootstrap_from_snapshot<'storage>(
         database_image,
         db_hash: snapshot_db_hash(&plaintext),
         history_verifier,
+        storage,
         founder_registration,
         restorer_identity: restorer_identity.clone(),
         snapshot,

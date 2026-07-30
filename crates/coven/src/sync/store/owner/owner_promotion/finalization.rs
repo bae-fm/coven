@@ -23,15 +23,16 @@ use super::journal::{
 use super::OwnerPromotionError;
 
 async fn prepare_promotion_wrap(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     store_id: &str,
     recipient: &str,
     encryption: &EncryptionService,
     membership: &MembershipChain,
 ) -> Result<PreparedWrappedStoreKey, OwnerPromotionError> {
-    let identity = operation.identity().clone();
+    let identity = operation.identity.clone();
     let authorized = operation
-        .keyring(membership)
+        .writer
+        .owner_promotion_keyring(membership)
         .open_or(encryption)
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
@@ -41,46 +42,53 @@ async fn prepare_promotion_wrap(
         WrappedStoreKey::seal_keyring(store_id, recipient, &recipient_key, &authorized, &identity)
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     operation
-        .keyring(membership)
+        .writer
+        .owner_promotion_keyring(membership)
         .prepare(recipient, value)
         .await
         .map_err(OwnerPromotionError::from)
 }
 
 /// Activate an accepted promotion through Store membership and recovery state.
-pub(crate) async fn finalize(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    encryption: &EncryptionService,
-    acceptance: OwnerPromotionAcceptance,
-) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
-    let database = operation.database().clone();
-    Box::pin(
-        operation
-            .history_verifier_mut()
-            .verify_owner_promotion_acceptance_with_history(&acceptance),
-    )
-    .await
-    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    if operation.writer.registration_ref != acceptance.request.promoter_registration {
-        return Err(OwnerPromotionError::Protocol(
-            "promotion finalizer is not the request promoter".to_string(),
-        ));
-    }
-    loop {
-        let resumed =
-            resume_owner_promotion_finalization(operation, encryption, acceptance.clone()).await?;
-        match resumed {
-            OwnerPromotionResumeOutcome::Complete(membership) => return Ok(membership),
-            OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
-                match activate_owner_promotion_merge_head(operation, &previous, pending).await? {
-                    MergeHeadPublication::Continue(next) => {
-                        advance_owner_promotion_journal(&database, previous, next).await?;
-                    }
-                    MergeHeadPublication::DurablyComplete { membership } => {
-                        return Ok(membership);
-                    }
-                    MergeHeadPublication::Ended { reason } => {
-                        return Err(OwnerPromotionError::Stale(Box::new(reason)));
+impl super::AuthorizedOwnerPromotion<'_, '_> {
+    pub(crate) async fn finalize(
+        &mut self,
+        encryption: &EncryptionService,
+        acceptance: OwnerPromotionAcceptance,
+    ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
+        let operation = self;
+        let database = operation.database.clone();
+        Box::pin(
+            operation
+                .writer
+                .owner_promotion_history()
+                .verify_acceptance(&acceptance),
+        )
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        if operation.registration_ref != acceptance.request.promoter_registration {
+            return Err(OwnerPromotionError::Protocol(
+                "promotion finalizer is not the request promoter".to_string(),
+            ));
+        }
+        loop {
+            let resumed =
+                resume_owner_promotion_finalization(operation, encryption, acceptance.clone())
+                    .await?;
+            match resumed {
+                OwnerPromotionResumeOutcome::Complete(membership) => return Ok(membership),
+                OwnerPromotionResumeOutcome::PublishMergeHead { previous, pending } => {
+                    match activate_owner_promotion_merge_head(operation, &previous, pending).await?
+                    {
+                        MergeHeadPublication::Continue(next) => {
+                            advance_owner_promotion_journal(&database, previous, next).await?;
+                        }
+                        MergeHeadPublication::DurablyComplete { membership } => {
+                            return Ok(membership);
+                        }
+                        MergeHeadPublication::Ended { reason } => {
+                            return Err(OwnerPromotionError::Stale(Box::new(reason)));
+                        }
                     }
                 }
             }
@@ -97,7 +105,7 @@ enum OwnerPromotionPreparation {
 }
 
 async fn prepare_owner_promotion_finalization(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     encryption: &EncryptionService,
     journal: &OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
@@ -116,26 +124,25 @@ async fn prepare_owner_promotion_finalization(
 }
 
 async fn prepare_merge_owner_promotion_finalization(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     encryption: &EncryptionService,
     journal: &OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
     author_stream: crate::protocol::causal_grants::AuthorStreamId,
     seq: u64,
 ) -> Result<OwnerPromotionPreparation, OwnerPromotionError> {
-    let database = operation.database().clone();
-    let root = operation.store_root().clone();
+    let database = operation.database.clone();
+    let root = operation.root.clone();
     let db = &database;
-    let (_, promoter, _) = operation.registration();
-    let promoter = promoter.clone();
-    if operation.writer.registration_ref != acceptance.request.promoter_registration
-        || promoter.author_pubkey != keys::public_key_hex(operation.identity())
+    let promoter = operation.registration.clone();
+    if operation.registration_ref != acceptance.request.promoter_registration
+        || promoter.author_pubkey != keys::public_key_hex(&operation.identity)
     {
         return Err(OwnerPromotionError::Protocol(
             "promotion finalizer is not the request promoter".to_string(),
         ));
     }
-    let membership = operation.membership().clone();
+    let membership = operation.membership.clone();
     if let Some(winner) = membership.head_refs().iter().find(|head| {
         head.coord.author_pubkey == promoter.author_pubkey
             && head.coord.author_owner_grant == acceptance.request.promoter_owner_grant
@@ -170,11 +177,12 @@ async fn prepare_merge_owner_promotion_finalization(
     )
     .await?;
     let candidate = operation
-        .history_verifier_mut()
+        .writer
+        .owner_promotion_history()
         .load_registration(&acceptance.request.member_registration)
         .await
         .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-    let identity = operation.identity().clone();
+    let identity = operation.identity.clone();
     let entry = membership
         .signed_finalize_owner_promotion_in_stream(
             &root,
@@ -187,6 +195,7 @@ async fn prepare_merge_owner_promotion_finalization(
         )
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     let transition = operation
+        .writer
         .prepare_membership_transition(&membership, entry)
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
@@ -211,18 +220,19 @@ async fn prepare_merge_owner_promotion_finalization(
 /// entry and head above all — sits in create-once slots the promoter's next
 /// attempt composes into, which is why ending the attempt deletes them.
 async fn prepare_merge_store_candidate(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     journal: &OwnerPromotionJournalPredecessor,
     acceptance: OwnerPromotionAcceptance,
     wrapped_key: PreparedWrappedStoreKey,
     transition: Box<PreparedMembershipTransition>,
 ) -> Result<OwnerPromotionJournal, OwnerPromotionError> {
-    let root = operation.store_root().clone();
+    let root = operation.root.clone();
     operation
+        .writer
         .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let plan = operation.prepare_plan().await?;
+    let plan = operation.writer.prepare_plan().await?;
     let OwnerPromotionAnchors {
         membership: membership_anchor,
         recovery,
@@ -243,6 +253,7 @@ async fn prepare_merge_store_candidate(
     ];
     stream_activations.sort();
     let mut candidate = operation
+        .writer
         .prepare_candidate(
             plan,
             StoreOperationBatch::MergeMembershipActivation {
@@ -252,6 +263,7 @@ async fn prepare_merge_store_candidate(
         )
         .await?;
     let publication = operation
+        .writer
         .finish_membership_transition(
             transition.as_ref().clone(),
             crate::protocol::membership::MembershipHeadActivation::StoreCommit {
@@ -260,9 +272,9 @@ async fn prepare_merge_store_candidate(
         )
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let identity = operation.identity().clone();
+    let identity = operation.identity.clone();
     candidate
-        .attach_merge_membership_proof(operation.storage(), &publication, None, &identity)
+        .attach_merge_membership_proof(operation.storage.as_ref(), &publication, None, &identity)
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     let next = OwnerPromotionJournal {
         promotion_id: journal.promotion_id,
@@ -300,11 +312,11 @@ struct PublishedOwnerPromotionMergeHead {
 }
 
 async fn activate_owner_promotion_merge_head(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     previous: &OwnerPromotionJournalPredecessor,
     published: Box<PublishedOwnerPromotionMergeHead>,
 ) -> Result<MergeHeadPublication, OwnerPromotionError> {
-    let database = operation.database().clone();
+    let database = operation.database.clone();
     let PublishedOwnerPromotionMergeHead {
         acceptance,
         wrapped_key,
@@ -316,11 +328,13 @@ async fn activate_owner_promotion_merge_head(
     let candidate_commit = Box::new(candidate.commit.clone());
     let receipt_candidate = candidate.clone();
     operation
+        .writer
         .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     let membership = finalized_merge_membership_ref(
-        operation.history_verifier_mut(),
+        &operation.root,
+        &mut operation.writer.owner_promotion_history(),
         &candidate_ref,
         &candidate_commit,
         &transition,
@@ -371,6 +385,7 @@ async fn activate_owner_promotion_merge_head(
             })?;
     }
     let outcome = operation
+        .writer
         .publish_membership_activation(
             &transition,
             &publication,
@@ -438,7 +453,8 @@ async fn activate_owner_promotion_merge_head(
                     *nonactivation,
                 )
                 .await?;
-            delete_promotion_candidate_objects(&database, operation.storage(), targets).await?;
+            delete_promotion_candidate_objects(&database, operation.storage.as_ref(), targets)
+                .await?;
             Ok(MergeHeadPublication::Ended { reason })
         }
         StoreOperationPublicationOutcome::Nonactivated(_) => Err(OwnerPromotionError::Protocol(
@@ -500,11 +516,11 @@ enum OwnerPromotionResumeOutcome {
 }
 
 async fn resume_owner_promotion_finalization(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
+    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
     encryption: &EncryptionService,
     acceptance: OwnerPromotionAcceptance,
 ) -> Result<OwnerPromotionResumeOutcome, OwnerPromotionError> {
-    let database = operation.database().clone();
+    let database = operation.database.clone();
     let existing = database
         .load_owner_promotion_journal(acceptance.request.promotion_id)
         .await?;
@@ -630,8 +646,12 @@ async fn resume_owner_promotion_finalization(
             OwnerPromotionJournalState::Stale {
                 reason, evidence, ..
             } => {
-                finish_stale_owner_promotion_cleanup(&database, operation.storage(), &evidence)
-                    .await?;
+                finish_stale_owner_promotion_cleanup(
+                    &database,
+                    operation.storage.as_ref(),
+                    &evidence,
+                )
+                .await?;
                 return Err(OwnerPromotionError::Stale(Box::new(reason)));
             }
             OwnerPromotionJournalState::Allocated
@@ -644,7 +664,8 @@ async fn resume_owner_promotion_finalization(
 }
 
 fn finalized_merge_membership_ref<'a>(
-    history_verifier: &'a mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
+    root: &'a crate::protocol::store_commit::StoreRootRef,
+    history: &'a mut crate::sync::store::owner::history::OwnerPromotionHistory<'_, '_>,
     candidate_ref: &'a crate::protocol::store_commit::StoreBatchCommitRef,
     candidate: &'a crate::protocol::store_commit::StoreBatchCommit,
     transition: &'a PreparedMembershipTransition,
@@ -657,7 +678,6 @@ fn finalized_merge_membership_ref<'a>(
     >,
 > {
     Box::pin(async move {
-        let root = history_verifier.root().clone();
         if candidate.control()
             != Some(&crate::protocol::store_commit::StoreControl {
                 transition: transition.transition.clone(),
@@ -677,8 +697,8 @@ fn finalized_merge_membership_ref<'a>(
             ));
         }
         let predecessor = &candidate.membership_state;
-        let mut membership = history_verifier
-            .load_membership_at_exact_heads(&predecessor.heads, &predecessor.resolutions)
+        let mut membership = history
+            .load_membership(&predecessor.heads, &predecessor.resolutions)
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
@@ -738,7 +758,7 @@ fn finalized_merge_membership_ref<'a>(
             owner_grant: grant_id.clone(),
             position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                 activation: crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
-                    &root,
+                    root,
                     user_pubkey,
                     grant_id,
                     acceptance.anchors.recovery(),

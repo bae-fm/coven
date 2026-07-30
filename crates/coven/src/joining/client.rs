@@ -685,12 +685,9 @@ impl DeviceJoinClient {
         }
         let published_at = self.clock.now().to_rfc3339();
         on_status("Installing device registration...");
-        let mut joining = crate::sync::store::JoiningStore::begin_from_restore(
-            opened,
-            &pending,
-            offer.as_ref().clone(),
-        )
-        .await?;
+        let mut joining = opened
+            .begin_device_join(&pending, offer.as_ref().clone())
+            .await?;
         Ok(joining.bootstrap(bootstrap, &published_at).await?)
     }
 

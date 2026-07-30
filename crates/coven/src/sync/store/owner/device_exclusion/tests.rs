@@ -2611,7 +2611,7 @@ async fn resume_proposal_and_publish_freeze_ack(
         .authorize_writer()
         .await
         .expect("authorize resumed exclusion Store");
-    let result = Box::pin(AuthorizedDeviceExclusion::new(&mut writer).resume())
+    let result = Box::pin(writer.device_exclusion().resume())
         .await
         .expect("resume exclusion proposal")
         .expect("pending exclusion operation");

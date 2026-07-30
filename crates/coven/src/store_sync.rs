@@ -490,7 +490,7 @@ impl StoreSync {
         let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
         let mut authorization = device
             .store
-            .authorize()
+            .authorize_writer()
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
         let result = authorization

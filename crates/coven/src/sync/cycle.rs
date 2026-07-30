@@ -208,119 +208,6 @@ pub(crate) struct DeferredLocalBlobDrop {
     pub disposition: DeferredLocalBlobDisposition,
 }
 
-pub(crate) async fn drain_published_blob_drop_intents(
-    db: &crate::database::StoreDatabase,
-    store_dir: &StoreDir,
-    max_seq: u64,
-) -> Result<(), String> {
-    let intents = db
-        .published_blob_drop_intents(max_seq)
-        .await
-        .map_err(|error| format!("Failed to load published blob drop intents: {error}"))?;
-    for intent in intents {
-        apply_published_blob_drop_intent(db, store_dir, &intent).await?;
-        db.clear_published_blob_drop_intent(&intent)
-            .await
-            .map_err(|error| format!("Failed to clear published blob drop intent: {error}"))?;
-    }
-    Ok(())
-}
-
-async fn apply_published_blob_drop_intent(
-    db: &crate::database::StoreDatabase,
-    store_dir: &StoreDir,
-    intent: &crate::database::PublishedBlobDropIntent,
-) -> Result<(), String> {
-    apply_deferred_local_blob_drop(db, store_dir, &intent.drop)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn apply_deferred_local_blob_drop(
-    db: &crate::database::StoreDatabase,
-    store_dir: &StoreDir,
-    deferred: &DeferredLocalBlobDrop,
-) -> Result<(), super::store::StorePreparationError> {
-    let local = crate::blob::local_files::path_if_present(
-        store_dir,
-        &deferred.namespace,
-        &deferred.id,
-        deferred.size,
-    )
-    .await
-    .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
-    match (deferred.disposition, local) {
-        (DeferredLocalBlobDisposition::Pin, Some(source)) => {
-            crate::blob::cache::populate_pinned_from_file(
-                store_dir,
-                &deferred.namespace,
-                deferred.locator_hash,
-                deferred.size,
-                deferred.plaintext_hash,
-                &source,
-            )
-            .await
-            .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
-        }
-        (DeferredLocalBlobDisposition::Cache, Some(source)) => {
-            crate::blob::cache::write_blob_from_file(
-                db,
-                store_dir,
-                &deferred.namespace,
-                deferred.locator_hash,
-                deferred.size,
-                deferred.plaintext_hash,
-                &source,
-            )
-            .await
-            .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))?;
-        }
-        (DeferredLocalBlobDisposition::Drop, _) => {}
-        (DeferredLocalBlobDisposition::Pin, None) => {
-            let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, deferred.locator_hash)
-                .map_err(|error| {
-                    super::store::StorePreparationError::AssetUpload(error.to_string())
-                })?;
-            return recognize_applied_disposition_or_fail(&pinned, deferred).await;
-        }
-        (DeferredLocalBlobDisposition::Cache, None) => {
-            let cached = store_dir
-                .cache_blob_path(&deferred.namespace, deferred.locator_hash)
-                .map_err(|error| {
-                    super::store::StorePreparationError::AssetUpload(error.to_string())
-                })?;
-            return recognize_applied_disposition_or_fail(&cached, deferred).await;
-        }
-    }
-    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
-        .await
-        .map(|_| ())
-        .map_err(|error| super::store::StorePreparationError::AssetUpload(error.to_string()))
-}
-
-async fn recognize_applied_disposition_or_fail(
-    destination: &std::path::Path,
-    deferred: &DeferredLocalBlobDrop,
-) -> Result<(), super::store::StorePreparationError> {
-    match crate::local_blob::exists(destination).await {
-        Ok(true) => {
-            let (size, hash) = crate::local_blob::exact_file_facts(destination)
-                .await
-                .map_err(super::store::StorePreparationError::AssetUpload)?;
-            if size == deferred.size && hash == deferred.plaintext_hash {
-                return Ok(());
-            }
-        }
-        Ok(false) => {}
-        Err(error) => return Err(super::store::StorePreparationError::AssetUpload(error)),
-    }
-    Err(super::store::StorePreparationError::AssetUpload(format!(
-        "published blob {}/{} is missing from both the local store and its {:?} destination",
-        deferred.namespace, deferred.id, deferred.disposition
-    )))
-}
-
 /// Run a single sync cycle: drain pending local changes + gate + push, pull,
 /// bookkeeping, snapshot.
 ///
@@ -488,10 +375,6 @@ async fn prepare_cycle_before_pull(
     observer: Option<&dyn BlobTransitionObserver>,
     authorization: &mut AuthorizedWriterOperation<'_>,
 ) -> Result<CycleBeforePull, SyncCycleFailure> {
-    let database = authorization.database().clone();
-    let db = &database;
-    let protocol_store_id = authorization.store_root().store_root_id.to_string();
-
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
     // judges, or decrypts. Membership and the rotatable store key are
     // per-cycle preconditions, not init-time bootstraps:
@@ -527,7 +410,7 @@ async fn prepare_cycle_before_pull(
     if let Some(home) = cloud_home {
         if rotation_pending.is_none() {
             let drained = authorization
-                .drain_tombstones(home, cipher, pending_rotation, &protocol_store_id, clock)
+                .drain_tombstones(home, cipher, pending_rotation, clock)
                 .await
                 .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
             if drained > 0 {
@@ -535,13 +418,7 @@ async fn prepare_cycle_before_pull(
             }
         }
         let reclaimed = authorization
-            .gc_tombstones(
-                home,
-                cipher,
-                &protocol_store_id,
-                clock,
-                db.blob_tombstone_grace(),
-            )
+            .gc_tombstones(home, cipher, clock)
             .await
             .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
         if reclaimed > 0 {
@@ -554,7 +431,9 @@ async fn prepare_cycle_before_pull(
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
         .map_or(0, |reference| reference.coord.sequence());
-    drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
+    authorization
+        .drain_published_blob_drop_intents(store_dir, local_seq)
+        .await?;
 
     // One wall-clock reading for this whole cycle. Store acknowledgements and
     // the status built at the end record the same instant. Store write commits
@@ -616,8 +495,6 @@ async fn complete_cycle_after_pull(
     prepared: PreparedCycle,
     store_pull: super::store::StorePullResult,
 ) -> Result<CompletedPullCycle, SyncCycleFailure> {
-    let database = authorization.database().clone();
-    let db = &database;
     let PreparedCycle {
         sync_time,
         resume_drain_promptly,
@@ -640,8 +517,10 @@ async fn complete_cycle_after_pull(
         .await
         .map_err(|error| format!("read local Store position after publish: {error}"))?
         .map_or(0, |position| position.coord.sequence());
-    drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
-    let local_blob_cleanup_pending = db
+    authorization
+        .drain_published_blob_drop_intents(store_dir, local_seq)
+        .await?;
+    let local_blob_cleanup_pending = authorization
         .drain_local_blob_cleanup(store_dir)
         .await
         .map_err(|error| format!("drain local blob cleanup after Store publication: {error}"))?
@@ -651,12 +530,10 @@ async fn complete_cycle_after_pull(
     // advances the clock in the row-and-materialized-position commit closure, so
     // `high_water` reflects remote commits and host stamps minted this cycle. A
     // persist error aborts the cycle rather than risking a backward jump.
-    db.set_protocol_state(
-        crate::sync::hlc::HIGHWATER_STATE_KEY,
-        &hlc.high_water().to_string(),
-    )
-    .await
-    .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
+    authorization
+        .persist_hlc_high_water(hlc)
+        .await
+        .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
     authorization
         .publish_due_snapshots(
@@ -771,7 +648,7 @@ pub(crate) async fn init_sync_over_storage(
         } => {
             Store::open(
                 store_database.clone(),
-                store_storage,
+                store_storage.clone(),
                 &expected_store_root,
                 &user_keypair,
             )
@@ -804,6 +681,8 @@ pub(crate) async fn init_sync_over_storage(
 
     Ok(SyncComponents {
         store: std::sync::Arc::new(initialized.store),
+        database: store_database.clone(),
+        storage: store_storage,
         hlc,
         store_id,
         device_id: initialized.device_id,
@@ -820,6 +699,8 @@ pub(crate) async fn init_sync_over_storage(
 /// checked. Callers cannot replace any of them before running a cycle.
 pub(crate) struct SyncComponents {
     store: std::sync::Arc<Store>,
+    database: crate::database::StoreDatabase,
+    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     hlc: std::sync::Arc<Hlc>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
@@ -838,11 +719,11 @@ impl SyncComponents {
 
     #[doc(hidden)]
     pub(crate) fn database(&self) -> &crate::database::StoreDatabase {
-        self.store.database()
+        &self.database
     }
 
     pub(crate) fn storage(&self) -> &std::sync::Arc<dyn crate::storage::SyncStorage> {
-        self.store.storage()
+        &self.storage
     }
 
     pub(crate) async fn discard_blocked_write(
@@ -1114,7 +995,7 @@ impl SyncComponents {
             security,
             self.routing_encryption.as_ref(),
             store_dir,
-            Some(self.store.cloud_home()),
+            Some(self.storage.cloud_home()),
             observer,
             authorization,
         )

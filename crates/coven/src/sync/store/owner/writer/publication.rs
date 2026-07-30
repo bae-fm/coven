@@ -13,7 +13,7 @@ use super::AuthorizedWriterOperation;
 pub(super) async fn drain_store_writes(
     operation: &mut AuthorizedWriterOperation<'_>,
 ) -> Result<u64, StoreError> {
-    let database = &operation.store.database();
+    let database = &operation.database;
     // Each candidate here takes a position on this device's own stream by
     // publishing its head, so this waits its turn behind any operation composing
     // against that same position. Queued writes are the one composer that can
@@ -32,14 +32,14 @@ async fn drain_prepared_store_writes(
     operation: &mut AuthorizedWriterOperation<'_>,
     first: crate::database::PreparedStoreWriteCommit,
 ) -> Result<u64, StoreError> {
-    let database = operation.store.database().clone();
-    let storage = operation.store.storage();
+    let database = operation.database.clone();
+    let storage = operation.storage.as_ref();
     #[cfg(test)]
     let db = &database;
     let mut published = 0_u64;
     let mut next = Some(first);
     while let Some(batch) = next {
-        let root = operation.store.store_root().clone();
+        let root = operation.store_root().clone();
         let write_id = batch.commit.value.write_id.clone();
         database
             .set_write_status(&write_id, crate::WriteStatus::Publishing)
@@ -109,7 +109,7 @@ async fn drain_prepared_store_writes(
                     return Err(StoreObjectError::from(error).into());
                 }
                 let observation = operation
-                    .history()
+                    .history
                     .observe_occupied_merge_head(
                         head,
                         commit,
@@ -179,7 +179,7 @@ async fn drain_prepared_store_writes(
                 return Ok::<bool, StoreError>(false);
             }
             let observation = operation
-                .history()
+                .history
                 .observe_occupied_merge_head(head, commit, batch.head.object.slot(), &head_prefix)
                 .await?;
             if observation.winner() != head

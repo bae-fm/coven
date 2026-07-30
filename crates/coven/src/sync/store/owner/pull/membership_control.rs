@@ -17,64 +17,6 @@ pub(crate) fn membership_authorizes(
         .is_some_and(|authority| chain.authorizes_write_authority(authority, &author.author_pubkey))
 }
 
-pub(crate) async fn verify_merge_membership_control(
-    history_verifier: &mut MergeHistoryVerifier<'_>,
-    verified_commit: &VerifiedStoreBatchCommit,
-) -> Result<VerifiedCircleActivations, String> {
-    let root = history_verifier.root().clone();
-    if verified_commit.store_root_hash() != root.store_root_hash {
-        return Err("authenticated Merge membership control belongs to another Store root".into());
-    }
-    let commit_ref = verified_commit.reference();
-    let commit = verified_commit.value();
-    history_verifier
-        .verify_refs(commit_predecessor_references(commit))
-        .await
-        .map_err(|error| error.to_string())?;
-    let history = history_verifier.history();
-    let states = history
-        .commits
-        .iter()
-        .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let predecessor_state = verified_merge_predecessor_state(&history.genesis, &states, commit)
-        .map_err(|error| error.to_string())?;
-    let verified_membership_activations =
-        verified_merge_membership_prefix(&history.commits, commit_predecessor_references(commit))
-            .map_err(|error| error.to_string())?;
-    let pending_resolution = history_verifier
-        .verify_resolution_activation_acceptance(commit)
-        .await
-        .map_err(|error| error.to_string())?;
-    let predecessor_membership = load_merge_predecessor_membership_with_retained_history(
-        history_verifier,
-        &commit.membership_state,
-        &verified_membership_activations,
-        pending_resolution.as_ref(),
-    )
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => error.to_string(),
-        RegistrationLoadError::Invalid(error) => error,
-    })?;
-    verify_merge_membership_state_ref(
-        &commit.membership_state,
-        &predecessor_membership,
-        &predecessor_state,
-    )
-    .map_err(|error| error.to_string())?;
-    history_verifier
-        .verify_membership_control_with_retained_history(
-            commit_ref,
-            commit,
-            &predecessor_membership,
-            &predecessor_state,
-            pending_resolution.as_ref(),
-        )
-        .await
-        .map(|(activations, _)| activations)
-}
-
 pub(crate) async fn verify_merge_membership_control_with_history(
     commit_verifier: &mut StoreCommitVerifier<'_>,
     commit_ref: &StoreBatchCommitRef,

@@ -578,8 +578,8 @@ impl BlobBody {
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
         Self::from_file_with_prefix(len, reader, None, Vec::new())
     }
 

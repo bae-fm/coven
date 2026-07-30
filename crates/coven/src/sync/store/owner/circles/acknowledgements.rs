@@ -6,10 +6,13 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectErr
 use crate::sync::store::operations;
 
 use super::super::StoreAckError;
-use super::AuthorizedWriterOperation;
-
-pub(crate) struct CircleAcknowledgementWriter<'operation, 'storage> {
-    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+pub(crate) struct CircleAcknowledgementWriter {
+    database: crate::database::StoreDatabase,
+    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+    root: crate::protocol::store_commit::StoreRootRef,
+    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    registration: crate::protocol::store_commit::StoreDeviceRegistration,
+    device_signer: crate::keys::UserKeypair,
 }
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
@@ -19,7 +22,7 @@ pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
-    pub(super) fn new(
+    pub(crate) fn new(
         database: &'operation crate::database::StoreDatabase,
         history: &'operation crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
@@ -102,9 +105,23 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     }
 }
 
-impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
-    pub(super) fn new(writer: &'operation mut AuthorizedWriterOperation<'storage>) -> Self {
-        Self { writer }
+impl CircleAcknowledgementWriter {
+    pub(super) fn new(
+        database: crate::database::StoreDatabase,
+        storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+        root: crate::protocol::store_commit::StoreRootRef,
+        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: crate::protocol::store_commit::StoreDeviceRegistration,
+        device_signer: crate::keys::UserKeypair,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            root,
+            registration_ref,
+            registration,
+            device_signer,
+        }
     }
 
     pub(crate) async fn stage(
@@ -113,22 +130,19 @@ impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
         sync_time: &str,
     ) -> Result<(), StoreAckError> {
         let inputs = self
-            .writer
-            .database()
+            .database
             .circle_acknowledgement_publication_inputs()
             .await?;
         if inputs.is_empty() {
             return Ok(());
         }
-        let device_id = self.writer.local_device_id().to_string();
-        let root = self.writer.store_root().clone();
-        let (registration_ref, _, device_signer) = self.writer.registration();
-        let registration_ref = registration_ref.clone();
-        let device_signer = device_signer.clone();
+        let device_id = self.registration.device_id.to_string();
+        let root = self.root.clone();
+        let registration_ref = self.registration_ref.clone();
+        let device_signer = self.device_signer.clone();
         for input in inputs {
             let previous = self
-                .writer
-                .database()
+                .database
                 .latest_published_circle_ack(input.circle_id)
                 .await?;
             if previous.as_ref().is_some_and(|previous| {
@@ -160,15 +174,13 @@ impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
             let current_slot = match &previous {
                 Some(previous) => previous.successor_slot.clone(),
                 None => self
-                    .writer
-                    .storage()
+                    .storage
                     .allocate_protocol_slot(&context, &semantic_prefix, ".json")
                     .await
                     .map_err(StoreObjectError::from)?,
             };
             let next_slot = self
-                .writer
-                .storage()
+                .storage
                 .allocate_protocol_slot(
                     &context,
                     &circle_ack_slot_prefix(
@@ -218,14 +230,10 @@ impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
             )
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
             let prepared = self
-                .writer
-                .storage()
+                .storage
                 .prepare_protocol_object(&context, current_slot, &semantic_prefix, ack.to_bytes())
                 .map_err(StoreObjectError::from)?;
-            self.writer
-                .database()
-                .stage_circle_ack(ack, prepared)
-                .await?;
+            self.database.stage_circle_ack(ack, prepared).await?;
         }
         Ok(())
     }
@@ -237,8 +245,7 @@ impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
     ) -> Result<(), StoreAckError> {
         for circle in &outbound.circle_acknowledgements {
             if let Err(error) = self
-                .writer
-                .storage()
+                .storage
                 .create_protocol_object(&circle.ack.prepared)
                 .await
             {
@@ -260,10 +267,7 @@ impl<'operation, 'storage> CircleAcknowledgementWriter<'operation, 'storage> {
                             .to_string(),
                     )
                 })?;
-            self.writer
-                .database()
-                .mark_remote_object_uploaded(remote)
-                .await?;
+            self.database.mark_remote_object_uploaded(remote).await?;
         }
         Ok(())
     }

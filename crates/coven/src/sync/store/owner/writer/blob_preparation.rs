@@ -29,12 +29,14 @@ pub(crate) async fn prepare_partition_package(
     store_dir: &StoreDir,
     active_store_members: &std::collections::BTreeSet<String>,
 ) -> Result<PreparedPartitionPackage, StoreError> {
-    let database = operation.database();
-    let storage = operation.storage();
+    let database = &operation.database;
+    let storage = operation.storage.as_ref();
     let store_root_hash = operation.store_root().store_root_hash;
-    let (registration_ref, registration, _) = operation.registration();
-    let authority = BlobWriteAuthority::new(registration_ref, registration)
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+    let authority = BlobWriteAuthority::new(
+        &operation.writer.registration_ref,
+        &operation.writer.registration,
+    )
+    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
     let partition = if let circle::Audience::Circle(circle_id) = partition.audience {
         if let Some(blocked) = database
             .circle_publication_rotation_block(circle_id, active_store_members.clone())
@@ -248,7 +250,7 @@ impl AuthorizedWriterOperation<'_> {
         ),
         StoreError,
     > {
-        let storage = self.storage();
+        let storage = self.storage.as_ref();
         let locator =
             prepare_partition_blob_locator(fact, audience.clone(), &protection, authority)?;
         if let Some(audience_move) = &fact.audience_move {
@@ -472,7 +474,8 @@ impl AuthorizedWriterOperation<'_> {
                 id: fact.blob.id.clone(),
             })?;
         let authority = crate::blob::RowBlobAuthority::Remote(previous.authority.clone());
-        let protection = crate::sync::store::blob::StoreBlobOpening::for_store(self)
+        let protection = self
+            .blob_opening()
             .protection(&authority, &previous.stored)
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -481,7 +484,8 @@ impl AuthorizedWriterOperation<'_> {
             .join("outbound-blobs")
             .join(format!(".plaintext-{destination_locator}"));
         let staged = self
-            .storage()
+            .storage
+            .as_ref()
             .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
             .await
             .map_err(|source| StoreError::BlobStorage {

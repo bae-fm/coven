@@ -599,20 +599,22 @@ pub(super) async fn prepare_founder_graph(
     let origin = StoreDeviceRegistrationOrigin::Founder {
         creation_id: authority.creation_id,
     };
-    let (registration_value, registration_prepared) =
-        crate::sync::store::prepare_registration_for_origin(
-            storage,
-            signer,
-            root_ref.clone(),
-            origin,
-            root_value.descriptor.founder_registration.clone(),
-            authority.binding.device.clone(),
-            graph_reservation.store_commits.clone(),
-            graph_reservation.acknowledgements.clone(),
-            graph_reservation.snapshots.clone(),
-        )
-        .await
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    let registration_value = crate::protocol::store_commit::StoreDeviceRegistration::signed(
+        root_ref.clone(),
+        origin,
+        authority.binding.device.clone(),
+        graph_reservation.store_commits.clone(),
+        graph_reservation.acknowledgements.clone(),
+        graph_reservation.snapshots.clone(),
+        signer,
+    )
+    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    let registration_prepared = super::prepare_registration_object(
+        storage,
+        &registration_value,
+        root_value.descriptor.founder_registration.clone(),
+    )
+    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     let registration_bytes = registration_value.to_bytes();
     let registration_ref = StoreDeviceRegistrationRef::from_registration(
         &registration_value,

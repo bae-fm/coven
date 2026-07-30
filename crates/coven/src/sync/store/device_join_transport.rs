@@ -271,33 +271,6 @@ mod seal_key {
 }
 
 impl DeviceJoinTransportParams {
-    /// Reserve one slot per kind under this attempt's namespace and mint the
-    /// attempt's seal key.
-    async fn allocate(
-        storage: &dyn SyncStorage,
-        offer: &DeviceJoinOffer,
-    ) -> Result<Self, DeviceJoinTransportError> {
-        let attempt_namespace = attempt_namespace(offer.attempt_id);
-        let context = slot_context(offer.store_root.store_root_hash);
-        let mut slots = BTreeMap::new();
-        for kind in DeviceJoinTransportKind::ALL {
-            let slot = storage
-                .allocate_protocol_slot(
-                    &context,
-                    &semantic_prefix(&attempt_namespace, kind),
-                    ".json",
-                )
-                .await?;
-            slots.insert(kind, slot);
-        }
-        Ok(Self {
-            version: STORE_PROTOCOL_VERSION,
-            attempt_namespace,
-            slots,
-            seal_key: MasterKeyring::generate(),
-        })
-    }
-
     fn slot(&self, kind: DeviceJoinTransportKind) -> Result<&ObjectSlot, DeviceJoinTransportError> {
         self.slots
             .get(&kind)
@@ -333,20 +306,6 @@ pub struct DeviceJoinOfferBundle {
 }
 
 impl DeviceJoinOfferBundle {
-    /// Mint a bundle for an offer the owner has just made: allocate the
-    /// attempt's slots and its seal key.
-    pub async fn allocate(
-        storage: &dyn SyncStorage,
-        offer: DeviceJoinOffer,
-    ) -> Result<Self, DeviceJoinTransportError> {
-        let transport = DeviceJoinTransportParams::allocate(storage, &offer).await?;
-        Ok(Self {
-            version: STORE_PROTOCOL_VERSION,
-            offer,
-            transport,
-        })
-    }
-
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("device join offer bundle serialization cannot fail")
     }
@@ -713,6 +672,56 @@ pub enum DeviceJoinApproval {
     Refuse,
 }
 
+pub(crate) struct StoreDeviceJoinTransport<'store> {
+    store: &'store Store,
+    database: crate::database::StoreDatabase,
+    storage: &'store dyn SyncStorage,
+}
+
+impl<'store> StoreDeviceJoinTransport<'store> {
+    pub(super) fn new(
+        store: &'store Store,
+        database: crate::database::StoreDatabase,
+        storage: &'store dyn SyncStorage,
+    ) -> Self {
+        Self {
+            store,
+            database,
+            storage,
+        }
+    }
+
+    pub(crate) async fn allocate_bundle(
+        &self,
+        offer: DeviceJoinOffer,
+    ) -> Result<DeviceJoinOfferBundle, DeviceJoinTransportError> {
+        let attempt_namespace = attempt_namespace(offer.attempt_id);
+        let context = slot_context(offer.store_root.store_root_hash);
+        let mut slots = BTreeMap::new();
+        for kind in DeviceJoinTransportKind::ALL {
+            let slot = self
+                .storage
+                .allocate_protocol_slot(
+                    &context,
+                    &semantic_prefix(&attempt_namespace, kind),
+                    ".json",
+                )
+                .await?;
+            slots.insert(kind, slot);
+        }
+        Ok(DeviceJoinOfferBundle {
+            version: STORE_PROTOCOL_VERSION,
+            offer,
+            transport: DeviceJoinTransportParams {
+                version: STORE_PROTOCOL_VERSION,
+                attempt_namespace,
+                slots,
+                seal_key: MasterKeyring::generate(),
+            },
+        })
+    }
+}
+
 /// Advance the Owner and Provider Administrator journals as the joiner's
 /// artifacts arrive, publishing each artifact this device produces.
 ///
@@ -724,17 +733,19 @@ pub enum DeviceJoinApproval {
 /// Returns when the attempt reaches an end the admitting side owns: its
 /// activation, or the abandonment that ends it early. The joiner's completion
 /// is the joiner's own step.
-pub(crate) async fn drive_device_join(
-    store: &Store,
-    bundle: &DeviceJoinOfferBundle,
-    policy: DeviceJoinApprovalPolicy<'_>,
-    access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
-    timing: DeviceJoinTransportTiming,
-) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-    retrying_activation_conflicts(|| {
-        drive_device_join_once(store, bundle, &policy, access_administrator, timing)
-    })
-    .await
+impl StoreDeviceJoinTransport<'_> {
+    pub(crate) async fn drive(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        policy: DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+        retrying_activation_conflicts(|| {
+            self.drive_once(bundle, &policy, access_administrator, timing)
+        })
+        .await
+    }
 }
 
 /// How many times a driver re-derives after losing an activation slot, and how
@@ -786,191 +797,214 @@ where
     Box::pin(pass()).await
 }
 
-async fn drive_device_join_once(
-    store: &Store,
-    bundle: &DeviceJoinOfferBundle,
-    policy: &DeviceJoinApprovalPolicy<'_>,
-    access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
-    timing: DeviceJoinTransportTiming,
-) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-    let roles = driver_roles(store, &bundle.offer).await?;
-    let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
-    let attempt_id = bundle.offer.attempt_id;
+impl StoreDeviceJoinTransport<'_> {
+    async fn drive_once(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        policy: &DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+        let roles = self.roles(&bundle.offer).await?;
+        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let attempt_id = bundle.offer.attempt_id;
 
-    // An abandoned attempt has no further step to drive. Publishing it here is
-    // what lets a driver started after the abandonment still deliver it to a
-    // joining device that has not seen it yet.
-    if let Some(DeviceJoinStatus::Abandoned { abandonment }) =
-        owner_status(store, attempt_id).await?
-    {
-        transport
-            .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
-            .await?;
-        return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
-    }
-
-    // The admitting side produces four artifacts in a fixed order, each after
-    // one of the joiner's. Every phase below starts from its role journal's
-    // durable state rather than from the beginning: a journal already holding
-    // the artifact republishes it (the crash between producing and publishing),
-    // and a journal past it does nothing (its artifact was published, which is
-    // how the journal got past it).
-    if roles.provider_administrator {
-        let approval = match admin_status(store, attempt_id).await? {
-            Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => Some(approval),
-            Some(
-                DeviceJoinStatus::AwaitingChallengePublication { .. }
-                | DeviceJoinStatus::AwaitingReadiness { .. }
-                | DeviceJoinStatus::AwaitingProviderCompletion { .. }
-                | DeviceJoinStatus::AwaitingActivation { .. },
-            ) => None,
-            _ => {
-                let request = transport
-                    .await_artifact::<DeviceProviderAccessRequest>(timing)
-                    .await?;
-                approve_access_request(store, roles, &bundle.offer, &request, policy).await?;
-                Some(
-                    store
-                        .authorize_device_provider_access(request, access_administrator)
-                        .await?,
-                )
-            }
-        };
-        if let Some(approval) = approval {
+        // An abandoned attempt has no further step to drive. Publishing it here is
+        // what lets a driver started after the abandonment still deliver it to a
+        // joining device that has not seen it yet.
+        if let Some(DeviceJoinStatus::Abandoned { abandonment }) =
+            self.owner_status(attempt_id).await?
+        {
             transport
-                .publish(&DeviceJoinAction::TransferProviderAdmissionApproval(
-                    approval,
+                .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+                .await?;
+            return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
+        }
+
+        // The admitting side produces four artifacts in a fixed order, each after
+        // one of the joiner's. Every phase below starts from its role journal's
+        // durable state rather than from the beginning: a journal already holding
+        // the artifact republishes it (the crash between producing and publishing),
+        // and a journal past it does nothing (its artifact was published, which is
+        // how the journal got past it).
+        if roles.provider_administrator {
+            let approval = match self.admin_status(attempt_id).await? {
+                Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => Some(approval),
+                Some(
+                    DeviceJoinStatus::AwaitingChallengePublication { .. }
+                    | DeviceJoinStatus::AwaitingReadiness { .. }
+                    | DeviceJoinStatus::AwaitingProviderCompletion { .. }
+                    | DeviceJoinStatus::AwaitingActivation { .. },
+                ) => None,
+                _ => {
+                    let request = transport
+                        .await_artifact::<DeviceProviderAccessRequest>(timing)
+                        .await?;
+                    self.approve_access_request(roles, &bundle.offer, &request, policy)
+                        .await?;
+                    Some(
+                        self.store
+                            .authorize_device_provider_access(request, access_administrator)
+                            .await?,
+                    )
+                }
+            };
+            if let Some(approval) = approval {
+                transport
+                    .publish(&DeviceJoinAction::TransferProviderAdmissionApproval(
+                        approval,
+                    ))
+                    .await?;
+            }
+        }
+
+        if roles.owner {
+            let provisional = match self.owner_status(attempt_id).await? {
+                Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
+                    Some(bootstrap)
+                }
+                Some(
+                    DeviceJoinStatus::AwaitingActivation { .. }
+                    | DeviceJoinStatus::AwaitingCompletion { .. },
+                ) => None,
+                Some(DeviceJoinStatus::AwaitingBootstrap { request }) => Some(
+                    self.store
+                        .accept_device_registration_request(request)
+                        .await?,
+                ),
+                _ => {
+                    let request = transport
+                        .await_artifact::<DeviceRegistrationRequest>(timing)
+                        .await?;
+                    Some(
+                        self.store
+                            .accept_device_registration_request(request)
+                            .await?,
+                    )
+                }
+            };
+            if let Some(provisional) = provisional {
+                transport
+                    .publish(&DeviceJoinAction::TransferProvisionalBootstrap(provisional))
+                    .await?;
+            }
+        }
+
+        if roles.provider_administrator {
+            let ready = match self.admin_status(attempt_id).await? {
+                Some(DeviceJoinStatus::AwaitingReadiness { bootstrap }) => Some(bootstrap),
+                Some(
+                    DeviceJoinStatus::AwaitingProviderCompletion { .. }
+                    | DeviceJoinStatus::AwaitingActivation { .. },
+                ) => None,
+                Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => Some(
+                    self.store
+                        .publish_device_provider_challenge(bootstrap)
+                        .await?,
+                ),
+                _ => {
+                    let provisional = transport
+                        .await_artifact::<ProvisionalDeviceBootstrap>(timing)
+                        .await?;
+                    Some(
+                        self.store
+                            .publish_device_provider_challenge(provisional)
+                            .await?,
+                    )
+                }
+            };
+            if let Some(ready) = ready {
+                transport
+                    .publish(&DeviceJoinAction::TransferProviderReadyBootstrap(ready))
+                    .await?;
+            }
+
+            let completion = match self.admin_status(attempt_id).await? {
+                Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
+                Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
+                    self.store
+                        .complete_device_provider_admission(readiness)
+                        .await?
+                }
+                _ => {
+                    let readiness = transport
+                        .await_artifact::<DeviceJoinReadiness>(timing)
+                        .await?;
+                    self.store
+                        .complete_device_provider_admission(readiness)
+                        .await?
+                }
+            };
+            transport
+                .publish(&DeviceJoinAction::TransferProviderAdmissionCompletion(
+                    completion,
                 ))
                 .await?;
         }
-    }
 
-    if roles.owner {
-        let provisional = match owner_status(store, attempt_id).await? {
-            Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => Some(bootstrap),
-            Some(
-                DeviceJoinStatus::AwaitingActivation { .. }
-                | DeviceJoinStatus::AwaitingCompletion { .. },
-            ) => None,
-            Some(DeviceJoinStatus::AwaitingBootstrap { request }) => {
-                Some(store.accept_device_registration_request(request).await?)
-            }
-            _ => {
-                let request = transport
-                    .await_artifact::<DeviceRegistrationRequest>(timing)
-                    .await?;
-                Some(store.accept_device_registration_request(request).await?)
-            }
-        };
-        if let Some(provisional) = provisional {
-            transport
-                .publish(&DeviceJoinAction::TransferProvisionalBootstrap(provisional))
-                .await?;
-        }
-    }
-
-    if roles.provider_administrator {
-        let ready = match admin_status(store, attempt_id).await? {
-            Some(DeviceJoinStatus::AwaitingReadiness { bootstrap }) => Some(bootstrap),
-            Some(
-                DeviceJoinStatus::AwaitingProviderCompletion { .. }
-                | DeviceJoinStatus::AwaitingActivation { .. },
-            ) => None,
-            Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
-                Some(store.publish_device_provider_challenge(bootstrap).await?)
-            }
-            _ => {
-                let provisional = transport
-                    .await_artifact::<ProvisionalDeviceBootstrap>(timing)
-                    .await?;
-                Some(store.publish_device_provider_challenge(provisional).await?)
-            }
-        };
-        if let Some(ready) = ready {
-            transport
-                .publish(&DeviceJoinAction::TransferProviderReadyBootstrap(ready))
-                .await?;
+        if !roles.owner {
+            return Ok(DeviceJoinDriveOutcome::Activated(
+                transport
+                    .await_artifact::<DeviceJoinActivation>(timing)
+                    .await?,
+            ));
         }
 
-        let completion = match admin_status(store, attempt_id).await? {
-            Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
-            Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                store.complete_device_provider_admission(readiness).await?
+        let activation = match self.owner_status(attempt_id).await? {
+            Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
+            Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
+                self.store.finalize_device_join(completion).await?
             }
             _ => {
-                let readiness = transport
-                    .await_artifact::<DeviceJoinReadiness>(timing)
+                let completion = transport
+                    .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
                     .await?;
-                store.complete_device_provider_admission(readiness).await?
+                self.store.finalize_device_join(completion).await?
             }
         };
         transport
-            .publish(&DeviceJoinAction::TransferProviderAdmissionCompletion(
-                completion,
-            ))
+            .publish(&DeviceJoinAction::TransferActivation(activation.clone()))
             .await?;
+        Ok(DeviceJoinDriveOutcome::Activated(activation))
     }
-
-    if !roles.owner {
-        return Ok(DeviceJoinDriveOutcome::Activated(
-            transport
-                .await_artifact::<DeviceJoinActivation>(timing)
-                .await?,
-        ));
-    }
-
-    let activation = match owner_status(store, attempt_id).await? {
-        Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
-        Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
-            store.finalize_device_join(completion).await?
-        }
-        _ => {
-            let completion = transport
-                .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
-                .await?;
-            store.finalize_device_join(completion).await?
-        }
-    };
-    transport
-        .publish(&DeviceJoinAction::TransferActivation(activation.clone()))
-        .await?;
-    Ok(DeviceJoinDriveOutcome::Activated(activation))
 }
 
 /// Give up on an attempt and publish the abandonment, so a joining device
 /// waiting on its next artifact learns the join is over instead of waiting out
 /// its deadline.
-pub(crate) async fn abandon_device_join_via_transport(
-    store: &Store,
-    bundle: &DeviceJoinOfferBundle,
-) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
-    let roles = driver_roles(store, &bundle.offer).await?;
-    let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
-    let abandonment = store.abandon_device_join(bundle.offer.clone()).await?;
-    transport
-        .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
-        .await?;
-    Ok(abandonment)
-}
+impl StoreDeviceJoinTransport<'_> {
+    pub(crate) async fn abandon(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+    ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
+        let roles = self.roles(&bundle.offer).await?;
+        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let abandonment = self.store.abandon_device_join(bundle.offer.clone()).await?;
+        transport
+            .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+            .await?;
+        Ok(abandonment)
+    }
 
-async fn admin_status(
-    store: &Store,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
-    Ok(store
-        .database()
-        .device_join_status(attempt_id, DeviceJoinRole::ProviderAdministrator)
-        .await?)
-}
+    async fn admin_status(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
+        Ok(self
+            .database
+            .device_join_status(attempt_id, DeviceJoinRole::ProviderAdministrator)
+            .await?)
+    }
 
-async fn owner_status(
-    store: &Store,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
-    Ok(store
-        .database()
-        .device_join_status(attempt_id, DeviceJoinRole::Owner)
-        .await?)
+    async fn owner_status(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
+        Ok(self
+            .database
+            .device_join_status(attempt_id, DeviceJoinRole::Owner)
+            .await?)
+    }
 }
 
 /// Cancel an attempt and carry the unwind to its activated cleanup.
@@ -985,174 +1019,180 @@ async fn owner_status(
 /// cleanup activation this publishes last, and the owner has no artifact by
 /// which it could learn that read had happened — so the deletion belongs to the
 /// joiner, at the point it accepts that activation.
-pub(crate) async fn cancel_device_join_via_transport(
-    store: &Store,
-    bundle: &DeviceJoinOfferBundle,
-    timing: DeviceJoinTransportTiming,
-) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-    retrying_activation_conflicts(|| cancel_device_join_via_transport_once(store, bundle, timing))
-        .await
-}
-
-async fn cancel_device_join_via_transport_once(
-    store: &Store,
-    bundle: &DeviceJoinOfferBundle,
-    timing: DeviceJoinTransportTiming,
-) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-    let roles = driver_roles(store, &bundle.offer).await?;
-    let transport = DeviceJoinTransport::open(&**store.storage(), bundle, roles)?;
-    let attempt_id = bundle.offer.attempt_id;
-
-    let receipt = match owner_status(store, attempt_id).await? {
-        // The unwind already reached its end; republish what it settled on.
-        Some(DeviceJoinStatus::CleanupActivated { activation }) => {
-            transport
-                .publish(&DeviceJoinAction::TransferCleanupActivation(
-                    activation.clone(),
-                ))
-                .await?;
-            store
-                .complete_owner_device_join_cleanup(activation.clone())
-                .await?;
-            return Ok(activation);
-        }
-        Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
-        _ => {
-            let cancellation = cancel_and_publish(store, &transport, attempt_id).await?;
-            let administrator_terminal = store
-                .close_device_provider_admission(cancellation.clone())
-                .await?;
-            transport
-                .publish(&DeviceJoinAction::TransferProviderAdminTerminal(
-                    administrator_terminal.clone(),
-                ))
-                .await?;
-            let joiner_terminal = transport
-                .await_artifact::<JoinerJoinTerminal>(timing)
-                .await?;
-            store
-                .prepare_device_join_cleanup(cancellation, administrator_terminal, joiner_terminal)
-                .await?
-        }
-    };
-    transport
-        .publish(&DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
-        .await?;
-
-    let activation = store.activate_device_join_cleanup(receipt).await?;
-    transport
-        .publish(&DeviceJoinAction::TransferCleanupActivation(
-            activation.clone(),
-        ))
-        .await?;
-    store
-        .complete_owner_device_join_cleanup(activation.clone())
-        .await?;
-    Ok(activation)
-}
-
-/// The attempt's cancellation, taken from the owner journal when it already
-/// holds one — `cancel_device_join` refuses to run again once the unwind has
-/// moved on to preparing the cleanup receipt.
-///
-/// The attempt reference the first cancellation needs comes from the journal
-/// too, rather than from a caller: the journal is what decided which attempt
-/// this join activated, so a supplied reference could only agree with it or be
-/// wrong.
-async fn cancel_and_publish(
-    store: &Store,
-    transport: &DeviceJoinTransport<'_>,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
-    let cancellation = match owner_status(store, attempt_id).await? {
-        Some(
-            DeviceJoinStatus::CleanupPending { cancellation, .. }
-            | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
-        ) => cancellation,
-        Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
-            store
-                .cancel_device_join(bootstrap.publication_authorization.attempt.clone())
-                .await?
-        }
-        other => {
-            return Err(DeviceJoinError::Store(format!(
-                "device join {attempt_id} has no attempt to cancel: {other:?}"
-            ))
-            .into())
-        }
-    };
-    transport
-        .publish(&DeviceJoinAction::TransferCancellation(
-            cancellation.clone(),
-        ))
-        .await?;
-    Ok(cancellation)
-}
-
-async fn driver_roles(
-    store: &Store,
-    offer: &DeviceJoinOffer,
-) -> Result<DeviceJoinRoles, DeviceJoinTransportError> {
-    let local = store
-        .database()
-        .local_activated_registration_ref()
-        .await
-        .map_err(|error| DeviceJoinError::Store(error.to_string()))?
-        .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let roles = DeviceJoinRoles::admitting(
-        local == offer.owner_registration,
-        local == offer.provider_admin.administrator,
-    );
-    if !roles.any() {
-        return Err(DeviceJoinError::ActiveDeviceRequired.into());
+impl StoreDeviceJoinTransport<'_> {
+    pub(crate) async fn cancel(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
+        retrying_activation_conflicts(|| self.cancel_once(bundle, timing)).await
     }
-    Ok(roles)
-}
 
-async fn approve_access_request(
-    store: &Store,
-    roles: DeviceJoinRoles,
-    offer: &DeviceJoinOffer,
-    request: &DeviceProviderAccessRequest,
-    policy: &DeviceJoinApprovalPolicy<'_>,
-) -> Result<(), DeviceJoinTransportError> {
-    let approval = match policy {
-        DeviceJoinApprovalPolicy::AutoApproveSelfIssued => {
-            if self_issued(store, roles, offer).await? && *request.offer == *offer {
-                DeviceJoinApproval::Approve
-            } else {
-                DeviceJoinApproval::Refuse
+    async fn cancel_once(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
+        let roles = self.roles(&bundle.offer).await?;
+        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let attempt_id = bundle.offer.attempt_id;
+
+        let receipt = match self.owner_status(attempt_id).await? {
+            // The unwind already reached its end; republish what it settled on.
+            Some(DeviceJoinStatus::CleanupActivated { activation }) => {
+                transport
+                    .publish(&DeviceJoinAction::TransferCleanupActivation(
+                        activation.clone(),
+                    ))
+                    .await?;
+                self.store
+                    .complete_owner_device_join_cleanup(activation.clone())
+                    .await?;
+                return Ok(activation);
             }
-        }
-        DeviceJoinApprovalPolicy::Ask(ask) => ask(request),
-    };
-    match approval {
-        DeviceJoinApproval::Approve => Ok(()),
-        DeviceJoinApproval::Refuse => Err(DeviceJoinError::OfferMismatch.into()),
-    }
-}
+            Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
+            _ => {
+                let cancellation = self.cancel_and_publish(&transport, attempt_id).await?;
+                let administrator_terminal = self
+                    .store
+                    .close_device_provider_admission(cancellation.clone())
+                    .await?;
+                transport
+                    .publish(&DeviceJoinAction::TransferProviderAdminTerminal(
+                        administrator_terminal.clone(),
+                    ))
+                    .await?;
+                let joiner_terminal = transport
+                    .await_artifact::<JoinerJoinTerminal>(timing)
+                    .await?;
+                self.store
+                    .prepare_device_join_cleanup(
+                        cancellation,
+                        administrator_terminal,
+                        joiner_terminal,
+                    )
+                    .await?
+            }
+        };
+        transport
+            .publish(&DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
+            .await?;
 
-/// Whether this device issued the offer being admitted — the bound
-/// `AutoApproveSelfIssued` keeps to.
-///
-/// Two facts decide it, both authoritative: this device is the offer's owner,
-/// and its own owner journal holds a record for this attempt. That record
-/// exists only because this device ran `begin_device_join` for it. A provider
-/// administrator that is a *different* device never satisfies this, so it
-/// prompts rather than admitting an offer it did not make.
-async fn self_issued(
-    store: &Store,
-    roles: DeviceJoinRoles,
-    offer: &DeviceJoinOffer,
-) -> Result<bool, DeviceJoinTransportError> {
-    if !roles.owner {
-        return Ok(false);
+        let activation = self.store.activate_device_join_cleanup(receipt).await?;
+        transport
+            .publish(&DeviceJoinAction::TransferCleanupActivation(
+                activation.clone(),
+            ))
+            .await?;
+        self.store
+            .complete_owner_device_join_cleanup(activation.clone())
+            .await?;
+        Ok(activation)
     }
-    Ok(store
-        .database()
-        .device_join_status(offer.attempt_id, DeviceJoinRole::Owner)
-        .await?
-        .is_some())
+
+    /// The attempt's cancellation, taken from the owner journal when it already
+    /// holds one — `cancel_device_join` refuses to run again once the unwind has
+    /// moved on to preparing the cleanup receipt.
+    ///
+    /// The attempt reference the first cancellation needs comes from the journal
+    /// too, rather than from a caller: the journal is what decided which attempt
+    /// this join activated, so a supplied reference could only agree with it or be
+    /// wrong.
+    async fn cancel_and_publish(
+        &self,
+        transport: &DeviceJoinTransport<'_>,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
+        let cancellation = match self.owner_status(attempt_id).await? {
+            Some(
+                DeviceJoinStatus::CleanupPending { cancellation, .. }
+                | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
+            ) => cancellation,
+            Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
+                self.store
+                    .cancel_device_join(bootstrap.publication_authorization.attempt.clone())
+                    .await?
+            }
+            other => {
+                return Err(DeviceJoinError::Store(format!(
+                    "device join {attempt_id} has no attempt to cancel: {other:?}"
+                ))
+                .into())
+            }
+        };
+        transport
+            .publish(&DeviceJoinAction::TransferCancellation(
+                cancellation.clone(),
+            ))
+            .await?;
+        Ok(cancellation)
+    }
+
+    async fn roles(
+        &self,
+        offer: &DeviceJoinOffer,
+    ) -> Result<DeviceJoinRoles, DeviceJoinTransportError> {
+        let local = self
+            .database
+            .local_activated_registration_ref()
+            .await
+            .map_err(|error| DeviceJoinError::Store(error.to_string()))?
+            .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
+        let roles = DeviceJoinRoles::admitting(
+            local == offer.owner_registration,
+            local == offer.provider_admin.administrator,
+        );
+        if !roles.any() {
+            return Err(DeviceJoinError::ActiveDeviceRequired.into());
+        }
+        Ok(roles)
+    }
+
+    async fn approve_access_request(
+        &self,
+        roles: DeviceJoinRoles,
+        offer: &DeviceJoinOffer,
+        request: &DeviceProviderAccessRequest,
+        policy: &DeviceJoinApprovalPolicy<'_>,
+    ) -> Result<(), DeviceJoinTransportError> {
+        let approval = match policy {
+            DeviceJoinApprovalPolicy::AutoApproveSelfIssued => {
+                if self.self_issued(roles, offer).await? && request.offer.as_ref() == offer {
+                    DeviceJoinApproval::Approve
+                } else {
+                    DeviceJoinApproval::Refuse
+                }
+            }
+            DeviceJoinApprovalPolicy::Ask(ask) => ask(request),
+        };
+        match approval {
+            DeviceJoinApproval::Approve => Ok(()),
+            DeviceJoinApproval::Refuse => Err(DeviceJoinError::OfferMismatch.into()),
+        }
+    }
+
+    /// Whether this device issued the offer being admitted — the bound
+    /// `AutoApproveSelfIssued` keeps to.
+    ///
+    /// Two facts decide it, both authoritative: this device is the offer's owner,
+    /// and its own owner journal holds a record for this attempt. That record
+    /// exists only because this device ran `begin_device_join` for it. A provider
+    /// administrator that is a *different* device never satisfies this, so it
+    /// prompts rather than admitting an offer it did not make.
+    async fn self_issued(
+        &self,
+        roles: DeviceJoinRoles,
+        offer: &DeviceJoinOffer,
+    ) -> Result<bool, DeviceJoinTransportError> {
+        if !roles.owner {
+            return Ok(false);
+        }
+        Ok(self
+            .database
+            .device_join_status(offer.attempt_id, DeviceJoinRole::Owner)
+            .await?
+            .is_some())
+    }
 }
 
 #[cfg(test)]
