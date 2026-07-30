@@ -68,7 +68,10 @@ impl StoreDatabase {
     ) -> Result<Option<crate::protocol::store_commit::RegisteredStreamActivation>, DbError> {
         self.connection
             .call(move |conn| {
-                load_registered_stream_activation_on(conn, &activation_id.as_hash().to_string())
+                Self::load_registered_stream_activation_on(
+                    conn,
+                    &activation_id.as_hash().to_string(),
+                )
             })
             .await
     }

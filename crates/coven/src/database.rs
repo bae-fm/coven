@@ -65,9 +65,6 @@ pub(crate) use crate::database::store_reclaim_records::{
     parse_store_reclaim_operation, record_store_reclaim_activation_on, store_reclaim_journal_error,
     update_store_reclaim_operation_on,
 };
-pub(crate) use crate::database::stream_activation_records::load_registered_stream_activation_on;
-pub(crate) use crate::database::stream_activation_records::record_verified_stream_activations_on;
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

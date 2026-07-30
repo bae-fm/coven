@@ -493,7 +493,7 @@ impl StoreDatabase {
                 })?;
             let owned =
                 Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
-            crate::database::record_verified_stream_activations_on(
+            Self::record_verified_stream_activations_on(
                 conn,
                 owned.circle_activations().stream_activations(),
                 &encoded,

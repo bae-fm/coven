@@ -7,10 +7,9 @@ use crate::database::ReclaimCommitActivation;
 use crate::database::{
     load_activated_registration_on, load_remote_object_on, record_activated_circle_acks_on,
     record_activated_store_ack_on, record_store_reclaim_activation_on,
-    record_verified_stream_activations_on, required_store_root_authority_on,
-    store_reclaim_journal_error, update_remote_object_on, Database, DbError,
-    OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedMergeMaterialization,
+    required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
+    Database, DbError, OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::remote_object::RemoteObjectRecord;
@@ -400,7 +399,11 @@ impl MergeMaterializationTransaction<'_, '_> {
                     .to_string(),
             ));
         }
-        record_verified_stream_activations_on(conn, stream_activations, &commit_ref_json)?;
+        StoreDatabase::record_verified_stream_activations_on(
+            conn,
+            stream_activations,
+            &commit_ref_json,
+        )?;
         apply_store_device_exclusion_freezes_on(conn, &root, &device_state, device_operations)?;
         record_store_reclaim_activation_on(conn, commit, commit_ref, activation)
     }
