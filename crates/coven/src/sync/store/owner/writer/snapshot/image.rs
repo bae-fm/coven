@@ -2718,14 +2718,12 @@ mod tests {
 
         assert_eq!(
             installed
-                .database()
-                .local_store_root_ref()
+                .installed_store_root_for_test()
                 .await
                 .expect("read installed Store root"),
             Some(store.root.clone()),
         );
         let baseline = installed
-            .database()
             .generation_zero_replay_baseline_for_test()
             .await
             .expect("load installed snapshot replay baseline");
@@ -2756,12 +2754,10 @@ mod tests {
             .expect_err("retained snapshot authority must re-open its signed metadata");
         let authority_bytes = serde_json::to_vec(&tampered).expect("serialize tampered authority");
         installed
-            .database()
             .replace_generation_zero_replay_authority_for_test(authority_bytes)
             .await
             .expect("tamper retained snapshot metadata");
         installed
-            .database()
             .generation_zero_replay_baseline_for_test()
             .await
             .expect_err("restart must reject retained snapshot metadata with another signature");

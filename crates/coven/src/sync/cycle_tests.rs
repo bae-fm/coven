@@ -1764,8 +1764,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         crate::blob::cache::read_cached_exact(
             &restore_dir,
             &restored
-                .database()
-                .row_blob_ref("note_photos", "cover1")
+                .row_blob_ref_for_test("note_photos", "cover1")
                 .await
                 .expect("load restored exact blob reference"),
         )

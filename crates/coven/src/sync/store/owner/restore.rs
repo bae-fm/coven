@@ -1062,13 +1062,53 @@ impl<'storage> RestoringStore<'storage> {
     }
 
     #[cfg(test)]
-    pub(crate) fn database(&self) -> &StoreDatabase {
-        &self.database
+    pub(crate) fn into_database(self) -> StoreDatabase {
+        self.database
     }
 
     #[cfg(test)]
-    pub(crate) fn into_database(self) -> StoreDatabase {
+    pub(crate) async fn install_device_join_bootstrap_for_test(
+        &self,
+        plan: crate::sync::DeviceJoinBootstrapPlan,
+    ) -> Result<(), crate::database::DbError> {
         self.database
+            .install_device_join_bootstrap(self.root.clone(), plan)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn installed_store_root_for_test(
+        &self,
+    ) -> Result<Option<StoreRootRef>, crate::database::DbError> {
+        self.database.local_store_root_ref().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn generation_zero_replay_baseline_for_test(
+        &self,
+    ) -> Result<crate::sync::RetainedReplayBaseline, crate::database::DbError> {
+        self.database
+            .generation_zero_replay_baseline_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn replace_generation_zero_replay_authority_for_test(
+        &self,
+        authority_bytes: Vec<u8>,
+    ) -> Result<(), crate::database::DbError> {
+        self.database
+            .replace_generation_zero_replay_authority_for_test(authority_bytes)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn row_blob_ref_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<crate::blob::RowBlobRef, crate::database::DbError> {
+        self.database.row_blob_ref(table, row_id).await
     }
 
     pub(crate) async fn pull(

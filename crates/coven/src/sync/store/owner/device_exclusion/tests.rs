@@ -552,8 +552,7 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .await
         .expect("open pre-exclusion snapshot");
     joining_db
-        .database()
-        .install_device_join_bootstrap(store.root.clone(), plan)
+        .install_device_join_bootstrap_for_test(plan)
         .await
         .expect("replay exclusion after snapshot");
     let joining_db = joining_db.into_database();
