@@ -38,6 +38,7 @@ mod store_acknowledgements;
 mod store_authority;
 mod store_creation_attempts;
 mod store_device_state;
+mod stream_activation_records;
 #[cfg(test)]
 mod test_support;
 mod write_lifecycle;

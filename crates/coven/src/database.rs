@@ -94,13 +94,12 @@ use crate::protocol::store_commit::{
     ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
     SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
-    StoreSnapshotRef, StreamActivationId,
+    StoreSnapshotRef,
 };
 use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::{quote_ident, SyncedTable};
-use crate::sync::store::VerifiedStreamActivations;
 use crate::sync::store::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority,
@@ -134,7 +133,6 @@ mod store_ack_records;
 mod store_authority_records;
 mod store_coordinates;
 mod store_reclaim_records;
-mod stream_activation_records;
 mod write_lifecycle;
 mod write_models;
 

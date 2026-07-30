@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
-use crate::protocol::store_commit::commit_semantic_prefix;
+use crate::protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {
     let bytes = path.as_bytes();

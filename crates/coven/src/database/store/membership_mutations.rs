@@ -4,7 +4,7 @@ use super::candidate_records::{
 use super::*;
 use crate::database::*;
 use crate::protocol::remote_object::RemoteObjectRecord;
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StreamActivationId};
+use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use crate::storage::ExactObjectRef;
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
@@ -60,20 +60,6 @@ impl StoreDatabase {
             reusable,
         )
         .await
-    }
-
-    pub(crate) async fn registered_stream_activation(
-        &self,
-        activation_id: StreamActivationId,
-    ) -> Result<Option<crate::protocol::store_commit::RegisteredStreamActivation>, DbError> {
-        self.connection
-            .call(move |conn| {
-                Self::load_registered_stream_activation_on(
-                    conn,
-                    &activation_id.as_hash().to_string(),
-                )
-            })
-            .await
     }
 
     pub(crate) async fn select_causal_author_stream(
