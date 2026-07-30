@@ -2757,18 +2757,25 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     let cipher = std::sync::RwLock::new(crate::storage::CloudCipher::Encrypted(
         EncryptionService::from_key([42; 32]),
     ));
-    assert_eq!(
-        crate::blob::delete::drain_tombstones(
-            &store_database,
-            fixture.store.home.as_ref(),
-            &cipher,
-            &crate::storage::PendingRotation::default(),
-            fixture.store.storage.store_id(),
-            &fixture.signer,
-            &crate::clock::FixedClock(deleted_at),
-        )
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
         .await
-        .expect("write the signed tombstone"),
+        .expect("load the Owner Store");
+    let writer = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize the Owner Store");
+    assert_eq!(
+        writer
+            .drain_tombstones(
+                fixture.store.home.as_ref(),
+                &cipher,
+                &crate::storage::PendingRotation::default(),
+                &crate::clock::FixedClock(deleted_at),
+            )
+            .await
+            .expect("write the signed tombstone"),
         1,
         "the queued deletion writes one tombstone"
     );
@@ -2785,15 +2792,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     let past = crate::clock::FixedClock(
         deleted_at + crate::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
     );
-    let loaded_store = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("load the Owner Store");
-    let collected = loaded_store
-        .authorize_writer()
-        .await
-        .expect("authorize the Owner Store")
+    let collected = writer
         .gc_tombstones(fixture.store.home.as_ref(), &cipher, &past)
         .await
         .expect("run the graced tombstone GC over an audience-scoped blob");
