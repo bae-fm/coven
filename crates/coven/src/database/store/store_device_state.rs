@@ -241,7 +241,7 @@ pub(crate) fn apply_store_device_exclusion_freezes_on(
     replace_store_device_exclusion_freezes_on(conn, &desired)
 }
 
-pub(crate) fn replace_store_device_exclusion_freezes_on(
+pub(super) fn replace_store_device_exclusion_freezes_on(
     conn: &Connection,
     desired: &[StoreDeviceProposalAck],
 ) -> Result<(), DbError> {
