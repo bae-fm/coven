@@ -273,7 +273,7 @@ impl TransportFixture {
             self.layout.clone(),
             self.tables.clone(),
             test_migrations(),
-            None,
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
             crate::oauth::OAuthClients::empty(),

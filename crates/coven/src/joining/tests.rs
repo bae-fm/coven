@@ -89,7 +89,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             layout.clone(),
             tables.clone(),
             test_migrations(),
-            None,
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
             crate::custody::KeyCustody::Keyring,
             crate::identity_custody::IdentityCustody::Keyring,
             crate::oauth::OAuthClients::empty(),
