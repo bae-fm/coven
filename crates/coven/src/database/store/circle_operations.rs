@@ -968,15 +968,21 @@ impl StoreDatabase {
             crate::protocol::circle::PreparedCircleControl,
         )> = Vec::new();
         for coord in controls {
-            if !Self::circle_activation_commit_is_retained_on(conn, circle_id, coord)? {
+            let Some(activation_commit) =
+                Self::retained_circle_activation_commit_ref_on(conn, circle_id, coord)?
+            else {
                 continue;
-            }
-            let reference = Self::verified_circle_activation_on(conn, root, circle_id, coord)?
-                .ok_or_else(|| {
-                    DbError::Message(format!(
-                        "Circle {circle_id} control index lost control {coord:?}"
-                    ))
-                })?;
+            };
+            let materialization = Self::load_retained_merge_materialization_by_ref_on(
+                conn,
+                root,
+                &activation_commit,
+            )?;
+            let reference = Self::verified_circle_activation_from_materialization(
+                &materialization,
+                circle_id,
+                coord,
+            )?;
             retained.push((coord.clone(), reference.control));
         }
         let mut head: Option<crate::protocol::circle::CircleControlCoord> = None;
@@ -1007,38 +1013,6 @@ impl StoreDatabase {
             }
         }
         Ok(head)
-    }
-
-    /// Whether a Circle control's activating commit is still retained. Restore
-    /// enumerates every preserved control, but a control whose commit was reclaimed
-    /// after a later epoch superseded it cannot be resolved or be the head.
-    fn circle_activation_commit_is_retained_on(
-        conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<bool, DbError> {
-        let control_coord = serde_json::to_string(control).map_err(|error| {
-            DbError::Message(format!("serialize Circle control coordinate: {error}"))
-        })?;
-        let stored: Option<(String, i64)> = conn
-            .query_row(
-                "SELECT stream_id, seq FROM circle_control_activations
-                 WHERE circle_id = ?1 AND control_coord = ?2",
-                rusqlite::params![circle_id.to_string(), control_coord],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let Some((stream_id, sequence_sql)) = stored else {
-            return Ok(false);
-        };
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM retained_merge_materializations
-             WHERE device_id = ?1 AND seq = ?2)",
-            rusqlite::params![&stream_id, sequence_sql],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)
     }
 
     /// Resolve a Circle control's activating commit reference from the retained
