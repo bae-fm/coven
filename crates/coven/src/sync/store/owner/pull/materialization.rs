@@ -1069,52 +1069,29 @@ pub(crate) async fn verified_merge_membership_objects(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Option<VerifiedMergeMembershipClosure>, StorePullError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Ok(None);
     };
-    let entry = crate::storage::load_membership_entry_ref(
-        storage,
-        root.store_root_hash,
-        &transition.body.entry,
-    )
-    .await
-    .map_err(StorePullError::Object)?;
-    let author = commit_verifier
-        .load_registration(&transition.body.author_registration)
+    let entry = commit_verifier
+        .membership_objects()
+        .load_entry(&transition.body.entry)
         .await
-        .map_err(StorePullError::Object)?
-        .value;
-    let semantic_prefix = transition
-        .head_slot
-        .logical_key()
-        .strip_suffix(".json")
-        .ok_or_else(|| {
-            StorePullError::Database(
-                "Merge membership head slot has no protocol extension".to_string(),
-            )
-        })?;
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreMembershipHead,
-    );
-    let (head_bytes, head_object) = storage
-        .read_protocol_slot(&context, &transition.head_slot, semantic_prefix)
-        .await
-        .map_err(StoreObjectError::from)
         .map_err(StorePullError::Object)?;
-    let head: super::membership::AuthorHead = serde_json::from_slice(&head_bytes)
-        .map_err(|error| StorePullError::Database(format!("Merge membership head: {error}")))?;
-    if !head.verify(&author)
-        || serde_json::to_vec(&head).map_err(|error| {
-            StorePullError::Database(format!("serialize membership head: {error}"))
-        })? != head_bytes
-    {
-        return Err(StorePullError::Database(
-            "Merge membership head is not canonical or has an invalid device signature".to_string(),
-        ));
-    }
+    let coord = &transition.body.entry.coord;
+    let loaded_head = commit_verifier
+        .membership_objects()
+        .load_head_at_slot(
+            &transition.head_slot,
+            &coord.author_pubkey,
+            &coord.author_owner_grant,
+            coord.stream_id,
+            coord.seq,
+        )
+        .await
+        .map_err(StorePullError::Object)?;
+    let head_bytes = loaded_head.bytes;
+    let head_object = loaded_head.object;
+    let head = loaded_head.value;
     let head_ref = super::membership::MembershipHeadRef {
         coord: head.entry_coord(),
         head_hash: head.head_hash(),
@@ -1136,13 +1113,11 @@ pub(crate) async fn verified_merge_membership_objects(
         _ => None,
     };
     let resolution_loaded = if let Some(resolution) = &resolution {
-        let loaded = crate::storage::load_membership_resolution_ref(
-            storage,
-            root.store_root_hash,
-            resolution,
-        )
-        .await
-        .map_err(StorePullError::Object)?;
+        let loaded = commit_verifier
+            .membership_objects()
+            .load_resolution(resolution)
+            .await
+            .map_err(StorePullError::Object)?;
         Some((loaded.bytes, loaded.value))
     } else {
         None

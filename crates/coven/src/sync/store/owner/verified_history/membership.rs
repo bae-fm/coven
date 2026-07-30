@@ -4,8 +4,8 @@ use crate::protocol::membership::{
     StoreMembershipConflictResolutionRef,
 };
 use crate::protocol::store_commit::{GrantStreamAnchor, StoreRootRef};
+use crate::storage::StorageError;
 use crate::storage::StoreObjectError;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
 use crate::sync::store::membership::AnchoredChainError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -51,6 +51,15 @@ pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
 }
 
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
+    fn commit_verifier(&self) -> &crate::sync::store::owner::StoreCommitVerifier<'storage> {
+        match self {
+            Self::History(history) => &history.commit_verifier,
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => commit_verifier,
+        }
+    }
+
     async fn load_registration(
         &self,
         reference: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -58,12 +67,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
         StoreObjectError,
     > {
-        match self {
-            Self::History(history) => history.load_registration(reference).await,
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier.load_registration(reference).await,
-        }
+        self.commit_verifier().load_registration(reference).await
     }
 
     async fn load_founder_registration(
@@ -72,87 +76,62 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
         StoreObjectError,
     > {
-        match self {
-            Self::History(history) => history.load_founder_registration().await,
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier.load_founder_registration().await,
-        }
-    }
-
-    fn storage(&self) -> &'storage dyn SyncStorage {
-        match self {
-            Self::History(history) => history.storage(),
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier.storage(),
-        }
+        self.commit_verifier().load_founder_registration().await
     }
 
     fn root(&self) -> &StoreRootRef {
-        match self {
-            Self::History(history) => history.root(),
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier.root(),
-        }
+        self.commit_verifier().root()
     }
 
     fn verified_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
-        match self {
-            Self::History(history) => history.verified_root(),
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier.verified_root(),
-        }
+        self.commit_verifier().verified_root()
     }
 
     async fn load_exact_membership_head(
         &self,
         reference: &MembershipHeadRef,
     ) -> Result<AuthorHead, AnchoredChainError> {
-        let storage = self.storage();
-        let root = self.root();
-        let coord = &reference.coord;
-        let context = ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreMembershipHead,
-        );
-        let semantic_prefix = reference
-            .object
-            .slot()
-            .logical_key()
-            .strip_suffix(".json")
-            .ok_or_else(|| {
-                AnchoredChainError::LoadFailed(
-                    "membership head exact slot has no .json suffix".to_string(),
-                )
-            })?;
-        let bytes = storage
-            .read_protocol_object(&context, &reference.object, semantic_prefix)
+        self.commit_verifier()
+            .membership_objects()
+            .load_head(reference)
             .await
-            .map_err(|source| AnchoredChainError::StorageUnavailable {
-                operation: format!("read exact membership head {coord:?}"),
-                source,
-            })?;
-        let head =
-            parse_membership_head_off_stack(bytes, semantic_prefix, &reference.object).await?;
-        if head.entry_coord() != *coord || head.head_hash() != reference.head_hash {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head differs from its exact reference".to_string(),
-            ));
-        }
-        let registration = self
-            .load_registration(&head.body.author_registration)
+            .map(|loaded| loaded.value)
+            .map_err(map_membership_object_error)
+    }
+
+    async fn load_membership_entry(
+        &self,
+        reference: &crate::protocol::membership::MembershipEntryRef,
+    ) -> Result<crate::storage::VerifiedObject<MembershipEntry>, StoreObjectError> {
+        self.commit_verifier()
+            .membership_objects()
+            .load_entry(reference)
             .await
-            .map_err(map_membership_object_error)?
-            .value;
-        if registration.author_pubkey != coord.author_pubkey || !head.verify(&registration) {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head is not signed by its exact certified device".to_string(),
-            ));
-        }
-        Ok(head)
+    }
+
+    async fn load_membership_resolution(
+        &self,
+        reference: &StoreMembershipConflictResolutionRef,
+    ) -> Result<crate::storage::VerifiedObject<StoreMembershipConflictResolution>, StoreObjectError>
+    {
+        self.commit_verifier()
+            .membership_objects()
+            .load_resolution(reference)
+            .await
+    }
+
+    async fn load_membership_head_at_slot(
+        &self,
+        slot: &crate::storage::cloud::ObjectSlot,
+        author: &str,
+        grant: &MembershipGrantId,
+        stream_id: crate::protocol::membership::AuthorStreamId,
+        sequence: u64,
+    ) -> Result<crate::storage::VerifiedObject<AuthorHead>, StoreObjectError> {
+        self.commit_verifier()
+            .membership_objects()
+            .load_head_at_slot(slot, author, grant, stream_id, sequence)
+            .await
     }
 }
 
@@ -245,7 +224,6 @@ async fn validate_membership_head_activation(
 
 async fn traverse_exact_membership_stream(
     authority: &mut MembershipActivationAuthority<'_, '_>,
-    storage: &dyn SyncStorage,
     root: &StoreRootRef,
     author: &str,
     grant: &MembershipGrantId,
@@ -258,10 +236,6 @@ async fn traverse_exact_membership_stream(
             "membership stream uses a recovery anchor".to_string(),
         ));
     };
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreMembershipHead,
-    );
     let mut slot = first_slot.clone();
     let mut expected_sequence = 1_u64;
     let mut predecessor: Option<MembershipHeadRef> = None;
@@ -271,18 +245,13 @@ async fn traverse_exact_membership_stream(
     let mut reached_cursor = cursor.is_none();
 
     loop {
-        let semantic_prefix = slot.logical_key().strip_suffix(".json").ok_or_else(|| {
-            AnchoredChainError::LoadFailed(
-                "membership head exact slot has no .json suffix".to_string(),
-            )
-        })?;
-        let (bytes, object) = match storage
-            .read_protocol_slot(&context, &slot, semantic_prefix)
+        let loaded = match authority
+            .load_membership_head_at_slot(&slot, author, grant, stream_id, expected_sequence)
             .await
         {
             Ok(value) => value,
-            Err(StorageError::NotFound(_)) => break,
-            Err(source) if source.is_transport() => {
+            Err(StoreObjectError::Storage(StorageError::NotFound(_))) => break,
+            Err(StoreObjectError::Storage(source)) if source.is_transport() => {
                 return Err(AnchoredChainError::StorageUnavailable {
                     operation: format!(
                         "read membership head {author}/{grant}/{stream_id}/{expected_sequence}"
@@ -290,19 +259,11 @@ async fn traverse_exact_membership_stream(
                     source,
                 })
             }
-            Err(error) => return Err(AnchoredChainError::LoadFailed(error.to_string())),
+            Err(error) => return Err(map_membership_object_error(error)),
         };
-        let head = parse_membership_head_off_stack(bytes, semantic_prefix, &object).await?;
+        let object = loaded.object;
+        let head = loaded.value;
         let coord = head.entry_coord();
-        if coord.author_pubkey != author
-            || coord.author_owner_grant != *grant
-            || coord.stream_id != stream_id
-            || coord.seq != expected_sequence
-        {
-            return Err(AnchoredChainError::LoadFailed(format!(
-                "membership head at sequence {expected_sequence} selects coordinate {coord:?}"
-            )));
-        }
         let reference = MembershipHeadRef {
             coord: coord.clone(),
             head_hash: head.head_hash(),
@@ -318,33 +279,23 @@ async fn traverse_exact_membership_stream(
                 "membership head {coord:?} does not extend its exact predecessor"
             )));
         }
-        let registration = authority
-            .load_registration(&head.body.author_registration)
-            .await
-            .map_err(map_membership_object_error)?
-            .value;
-        if registration.author_pubkey != author
-            || !head.verify(&registration)
-            || head.body.successor.activation
-                != crate::protocol::store_commit::StreamActivation::grant_authorized(
-                    root.store_root_hash,
-                    head.body.author_registration.clone(),
-                    grant.clone(),
-                    anchor.clone(),
-                )
-                .activation_id()
+        if head.body.successor.activation
+            != crate::protocol::store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                head.body.author_registration.clone(),
+                grant.clone(),
+                anchor.clone(),
+            )
+            .activation_id()
         {
             return Err(AnchoredChainError::LoadFailed(format!(
                 "membership head {coord:?} is not signed by its activated certified device"
             )));
         }
-        let loaded_entry = crate::storage::load_membership_entry_ref(
-            storage,
-            root.store_root_hash,
-            &head.body.entry,
-        )
-        .await
-        .map_err(map_membership_object_error)?;
+        let loaded_entry = authority
+            .load_membership_entry(&head.body.entry)
+            .await
+            .map_err(map_membership_object_error)?;
         if loaded_entry.value.resolution_dependencies != head.body.resolutions {
             return Err(AnchoredChainError::LoadFailed(format!(
                 "membership head {coord:?} carries a resolution cut different from its entry"
@@ -362,14 +313,11 @@ async fn traverse_exact_membership_stream(
         }
         for resolution_ref in &head.body.resolutions {
             if !resolutions.contains_key(resolution_ref) {
-                let resolution = crate::storage::load_membership_resolution_ref(
-                    storage,
-                    root.store_root_hash,
-                    resolution_ref,
-                )
-                .await
-                .map_err(map_membership_object_error)?
-                .value;
+                let resolution = authority
+                    .load_membership_resolution(resolution_ref)
+                    .await
+                    .map_err(map_membership_object_error)?
+                    .value;
                 resolutions.insert(resolution_ref.clone(), resolution);
             }
         }
@@ -401,7 +349,6 @@ pub(super) async fn load_exact_anchored_chain_with_history(
     cursors: &[MembershipHeadRef],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let storage = history_verifier.storage();
     let root = history_verifier.root().clone();
     let root_value = history_verifier.verified_root().clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
@@ -425,7 +372,6 @@ pub(super) async fn load_exact_anchored_chain_with_history(
     });
     let founder_loaded = Box::pin(traverse_exact_membership_stream(
         &mut activation_authority,
-        storage,
         &root,
         &root_value.descriptor.founder_pubkey,
         &root_value.descriptor.founder_grant,
@@ -469,7 +415,6 @@ pub(super) async fn load_exact_anchored_chain_with_history(
         let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
         let chain = Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
             &mut activation_authority,
-            storage,
             &root,
             &root_value,
             &root_value.descriptor.founder_pubkey,
@@ -499,7 +444,6 @@ pub(super) async fn load_exact_anchored_chain_with_history(
                 .find(|cursor| cursor.coord.stream_key() == stream);
             let loaded = Box::pin(traverse_exact_membership_stream(
                 &mut activation_authority,
-                storage,
                 &root,
                 &stream.author_pubkey,
                 &stream.author_owner_grant,
@@ -535,14 +479,12 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let storage = history_verifier.storage();
     let root = history_verifier.root().clone();
     let root_value = history_verifier.verified_root().clone();
     let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
     let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
-        storage,
         &root,
         &root_value,
         &owner_pubkey,
@@ -573,7 +515,6 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
     };
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
-        commit_verifier.storage(),
         commit_verifier.root(),
         commit_verifier.verified_root(),
         &owner_pubkey,
@@ -582,33 +523,6 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
         pending_resolution,
     ))
     .await
-}
-
-/// Deserialize an exact membership head off the async poll stack.
-///
-/// This runs at the leaves of the nested membership-load chain, where the
-/// accumulated async future frames leave little of the default thread stack for
-/// serde's monomorphized deserializer of the large `AuthorHead` graph. Running
-/// the parse on a fresh blocking-pool stack keeps the deep async descent and the
-/// heavy deserialization off the same stack — the same bounded-stack path
-/// exact Store-object loading uses for
-/// entries and heads loaded by reference.
-async fn parse_membership_head_off_stack(
-    bytes: Vec<u8>,
-    semantic_prefix: &str,
-    object: &crate::storage::ExactObjectRef,
-) -> Result<AuthorHead, AnchoredChainError> {
-    crate::storage::run_blocking_object_verification(
-        semantic_prefix,
-        object,
-        Box::new(move || {
-            serde_json::from_slice::<AuthorHead>(&bytes).map_err(|error| {
-                crate::protocol::store_commit::StoreProtocolError::Malformed(error.to_string())
-            })
-        }),
-    )
-    .await
-    .map_err(map_membership_object_error)
 }
 
 pub(super) fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {

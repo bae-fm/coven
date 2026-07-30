@@ -216,18 +216,34 @@ pub(crate) async fn load_membership_head_ref(
         reference.head_hash,
         move |bytes| {
             let head: AuthorHead = decode_protocol_object(bytes)?;
-            if head.entry_coord() != expected_coord
-                || head.head_hash() != expected_head_hash
-                || !head.verify(&expected_registration)
-            {
-                return Err(StoreProtocolError::Malformed(
-                    "exact membership head differs from its reference".to_string(),
-                ));
-            }
+            verify_membership_head_reference(
+                &head,
+                &expected_coord,
+                expected_head_hash,
+                &expected_registration,
+            )?;
             Ok(head)
         },
     )
     .await
+}
+
+pub(crate) fn verify_membership_head_reference(
+    head: &AuthorHead,
+    expected_coord: &crate::protocol::membership::MembershipCoord,
+    expected_head_hash: ObjectHash,
+    registration: &StoreDeviceRegistration,
+) -> Result<(), StoreProtocolError> {
+    if head.entry_coord() != *expected_coord
+        || head.head_hash() != expected_head_hash
+        || registration.author_pubkey != expected_coord.author_pubkey
+        || !head.verify(registration)
+    {
+        return Err(StoreProtocolError::Malformed(
+            "exact membership head differs from its reference or certified author".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn load_membership_resolution_ref(

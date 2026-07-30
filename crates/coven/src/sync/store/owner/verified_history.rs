@@ -22,7 +22,6 @@ use crate::protocol::store_commit::{
 use crate::protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
 };
-use crate::storage as store_objects;
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::storage::{StoreObjectError, VerifiedObject};
 use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
@@ -1120,17 +1119,14 @@ pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
     genesis: &ResolvedStoreDeviceState,
     commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
-    let storage = commit_verifier.storage();
     let root = commit_verifier.root();
     let Some(store_commit::StoreControl { transition }) = commit.control() else {
         return Ok(None);
     };
-    let entry = store_objects::load_membership_entry_ref(
-        storage,
-        root.store_root_hash,
-        &transition.body.entry,
-    )
-    .await?;
+    let entry = commit_verifier
+        .membership_objects()
+        .load_entry(&transition.body.entry)
+        .await?;
     let protocol_membership::MembershipChange::ResolutionActivation { resolution } =
         &entry.value.change
     else {
@@ -1141,9 +1137,10 @@ pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
             "Merge resolution activation differs from its exact transition".to_string(),
         ));
     }
-    let value =
-        store_objects::load_membership_resolution_ref(storage, root.store_root_hash, resolution)
-            .await?;
+    let value = commit_verifier
+        .membership_objects()
+        .load_resolution(resolution)
+        .await?;
     let registration = commit_verifier
         .load_registration(&commit.author_registration)
         .await?;

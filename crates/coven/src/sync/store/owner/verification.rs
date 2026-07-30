@@ -30,6 +30,9 @@ use crate::sync::store::{
 };
 use std::collections::BTreeMap;
 
+mod membership;
+pub(crate) use membership::StoreMembershipObjectVerifier;
+
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
     root: StoreRootRef,
@@ -56,6 +59,10 @@ pub(crate) struct VerifiedReclaimReceipt {
 }
 
 impl<'a> StoreCommitVerifier<'a> {
+    pub(crate) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'a> {
+        StoreMembershipObjectVerifier::new(self)
+    }
+
     pub(crate) async fn load_membership_at_verified_prefix(
         &self,
         heads: &[crate::protocol::membership::MembershipHeadRef],

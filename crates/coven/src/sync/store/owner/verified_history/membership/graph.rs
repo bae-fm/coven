@@ -42,13 +42,9 @@ fn load_exact_membership_head_node<'a>(
 ) -> LoadedMembershipHeadFuture<'a> {
     Box::pin(async move {
         let head = authority.load_exact_membership_head(reference).await?;
-        let loaded_entry = Box::pin(crate::storage::load_membership_entry_ref(
-            authority.storage(),
-            authority.root().store_root_hash,
-            &head.body.entry,
-        ))
-        .await
-        .map_err(map_membership_object_error)?;
+        let loaded_entry = Box::pin(authority.load_membership_entry(&head.body.entry))
+            .await
+            .map_err(map_membership_object_error)?;
         if loaded_entry.value.resolution_dependencies != head.body.resolutions {
             return Err(AnchoredChainError::LoadFailed(
                 "membership head and selected entry carry different resolution cuts".to_string(),
@@ -423,10 +419,8 @@ pub(super) async fn project_anchored_chain_to_verified_store_prefix(
     let owner_pubkey = authority.verified_root().descriptor.founder_pubkey.clone();
     let root = authority.root().clone();
     let root_value = authority.verified_root().clone();
-    let storage = authority.storage();
     let projected = load_anchored_chain_at_exact_heads_with_root_impl(
         &mut authority,
-        storage,
         &root,
         &root_value,
         &owner_pubkey,
@@ -660,7 +654,6 @@ type LayeredMembershipFuture<'a> =
 #[allow(clippy::too_many_arguments)]
 fn load_layered_membership_chain<'a>(
     activation_authority: &'a mut MembershipActivationAuthority<'_, '_>,
-    storage: &'a dyn SyncStorage,
     root: &'a StoreRootRef,
     graph: LoadedExactMembershipGraph,
     exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
@@ -682,14 +675,10 @@ fn load_layered_membership_chain<'a>(
 
         let mut resolutions = BTreeMap::new();
         for reference in exact_resolutions {
-            let value = Box::pin(crate::storage::load_membership_resolution_ref(
-                storage,
-                root.store_root_hash,
-                reference,
-            ))
-            .await
-            .map_err(map_membership_object_error)?
-            .value;
+            let value = Box::pin(activation_authority.load_membership_resolution(reference))
+                .await
+                .map_err(map_membership_object_error)?
+                .value;
             match &mut *activation_authority {
                 MembershipActivationAuthority::VerifiedPrefix { activations, .. } => {
                     let verified_by_prefix = activations.verifies_conflict_resolution(reference);
@@ -773,7 +762,6 @@ fn load_layered_membership_chain<'a>(
         }
         let mut chain = load_layered_membership_chain(
             activation_authority,
-            storage,
             root,
             conflict_graph,
             &prior_cut,
@@ -812,7 +800,6 @@ fn load_layered_membership_chain<'a>(
 
 pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
     activation_authority: &mut MembershipActivationAuthority<'_, '_>,
-    storage: &dyn SyncStorage,
     root: &StoreRootRef,
     root_value: &crate::protocol::store_commit::StoreProtocolRoot,
     owner_pubkey: &str,
@@ -849,7 +836,6 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
     .await?;
     let chain = load_layered_membership_chain(
         activation_authority,
-        storage,
         root,
         graph,
         exact_resolutions,

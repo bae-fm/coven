@@ -32,7 +32,6 @@ pub(crate) async fn verify_merge_membership_control_with_history(
     ),
     String,
 > {
-    let storage = commit_verifier.storage();
     let root = commit_verifier.root().clone();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Err("Merge membership verifier received another Store control".to_string());
@@ -72,13 +71,11 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         }
         _ => {}
     }
-    let opened_entry = crate::storage::load_membership_entry_ref(
-        storage,
-        root.store_root_hash,
-        &transition.body.entry,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let opened_entry = commit_verifier
+        .membership_objects()
+        .load_entry(&transition.body.entry)
+        .await
+        .map_err(|error| error.to_string())?;
     if opened_entry.value.coord() != transition.body.entry.coord
         || opened_entry.value.dependencies != predecessor_membership.effective_frontier()
         || opened_entry.value.resolution_dependencies != transition.body.resolutions
@@ -130,13 +127,11 @@ pub(crate) async fn verify_merge_membership_control_with_history(
                 "Merge conflict resolution lacks its verified Store activation".to_string()
             })?
             .clone();
-        let opened_resolution = crate::storage::load_membership_resolution_ref(
-            storage,
-            root.store_root_hash,
-            &resolution,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let opened_resolution = commit_verifier
+            .membership_objects()
+            .load_resolution(&resolution)
+            .await
+            .map_err(|error| error.to_string())?;
         let acceptance = &opened_resolution.value.replacement_acceptance;
         let mut expected = vec![
             super::store_commit::StreamActivation::grant_authorized(
