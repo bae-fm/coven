@@ -10,30 +10,12 @@ use tokio::io::AsyncReadExt;
 /// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
 /// destination.
 pub(crate) const TEMP_BLOB_PREFIX: &str = ".tmp.";
-const STAGED_BLOB_MARKER: &str = ".coven-stage-";
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
 pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(TEMP_BLOB_PREFIX))
-}
-
-pub(crate) fn staged_blob_path(final_path: &Path) -> Result<PathBuf, String> {
-    let file_name = final_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("local blob path has no file name: {}", final_path.display()))?;
-    Ok(final_path.with_file_name(format!(
-        "{file_name}{STAGED_BLOB_MARKER}{}",
-        uuid::Uuid::new_v4()
-    )))
-}
-
-pub(crate) fn is_staged_blob_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains(STAGED_BLOB_MARKER))
 }
 
 pub struct PlaintextReader(Box<dyn PlaintextChunkReader>);
@@ -73,6 +55,7 @@ pub(crate) enum StreamWriteError {
 #[derive(Debug)]
 pub(crate) enum ByteStreamWriteError<E> {
     Source(E),
+    SourceCleanup { source: E, cleanup: String },
     Local(String),
 }
 
@@ -83,6 +66,7 @@ pub trait PlaintextChunkReader: Send {
 
 enum AtomicChunkWriteError<E> {
     Source(E),
+    SourceCleanup { source: E, cleanup: String },
     Local(String),
 }
 
@@ -96,8 +80,13 @@ struct AtomicTempFile {
 /// the caller has verified the completed file.
 pub struct AtomicStagedFile {
     destination: PathBuf,
-    staged: PathBuf,
-    armed: bool,
+    staged: Option<AtomicTempFile>,
+}
+
+/// A staged file that has been installed at its destination while the caller's
+/// durable transaction is still deciding whether that installation commits.
+pub(crate) struct PublishedAtomicFile {
+    destination: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -111,18 +100,47 @@ pub enum CommitNewFileError {
 }
 
 impl AtomicStagedFile {
+    pub(crate) async fn create(destination: &Path) -> Result<Self, String> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent dir: {}", destination.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("create parent dir for {}: {error}", destination.display()))?;
+        let mut staged = AtomicTempFile::create_in(parent)?;
+        staged.close();
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            staged: Some(staged),
+        })
+    }
+
     pub fn path(&self) -> &Path {
-        &self.staged
+        &self
+            .staged
+            .as_ref()
+            .expect("atomic stage is unpublished")
+            .path
+    }
+
+    pub(crate) async fn write_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        write_atomic(self.path(), bytes).await
     }
 
     pub async fn commit(mut self) -> Result<(), String> {
-        commit_staged_file(&self.staged, &self.destination, |path| {
+        let mut staged = self.take_stage();
+        let result = commit_staged_file(&staged.path, &self.destination, |path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }
         })
-        .await?;
-        self.armed = false;
-        Ok(())
+        .await;
+        match result {
+            Ok(()) => {
+                staged.disarm();
+                Ok(())
+            }
+            Err(operation) => staged.fail(operation).await,
+        }
     }
 
     /// Publish a verified user-owned destination without replacing an existing
@@ -144,40 +162,89 @@ impl AtomicStagedFile {
         F: FnMut(&Path) -> Fut,
         Fut: std::future::Future<Output = Result<(), String>>,
     {
-        match tokio::fs::hard_link(&self.staged, &self.destination).await {
+        let staged = self.take_stage();
+        match tokio::fs::hard_link(&staged.path, &self.destination).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(CommitNewFileError::DestinationExists(
-                    self.destination.clone(),
-                ));
+                let operation = CommitNewFileError::DestinationExists(self.destination.clone());
+                return match staged.cleanup().await {
+                    Ok(()) => Err(operation),
+                    Err(cleanup) => Err(CommitNewFileError::RollbackFailed {
+                        operation: operation.to_string(),
+                        rollback: cleanup,
+                    }),
+                };
             }
             Err(error) => {
-                return Err(CommitNewFileError::Filesystem(format!(
+                let operation = format!(
                     "link verified blob {} -> {}: {error}",
-                    self.staged.display(),
+                    staged.path.display(),
                     self.destination.display()
-                )));
+                );
+                return match staged.cleanup().await {
+                    Ok(()) => Err(CommitNewFileError::Filesystem(operation)),
+                    Err(cleanup) => Err(CommitNewFileError::RollbackFailed {
+                        operation,
+                        rollback: cleanup,
+                    }),
+                };
             }
         }
 
         if let Err(operation) = sync_committed_parent(&self.destination).await {
+            let mut failures = Vec::new();
+            if let Err(error) = rollback_new_destination(&self.destination, &operation).await {
+                failures.push(error.to_string());
+            }
+            if let Err(error) = staged.cleanup().await {
+                failures.push(error);
+            }
+            return if failures.is_empty() {
+                Err(CommitNewFileError::Filesystem(operation))
+            } else {
+                Err(CommitNewFileError::RollbackFailed {
+                    operation,
+                    rollback: failures.join("; "),
+                })
+            };
+        }
+        if let Err(operation) = staged.cleanup().await {
             rollback_new_destination(&self.destination, &operation).await?;
             return Err(CommitNewFileError::Filesystem(operation));
         }
-        if let Err(error) = tokio::fs::remove_file(&self.staged).await {
-            let operation = format!(
-                "remove linked staging file {}: {error}",
-                self.staged.display()
-            );
-            rollback_new_destination(&self.destination, &operation).await?;
-            return Err(CommitNewFileError::Filesystem(operation));
-        }
-        self.armed = false;
         if let Err(operation) = sync_committed_parent(&self.destination).await {
             rollback_new_destination(&self.destination, &operation).await?;
             return Err(CommitNewFileError::Filesystem(operation));
         }
         Ok(())
+    }
+
+    pub(crate) async fn discard(mut self) -> Result<(), String> {
+        self.take_stage().cleanup().await
+    }
+
+    pub(crate) fn discard_blocking(mut self) -> Result<(), String> {
+        self.take_stage().cleanup_blocking()
+    }
+
+    pub(crate) fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, String> {
+        let staged = self.take_stage();
+        staged.publish_blocking(&self.destination)?;
+        Ok(PublishedAtomicFile {
+            destination: self.destination.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn leave_unpublished_for_test(mut self) -> PathBuf {
+        let mut staged = self.take_stage();
+        let path = staged.path.clone();
+        staged.disarm();
+        path
+    }
+
+    fn take_stage(&mut self) -> AtomicTempFile {
+        self.staged.take().expect("atomic stage is unpublished")
     }
 }
 
@@ -281,30 +348,40 @@ async fn rollback_new_destination(
 
 impl Drop for AtomicStagedFile {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        match std::fs::remove_file(&self.staged) {
+        // `AtomicTempFile` owns cancellation cleanup. Taking it explicitly is
+        // reserved for commit, transaction publication, and reported discard.
+        self.staged.take();
+    }
+}
+
+impl PublishedAtomicFile {
+    pub(crate) fn rollback(self) -> Result<(), String> {
+        match std::fs::remove_file(&self.destination) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                tracing::warn!(
-                    path = %self.staged.display(),
-                    %error,
-                    "could not remove unverified staged blob"
-                );
+                return Err(format!(
+                    "remove published file {}: {error}",
+                    self.destination.display()
+                ));
             }
         }
+        sync_parent_dir_blocking(&self.destination)
     }
 }
 
 impl AtomicTempFile {
-    fn create(path: PathBuf) -> Result<Self, String> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| format!("create temp blob {}: {error}", path.display()))?;
+    fn create_in(parent: &Path) -> Result<Self, String> {
+        let named = tempfile::Builder::new()
+            .prefix(TEMP_BLOB_PREFIX)
+            .tempfile_in(parent)
+            .map_err(|error| {
+                format!("create temporary blob under {}: {error}", parent.display())
+            })?;
+        let (file, path) = named.into_parts();
+        let path = path
+            .keep()
+            .map_err(|error| format!("retain temporary blob path: {error}"))?;
         Ok(Self {
             path,
             file: Some(tokio::fs::File::from_std(file)),
@@ -321,7 +398,93 @@ impl AtomicTempFile {
     }
 
     fn disarm(&mut self) {
+        self.close();
         self.armed = false;
+    }
+
+    async fn cleanup(mut self) -> Result<(), String> {
+        self.close();
+        let cleanup = match tokio::fs::remove_file(&self.path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove temporary blob {}: {error}",
+                self.path.display()
+            )),
+        };
+        self.armed = false;
+        cleanup
+    }
+
+    fn cleanup_blocking(mut self) -> Result<(), String> {
+        self.close();
+        let cleanup = match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove temporary blob {}: {error}",
+                self.path.display()
+            )),
+        };
+        self.armed = false;
+        cleanup
+    }
+
+    async fn fail<T>(self, operation: String) -> Result<T, String> {
+        match self.cleanup().await {
+            Ok(()) => Err(operation),
+            Err(cleanup) => Err(format!("{operation}; {cleanup}")),
+        }
+    }
+
+    async fn commit(mut self, destination: &Path) -> Result<(), String> {
+        self.close();
+        if let Err(error) = tokio::fs::rename(&self.path, destination).await {
+            let operation = format!(
+                "rename temporary blob {} -> {}: {error}",
+                self.path.display(),
+                destination.display()
+            );
+            return self.fail(operation).await;
+        }
+        self.armed = false;
+        Ok(())
+    }
+
+    fn publish_blocking(mut self, destination: &Path) -> Result<(), String> {
+        self.close();
+        let operation = match std::fs::rename(&self.path, destination) {
+            Ok(()) => match sync_parent_dir_blocking(destination) {
+                Ok(()) => {
+                    self.armed = false;
+                    return Ok(());
+                }
+                Err(operation) => {
+                    let rollback = std::fs::rename(destination, &self.path)
+                        .map_err(|error| {
+                            format!(
+                                "rollback rename {} -> {}: {error}",
+                                destination.display(),
+                                self.path.display()
+                            )
+                        })
+                        .and_then(|()| sync_parent_dir_blocking(&self.path));
+                    match rollback {
+                        Ok(()) => operation,
+                        Err(rollback) => format!("{operation}; {rollback}"),
+                    }
+                }
+            },
+            Err(error) => format!(
+                "rename temporary blob {} -> {}: {error}",
+                self.path.display(),
+                destination.display()
+            ),
+        };
+        match self.cleanup_blocking() {
+            Ok(()) => Err(operation),
+            Err(cleanup) => Err(format!("{operation}; {cleanup}")),
+        }
     }
 }
 
@@ -557,20 +720,6 @@ pub(crate) async fn verify_exact_file(
     Ok(())
 }
 
-pub(crate) async fn stage_atomic_destination(path: &Path) -> Result<AtomicStagedFile, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("create parent dir for {}: {error}", path.display()))?;
-    Ok(AtomicStagedFile {
-        destination: path.to_path_buf(),
-        staged: temp_sibling(parent),
-        armed: true,
-    })
-}
-
 pub(crate) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     copy_atomic_with_facts(src, dst).await.map(|_| ())
 }
@@ -601,12 +750,9 @@ async fn copy_open_file_atomic_with_facts(
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|e| format!("create parent dir for {}: {e}", dst.display()))?;
-    let tmp = temp_sibling(parent);
+    let mut temp = AtomicTempFile::create_in(parent)?;
 
     let copy = async {
-        let mut output = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| format!("create temp pin {}: {e}", tmp.display()))?;
         let mut buf = vec![0u8; 1 << 20];
         let mut size = 0_u64;
         let mut hasher = Sha256::new();
@@ -622,15 +768,15 @@ async fn copy_open_file_atomic_with_facts(
                 .checked_add(read as u64)
                 .ok_or_else(|| format!("copy source size overflow: {}", src.display()))?;
             hasher.update(&buf[..read]);
-            output
+            temp.file_mut()
                 .write_all(&buf[..read])
                 .await
-                .map_err(|e| format!("write temp pin {}: {e}", tmp.display()))?;
+                .map_err(|e| format!("write temp pin {}: {e}", temp.path.display()))?;
         }
-        output
+        temp.file_mut()
             .sync_all()
             .await
-            .map_err(|e| format!("fsync temp pin {}: {e}", tmp.display()))?;
+            .map_err(|e| format!("fsync temp pin {}: {e}", temp.path.display()))?;
         Ok::<_, String>((
             size,
             crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
@@ -640,18 +786,10 @@ async fn copy_open_file_atomic_with_facts(
     let facts = match copy {
         Ok(facts) => facts,
         Err(error) => {
-            remove_failed_temp(&tmp, "copy").await;
-            return Err(error);
+            return temp.fail(error).await;
         }
     };
-    if let Err(error) = tokio::fs::rename(&tmp, dst).await {
-        remove_failed_temp(&tmp, "rename").await;
-        return Err(format!(
-            "rename temp pin {} -> {}: {error}",
-            tmp.display(),
-            dst.display()
-        ));
-    }
+    temp.commit(dst).await?;
     Ok(facts)
 }
 
@@ -663,6 +801,9 @@ pub(crate) async fn write_byte_stream_atomic<E: Send>(
         .await
         .map_err(|error| match error {
             AtomicChunkWriteError::Source(error) => ByteStreamWriteError::Source(error),
+            AtomicChunkWriteError::SourceCleanup { source, cleanup } => {
+                ByteStreamWriteError::SourceCleanup { source, cleanup }
+            }
             AtomicChunkWriteError::Local(error) => ByteStreamWriteError::Local(error),
         })
 }
@@ -679,32 +820,53 @@ async fn write_atomic_chunks<E: Send>(
     tokio::fs::create_dir_all(parent).await.map_err(|e| {
         AtomicChunkWriteError::Local(format!("create parent dir for {}: {e}", path.display()))
     })?;
-    let mut temp =
-        AtomicTempFile::create(temp_sibling(parent)).map_err(AtomicChunkWriteError::Local)?;
-    let mut written = 0u64;
-    while let Some(chunk) = stream
-        .next()
-        .await
-        .transpose()
-        .map_err(AtomicChunkWriteError::Source)?
-    {
-        temp.file_mut().write_all(&chunk).await.map_err(|e| {
-            AtomicChunkWriteError::Local(format!("write temp blob {}: {e}", temp.path.display()))
+    let mut temp = AtomicTempFile::create_in(parent).map_err(AtomicChunkWriteError::Local)?;
+    let write = async {
+        let mut written = 0u64;
+        while let Some(chunk) = stream
+            .next()
+            .await
+            .transpose()
+            .map_err(AtomicChunkWriteError::Source)?
+        {
+            let temp_path = temp.path.clone();
+            temp.file_mut().write_all(&chunk).await.map_err(|e| {
+                AtomicChunkWriteError::Local(format!(
+                    "write temp blob {}: {e}",
+                    temp_path.display()
+                ))
+            })?;
+            written += chunk.len() as u64;
+        }
+        let temp_path = temp.path.clone();
+        temp.file_mut().sync_all().await.map_err(|e| {
+            AtomicChunkWriteError::Local(format!("fsync temp blob {}: {e}", temp_path.display()))
         })?;
-        written += chunk.len() as u64;
+        Ok(written)
     }
-    temp.file_mut().sync_all().await.map_err(|e| {
-        AtomicChunkWriteError::Local(format!("fsync temp blob {}: {e}", temp.path.display()))
-    })?;
-    temp.close();
-    std::fs::rename(&temp.path, path).map_err(|error| {
-        AtomicChunkWriteError::Local(format!(
-            "rename temp blob {} -> {}: {error}",
-            temp.path.display(),
-            path.display()
-        ))
-    })?;
-    temp.disarm();
+    .await;
+    let written = match write {
+        Ok(written) => written,
+        Err(AtomicChunkWriteError::Source(source)) => {
+            return match temp.cleanup().await {
+                Ok(()) => Err(AtomicChunkWriteError::Source(source)),
+                Err(cleanup) => Err(AtomicChunkWriteError::SourceCleanup { source, cleanup }),
+            };
+        }
+        Err(AtomicChunkWriteError::SourceCleanup { .. }) => {
+            unreachable!("source cleanup errors are assembled after writing")
+        }
+        Err(AtomicChunkWriteError::Local(operation)) => {
+            let error = temp
+                .fail::<()>(operation)
+                .await
+                .expect_err("failed temporary write returns an error");
+            return Err(AtomicChunkWriteError::Local(error));
+        }
+    };
+    temp.commit(path)
+        .await
+        .map_err(AtomicChunkWriteError::Local)?;
     Ok(written)
 }
 
@@ -723,33 +885,24 @@ pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-    let tmp = temp_sibling(parent);
+    let mut temp = AtomicTempFile::create_in(parent)?;
 
     let write = async {
-        let mut file = tokio::fs::File::create(&tmp)
+        let temp_path = temp.path.clone();
+        temp.file_mut()
+            .write_all(bytes)
             .await
-            .map_err(|e| format!("create temp blob {}: {e}", tmp.display()))?;
-        file.write_all(bytes)
+            .map_err(|e| format!("write temp blob {}: {e}", temp_path.display()))?;
+        temp.file_mut()
+            .sync_all()
             .await
-            .map_err(|e| format!("write temp blob {}: {e}", tmp.display()))?;
-        file.sync_all()
-            .await
-            .map_err(|e| format!("fsync temp blob {}: {e}", tmp.display()))
+            .map_err(|e| format!("fsync temp blob {}: {e}", temp_path.display()))
     }
     .await;
     if let Err(error) = write {
-        remove_failed_temp(&tmp, "write").await;
-        return Err(error);
+        return temp.fail(error).await;
     }
-    if let Err(error) = tokio::fs::rename(&tmp, path).await {
-        remove_failed_temp(&tmp, "rename").await;
-        return Err(format!(
-            "rename temp blob {} -> {}: {error}",
-            tmp.display(),
-            path.display()
-        ));
-    }
-    Ok(())
+    temp.commit(path).await
 }
 
 /// Write atomically and fsync the parent directory containing the committed name.
@@ -769,10 +922,15 @@ pub(crate) fn write_atomic_durable_blocking(path: &Path, bytes: &[u8]) -> Result
         .ok_or_else(|| format!("path has no parent directory: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("create parent directory {}: {error}", parent.display()))?;
-    let temp = temp_sibling(parent);
+    let named = tempfile::Builder::new()
+        .prefix(TEMP_BLOB_PREFIX)
+        .tempfile_in(parent)
+        .map_err(|error| format!("create temporary file under {}: {error}", parent.display()))?;
+    let (mut file, temp) = named.into_parts();
+    let temp = temp
+        .keep()
+        .map_err(|error| format!("retain temporary file path: {error}"))?;
     let write = (|| {
-        let mut file = std::fs::File::create(&temp)
-            .map_err(|error| format!("create temp file {}: {error}", temp.display()))?;
         file.write_all(bytes)
             .map_err(|error| format!("write temp file {}: {error}", temp.display()))?;
         file.sync_all()
@@ -851,6 +1009,16 @@ pub(crate) async fn sync_parent_dir(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("fsync parent dir {}: {e}", parent.display()))
 }
 
+fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("path has no parent dir: {}", path.display()))?;
+    let dir = std::fs::File::open(parent)
+        .map_err(|error| format!("open parent dir {} to fsync: {error}", parent.display()))?;
+    dir.sync_all()
+        .map_err(|error| format!("fsync parent dir {}: {error}", parent.display()))
+}
+
 /// Every committed file under `dir` as `(path, mtime_ms, size)`.
 pub(crate) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
     let mut files = Vec::new();
@@ -894,20 +1062,6 @@ pub(crate) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, S
     Ok(files)
 }
 
-fn temp_sibling(parent: &Path) -> PathBuf {
-    parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()))
-}
-
-async fn remove_failed_temp(path: &Path, operation: &str) {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %operation, %error, "could not remove temporary blob");
-        }
-    }
-}
-
 fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
     Ok(metadata
         .modified()
@@ -923,34 +1077,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-
-    struct WarningSubscriber {
-        warnings: Arc<AtomicUsize>,
-    }
-
-    impl tracing::Subscriber for WarningSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.warnings.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
 
     async fn temp_entries(dir: &Path) -> Vec<PathBuf> {
         let mut entries = tokio::fs::read_dir(dir).await.expect("read test directory");
@@ -1101,7 +1227,7 @@ mod tests {
         write_atomic(&destination, b"prior")
             .await
             .expect("seed destination");
-        let staged = stage_atomic_destination(&destination)
+        let staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
         write_atomic(staged.path(), b"verified")
@@ -1118,7 +1244,7 @@ mod tests {
     async fn staged_file_publish_rolls_back_when_directory_sync_fails() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = stage_atomic_destination(&destination)
+        let staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
         write_atomic(staged.path(), b"verified")
@@ -1147,7 +1273,7 @@ mod tests {
         write_atomic(&destination, b"user file")
             .await
             .expect("seed user destination");
-        let staged = stage_atomic_destination(&destination)
+        let staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
         write_atomic(staged.path(), b"downloaded")
@@ -1166,7 +1292,7 @@ mod tests {
     async fn staged_new_file_publishes_complete_verified_bytes() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = stage_atomic_destination(&destination)
+        let staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
         write_atomic(staged.path(), b"downloaded")
@@ -1183,7 +1309,7 @@ mod tests {
     async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        let staged = stage_atomic_destination(&destination)
+        let staged = AtomicStagedFile::create(&destination)
             .await
             .expect("allocate staging path");
         write_atomic(staged.path(), b"downloaded")
@@ -1312,18 +1438,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_failed_temp_cleanup_does_not_warn() {
+    async fn absent_atomic_temp_cleanup_succeeds() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let warnings = Arc::new(AtomicUsize::new(0));
-        let subscriber = WarningSubscriber {
-            warnings: warnings.clone(),
-        };
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let temp = AtomicTempFile::create_in(tmp.path()).expect("create atomic temp");
+        let path = temp.path.clone();
+        tokio::fs::remove_file(path)
+            .await
+            .expect("remove atomic temp before cleanup");
 
-        remove_failed_temp(&tmp.path().join("absent"), "streamed write").await;
+        temp.cleanup()
+            .await
+            .expect("an already-absent atomic temp is clean");
+    }
 
-        assert_eq!(warnings.load(Ordering::SeqCst), 0);
+    #[tokio::test]
+    async fn failed_atomic_temp_cleanup_reports_the_remaining_target() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let temp = AtomicTempFile::create_in(tmp.path()).expect("create atomic temp");
+        let path = temp.path.clone();
+        tokio::fs::remove_file(&path)
+            .await
+            .expect("remove atomic temp");
+        tokio::fs::create_dir(&path)
+            .await
+            .expect("create cleanup obstruction");
+
+        let error = temp
+            .cleanup()
+            .await
+            .expect_err("an unremovable atomic temp must fail cleanup");
+
+        assert!(
+            error.contains("remove temporary blob") && path.exists(),
+            "{error}"
+        );
+        tokio::fs::remove_dir(path)
+            .await
+            .expect("remove cleanup obstruction");
     }
 
     #[tokio::test]

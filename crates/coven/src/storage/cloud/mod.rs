@@ -197,6 +197,12 @@ pub type CloudObjectStream =
 pub enum CloudFileReadError {
     #[error(transparent)]
     Source(#[from] CloudHomeError),
+    #[error("{source}; local cleanup failed: {cleanup}")]
+    SourceCleanup {
+        #[source]
+        source: CloudHomeError,
+        cleanup: String,
+    },
     #[error("local destination failed: {0}")]
     Local(String),
 }
@@ -210,6 +216,9 @@ pub async fn write_cloud_object_stream(
         .map_err(|error| match error {
             crate::local_blob::ByteStreamWriteError::Source(error) => {
                 CloudFileReadError::Source(error)
+            }
+            crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
+                CloudFileReadError::SourceCleanup { source, cleanup }
             }
             crate::local_blob::ByteStreamWriteError::Local(error) => {
                 CloudFileReadError::Local(error)

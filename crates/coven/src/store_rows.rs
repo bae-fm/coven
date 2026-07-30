@@ -208,7 +208,6 @@ fn map_host_write_error(error: HostWriteError<CovenError>) -> CovenError {
         HostWriteError::Database(error) => CovenError::Database(error),
         HostWriteError::Blob(error) => CovenError::Blob(error),
         HostWriteError::UnsafeBlobPath(error) => CovenError::UnsafeBlobPath(error),
-        HostWriteError::MalformedPath(error) => CovenError::MalformedPath(error),
         HostWriteError::WriteClosurePanicked => CovenError::WriteClosurePanicked,
         HostWriteError::WriteRollbackFailed { write, rollback } => {
             CovenError::WriteRollbackFailed {
@@ -216,6 +215,10 @@ fn map_host_write_error(error: HostWriteError<CovenError>) -> CovenError {
                 rollback,
             }
         }
+        HostWriteError::BlobCleanupFailed { operation, cleanup } => CovenError::BlobCleanupFailed {
+            operation: Box::new(map_host_write_error(*operation)),
+            cleanup,
+        },
         HostWriteError::BlobStillReferenced { namespace, id } => {
             CovenError::BlobStillReferenced { namespace, id }
         }

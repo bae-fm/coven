@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use crate::blob::local_cleanup::LocalBlobCleanupIntent;
 use crate::blob::BlobRef;
 use crate::database::DbError;
@@ -53,12 +51,77 @@ struct NewBlob {
     bytes: Vec<u8>,
 }
 
-#[derive(Clone)]
 struct StagedBlob {
     namespace: String,
     id: String,
-    staged: PathBuf,
-    final_path: PathBuf,
+    staged: Option<crate::local_blob::AtomicStagedFile>,
+    published: Option<crate::local_blob::PublishedAtomicFile>,
+}
+
+impl StagedBlob {
+    async fn stage<E>(store_dir: &StoreDir, blob: NewBlob) -> Result<Self, HostWriteError<E>> {
+        let destination = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+        let staged = crate::local_blob::AtomicStagedFile::create(&destination)
+            .await
+            .map_err(HostWriteError::Blob)?;
+        let staged_blob = Self {
+            namespace: blob.namespace,
+            id: blob.id,
+            staged: Some(staged),
+            published: None,
+        };
+        if let Err(operation) = staged_blob.staged().write_bytes(&blob.bytes).await {
+            return match staged_blob.discard().await {
+                Ok(()) => Err(HostWriteError::Blob(operation)),
+                Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
+                    operation: Box::new(HostWriteError::Blob(operation)),
+                    cleanup,
+                }),
+            };
+        }
+        Ok(staged_blob)
+    }
+
+    fn staged(&self) -> &crate::local_blob::AtomicStagedFile {
+        self.staged.as_ref().expect("blob is staged")
+    }
+
+    fn publish(&mut self) -> Result<(), String> {
+        let staged = self.staged.take().expect("blob is staged");
+        self.published = Some(staged.publish_for_transaction()?);
+        Ok(())
+    }
+
+    async fn discard(mut self) -> Result<(), String> {
+        match self.staged.take() {
+            Some(staged) => staged.discard().await,
+            None => Ok(()),
+        }
+    }
+
+    fn rollback(mut self) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if let Some(published) = self.published.take() {
+            if let Err(error) = published.rollback() {
+                failures.push(error);
+            }
+        }
+        if let Some(staged) = self.staged.take() {
+            if let Err(error) = staged.discard_blocking() {
+                failures.push(error);
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    fn commit(mut self) {
+        assert!(self.staged.is_none(), "committed blob remains staged");
+        assert!(self.published.take().is_some(), "blob was not published");
+    }
 }
 
 type HostSql<R, E> = Box<
@@ -90,12 +153,27 @@ pub(crate) enum HostWriteError<E> {
     Database(DbError),
     Blob(String),
     UnsafeBlobPath(PathTokenError),
-    MalformedPath(String),
     WriteClosurePanicked,
-    WriteRollbackFailed { write: Box<Self>, rollback: String },
-    BlobStillReferenced { namespace: String, id: String },
-    BlobAlreadyReferenced { namespace: String, id: String },
-    BlobOwnedByPendingWrite { namespace: String, id: String },
+    WriteRollbackFailed {
+        write: Box<Self>,
+        rollback: String,
+    },
+    BlobCleanupFailed {
+        operation: Box<Self>,
+        cleanup: String,
+    },
+    BlobStillReferenced {
+        namespace: String,
+        id: String,
+    },
+    BlobAlreadyReferenced {
+        namespace: String,
+        id: String,
+    },
+    BlobOwnedByPendingWrite {
+        namespace: String,
+        id: String,
+    },
     Io(std::io::Error),
 }
 
@@ -132,10 +210,6 @@ impl StoreDatabase {
     {
         let HostWriteOperation { batch, sql } = operation;
         let staged = stage_blobs(&store_dir, batch.new_blobs).await?;
-        let staged_paths = staged
-            .iter()
-            .map(|blob| blob.staged.clone())
-            .collect::<Vec<_>>();
         let tables = self.synced_tables.to_vec();
         let gates = self.gates.clone();
         let blob_decls = self.blob_decls.clone();
@@ -146,7 +220,7 @@ impl StoreDatabase {
         let outcome = self
             .connection
             .call(move |connection| {
-                let mut moved = Vec::new();
+                let mut staged = staged;
                 let result = StoreDatabase::run_store_write_transaction_on(
                     connection,
                     &tables,
@@ -180,7 +254,7 @@ impl StoreDatabase {
                             })
                             .collect::<Result<Vec<_>, _>>()?;
 
-                        for blob in &staged {
+                        for blob in &mut staged {
                             match blob_decls.row_for_blob_in_namespace(
                                 transaction,
                                 &blob.namespace,
@@ -213,28 +287,7 @@ impl StoreDatabase {
                                     id: blob.id.clone(),
                                 });
                             }
-                            if let Some(parent) = blob.final_path.parent() {
-                                std::fs::create_dir_all(parent).map_err(|error| {
-                                    HostWriteError::Blob(format!(
-                                        "create local blob parent {}: {error}",
-                                        parent.display()
-                                    ))
-                                })?;
-                            }
-                            std::fs::rename(&blob.staged, &blob.final_path).map_err(|error| {
-                                HostWriteError::Blob(format!(
-                                    "install staged blob {} -> {}: {error}",
-                                    blob.staged.display(),
-                                    blob.final_path.display()
-                                ))
-                            })?;
-                            moved.push(blob.clone());
-                            sync_parent_dir(&blob.final_path).map_err(|error| {
-                                HostWriteError::Blob(format!(
-                                    "sync local blob parent after installing {}: {error}",
-                                    blob.final_path.display()
-                                ))
-                            })?;
+                            blob.publish().map_err(HostWriteError::Blob)?;
                         }
 
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -270,20 +323,18 @@ impl StoreDatabase {
                 );
 
                 match result {
-                    Ok(receipt) => Ok(Ok(receipt)),
+                    Ok(receipt) => {
+                        for blob in staged {
+                            blob.commit();
+                        }
+                        Ok(Ok(receipt))
+                    }
                     Err(error) => {
                         let mut rollback_failures = Vec::new();
-                        for blob in moved.iter().rev() {
-                            match std::fs::remove_file(&blob.final_path) {
-                                Ok(()) => {}
-                                Err(rollback)
-                                    if rollback.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(rollback) => rollback_failures.push(format!(
-                                    "{}/{} at {}: {rollback}",
-                                    blob.namespace,
-                                    blob.id,
-                                    blob.final_path.display()
-                                )),
+                        for blob in staged.into_iter().rev() {
+                            let identity = format!("{}/{}", blob.namespace, blob.id);
+                            if let Err(rollback) = blob.rollback() {
+                                rollback_failures.push(format!("{identity}: {rollback}"));
                             }
                         }
                         if rollback_failures.is_empty() {
@@ -301,14 +352,8 @@ impl StoreDatabase {
 
         let receipt = match outcome {
             Ok(Ok(receipt)) => receipt,
-            Ok(Err(error)) => {
-                remove_staged_paths(&staged_paths).await;
-                return Err(error);
-            }
-            Err(error) => {
-                remove_staged_paths(&staged_paths).await;
-                return Err(HostWriteError::Database(error));
-            }
+            Ok(Err(error)) => return Err(error),
+            Err(error) => return Err(HostWriteError::Database(error)),
         };
 
         if let Err(error) = self.drain_local_blob_cleanup(&store_dir).await {
@@ -327,49 +372,34 @@ async fn stage_blobs<E>(
 ) -> Result<Vec<StagedBlob>, HostWriteError<E>> {
     let mut staged = Vec::new();
     for blob in blobs {
-        let final_path = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let staged_path = crate::local_blob::staged_blob_path(&final_path)
-            .map_err(HostWriteError::MalformedPath)?;
-        if let Err(error) = crate::local_blob::write_atomic(&staged_path, &blob.bytes).await {
-            remove_staged_files(&staged).await;
-            return Err(HostWriteError::Blob(error));
+        match StagedBlob::stage(store_dir, blob).await {
+            Ok(blob) => staged.push(blob),
+            Err(error) => {
+                let cleanup = discard_staged_blobs(staged).await;
+                return match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
+                        operation: Box::new(error),
+                        cleanup,
+                    }),
+                };
+            }
         }
-        staged.push(StagedBlob {
-            namespace: blob.namespace,
-            id: blob.id,
-            staged: staged_path,
-            final_path,
-        });
     }
     Ok(staged)
 }
 
-async fn remove_staged_files(staged: &[StagedBlob]) {
-    let paths = staged
-        .iter()
-        .map(|blob| blob.staged.clone())
-        .collect::<Vec<_>>();
-    remove_staged_paths(&paths).await;
-}
-
-async fn remove_staged_paths(paths: &[PathBuf]) {
-    for path in paths {
-        if let Err(error) = crate::local_blob::remove_file(path).await {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to remove staged local blob"
-            );
+async fn discard_staged_blobs(staged: Vec<StagedBlob>) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for blob in staged {
+        let identity = format!("{}/{}", blob.namespace, blob.id);
+        if let Err(error) = blob.discard().await {
+            failures.push(format!("{identity}: {error}"));
         }
     }
-}
-
-fn sync_parent_dir(path: &Path) -> Result<(), std::io::Error> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("path has no parent directory: {}", path.display()),
-        )
-    })?;
-    std::fs::File::open(parent)?.sync_all()
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }

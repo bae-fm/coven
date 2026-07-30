@@ -433,7 +433,7 @@ pub(crate) async fn write_blob_from_file(
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     let dest = store_dir.cache_blob_path(namespace, locator_hash)?;
-    let staged = crate::local_blob::stage_atomic_destination(&dest)
+    let staged = crate::local_blob::AtomicStagedFile::create(&dest)
         .await
         .map_err(BlobCacheError::Io)?;
     crate::local_blob::copy_atomic(src_path, staged.path())
@@ -486,7 +486,7 @@ pub(crate) async fn populate_pinned_from_file(
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     let dest = store_dir.pinned_blob_path(namespace, locator_hash)?;
-    let staged = crate::local_blob::stage_atomic_destination(&dest)
+    let staged = crate::local_blob::AtomicStagedFile::create(&dest)
         .await
         .map_err(BlobCacheError::Io)?;
     crate::local_blob::copy_atomic(src_path, staged.path())
@@ -1576,7 +1576,7 @@ async fn stage_exact_local_copy(
     to: &std::path::Path,
     reference: &RowBlobRef,
 ) -> Result<crate::local_blob::AtomicStagedFile, BlobCacheError> {
-    let staged = crate::local_blob::stage_atomic_destination(to)
+    let staged = crate::local_blob::AtomicStagedFile::create(to)
         .await
         .map_err(BlobCacheError::Io)?;
     let (actual_size, actual_hash) = crate::local_blob::copy_atomic_with_facts(from, staged.path())

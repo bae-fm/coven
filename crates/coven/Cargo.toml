@@ -39,7 +39,7 @@ bytes = "1.11"
 futures-util = "0.3"
 tracing = "0.1.41"
 tokio = { version = "1.0", features = ["full"] }
-tempfile = { version = "3.27.0", optional = true }
+tempfile = "3.27.0"
 rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata"] }
 axum = "0.7"
 open = { version = "5.3", optional = true }
@@ -65,11 +65,10 @@ windows-native-keyring-store = "0.5"
 
 [dev-dependencies]
 keyring-core = "0.7"
-tempfile = "3.27.0"
 tokio = { version = "1.0", features = ["test-util"] }
 
 [features]
-test-utils = ["dep:tempfile"]
+test-utils = []
 invariant-tests = []
 oauth-providers = ["dep:open"]
 

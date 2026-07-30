@@ -2011,13 +2011,19 @@ impl SyncStorage for CloudSyncStorage {
                 None => Ok::<_, crate::storage::cloud::CloudHomeError>(None),
             }
         });
-        let staged = crate::local_blob::stage_atomic_destination(spool_file)
+        let staged = crate::local_blob::AtomicStagedFile::create(spool_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let written = crate::local_blob::write_byte_stream_atomic(staged.path(), Box::pin(stream))
             .await
             .map_err(|error| match error {
                 crate::local_blob::ByteStreamWriteError::Source(error) => error.into(),
+                crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
+                    StorageError::CleanupFailed {
+                        operation: Box::new(source.into()),
+                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                    }
+                }
                 crate::local_blob::ByteStreamWriteError::Local(error) => {
                     StorageError::LocalFilesystem(error)
                 }
@@ -2184,7 +2190,7 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        let staged = crate::local_blob::stage_atomic_destination(dest)
+        let staged = crate::local_blob::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         self.exact
@@ -2192,6 +2198,12 @@ impl SyncStorage for CloudSyncStorage {
             .await
             .map_err(|error| match error {
                 CloudFileReadError::Source(error) => StorageError::from(error),
+                CloudFileReadError::SourceCleanup { source, cleanup } => {
+                    StorageError::CleanupFailed {
+                        operation: Box::new(StorageError::from(source)),
+                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                    }
+                }
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
             })?;
         crate::local_blob::verify_exact_file(object, staged.path())
@@ -2217,7 +2229,7 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self
             .stage_exact_blob_download(blob, &stored_destination)
             .await?;
-        let plaintext = crate::local_blob::stage_atomic_destination(dest)
+        let plaintext = crate::local_blob::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let mut reader =

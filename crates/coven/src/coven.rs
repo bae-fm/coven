@@ -46,6 +46,11 @@ pub enum CovenError {
         write: Box<CovenError>,
         rollback: String,
     },
+    #[error("write failed: {operation}; failed to remove unpublished local blobs: {cleanup}")]
+    BlobCleanupFailed {
+        operation: Box<CovenError>,
+        cleanup: String,
+    },
     #[error("synced_tables must be set before opening a coven store")]
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven store")]
@@ -452,11 +457,6 @@ fn remove_orphaned_local_blob_temps(
     process_start: std::time::SystemTime,
 ) -> CovenResult<()> {
     let storage = store_dir.storage_dir();
-    remove_orphaned_temps_in_dir(
-        &storage.join("local"),
-        &crate::local_blob::is_staged_blob_path,
-        None,
-    )?;
     for folder in ["local", "cache", "pinned"] {
         remove_orphaned_temps_in_dir(
             &storage.join(folder),
@@ -1483,8 +1483,14 @@ mod tests {
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
-        let temp = crate::local_blob::staged_blob_path(&final_path).expect("stage temp path");
-        write_raw_file(&temp, b"interrupted write").await;
+        let staged = crate::local_blob::AtomicStagedFile::create(&final_path)
+            .await
+            .expect("allocate local blob stage");
+        staged
+            .write_bytes(b"interrupted write")
+            .await
+            .expect("write interrupted stage");
+        let temp = staged.leave_unpublished_for_test();
 
         let _handle = Coven::builder(config(dir.clone()))
             .synced_tables(vec![files_table()])
@@ -3420,7 +3426,7 @@ mod tests {
     /// under every blob folder — `cache/`, `pinned/`, and the local store — that
     /// predate this open, while leaving a temp a concurrent write is mid-producing
     /// (newer than process start) and every committed blob untouched. Local-store
-    /// staging temps (`.coven-stage-<uuid>`) are still swept regardless of age.
+    /// staging temps use the same atomic-file ownership and age rule.
     #[test]
     fn open_time_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -3468,8 +3474,14 @@ mod tests {
         let stale_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
         let fresh_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
         let committed_local = local_ns.join("blob0bbb");
-        let stale_local_stage = crate::local_blob::staged_blob_path(&local_ns.join("blob"))
-            .expect("local staging path");
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let stale_local_stage = runtime.block_on(async {
+            let stage = crate::local_blob::AtomicStagedFile::create(&local_ns.join("blob"))
+                .await
+                .expect("local staging path");
+            stage.write_bytes(b"x").await.expect("write local stage");
+            stage.leave_unpublished_for_test()
+        });
 
         write_with_mtime(&stale_cache_temp, stale);
         write_with_mtime(&fresh_cache_temp, fresh);
@@ -3479,7 +3491,12 @@ mod tests {
         write_with_mtime(&stale_local_temp, stale);
         write_with_mtime(&fresh_local_temp, fresh);
         write_with_mtime(&committed_local, stale);
-        write_with_mtime(&stale_local_stage, stale);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_local_stage)
+            .expect("open local stage to set mtime")
+            .set_modified(stale)
+            .expect("set local stage mtime");
 
         remove_orphaned_local_blob_temps(&ld, process_start).expect("open-time orphan sweep");
 
@@ -3517,7 +3534,7 @@ mod tests {
         );
         assert!(
             !stale_local_stage.exists(),
-            "local-store staging temps are still swept at open",
+            "local-store staging temps older than process start are swept at open",
         );
     }
 
