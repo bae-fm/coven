@@ -1,5 +1,3 @@
-#[path = "tests/connection.rs"]
-mod connection;
 #[path = "tests/fixtures.rs"]
 mod fixtures;
 #[path = "tests/history.rs"]

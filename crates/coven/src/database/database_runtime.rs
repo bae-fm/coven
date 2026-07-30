@@ -160,21 +160,9 @@ impl Database {
             metadata_open,
         )?;
 
-        let database = {
-            let (jobs_tx, jobs_rx) = tokio::sync::mpsc::unbounded_channel::<DbJob>();
-            let join = std::thread::Builder::new()
-                .name("coven-db".to_string())
-                .spawn(move || run_connection_thread(core, jobs_rx))
-                .map_err(|e| DbError::Message(format!("spawn database connection thread: {e}")))?;
-            Database {
-                connection: DatabaseConnection {
-                    thread: Arc::new(ConnectionThread {
-                        jobs: jobs_tx,
-                        join: Some(join),
-                    }),
-                },
-                state,
-            }
+        let database = Database {
+            connection: DatabaseConnection::start(core, "coven-db")?,
+            state,
         };
 
         Ok((database, stamper))
@@ -213,18 +201,8 @@ impl Database {
             Arc::new(hlc),
             migrations,
         )?;
-        let (jobs_tx, jobs_rx) = tokio::sync::mpsc::unbounded_channel::<DbJob>();
-        let join = std::thread::Builder::new()
-            .name("coven-db-ro".to_string())
-            .spawn(move || run_connection_thread(core, jobs_rx))
-            .map_err(|e| DbError::Message(format!("spawn database connection thread: {e}")))?;
         Ok(Database {
-            connection: DatabaseConnection {
-                thread: Arc::new(ConnectionThread {
-                    jobs: jobs_tx,
-                    join: Some(join),
-                }),
-            },
+            connection: DatabaseConnection::start(core, "coven-db-ro")?,
             state,
         })
     }
@@ -320,55 +298,5 @@ impl Database {
         R: Send + 'static,
     {
         self.connection.call(f).await
-    }
-}
-
-impl DatabaseConnection {
-    pub(crate) async fn call<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.on_connection_thread(move |core| f(core.connection()))
-            .await
-    }
-
-    /// Send `f` to the connection thread, run it against the owned core there, and
-    /// await its result. A panic in `f` is caught on the connection thread (so it
-    /// cannot unwind the thread and take the connection with it) and resumed on
-    /// this task, matching the pre-thread behavior where the closure panicked
-    /// directly on the caller.
-    ///
-    /// Cancellation: once dispatched, `f` runs to completion on the connection
-    /// thread regardless of whether the caller is still awaiting. If the caller is
-    /// cancelled between the thread committing and this reply resolving, it never
-    /// observes the result even though the effect landed — the same "the operation
-    /// may have committed" contract any network call carries. This is deliberate:
-    /// the durable database state is the source of truth, and a caller must treat
-    /// a cancelled call as possibly-committed. Follow-ups that matter beyond that
-    /// durable state — observer notifications, publish triggers — are not driven
-    /// off this return value; the sync cycle re-derives them from durable state.
-    async fn on_connection_thread<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut DatabaseCore) -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let job = DbJob::Run(Box::new(move |core| {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(core)));
-            // The caller may have been cancelled and dropped `reply_rx`; a failed
-            // send is that normal outcome, not an error.
-            let _ = reply_tx.send(outcome);
-        }));
-        if self.thread.jobs.send(job).is_err() {
-            panic!("database connection thread stopped before a call completed");
-        }
-        match reply_rx.await {
-            Ok(Ok(value)) => value,
-            Ok(Err(panic)) => std::panic::resume_unwind(panic),
-            Err(_) => {
-                panic!("database connection thread dropped a call's reply without responding")
-            }
-        }
     }
 }

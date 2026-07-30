@@ -72,9 +72,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension};
-use tracing::error;
-
 use crate::blob::decl::BlobDecls;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
@@ -112,6 +109,7 @@ use crate::sync::store::{
     RetainedReplaySnapshotAuthority,
 };
 use crate::write::{WriteId, WriteStatus};
+use rusqlite::{Connection, OptionalExtension};
 
 mod blob_bindings;
 mod blob_records;
@@ -120,6 +118,7 @@ mod circle_operation_records;
 mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
+mod database_connection;
 pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
 mod circle_snapshot_records;
 mod database_open;
@@ -146,7 +145,8 @@ pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_bl
 pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
 };
-use database_open::{run_connection_thread, ConnectionThread, CovenMetadataOpen, DbJob};
+pub(crate) use database_connection::DatabaseConnection;
+use database_open::CovenMetadataOpen;
 pub(crate) use local_store_identity::local_merge_stream_id_on;
 pub(crate) use local_store_identity::{
     local_activated_registration_ref_on, local_store_authority_on,
@@ -363,11 +363,6 @@ struct DatabaseState {
     test_pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
     #[cfg(test)]
     merge_materialization_failure: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct DatabaseConnection {
-    thread: Arc<ConnectionThread>,
 }
 
 #[cfg(test)]
