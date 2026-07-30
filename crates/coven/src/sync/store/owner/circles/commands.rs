@@ -1,6 +1,6 @@
+use super::{AuthorizedCircleWriter, StoreCircleCommands};
 use super::{
-    prepare_circle_operation, prepare_circle_operation_request, CircleAuthoringState,
-    CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
+    CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
 use crate::database::StoreDatabase;
 use crate::keys;
@@ -13,7 +13,6 @@ use crate::protocol::store_commit::CircleControlRef;
 use crate::storage::BlobPathScheme;
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
-use crate::sync::store::{AuthorizedWriterOperation, Store};
 
 /// A deleted Circle is terminal: every lifecycle command refuses it with a
 /// typed reason rather than a generic missing-authoring-state error.
@@ -27,7 +26,37 @@ async fn ensure_not_deleted(
     Ok(())
 }
 
-impl Store {
+impl StoreCircleCommands<'_> {
+    fn identity(&self) -> &crate::keys::UserKeypair {
+        self.store.identity()
+    }
+
+    fn database(&self) -> &StoreDatabase {
+        self.store.database()
+    }
+
+    fn storage(&self) -> &std::sync::Arc<dyn SyncStorage> {
+        self.store.storage()
+    }
+
+    fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.store.blob_path_scheme()
+    }
+
+    async fn authorize_writer(
+        &self,
+    ) -> Result<
+        crate::sync::store::AuthorizedWriterOperation<'_>,
+        super::StoreWriterAuthorizationError,
+    > {
+        self.store.authorize_writer().await
+    }
+
+    async fn authorize(
+        &self,
+    ) -> Result<crate::sync::store::AuthorizedStore<'_>, crate::sync::store::SyncCycleFailure> {
+        self.store.authorize().await
+    }
     /// The read-only settlement status of a Circle's in-flight epoch close: for
     /// each participant device, whether its create-once response slot holds a
     /// response, an Owner exclusion, or is still empty. Reports each slot's
@@ -107,17 +136,17 @@ impl Store {
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let database = authority.database().clone();
-        let journal = Box::pin(prepare_circle_operation(
-            &mut authority,
-            metadata_stamp,
-            name,
-        ))
-        .await?;
+        let journal = authority
+            .circles()
+            .preparer()
+            .prepare_create(metadata_stamp, name)
+            .await?;
         let circle_id = journal.circle_id();
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&operation_id, None)
             .await?;
         Ok(circle_id)
@@ -165,17 +194,19 @@ impl Store {
                     "Circle {circle_id} current control is absent from its activating Store commit"
                 ))
             })?;
-        let journal = Box::pin(prepare_circle_operation_request(
-            &mut authority,
-            CircleOperationRequest::Rename(Box::new(CircleRenameRequest {
-                circle_id,
-                name: name.to_string(),
-                metadata_stamp: metadata_stamp.to_string(),
-                current,
-                previous_control: reference.clone(),
-            })),
-        ))
-        .await?;
+        let journal = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::Rename(Box::new(
+                CircleRenameRequest {
+                    circle_id,
+                    name: name.to_string(),
+                    metadata_stamp: metadata_stamp.to_string(),
+                    current,
+                    previous_control: reference.clone(),
+                },
+            )))
+            .await?;
         if journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle rename changed Circle identity".to_string(),
@@ -184,7 +215,8 @@ impl Store {
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&operation_id, None)
             .await
     }
@@ -238,26 +270,24 @@ impl Store {
                 ));
             }
         };
-        let roster_chain = super::activation::load_circle_control_roster_chain(
-            &database,
-            authority.history_verifier_mut(),
-            &activation_commit,
-            reference,
-            &current.control,
-            keyring,
-        )
-        .await?;
-        let journal = Box::pin(prepare_circle_operation_request(
-            &mut authority,
-            CircleOperationRequest::RemoveMember(Box::new(CircleRemoveMemberRequest {
-                circle_id,
-                member_pubkey,
-                current,
-                previous_control: reference.clone(),
-                roster_chain,
-            })),
-        ))
-        .await?;
+        let roster_chain = authority
+            .history()
+            .circles()
+            .load_control_roster_chain(&activation_commit, reference, &current.control, keyring)
+            .await?;
+        let journal = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::RemoveMember(Box::new(
+                CircleRemoveMemberRequest {
+                    circle_id,
+                    member_pubkey,
+                    current,
+                    previous_control: reference.clone(),
+                    roster_chain,
+                },
+            )))
+            .await?;
         if journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle member removal changed Circle identity".to_string(),
@@ -266,7 +296,8 @@ impl Store {
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&operation_id, None)
             .await?;
         Ok(operation_id)
@@ -346,17 +377,19 @@ impl Store {
                 selected_metadata,
             });
         }
-        let journal = Box::pin(prepare_circle_operation_request(
-            &mut authority,
-            CircleOperationRequest::ResolveControl(Box::new(CircleResolveControlRequest {
-                circle_id,
-                chosen: chosen_state,
-                previous_control,
-                losing_branches,
-                conflicting_branches: branches,
-            })),
-        ))
-        .await?;
+        let journal = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::ResolveControl(Box::new(
+                CircleResolveControlRequest {
+                    circle_id,
+                    chosen: chosen_state,
+                    previous_control,
+                    losing_branches,
+                    conflicting_branches: branches,
+                },
+            )))
+            .await?;
         if journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle control resolution changed Circle identity".to_string(),
@@ -365,7 +398,8 @@ impl Store {
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&operation_id, None)
             .await
     }
@@ -432,17 +466,19 @@ impl Store {
                 journal.operation_id
             )));
         }
-        let prepared = Box::pin(prepare_circle_operation_request(
-            &mut authority,
-            CircleOperationRequest::CancelEpochClose(Box::new(CircleCancelEpochCloseRequest {
-                operation_id: journal.operation_id.clone(),
-                circle_id,
-                member_pubkey,
-                current,
-                previous_control: reference,
-            })),
-        ))
-        .await?;
+        let prepared = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::CancelEpochClose(Box::new(
+                CircleCancelEpochCloseRequest {
+                    operation_id: journal.operation_id.clone(),
+                    circle_id,
+                    member_pubkey,
+                    current,
+                    previous_control: reference,
+                },
+            )))
+            .await?;
         if prepared.operation_id != journal.operation_id
             || prepared.circle_id != circle_id
             || prepared.intent != journal.intent
@@ -457,7 +493,8 @@ impl Store {
             .begin_circle_operation_finalization(journal.clone())
             .await?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&journal.operation_id, None)
             .await?;
         Ok(journal.operation_id)
@@ -617,7 +654,8 @@ impl Store {
             .transpose()
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(operation_id, routing_key.as_ref())
             .await
     }
@@ -738,15 +776,17 @@ impl Store {
                     "Circle {circle_id} current control is absent from its activating Store commit"
                 ))
             })?;
-        let journal = Box::pin(prepare_circle_operation_request(
-            &mut authority,
-            CircleOperationRequest::Delete(Box::new(CircleDeleteRequest {
-                circle_id,
-                current,
-                previous_control: reference.clone(),
-            })),
-        ))
-        .await?;
+        let journal = authority
+            .circles()
+            .preparer()
+            .prepare_request(CircleOperationRequest::Delete(Box::new(
+                CircleDeleteRequest {
+                    circle_id,
+                    current,
+                    previous_control: reference.clone(),
+                },
+            )))
+            .await?;
         if journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle deletion changed Circle identity".to_string(),
@@ -772,13 +812,14 @@ impl Store {
             None => database.insert_circle_operation(journal).await?,
         }
         authority
-            .circle_operation()
+            .circles()
+            .publisher()
             .publish(&operation_id, None)
             .await
     }
 }
 
-impl AuthorizedWriterOperation<'_> {
+impl AuthorizedCircleWriter<'_, '_> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn add_circle_member(
         &mut self,
@@ -788,13 +829,14 @@ impl AuthorizedWriterOperation<'_> {
         bootstrap: crate::sync::store::snapshot::SnapshotCut,
         routing_key: &crate::protocol::circle::RowRoutingKey,
     ) -> Result<(), CircleOperationError> {
-        let database = self.database().clone();
+        let database = self.writer.database().clone();
         ensure_not_deleted(&database, circle_id).await?;
-        let identity_pubkey = keys::public_key_hex(self.writer.identity);
+        let identity_pubkey = keys::public_key_hex(self.writer.writer.identity);
         let (current, activation_commit_ref) = database
             .circle_authoring_context(circle_id, &identity_pubkey)
             .await?;
         let activation_commit = self
+            .writer
             .history_verifier_mut()
             .load_ref(&activation_commit_ref)
             .await
@@ -824,28 +866,26 @@ impl AuthorizedWriterOperation<'_> {
                 ));
             }
         };
-        let roster_chain = super::activation::load_circle_control_roster_chain(
-            &database,
-            self.history_verifier_mut(),
-            &activation_commit,
-            reference,
-            &current.control,
-            keyring,
-        )
-        .await?;
-        let journal = Box::pin(prepare_circle_operation_request(
-            self,
-            CircleOperationRequest::AddMember(Box::new(CircleAddMemberRequest {
-                circle_id,
-                member_pubkey,
-                role,
-                bootstrap,
-                current,
-                previous_control: reference.clone(),
-                roster_chain,
-            })),
-        ))
-        .await?;
+        let roster_chain = self
+            .writer
+            .history()
+            .circles()
+            .load_control_roster_chain(&activation_commit, reference, &current.control, keyring)
+            .await?;
+        let journal = self
+            .preparer()
+            .prepare_request(CircleOperationRequest::AddMember(Box::new(
+                CircleAddMemberRequest {
+                    circle_id,
+                    member_pubkey,
+                    role,
+                    bootstrap,
+                    current,
+                    previous_control: reference.clone(),
+                    roster_chain,
+                },
+            )))
+            .await?;
         if journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle member addition changed Circle identity".to_string(),
@@ -853,7 +893,7 @@ impl AuthorizedWriterOperation<'_> {
         }
         let operation_id = journal.operation_id.clone();
         database.insert_circle_operation(journal).await?;
-        self.circle_operation()
+        self.publisher()
             .publish(&operation_id, Some(routing_key))
             .await
     }
@@ -862,12 +902,13 @@ impl AuthorizedWriterOperation<'_> {
         &mut self,
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
-        let database = self.database().clone();
+        let database = self.writer.database().clone();
         // Interrupted discards resume first: a durable `Discarding` row plus the
         // per-object cleanup states carry an unfinished discard to completion
         // before any pending operation republishes.
         for operation_id in database.discarding_circle_operations().await? {
-            self.cleanup_circle_operation_candidate(&operation_id)
+            self.writer
+                .cleanup_circle_operation_candidate(&operation_id)
                 .await
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -886,7 +927,7 @@ impl AuthorizedWriterOperation<'_> {
                 )));
             }
             match self
-                .circle_operation()
+                .publisher()
                 .publish(&journal.operation_id, routing_key)
                 .await
             {

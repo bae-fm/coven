@@ -5,8 +5,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracing::debug;
-
 use super::*;
 use crate::blob::decl::BlobDecls;
 use crate::changeset::RowChange;
@@ -42,7 +40,6 @@ use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 use crate::sync::{gate, hlc, session};
 
-mod circle_packages;
 mod device_lifecycle_state;
 mod device_operations;
 mod discovery;
@@ -61,7 +58,6 @@ use super::verification::StoreCommitVerifier;
 pub(crate) use super::verification::{
     load_provider_access_activation, CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
 };
-pub(crate) use circle_packages::*;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
 pub(crate) use join_activation::*;

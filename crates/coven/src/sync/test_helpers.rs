@@ -1656,6 +1656,36 @@ impl TestDevice {
         self.store.store_root()
     }
 
+    pub(crate) async fn create_circle(
+        &self,
+        metadata_stamp: &str,
+        name: &str,
+    ) -> Result<crate::CircleId, crate::sync::store::CircleOperationError> {
+        self.store
+            .circles()
+            .create_circle(metadata_stamp, name)
+            .await
+    }
+
+    pub(crate) async fn rename_circle(
+        &self,
+        metadata_stamp: &str,
+        circle_id: crate::CircleId,
+        name: &str,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.store
+            .circles()
+            .rename_circle(metadata_stamp, circle_id, name)
+            .await
+    }
+
+    pub(crate) async fn delete_circle(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<(), crate::sync::store::CircleOperationError> {
+        self.store.circles().delete_circle(circle_id).await
+    }
+
     pub(crate) async fn membership(
         &self,
     ) -> Result<crate::protocol::membership::MembershipChain, String> {

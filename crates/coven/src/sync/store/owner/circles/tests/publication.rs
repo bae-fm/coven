@@ -1373,10 +1373,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
             panic!("load late pre-close Circle package from retained access: {error}")
         }
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
             panic!("load late pre-close Circle package from retained access: {error}")
         }
     };
@@ -1430,6 +1430,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("authorize Circle close response");
     authorized_store
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish local Circle epoch-close response");
@@ -1480,6 +1482,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         malformed.stored_bytes().to_vec(),
     );
     let error = authorized_store
+        .circles()
+        .close()
         .finalize_ready_circle_epoch_closes(
             "2026-07-23T00:00:01Z",
             &store_dir,
@@ -1722,10 +1726,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
             panic!("load accepted Circle package after cutoff: {error}")
         }
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
             panic!("load accepted Circle package after cutoff: {error}")
         }
     };
@@ -1905,10 +1909,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Database(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
             panic!("classify package against candidate successor cutoff: {error}")
         }
-        Err(crate::sync::store::owner::pull::PullCircleActivationError::Invalid(error)) => {
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
             panic!("classify package against candidate successor cutoff: {error}")
         }
     };
@@ -3145,6 +3149,8 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
         .await
         .expect("authorize Owner Store");
     authorized
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -3154,6 +3160,8 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     // the first upload leaves the payload recorded and nothing in storage.
     fixture.store.home.fail_exact_create_before_call(1);
     let interrupted = authorized
+        .circles()
+        .close()
         .finalize_ready_circle_epoch_closes(
             "2026-07-24T03:00:00Z",
             &fixture.store_dir,
@@ -3540,6 +3548,8 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .await
         .expect("authorize Circle close response");
     authorized
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -3642,6 +3652,8 @@ async fn close_status_reports_a_response_and_an_exclusion() {
         .authorize_writer()
         .await
         .expect("authorize Circle close response")
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4220,6 +4232,8 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .await
         .expect("member pulls the epoch close");
     member
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("member publishes its close response");
@@ -4231,6 +4245,8 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .authorize_writer()
         .await
         .expect("authorize Owner close response")
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4532,6 +4548,8 @@ async fn silent_publish_response(fixture: &SilentParticipantClose) {
         .await
         .expect("silent participant pulls the epoch close");
     writer
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("silent participant publishes its close response");
@@ -4595,6 +4613,8 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
         .authorize_writer()
         .await
         .expect("authorize Owner Store")
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4649,6 +4669,8 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .authorize_writer()
         .await
         .expect("authorize Owner Store")
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4719,6 +4741,8 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         .await
         .expect("authorize Owner Store");
     owner
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4741,6 +4765,8 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         .clone()
         .expect("close retains its signed intent");
     let settlements = owner
+        .circles()
+        .close()
         .load_complete_circle_epoch_close_responses(&close_control)
         .await
         .expect("read close settlements")
@@ -4855,6 +4881,7 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
     )
     .await
     .expect("load Store for cancellation")
+    .circles()
     .cancel_circle_epoch_close(circle_id)
     .await
     .expect_err("cancelling a deleted Circle's close is refused");

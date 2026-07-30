@@ -147,12 +147,14 @@ async fn fork(fixture: &ConflictFixture) -> (CircleControlCoord, CircleControlCo
     fixture
         .store1()
         .await
+        .circles()
         .rename_circle("0000000001200-0000-device1", fixture.circle_id, "Alpha")
         .await
         .expect("device 1 authors a control successor");
     fixture
         .store2()
         .await
+        .circles()
         .rename_circle("0000000001200-0000-device2", fixture.circle_id, "Beta")
         .await
         .expect("device 2 authors a concurrent control successor");
@@ -190,6 +192,7 @@ async fn concurrent_successors_retain_and_surface_as_a_conflict() {
     let rename = fixture
         .store1()
         .await
+        .circles()
         .rename_circle("0000000001300-0000-device1", fixture.circle_id, "Gamma")
         .await;
     assert!(rename.is_err(), "conflicted Circle refuses authoring");
@@ -215,6 +218,7 @@ async fn resolution_collapses_the_conflict_on_every_device() {
     fixture
         .store1()
         .await
+        .circles()
         .resolve_circle_control(fixture.circle_id, chosen.clone())
         .await
         .expect("resolve the control conflict");
@@ -229,6 +233,7 @@ async fn resolution_collapses_the_conflict_on_every_device() {
     fixture
         .store1()
         .await
+        .circles()
         .rename_circle("0000000001400-0000-device1", fixture.circle_id, "Resumed")
         .await
         .expect("authoring resumes after resolution");
@@ -256,6 +261,7 @@ async fn resolving_to_another_devices_branch_merges_head_frontiers() {
     fixture
         .store1()
         .await
+        .circles()
         .resolve_circle_control(fixture.circle_id, device2_branch.clone())
         .await
         .expect("resolve the control conflict to device 2's branch");
@@ -278,6 +284,7 @@ async fn resolving_to_another_devices_branch_merges_head_frontiers() {
     fixture
         .store1()
         .await
+        .circles()
         .rename_circle("0000000001500-0000-device1", fixture.circle_id, "Gamma")
         .await
         .expect("device 1 authoring resumes without a metadata head-slot collision");
@@ -303,6 +310,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     let refused = fixture
         .store1()
         .await
+        .circles()
         .delete_circle(fixture.circle_id)
         .await
         .expect_err("deleting a conflicted Circle is refused");
@@ -315,6 +323,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     fixture
         .store1()
         .await
+        .circles()
         .resolve_circle_control(fixture.circle_id, chosen.clone())
         .await
         .expect("resolve the control conflict");
@@ -323,6 +332,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     fixture
         .store1()
         .await
+        .circles()
         .delete_circle(fixture.circle_id)
         .await
         .expect("delete the resolved Circle");
@@ -336,6 +346,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     let already = fixture
         .store1()
         .await
+        .circles()
         .delete_circle(fixture.circle_id)
         .await
         .expect_err("deleting an already-deleted Circle is refused");
@@ -444,6 +455,7 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
     fixture
         .store1()
         .await
+        .circles()
         .resolve_circle_control(fixture.circle_id, chosen.clone())
         .await
         .expect("resolving the complete current set succeeds");
@@ -460,6 +472,7 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
     fixture
         .store2()
         .await
+        .circles()
         .rename_circle("0000000001700-0000-device2", fixture.circle_id, "Delta")
         .await
         .expect("device 2 authors a late concurrent successor");
@@ -603,6 +616,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     )
     .await
     .expect("load device 1 Store")
+    .circles()
     .remove_circle_member(circle_id, member_pubkey.clone())
     .await
     .expect("device 1 authors an epoch close");
@@ -613,6 +627,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     )
     .await
     .expect("load device 2 Store")
+    .circles()
     .remove_circle_member(circle_id, member_pubkey)
     .await
     .expect("device 2 authors a concurrent epoch close");
@@ -665,6 +680,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     )
     .await
     .expect("load device 1 Store")
+    .circles()
     .resolve_circle_control(circle_id, closing[0].clone())
     .await
     .expect_err("resolving to the closing branch is refused");
@@ -685,6 +701,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     )
     .await
     .expect("load device 1 Store")
+    .circles()
     .cancel_circle_epoch_close(circle_id)
     .await
     .expect("cancel device 1's close while conflicted");
@@ -723,6 +740,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     )
     .await
     .expect("load device 1 Store")
+    .circles()
     .resolve_circle_control(circle_id, reopened)
     .await
     .expect("resolve to the reopened branch");
@@ -752,6 +770,7 @@ async fn resolving_a_nonconflicted_circle_is_refused() {
     let error = fixture
         .store1()
         .await
+        .circles()
         .resolve_circle_control(fixture.circle_id, chosen.control.coord.clone())
         .await
         .expect_err("resolving an unconflicted Circle is refused");
@@ -831,6 +850,7 @@ async fn non_owner_resolution_is_refused() {
     )
     .await
     .expect("load non-owner Store")
+    .circles()
     .resolve_circle_control(fixture.circle_id, chosen)
     .await
     .expect_err("a non-owner cannot resolve the conflict");

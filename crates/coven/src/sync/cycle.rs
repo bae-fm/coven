@@ -416,6 +416,8 @@ async fn run_single_sync_cycle_with_authorization(
     .await?;
     if completed.rotation_pending.is_none() {
         authorization
+            .circles()
+            .close()
             .publish_circle_epoch_close_responses()
             .await
             .map_err(|error| {
@@ -423,6 +425,8 @@ async fn run_single_sync_cycle_with_authorization(
             })?;
         if let Some(routing_encryption) = routing_encryption {
             authorization
+                .circles()
+                .close()
                 .finalize_ready_circle_epoch_closes(
                     &completed.sync_time,
                     store_dir,
@@ -951,6 +955,7 @@ impl SyncComponents {
         name: &str,
     ) -> Result<crate::protocol::circle::CircleId, super::store::CircleOperationError> {
         self.store
+            .circles()
             .create_circle(&self.hlc.now().to_string(), name)
             .await
     }
@@ -961,6 +966,7 @@ impl SyncComponents {
         name: &str,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
+            .circles()
             .rename_circle(&self.hlc.now().to_string(), circle_id, name)
             .await
     }
@@ -970,14 +976,17 @@ impl SyncComponents {
         circle_id: crate::protocol::circle::CircleId,
         chosen: crate::protocol::circle::CircleControlCoord,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store.resolve_circle_control(circle_id, chosen).await
+        self.store
+            .circles()
+            .resolve_circle_control(circle_id, chosen)
+            .await
     }
 
     pub(crate) async fn delete_circle(
         &self,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store.delete_circle(circle_id).await
+        self.store.circles().delete_circle(circle_id).await
     }
 
     pub(crate) async fn add_circle_member(
@@ -1016,6 +1025,7 @@ impl SyncComponents {
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authorization
+            .circles()
             .add_circle_member(circle_id, member_pubkey, role, bootstrap, &routing_key)
             .await
     }
@@ -1027,6 +1037,7 @@ impl SyncComponents {
     ) -> Result<crate::protocol::circle::CircleOperationId, super::store::CircleOperationError>
     {
         self.store
+            .circles()
             .remove_circle_member(circle_id, member_pubkey)
             .await
     }
@@ -1036,7 +1047,10 @@ impl SyncComponents {
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, super::store::CircleOperationError>
     {
-        self.store.cancel_circle_epoch_close(circle_id).await
+        self.store
+            .circles()
+            .cancel_circle_epoch_close(circle_id)
+            .await
     }
 
     pub(crate) async fn exclude_circle_close_device(
@@ -1045,6 +1059,7 @@ impl SyncComponents {
         excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
+            .circles()
             .exclude_circle_close_device(circle_id, excluded_device_id)
             .await
     }
@@ -1054,6 +1069,7 @@ impl SyncComponents {
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
+            .circles()
             .retry_circle_operation(operation_id, self.routing_encryption.as_ref())
             .await
     }
@@ -1062,7 +1078,10 @@ impl SyncComponents {
         &self,
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), super::store::CircleOperationError> {
-        self.store.discard_circle_operation(operation_id).await
+        self.store
+            .circles()
+            .discard_circle_operation(operation_id)
+            .await
     }
 
     pub(crate) async fn circle_close_status(
@@ -1070,7 +1089,7 @@ impl SyncComponents {
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<crate::protocol::circle::CircleCloseStatus, super::store::CircleOperationError>
     {
-        self.store.circle_close_status(circle_id).await
+        self.store.circles().circle_close_status(circle_id).await
     }
 
     pub(crate) async fn run_cycle(

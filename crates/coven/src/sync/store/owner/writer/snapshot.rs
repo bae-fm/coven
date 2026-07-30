@@ -1607,17 +1607,16 @@ async fn resolve_restorer_circle_access(
                  activation"
             ))
         })?;
-    super::super::circles::activation::resolve_local_circle_access(
-        history_verifier,
-        query_db,
-        &commit,
-        &reference.reference,
-        &reference.control,
-        restorer_identity,
-        routing_key,
-    )
-    .await
-    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
+    super::super::circles::VerifiedCircleHistory::new(query_db, history_verifier)
+        .resolve_local_access(
+            &commit,
+            &reference.reference,
+            &reference.control,
+            restorer_identity,
+            routing_key,
+        )
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
 }
 
 /// The maximal standalone Circle snapshot across the activated devices whose

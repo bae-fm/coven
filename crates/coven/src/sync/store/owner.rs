@@ -4,7 +4,6 @@ use crate::protocol::store_commit::StoreRootRef;
 
 mod acknowledgements;
 mod circle_bootstrap;
-mod circle_operation;
 mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;
@@ -20,6 +19,7 @@ mod verification;
 mod verified_history;
 pub(super) mod writer;
 
+pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 use history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use host_write::HostWriteBlobStaging;
 pub(crate) use registration::StoreRegistrationError;
@@ -98,6 +98,10 @@ impl BlobDownload {
 }
 
 impl Store {
+    pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {
+        StoreCircleCommands::new(self)
+    }
+
     #[doc(hidden)]
     pub(crate) fn host_write_blob_staging(
         self: &Arc<Self>,
@@ -1435,14 +1439,10 @@ impl Store {
         let mut history = self.authorize_history().await.map_err(|error| {
             crate::sync::store::CircleOperationError::InvalidState(error.to_string())
         })?;
-        circles::activation::load_circle_activations(
-            &self.database,
-            history.history_verifier_mut(),
-            &verified,
-            &self.identity,
-            routing_key,
-        )
-        .await
+        history
+            .circles()
+            .load_activations(&verified, &self.identity, routing_key)
+            .await
     }
 
     #[cfg(test)]
@@ -1452,20 +1452,16 @@ impl Store {
         activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
         author: &crate::protocol::store_commit::StoreDeviceRegistration,
         local_store_membership: pull::LocalStoreMembership,
-    ) -> Result<Vec<pull::LoadedCirclePackage>, pull::PullCircleActivationError> {
+    ) -> Result<Vec<pull::LoadedCirclePackage>, circles::CirclePackageReadError> {
         let mut history = self
             .authorize_history()
             .await
-            .map_err(|error| pull::PullCircleActivationError::Invalid(error.to_string()))?;
-        pull::load_applicable_circle_packages(
-            &self.database,
-            history.history_verifier_mut(),
-            verified,
-            activations,
-            author,
-            local_store_membership,
-        )
-        .await
+            .map_err(|error| circles::CirclePackageReadError::Invalid(error.to_string()))?;
+        history
+            .circles()
+            .packages()
+            .load_applicable(verified, activations, author, local_store_membership)
+            .await
     }
 
     #[cfg(test)]
@@ -1526,7 +1522,9 @@ impl Store {
         self.authorize_writer()
             .await
             .map_err(|error| writer::StoreAckError::InvalidOutbound(error.to_string()))?
-            .stage_circle_acknowledgements(frontier, sync_time)
+            .circles()
+            .acknowledgements()
+            .stage(frontier, sync_time)
             .await
     }
 

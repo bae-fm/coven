@@ -17,13 +17,11 @@ use crate::sync::store::circle_controls::{
 };
 use std::collections::BTreeSet;
 
-use super::circles::activation::load_circle_activations;
-
-pub(super) struct AuthorizedCircleOperation<'operation, 'storage> {
+pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     store: &'operation mut super::AuthorizedStore<'storage>,
 }
 
-impl<'operation, 'storage> AuthorizedCircleOperation<'operation, 'storage> {
+impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(store: &'operation mut super::AuthorizedStore<'storage>) -> Self {
         Self { store }
     }
@@ -502,14 +500,9 @@ impl<'operation, 'storage> AuthorizedCircleOperation<'operation, 'storage> {
             )
             .await?;
         }
-        let verified = load_circle_activations(
-            database,
-            history_verifier,
-            &verified_commit,
-            identity,
-            routing_key,
-        )
-        .await?;
+        let verified = super::VerifiedCircleHistory::new(database, history_verifier)
+            .load_activations(&verified_commit, identity, routing_key)
+            .await?;
         let expected =
             expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;
         if verified.circles() != std::slice::from_ref(&expected) {

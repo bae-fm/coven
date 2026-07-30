@@ -11,6 +11,12 @@ pub(super) struct AuthorizedStoreHistory<'storage> {
     pub(super) history_verifier: MergeHistoryVerifier<'storage>,
 }
 
+impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(super) fn circles(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {
+        super::circles::VerifiedCircleHistory::new(&self.database, &mut self.history_verifier)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct HistoryConstructionAuthority(());
 

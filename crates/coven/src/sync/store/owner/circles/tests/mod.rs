@@ -48,6 +48,8 @@ async fn publish_circle_epoch_close_response(
         .authorize_writer()
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        .circles()
+        .close()
         .publish_circle_epoch_close_responses()
         .await
 }
@@ -80,7 +82,22 @@ async fn prepare_circle_operation(
         .authorize_writer()
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    super::prepare_circle_operation(&mut authority, metadata_stamp, name).await
+    authority
+        .circles()
+        .preparer()
+        .prepare_create(metadata_stamp, name)
+        .await
+}
+
+async fn prepare_circle_operation_request(
+    authority: &mut AuthorizedWriterOperation<'_>,
+    request: CircleOperationRequest,
+) -> Result<CircleOperationJournal, CircleOperationError> {
+    authority
+        .circles()
+        .preparer()
+        .prepare_request(request)
+        .await
 }
 
 async fn publish_circle_operation(
@@ -102,7 +119,8 @@ async fn publish_circle_operation(
     )
     .expect("derive Circle test routing key");
     authority
-        .circle_operation()
+        .circles()
+        .publisher()
         .publish(operation_id, Some(&routing_key))
         .await
 }
@@ -124,6 +142,7 @@ async fn resume_circle_operations(
         .authorize_writer()
         .await
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+        .circles()
         .resume_circle_operations(Some(&routing_key))
         .await
 }
@@ -136,6 +155,7 @@ async fn retry_circle_operation(
 ) -> Result<(), CircleOperationError> {
     crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
+        .circles()
         .retry_circle_operation(
             operation_id,
             Some(&crate::encryption::EncryptionService::from_key([42; 32])),
@@ -151,6 +171,7 @@ async fn discard_circle_operation(
 ) -> Result<(), CircleOperationError> {
     crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
+        .circles()
         .discard_circle_operation(operation_id)
         .await
 }
@@ -187,6 +208,7 @@ async fn rename_circle(
 ) -> Result<(), CircleOperationError> {
     crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
+        .circles()
         .rename_circle(metadata_stamp, circle_id, name)
         .await
 }
@@ -199,6 +221,7 @@ async fn delete_circle(
 ) -> Result<(), CircleOperationError> {
     crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
         .await?
+        .circles()
         .delete_circle(circle_id)
         .await
 }

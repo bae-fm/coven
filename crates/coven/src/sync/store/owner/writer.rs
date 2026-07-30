@@ -566,10 +566,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(result)
     }
 
-    pub(super) fn circle_operation(
-        &mut self,
-    ) -> super::circle_operation::AuthorizedCircleOperation<'_, 'storage> {
-        super::circle_operation::AuthorizedCircleOperation::new(&mut self.store)
+    pub(crate) fn circles(&mut self) -> super::AuthorizedCircleWriter<'_, 'storage> {
+        super::AuthorizedCircleWriter::new(self)
     }
 
     pub(super) fn circle_bootstrap_verifier(
@@ -1396,7 +1394,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(|error| {
                 SyncCycleFailure::operation("derive Circle operation routing key", error)
             })?;
-        self.resume_circle_operations(routing_key.as_ref())
+        self.circles()
+            .resume_circle_operations(routing_key.as_ref())
             .await
             .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }

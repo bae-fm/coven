@@ -38,6 +38,23 @@ use crate::sync::store::circle_controls::activation::{
 use metadata::load_circle_metadata_state;
 use roster::{load_circle_authority_roster, load_circle_roster_chain, load_circle_roster_state};
 
+pub(crate) struct VerifiedCircleHistory<'operation, 'storage> {
+    database: &'operation StoreDatabase,
+    history:
+        &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+}
+
+impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+    pub(crate) fn new(
+        database: &'operation StoreDatabase,
+        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+    ) -> Self {
+        Self { database, history }
+    }
+}
+
 /// The verified epoch-close settlement a successor activation carries: the exact
 /// close it finalizes and the device registrations the Owner excluded. Derived
 /// only from the verified outcome, never from unverified storage.
@@ -117,38 +134,40 @@ fn verify_loaded_control_membership(
     Ok(chain.current_members())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn load_circle_control_roster_chain(
-    database: &StoreDatabase,
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    verified: &VerifiedStoreBatchCommit,
-    reference: &crate::protocol::store_commit::CircleControlRef,
-    control: &PreparedCircleControl,
-    keyring: &str,
-) -> Result<crate::protocol::circle::CircleRosterChain, CircleOperationError> {
-    verify_control_context_for_verified_commit(reference, control, verified)?;
-    let commit_ref = verified.reference();
-    let commit = verified.value();
-    let encryption =
-        EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "parse Circle authoring access keyring: {error}"
-            ))
-        })?);
-    let mut consumed_stream_activations = BTreeSet::new();
-    load_circle_roster_chain(
-        database,
-        history_verifier,
-        &VerifiedStreamActivationPrefix::empty(),
-        commit_ref,
-        commit,
-        reference.circle_id(),
-        &control.value.state().access_epoch().roster,
-        encryption,
-        reference.objects(),
-        &mut consumed_stream_activations,
-    )
-    .await
+impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+    pub(crate) async fn load_control_roster_chain(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        reference: &crate::protocol::store_commit::CircleControlRef,
+        control: &PreparedCircleControl,
+        keyring: &str,
+    ) -> Result<crate::protocol::circle::CircleRosterChain, CircleOperationError> {
+        let database = self.database;
+        let history_verifier = &mut *self.history;
+        verify_control_context_for_verified_commit(reference, control, verified)?;
+        let commit_ref = verified.reference();
+        let commit = verified.value();
+        let encryption =
+            EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "parse Circle authoring access keyring: {error}"
+                ))
+            })?);
+        let mut consumed_stream_activations = BTreeSet::new();
+        load_circle_roster_chain(
+            database,
+            history_verifier,
+            &VerifiedStreamActivationPrefix::empty(),
+            commit_ref,
+            commit,
+            reference.circle_id(),
+            &control.value.state().access_epoch().roster,
+            encryption,
+            reference.objects(),
+            &mut consumed_stream_activations,
+        )
+        .await
+    }
 }
 
 async fn load_verified_access_pairs(
@@ -1437,525 +1456,560 @@ pub(crate) enum LocalCircleAccess {
 /// when the leaf names a bootstrap — downloading and verifying that image. Used by
 /// snapshot-restore selection to decide, per Circle, whether the restoring
 /// identity can decrypt it and what baseline image it can stage.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn resolve_local_circle_access(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    database: &StoreDatabase,
-    commit: &StoreBatchCommit,
-    reference: &crate::protocol::store_commit::CircleControlRef,
-    control: &PreparedCircleControl,
-    identity: &UserKeypair,
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-) -> Result<LocalCircleAccess, CircleOperationError> {
-    let root = history_verifier.root().clone();
-    let storage = history_verifier.storage();
-    let verified_access = load_verified_access_pairs(
-        storage,
-        commit,
-        reference.circle_id(),
-        control,
-        reference.objects(),
-    )
-    .await?;
-    let checkpoint_members = Box::pin(verify_control_membership(history_verifier, control)).await?;
-    let Some(resolved) = resolve_identity_access_leaf(
-        &verified_access,
-        checkpoint_members.as_slice(),
-        reference,
-        control,
-        commit,
-        identity,
-    )?
-    else {
-        return Ok(LocalCircleAccess::NoAccess);
-    };
-    let CircleAccessDisposition::Active {
-        keyring, bootstrap, ..
-    } = &resolved.prepared_leaf.value.disposition
-    else {
-        return Ok(LocalCircleAccess::NoAccess);
-    };
-    let epoch_encryption =
-        EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
-            CircleOperationError::InvalidState(format!("parse circle access keyring: {error}"))
-        })?);
-    let leaf_bootstrap = match bootstrap {
-        Some(bootstrap) => Some(
-            build_verified_leaf_bootstrap_image(
-                database,
-                storage,
-                &root,
-                &resolved.prepared_leaf.value,
-                control,
-                bootstrap,
-                epoch_encryption.clone(),
-                routing_key,
-            )
-            .await?,
-        ),
-        None => None,
-    };
-    Ok(LocalCircleAccess::Active {
-        epoch_encryption,
-        leaf_bootstrap,
-    })
-}
-
-pub(crate) async fn load_circle_activations(
-    database: &StoreDatabase,
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    verified: &VerifiedStoreBatchCommit,
-    identity: &UserKeypair,
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-) -> Result<VerifiedCircleActivations, CircleOperationError> {
-    let commit = verified.value();
-    history_verifier
-        .verify_refs(crate::sync::store::owner::pull::commit_predecessor_references(commit))
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let verified_membership_prefix =
-        crate::sync::store::owner::verified_history::verified_merge_membership_prefix(
-            &history_verifier.history().commits,
-            crate::sync::store::owner::pull::commit_predecessor_references(commit),
-        )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let verified_prefix = VerifiedStreamActivationPrefix::empty();
-    Box::pin(load_circle_activations_with_prefix(
-        database,
-        history_verifier,
-        verified,
-        Some(identity),
-        routing_key,
-        &verified_prefix,
-        &verified_membership_prefix,
-    ))
-    .await
-}
-
-pub(crate) async fn load_circle_activations_with_prefix(
-    database: &StoreDatabase,
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    verified: &VerifiedStoreBatchCommit,
-    identity: Option<&UserKeypair>,
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-    verified_prefix: &VerifiedStreamActivationPrefix,
-    verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
-) -> Result<VerifiedCircleActivations, CircleOperationError> {
-    let root = history_verifier.root().clone();
-    let storage = history_verifier.storage();
-    let commit_ref = verified.reference();
-    let commit = verified.value();
-    let author = verified.author();
-    if history_verifier.root().store_root_hash != commit.store_root_hash
-        || commit
-            .author_registration
-            .verify_registration(author)
-            .is_err()
-    {
-        return Err(CircleOperationError::InvalidState(
-            "Circle activation authority differs from its exact Store commit".to_string(),
-        ));
-    }
-    let mut activations = Vec::with_capacity(commit.circle_controls().len());
-    let mut bootstraps = Vec::new();
-    let mut local_exclusions = Vec::new();
-    let mut bootstrap_pending_exclusions = Vec::new();
-    let local_device_id = match identity {
-        Some(_) => {
-            database
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-                .await?
-        }
-        None => None,
-    };
-    let mut consumed_stream_activations = BTreeSet::new();
-    for reference in commit.circle_controls() {
-        let objects = reference.objects();
-        let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
-            circle_id: reference.circle_id(),
-            control: reference.control(),
-        });
-        let control_bytes = read_exact_circle_object(
+impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+    pub(crate) async fn resolve_local_access(
+        &mut self,
+        commit: &StoreBatchCommit,
+        reference: &crate::protocol::store_commit::CircleControlRef,
+        control: &PreparedCircleControl,
+        identity: &UserKeypair,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    ) -> Result<LocalCircleAccess, CircleOperationError> {
+        let database = self.database;
+        let history_verifier = &mut *self.history;
+        let root = history_verifier.root().clone();
+        let storage = history_verifier.storage();
+        let verified_access = load_verified_access_pairs(
             storage,
-            &ProtocolObjectContext::store_encrypted(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            &objects.control,
-            &control_prefix,
-        )
-        .await?;
-        if ObjectHash::digest(&control_bytes) != reference.control().control_hash() {
-            return Err(CircleOperationError::InvalidState(
-                "Circle control bytes differ from the signed control hash".to_string(),
-            ));
-        }
-        let control_value: CircleControl =
-            serde_json::from_slice(&control_bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!("parse Circle control: {error}"))
-            })?;
-        let declared_coord = control_value.coord();
-        if !control_value.verify()
-            || verify_circle_semantic_prefix(
-                &control_prefix,
-                CircleSemanticSlot::Control {
-                    circle_id: control_value.circle_id,
-                    control: &declared_coord,
-                },
-            )
-            .is_err()
-        {
-            return Err(CircleOperationError::InvalidState(
-                "Circle control failed exact verification".to_string(),
-            ));
-        }
-        let control = PreparedCircleControl {
-            coord: reference.control().clone(),
-            bytes: control_bytes,
-            value: control_value,
-        };
-        let circle_id = reference.circle_id;
-        let head_hash = reference.head_hash;
-        let control_coord = &reference.control;
-        let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
-            circle_id,
-            control: control_coord,
-        });
-        let head_object = reference.head_object();
-        let bytes = read_exact_circle_object(
-            storage,
-            &ProtocolObjectContext::store_encrypted(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            head_object,
-            &prefix,
-        )
-        .await?;
-        let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse exact Circle control head: {error}"
-                ))
-            })?;
-        let CircleControlCoord {
-            stream_id,
-            author_pubkey,
-            author_owner_grant,
-            seq,
-            ..
-        } = &head.control;
-        let authority = resolve_circle_stream_authority(
-            database,
-            history_verifier,
-            verified_prefix,
-            commit_ref,
             commit,
-            head.successor.activation,
-            *stream_id,
-            circle_id,
-            author_owner_grant,
-            |circle_id, first_slot| GrantStreamAnchor::CircleControl {
-                circle_id,
-                first_slot,
-            },
-        )
-        .await?;
-        verify_circle_head_chain(
-            storage,
-            &ProtocolObjectContext::store_encrypted(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleControl,
-            ),
-            CircleHeadKind::Control,
-            CircleHeadValue::Control(head.clone()),
-            head_object.clone(),
-            &authority,
-        )
-        .await?;
-        if !head.verify(author)
-            || !head.verify(&authority.registration)
-            || authority.registration.author_pubkey != *author_pubkey
-            || (authority.activated_here && *seq != 1)
-            || head.successor.activation != authority.activation_id
-            || (*seq == 1
-                && (head.successor.predecessor.is_some()
-                    || head_object.slot() != &authority.first_slot))
-            || head.head_hash() != head_hash
-            || head.entry != objects.control
-            || verify_circle_semantic_prefix(
-                &prefix,
-                CircleSemanticSlot::ControlHead {
-                    circle_id: head.circle_id,
-                    control: &head.control,
-                },
-            )
-            .is_err()
-            || head.store_root_hash != commit.store_root_hash
-            || head.circle_id != circle_id
-        {
-            return Err(CircleOperationError::InvalidState(
-                "Circle control head failed exact verification".to_string(),
-            ));
-        }
-        if authority.activated_here {
-            consumed_stream_activations.insert(authority.activation_id);
-        }
-        verify_covered_control_heads(
-            database,
-            history_verifier,
-            verified_prefix,
-            commit_ref,
-            commit,
-            &control.value,
-        )
-        .await?;
-        verify_control_context_for_verified_commit(reference, &control, verified)?;
-        consume_public_private_stream_activations(
-            commit,
-            author,
             reference.circle_id(),
-            &control,
-            objects,
-            &mut consumed_stream_activations,
-        )?;
-        let verified_access =
-            load_verified_access_pairs(storage, commit, reference.circle_id(), &control, objects)
-                .await?;
-        let checkpoint_members = Box::pin(verify_control_membership_with_verified_activations(
-            history_verifier,
-            &control,
-            verified_membership_prefix,
-        ))
+            control,
+            reference.objects(),
+        )
         .await?;
-        if control.value.state().is_deleted() {
-            // A deletion carries no access material. It activates to the
-            // terminal Deleted state with no local access; materialization
-            // prunes the Circle's rows and caches from the winning chain.
-            activations.push(VerifiedCircleReference {
-                reference: reference.clone(),
-                circle_id: reference.circle_id(),
-                control,
-                local_access: None,
-            });
-            continue;
-        }
-        let Some(identity) = identity else {
-            activations.push(VerifiedCircleReference {
-                reference: reference.clone(),
-                circle_id: reference.circle_id(),
-                control,
-                local_access: None,
-            });
-            continue;
-        };
+        let checkpoint_members =
+            Box::pin(verify_control_membership(history_verifier, control)).await?;
         let Some(resolved) = resolve_identity_access_leaf(
             &verified_access,
-            &checkpoint_members,
+            checkpoint_members.as_slice(),
             reference,
-            &control,
+            control,
             commit,
             identity,
         )?
         else {
+            return Ok(LocalCircleAccess::NoAccess);
+        };
+        let CircleAccessDisposition::Active {
+            keyring, bootstrap, ..
+        } = &resolved.prepared_leaf.value.disposition
+        else {
+            return Ok(LocalCircleAccess::NoAccess);
+        };
+        let epoch_encryption =
+            EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
+                CircleOperationError::InvalidState(format!("parse circle access keyring: {error}"))
+            })?);
+        let leaf_bootstrap = match bootstrap {
+            Some(bootstrap) => Some(
+                build_verified_leaf_bootstrap_image(
+                    database,
+                    storage,
+                    &root,
+                    &resolved.prepared_leaf.value,
+                    control,
+                    bootstrap,
+                    epoch_encryption.clone(),
+                    routing_key,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        Ok(LocalCircleAccess::Active {
+            epoch_encryption,
+            leaf_bootstrap,
+        })
+    }
+}
+
+impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
+    pub(crate) async fn load_payload_activations(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        identity: Option<&UserKeypair>,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        verified_prefix: &VerifiedStreamActivationPrefix,
+        verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    ) -> Result<VerifiedCircleActivations, CircleOperationError> {
+        let commit = verified.value();
+        if commit.circle_controls().is_empty() && commit.stream_activations().is_empty() {
+            return VerifiedCircleActivations::none(commit, verified.reference())
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()));
+        }
+        self.load_activations_with_prefix(
+            verified,
+            identity,
+            routing_key,
+            verified_prefix,
+            verified_membership_prefix,
+        )
+        .await
+    }
+
+    pub(crate) fn packages(&mut self) -> super::packages::CirclePackageReader<'_, 'storage> {
+        super::packages::CirclePackageReader::new(self.database, self.history)
+    }
+
+    pub(crate) async fn load_activations(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        identity: &UserKeypair,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    ) -> Result<VerifiedCircleActivations, CircleOperationError> {
+        let history_verifier = &mut *self.history;
+        let commit = verified.value();
+        history_verifier
+            .verify_refs(crate::sync::store::owner::pull::commit_predecessor_references(commit))
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let verified_membership_prefix =
+            crate::sync::store::owner::verified_history::verified_merge_membership_prefix(
+                &history_verifier.history().commits,
+                crate::sync::store::owner::pull::commit_predecessor_references(commit),
+            )
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let verified_prefix = VerifiedStreamActivationPrefix::empty();
+        Box::pin(self.load_activations_with_prefix(
+            verified,
+            Some(identity),
+            routing_key,
+            &verified_prefix,
+            &verified_membership_prefix,
+        ))
+        .await
+    }
+
+    pub(super) async fn load_activations_with_prefix(
+        &mut self,
+        verified: &VerifiedStoreBatchCommit,
+        identity: Option<&UserKeypair>,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        verified_prefix: &VerifiedStreamActivationPrefix,
+        verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    ) -> Result<VerifiedCircleActivations, CircleOperationError> {
+        let database = self.database;
+        let history_verifier = &mut *self.history;
+        let root = history_verifier.root().clone();
+        let storage = history_verifier.storage();
+        let commit_ref = verified.reference();
+        let commit = verified.value();
+        let author = verified.author();
+        if history_verifier.root().store_root_hash != commit.store_root_hash
+            || commit
+                .author_registration
+                .verify_registration(author)
+                .is_err()
+        {
+            return Err(CircleOperationError::InvalidState(
+                "Circle activation authority differs from its exact Store commit".to_string(),
+            ));
+        }
+        let mut activations = Vec::with_capacity(commit.circle_controls().len());
+        let mut bootstraps = Vec::new();
+        let mut local_exclusions = Vec::new();
+        let mut bootstrap_pending_exclusions = Vec::new();
+        let local_device_id = match identity {
+            Some(_) => {
+                database
+                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                    .await?
+            }
+            None => None,
+        };
+        let mut consumed_stream_activations = BTreeSet::new();
+        for reference in commit.circle_controls() {
+            let objects = reference.objects();
+            let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
+                circle_id: reference.circle_id(),
+                control: reference.control(),
+            });
+            let control_bytes = read_exact_circle_object(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::CircleControl,
+                ),
+                &objects.control,
+                &control_prefix,
+            )
+            .await?;
+            if ObjectHash::digest(&control_bytes) != reference.control().control_hash() {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle control bytes differ from the signed control hash".to_string(),
+                ));
+            }
+            let control_value: CircleControl =
+                serde_json::from_slice(&control_bytes).map_err(|error| {
+                    CircleOperationError::InvalidState(format!("parse Circle control: {error}"))
+                })?;
+            let declared_coord = control_value.coord();
+            if !control_value.verify()
+                || verify_circle_semantic_prefix(
+                    &control_prefix,
+                    CircleSemanticSlot::Control {
+                        circle_id: control_value.circle_id,
+                        control: &declared_coord,
+                    },
+                )
+                .is_err()
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle control failed exact verification".to_string(),
+                ));
+            }
+            let control = PreparedCircleControl {
+                coord: reference.control().clone(),
+                bytes: control_bytes,
+                value: control_value,
+            };
+            let circle_id = reference.circle_id;
+            let head_hash = reference.head_hash;
+            let control_coord = &reference.control;
+            let prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
+                circle_id,
+                control: control_coord,
+            });
+            let head_object = reference.head_object();
+            let bytes = read_exact_circle_object(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::CircleControl,
+                ),
+                head_object,
+                &prefix,
+            )
+            .await?;
+            let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
+                .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "parse exact Circle control head: {error}"
+                ))
+            })?;
+            let CircleControlCoord {
+                stream_id,
+                author_pubkey,
+                author_owner_grant,
+                seq,
+                ..
+            } = &head.control;
+            let authority = resolve_circle_stream_authority(
+                database,
+                history_verifier,
+                verified_prefix,
+                commit_ref,
+                commit,
+                head.successor.activation,
+                *stream_id,
+                circle_id,
+                author_owner_grant,
+                |circle_id, first_slot| GrantStreamAnchor::CircleControl {
+                    circle_id,
+                    first_slot,
+                },
+            )
+            .await?;
+            verify_circle_head_chain(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::CircleControl,
+                ),
+                CircleHeadKind::Control,
+                CircleHeadValue::Control(head.clone()),
+                head_object.clone(),
+                &authority,
+            )
+            .await?;
+            if !head.verify(author)
+                || !head.verify(&authority.registration)
+                || authority.registration.author_pubkey != *author_pubkey
+                || (authority.activated_here && *seq != 1)
+                || head.successor.activation != authority.activation_id
+                || (*seq == 1
+                    && (head.successor.predecessor.is_some()
+                        || head_object.slot() != &authority.first_slot))
+                || head.head_hash() != head_hash
+                || head.entry != objects.control
+                || verify_circle_semantic_prefix(
+                    &prefix,
+                    CircleSemanticSlot::ControlHead {
+                        circle_id: head.circle_id,
+                        control: &head.control,
+                    },
+                )
+                .is_err()
+                || head.store_root_hash != commit.store_root_hash
+                || head.circle_id != circle_id
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle control head failed exact verification".to_string(),
+                ));
+            }
+            if authority.activated_here {
+                consumed_stream_activations.insert(authority.activation_id);
+            }
+            verify_covered_control_heads(
+                database,
+                history_verifier,
+                verified_prefix,
+                commit_ref,
+                commit,
+                &control.value,
+            )
+            .await?;
+            verify_control_context_for_verified_commit(reference, &control, verified)?;
+            consume_public_private_stream_activations(
+                commit,
+                author,
+                reference.circle_id(),
+                &control,
+                objects,
+                &mut consumed_stream_activations,
+            )?;
+            let verified_access = load_verified_access_pairs(
+                storage,
+                commit,
+                reference.circle_id(),
+                &control,
+                objects,
+            )
+            .await?;
+            let checkpoint_members = Box::pin(verify_control_membership_with_verified_activations(
+                history_verifier,
+                &control,
+                verified_membership_prefix,
+            ))
+            .await?;
+            if control.value.state().is_deleted() {
+                // A deletion carries no access material. It activates to the
+                // terminal Deleted state with no local access; materialization
+                // prunes the Circle's rows and caches from the winning chain.
+                activations.push(VerifiedCircleReference {
+                    reference: reference.clone(),
+                    circle_id: reference.circle_id(),
+                    control,
+                    local_access: None,
+                });
+                continue;
+            }
+            let Some(identity) = identity else {
+                activations.push(VerifiedCircleReference {
+                    reference: reference.clone(),
+                    circle_id: reference.circle_id(),
+                    control,
+                    local_access: None,
+                });
+                continue;
+            };
+            let Some(resolved) = resolve_identity_access_leaf(
+                &verified_access,
+                &checkpoint_members,
+                reference,
+                &control,
+                commit,
+                identity,
+            )?
+            else {
+                activations.push(VerifiedCircleReference {
+                    reference: reference.clone(),
+                    circle_id: reference.circle_id(),
+                    control,
+                    local_access: None,
+                });
+                continue;
+            };
+            let ResolvedIdentityAccess {
+                envelope,
+                prepared_leaf,
+            } = resolved;
+            let leaf = &prepared_leaf.value;
+            let active = match &leaf.disposition {
+                CircleAccessDisposition::Active { keyring, .. } => {
+                    let encryption = EncryptionService::from(
+                        MasterKeyring::from_serialized(keyring).map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "parse circle access keyring: {error}"
+                            ))
+                        })?,
+                    );
+                    let authority_roster = load_circle_authority_roster(
+                        database,
+                        history_verifier,
+                        verified_prefix,
+                        commit,
+                        reference.circle_id(),
+                        &control,
+                        encryption.clone(),
+                        objects,
+                        commit_ref,
+                        &mut consumed_stream_activations,
+                    )
+                    .await?;
+                    if !verify_circle_owner_authority(
+                        &control.value.author_pubkey,
+                        &control.value,
+                        &authority_roster,
+                    ) {
+                        return Err(CircleOperationError::InvalidState(
+                            "circle control author lacks its exact historical Owner grant"
+                                .to_string(),
+                        ));
+                    }
+                    let roster_chain = load_circle_roster_chain(
+                        database,
+                        history_verifier,
+                        verified_prefix,
+                        commit_ref,
+                        commit,
+                        reference.circle_id(),
+                        &control.value.roster_state_ref(),
+                        encryption.clone(),
+                        objects,
+                        &mut consumed_stream_activations,
+                    )
+                    .await?;
+                    let resolved = roster_chain
+                        .try_resolved()
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                    let close_outcome = verify_epoch_close(
+                        database,
+                        storage,
+                        &root,
+                        commit,
+                        &control,
+                        objects,
+                        encryption.clone(),
+                        &roster_chain,
+                    )
+                    .await?;
+                    if let (Some(outcome), Some(local_device_id)) =
+                        (&close_outcome, local_device_id.as_deref())
+                    {
+                        if let Some(excluded) = outcome.exclusions.iter().find(|registration| {
+                            registration.device_id.to_string() == local_device_id
+                        }) {
+                            local_exclusions.push(LocalCircleExclusion {
+                                circle_id: reference.circle_id(),
+                                close_id: outcome.close_id,
+                                excluded: excluded.clone(),
+                                successor_control: control.coord.clone(),
+                                activating_commit: commit_ref.clone(),
+                            });
+                        }
+                    }
+                    let resolved_members = resolved.members();
+                    if !resolved_members.contains_key(&leaf.recipient_pubkey) {
+                        return Err(CircleOperationError::InvalidState(
+                            "circle Active access recipient is absent from its resolved roster"
+                                .to_string(),
+                        ));
+                    }
+                    let roster_owners = resolved_members
+                        .iter()
+                        .filter_map(|(pubkey, role)| {
+                            (*role == crate::protocol::circle::CircleRole::Owner)
+                                .then_some(pubkey.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    if roster_owners != control.value.owners() {
+                        return Err(CircleOperationError::InvalidState(
+                            "circle control Owners differ from its roster".to_string(),
+                        ));
+                    }
+                    let metadata_state = control.value.metadata_state_ref();
+                    let metadata = load_circle_metadata_state(
+                        database,
+                        history_verifier,
+                        verified_prefix,
+                        commit,
+                        reference.circle_id(),
+                        &metadata_state,
+                        encryption.clone(),
+                        objects,
+                        commit_ref,
+                        &mut consumed_stream_activations,
+                    )
+                    .await?;
+                    if let CircleAccessDisposition::Active {
+                        bootstrap: Some(bootstrap),
+                        ..
+                    } = &leaf.disposition
+                    {
+                        // An excluded device that cannot yet read its successor bootstrap
+                        // image defers the reset: flag the exclusion so the pull records
+                        // it (detection is derived from the verified outcome above, not the
+                        // bootstrap) and holds the successor. Its publication stays gated
+                        // until a later pull reads the image and the reseed records
+                        // coverage. The image read is the only source of a `CircleObject`
+                        // error here — verification and blob checks fail as `InvalidState`.
+                        match build_verified_leaf_bootstrap_image(
+                            database,
+                            storage,
+                            &root,
+                            leaf,
+                            &control,
+                            bootstrap,
+                            encryption,
+                            routing_key,
+                        )
+                        .await
+                        {
+                            Ok(image) => bootstraps.push(image),
+                            Err(error @ CircleOperationError::Object(_)) => {
+                                if let Some(exclusion) = local_exclusions
+                                    .iter()
+                                    .find(|exclusion| exclusion.circle_id == reference.circle_id())
+                                {
+                                    bootstrap_pending_exclusions.push(exclusion.clone());
+                                    continue;
+                                }
+                                return Err(error);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Some(VerifiedCircleActive {
+                        roster: resolved,
+                        metadata,
+                    })
+                }
+                CircleAccessDisposition::Inactive => None,
+            };
             activations.push(VerifiedCircleReference {
                 reference: reference.clone(),
                 circle_id: reference.circle_id(),
                 control,
-                local_access: None,
+                local_access: Some(VerifiedCircleAccess {
+                    envelope: envelope.clone(),
+                    leaf: prepared_leaf,
+                    active,
+                }),
             });
-            continue;
-        };
-        let ResolvedIdentityAccess {
-            envelope,
-            prepared_leaf,
-        } = resolved;
-        let leaf = &prepared_leaf.value;
-        let active = match &leaf.disposition {
-            CircleAccessDisposition::Active { keyring, .. } => {
-                let encryption = EncryptionService::from(
-                    MasterKeyring::from_serialized(keyring).map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse circle access keyring: {error}"
-                        ))
-                    })?,
-                );
-                let authority_roster = load_circle_authority_roster(
-                    database,
-                    history_verifier,
-                    verified_prefix,
-                    commit,
-                    reference.circle_id(),
-                    &control,
-                    encryption.clone(),
-                    objects,
-                    commit_ref,
-                    &mut consumed_stream_activations,
-                )
-                .await?;
-                if !verify_circle_owner_authority(
-                    &control.value.author_pubkey,
-                    &control.value,
-                    &authority_roster,
-                ) {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle control author lacks its exact historical Owner grant".to_string(),
-                    ));
-                }
-                let roster_chain = load_circle_roster_chain(
-                    database,
-                    history_verifier,
-                    verified_prefix,
-                    commit_ref,
-                    commit,
-                    reference.circle_id(),
-                    &control.value.roster_state_ref(),
-                    encryption.clone(),
-                    objects,
-                    &mut consumed_stream_activations,
-                )
-                .await?;
-                let resolved = roster_chain
-                    .try_resolved()
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-                let close_outcome = verify_epoch_close(
-                    database,
-                    storage,
-                    &root,
-                    commit,
-                    &control,
-                    objects,
-                    encryption.clone(),
-                    &roster_chain,
-                )
-                .await?;
-                if let (Some(outcome), Some(local_device_id)) =
-                    (&close_outcome, local_device_id.as_deref())
-                {
-                    if let Some(excluded) = outcome
-                        .exclusions
-                        .iter()
-                        .find(|registration| registration.device_id.to_string() == local_device_id)
-                    {
-                        local_exclusions.push(LocalCircleExclusion {
-                            circle_id: reference.circle_id(),
-                            close_id: outcome.close_id,
-                            excluded: excluded.clone(),
-                            successor_control: control.coord.clone(),
-                            activating_commit: commit_ref.clone(),
-                        });
-                    }
-                }
-                let resolved_members = resolved.members();
-                if !resolved_members.contains_key(&leaf.recipient_pubkey) {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle Active access recipient is absent from its resolved roster"
-                            .to_string(),
-                    ));
-                }
-                let roster_owners = resolved_members
-                    .iter()
-                    .filter_map(|(pubkey, role)| {
-                        (*role == crate::protocol::circle::CircleRole::Owner)
-                            .then_some(pubkey.clone())
-                    })
-                    .collect::<Vec<_>>();
-                if roster_owners != control.value.owners() {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle control Owners differ from its roster".to_string(),
-                    ));
-                }
-                let metadata_state = control.value.metadata_state_ref();
-                let metadata = load_circle_metadata_state(
-                    database,
-                    history_verifier,
-                    verified_prefix,
-                    commit,
-                    reference.circle_id(),
-                    &metadata_state,
-                    encryption.clone(),
-                    objects,
-                    commit_ref,
-                    &mut consumed_stream_activations,
-                )
-                .await?;
-                if let CircleAccessDisposition::Active {
-                    bootstrap: Some(bootstrap),
-                    ..
-                } = &leaf.disposition
-                {
-                    // An excluded device that cannot yet read its successor bootstrap
-                    // image defers the reset: flag the exclusion so the pull records
-                    // it (detection is derived from the verified outcome above, not the
-                    // bootstrap) and holds the successor. Its publication stays gated
-                    // until a later pull reads the image and the reseed records
-                    // coverage. The image read is the only source of a `CircleObject`
-                    // error here — verification and blob checks fail as `InvalidState`.
-                    match build_verified_leaf_bootstrap_image(
-                        database,
-                        storage,
-                        &root,
-                        leaf,
-                        &control,
-                        bootstrap,
-                        encryption,
-                        routing_key,
-                    )
-                    .await
-                    {
-                        Ok(image) => bootstraps.push(image),
-                        Err(error @ CircleOperationError::Object(_)) => {
-                            if let Some(exclusion) = local_exclusions
-                                .iter()
-                                .find(|exclusion| exclusion.circle_id == reference.circle_id())
-                            {
-                                bootstrap_pending_exclusions.push(exclusion.clone());
-                                continue;
-                            }
-                            return Err(error);
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Some(VerifiedCircleActive {
-                    roster: resolved,
-                    metadata,
-                })
-            }
-            CircleAccessDisposition::Inactive => None,
-        };
-        activations.push(VerifiedCircleReference {
-            reference: reference.clone(),
-            circle_id: reference.circle_id(),
-            control,
-            local_access: Some(VerifiedCircleAccess {
-                envelope: envelope.clone(),
-                leaf: prepared_leaf,
-                active,
-            }),
-        });
+        }
+        let declared = commit
+            .stream_activations()
+            .iter()
+            .map(StreamActivation::activation_id)
+            .collect::<BTreeSet<_>>();
+        if consumed_stream_activations != declared {
+            return Err(CircleOperationError::InvalidState(
+                "Store commit stream activations do not exactly introduce its first Circle heads"
+                    .to_string(),
+            ));
+        }
+        let stream_activations =
+            VerifiedStreamActivations::from_verified_circle_commit(commit, commit_ref)
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        Ok(VerifiedCircleActivations::from_verified_parts(
+            activations,
+            stream_activations,
+            bootstraps,
+            local_exclusions,
+            bootstrap_pending_exclusions,
+        ))
     }
-    let declared = commit
-        .stream_activations()
-        .iter()
-        .map(StreamActivation::activation_id)
-        .collect::<BTreeSet<_>>();
-    if consumed_stream_activations != declared {
-        return Err(CircleOperationError::InvalidState(
-            "Store commit stream activations do not exactly introduce its first Circle heads"
-                .to_string(),
-        ));
-    }
-    let stream_activations =
-        VerifiedStreamActivations::from_verified_circle_commit(commit, commit_ref)
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    Ok(VerifiedCircleActivations::from_verified_parts(
-        activations,
-        stream_activations,
-        bootstraps,
-        local_exclusions,
-        bootstrap_pending_exclusions,
-    ))
 }
 
 fn consume_public_private_stream_activations(
