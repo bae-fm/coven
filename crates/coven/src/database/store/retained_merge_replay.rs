@@ -219,7 +219,42 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 Self::seed_stream_activation_index_from_retained_on(&tx, &root)?;
-                let circles = Self::circle_control_activation_index_on(&tx)?;
+                let mut statement = tx
+                    .prepare(
+                        "SELECT circle_id, control_coord FROM circle_control_activations
+                         ORDER BY circle_id, control_coord",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(DbError::from)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(DbError::from)?;
+                drop(statement);
+                let mut circles: Vec<(
+                    crate::protocol::circle::CircleId,
+                    Vec<crate::protocol::circle::CircleControlCoord>,
+                )> = Vec::new();
+                for (circle_id, control_coord) in rows {
+                    let circle_id: crate::protocol::circle::CircleId =
+                        circle_id.parse().map_err(|error| {
+                            DbError::Message(format!("parse retained Circle id: {error}"))
+                        })?;
+                    let control: crate::protocol::circle::CircleControlCoord =
+                        serde_json::from_str(&control_coord).map_err(|error| {
+                            DbError::Message(format!(
+                                "parse retained Circle control coordinate: {error}"
+                            ))
+                        })?;
+                    match circles.last_mut() {
+                        Some((last_circle, controls)) if *last_circle == circle_id => {
+                            controls.push(control)
+                        }
+                        _ => circles.push((circle_id, vec![control])),
+                    }
+                }
                 let preserved_images = Self::circle_bootstrap_replay_inputs_on(&tx)?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(CircleRestoreSelectionIndex {

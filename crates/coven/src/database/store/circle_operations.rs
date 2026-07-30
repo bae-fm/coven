@@ -483,16 +483,15 @@ impl StoreDatabase {
             ))
     }
 
-    /// The close this device was excluded from and has not yet reset, if
-    /// publication into `circle_id` must be refused. Derived from durable
-    /// verified state: an exclusions row whose successor the bootstrap coverage
-    /// does not yet record. Once the reseed records that coverage the gate
-    /// derives clear — nothing is ever unset.
-    pub(crate) fn circle_close_exclusion_reset_pending_on(
+    pub(crate) fn circle_publication_context_on(
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleEpochCloseId>, DbError> {
-        let row: Option<(String, String)> = conn
+        expected_control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        // An exclusion blocks publication until this device's bootstrap coverage
+        // records the exact successor commit that excluded it. The gate derives
+        // clear from that coverage; no reset flag is mutated.
+        let exclusion: Option<(String, String)> = conn
             .query_row(
                 "SELECT close_id, activating_commit FROM circle_close_exclusions
                  WHERE circle_id = ?1",
@@ -501,36 +500,24 @@ impl StoreDatabase {
             )
             .optional()
             .map_err(DbError::from)?;
-        let Some((close_id, activating_commit)) = row else {
-            return Ok(None);
-        };
-        let coverage_commit: Option<String> = conn
-            .query_row(
-                "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        if coverage_commit.as_deref() == Some(activating_commit.as_str()) {
-            return Ok(None);
-        }
-        let close_id = serde_json::from_str(&close_id).map_err(|error| {
-            DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
-        })?;
-        Ok(Some(close_id))
-    }
-
-    pub(crate) fn circle_publication_context_on(
-        conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
-        if let Some(close_id) = Self::circle_close_exclusion_reset_pending_on(conn, circle_id)? {
-            return Err(DbError::ExcludedDeviceMustReset {
-                circle_id,
-                close_id,
-            });
+        if let Some((close_id, activating_commit)) = exclusion {
+            let coverage_commit: Option<String> = conn
+                .query_row(
+                    "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                    [circle_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
+                let close_id = serde_json::from_str(&close_id).map_err(|error| {
+                    DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
+                })?;
+                return Err(DbError::ExcludedDeviceMustReset {
+                    circle_id,
+                    close_id,
+                });
+            }
         }
         let state = Self::circle_current_state_on(conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
@@ -899,54 +886,6 @@ impl StoreDatabase {
                 )
             })
             .await
-    }
-
-    /// Enumerate every retained Circle and its retained control coordinates from
-    /// the preserved control indexes — the starting point restore selection walks
-    /// to re-resolve the restoring identity's access per Circle.
-    pub(crate) fn circle_control_activation_index_on(
-        conn: &Connection,
-    ) -> Result<
-        Vec<(
-            crate::protocol::circle::CircleId,
-            Vec<crate::protocol::circle::CircleControlCoord>,
-        )>,
-        DbError,
-    > {
-        let mut statement = conn
-            .prepare(
-                "SELECT circle_id, control_coord FROM circle_control_activations
-                 ORDER BY circle_id, control_coord",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-        let mut index: Vec<(
-            crate::protocol::circle::CircleId,
-            Vec<crate::protocol::circle::CircleControlCoord>,
-        )> = Vec::new();
-        for (circle_id, control_coord) in rows {
-            let circle_id: crate::protocol::circle::CircleId = circle_id
-                .parse()
-                .map_err(|error| DbError::Message(format!("parse retained Circle id: {error}")))?;
-            let control: crate::protocol::circle::CircleControlCoord =
-                serde_json::from_str(&control_coord).map_err(|error| {
-                    DbError::Message(format!("parse retained Circle control coordinate: {error}"))
-                })?;
-            match index.last_mut() {
-                Some((last_circle, controls)) if *last_circle == circle_id => {
-                    controls.push(control)
-                }
-                _ => index.push((circle_id, vec![control])),
-            }
-        }
-        Ok(index)
     }
 
     /// The head control of a Circle: the retained control whose lineage no other
