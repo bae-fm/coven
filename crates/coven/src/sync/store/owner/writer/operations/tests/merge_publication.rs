@@ -1078,7 +1078,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     );
     let db = open_test_db();
     let database = crate::database::StoreDatabase::new(&db);
-    let (root, _) = initialize_exact_store(&db, &storage, "blocked-discard", &keypair).await;
+    initialize_exact_store(&db, &storage, "blocked-discard", &keypair).await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1096,13 +1096,16 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     let writes = database.pending_writes().await.unwrap();
     let first = writes[0].write_id.clone();
     let second = writes[1].write_id.clone();
-    remove_exact_store_root(&db).await;
     let (_store_temp, store_dir) = temp_store_dir();
-    assert!(
-        prepare_merge_store_write(&db, &storage, &keypair, &store_dir,)
-            .await
-            .is_err()
-    );
+    database
+        .set_write_status(
+            &first,
+            crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                reason: "discard test precondition".to_string(),
+            }),
+        )
+        .await
+        .expect("block the first unpublished write");
 
     assert_eq!(
         database.discard_blocked_write(&first).await.unwrap(),
@@ -1124,7 +1127,6 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         );
     }
 
-    reinstall_exact_store_root(&db, &storage, &root, &keypair).await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \

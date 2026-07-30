@@ -35,14 +35,3 @@ pub(super) async fn remove_exact_store_root(db: &Database) {
     .await
     .expect("remove exact Store root authority");
 }
-
-pub(super) async fn reinstall_exact_store_root(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    root: &StoreRootRef,
-    identity: &UserKeypair,
-) {
-    Store::open(StoreDatabase::new(db), storage.clone(), root, identity)
-        .await
-        .expect("reopen exact Store root authority");
-}
