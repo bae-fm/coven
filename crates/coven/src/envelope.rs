@@ -7,8 +7,9 @@
 //! bytes) and its file path; the payload's own shape (a JSON keyring, a raw
 //! 64-byte keypair) is the caller's concern, not this module's.
 
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use argon2::Argon2;
@@ -89,7 +90,7 @@ struct CachedDerivation {
 /// rotated N times carries N generations.
 pub(crate) struct PassphraseVault {
     passphrase: Passphrase,
-    path: PathBuf,
+    file: crate::atomic_file::AtomicFile,
     derived: Mutex<Option<CachedDerivation>>,
 }
 
@@ -97,29 +98,26 @@ impl PassphraseVault {
     pub(crate) fn new(passphrase: Passphrase, path: PathBuf) -> Self {
         Self {
             passphrase,
-            path,
+            file: crate::atomic_file::AtomicFile::new(path),
             derived: Mutex::new(None),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
-        &self.path
+        self.file.path()
     }
 
     fn read_envelope(&self) -> Result<Option<Envelope>, KeyError> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
+        match self.file.read_optional().map_err(KeyError::Persistence)? {
+            Some(bytes) => {
                 let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|e| {
                     KeyError::Persistence(format!("passphrase envelope is malformed: {e}"))
                 })?;
                 validate_envelope_header(&envelope)?;
                 Ok(Some(envelope))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(KeyError::Persistence(format!(
-                "read passphrase envelope file: {e}"
-            ))),
+            None => Ok(None),
         }
     }
 
@@ -190,9 +188,9 @@ impl PassphraseVault {
     /// then sealed under a wrapping key derived for `new_passphrase` with a
     /// *fresh* random salt and this module's current default params (never the
     /// old envelope's salt — that would tie the new derivation to the old
-    /// one), and written atomically over `self.path`.
+    /// one), and written atomically over the retained envelope file.
     ///
-    /// Nothing established at `self.path` is an error, not a no-op: re-wrapping
+    /// Nothing established in the retained file is an error, not a no-op: re-wrapping
     /// a custody that was never established is a caller bug, and silent success
     /// would mask it. A wrong current passphrase surfaces from `unlock` as
     /// [`KeyError::Crypto`]; because the write only follows a successful
@@ -205,10 +203,10 @@ impl PassphraseVault {
     /// for any further operation.
     pub(crate) fn rewrap(&self, new_passphrase: &Passphrase) -> Result<(), KeyError> {
         let Some(mut plaintext) = self.unlock()? else {
-            return Err(KeyError::Persistence(format!(
-                "nothing established at {}; cannot re-wrap a custody that was never established",
-                self.path.display()
-            )));
+            return Err(KeyError::Persistence(
+                "nothing established; cannot re-wrap a custody that was never established"
+                    .to_string(),
+            ));
         };
 
         // Mirror the fresh-file branch of `derived_key`: a new random salt and
@@ -240,7 +238,7 @@ impl PassphraseVault {
     }
 
     /// Seal `plaintext` under `derivation` (a fresh AEAD nonce) and write the
-    /// resulting envelope atomically over `self.path`. The shared tail of
+    /// resulting envelope atomically over the retained file. The shared tail of
     /// [`persist`](Self::persist) and [`rewrap`](Self::rewrap) — they differ
     /// only in where the derivation comes from (this instance's cached one, or
     /// a fresh one under a new passphrase).
@@ -264,18 +262,12 @@ impl PassphraseVault {
         };
         let bytes = serde_json::to_vec(&envelope)
             .map_err(|e| KeyError::Persistence(format!("serialize passphrase envelope: {e}")))?;
-        write_atomic(&self.path, &bytes)
+        self.file.replace(&bytes).map_err(KeyError::Persistence)
     }
 
     /// Remove the stored envelope. `Ok` when nothing was stored.
     pub(crate) fn forget(&self) -> Result<(), KeyError> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(KeyError::Persistence(format!(
-                "remove passphrase envelope file: {e}"
-            ))),
-        }
+        self.file.remove().map_err(KeyError::Persistence)
     }
 }
 
@@ -401,50 +393,6 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, KeyError> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| KeyError::Persistence(format!("passphrase envelope base64: {e}")))
-}
-
-/// Write `bytes` to `path` atomically: a uniquely-named temp sibling (derived
-/// from `path`'s own file name, so two vaults at different paths never share
-/// a temp name), fsynced, then renamed over the destination — the same
-/// temp-then-rename discipline coven's blob store writes with, so a crash
-/// mid-write never leaves a torn file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
-    let parent = path.parent().ok_or_else(|| {
-        KeyError::Persistence(format!(
-            "passphrase envelope path has no parent directory: {}",
-            path.display()
-        ))
-    })?;
-    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-        KeyError::Persistence(format!(
-            "passphrase envelope path has no valid file name: {}",
-            path.display()
-        ))
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| KeyError::Persistence(format!("create passphrase envelope directory: {e}")))?;
-    let temp_path = parent.join(format!(
-        "{}{file_name}.{}",
-        crate::local_blob::TEMP_BLOB_PREFIX,
-        uuid::Uuid::new_v4()
-    ));
-    let mut file = std::fs::File::create(&temp_path)
-        .map_err(|e| KeyError::Persistence(format!("write passphrase envelope temp file: {e}")))?;
-    file.write_all(bytes)
-        .map_err(|e| KeyError::Persistence(format!("write passphrase envelope temp file: {e}")))?;
-    file.sync_all()
-        .map_err(|e| KeyError::Persistence(format!("fsync passphrase envelope temp file: {e}")))?;
-    drop(file);
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| KeyError::Persistence(format!("install passphrase envelope file: {e}")))?;
-    // fsync the parent directory so the rename that installed the envelope is
-    // itself durable — the same discipline `local_blob::sync_parent_dir`
-    // keeps, propagating these errors rather than swallowing them.
-    std::fs::File::open(parent)
-        .map_err(|e| KeyError::Persistence(format!("open the parent dir to fsync it: {e}")))?
-        .sync_all()
-        .map_err(|e| KeyError::Persistence(format!("fsync the parent dir: {e}")))?;
-    Ok(())
 }
 
 #[cfg(test)]

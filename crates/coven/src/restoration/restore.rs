@@ -13,7 +13,7 @@ use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
 use crate::encryption::MasterKeyring;
 use crate::identity_custody::IdentityCustody;
-use crate::joining::{bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapError};
+use crate::joining::{bootstrap_and_save_store, BootstrapCleanup, BootstrapError};
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
@@ -48,7 +48,7 @@ fn require_and_persist_oauth(
         BootstrapError::Provider(format!("{provider_name} restore requires OAuth token"))
     })?;
     let ks = StoreKeys::new(store_id.to_string());
-    crate::joining::persist_oauth_tokens(&ks, &tokens)?;
+    ks.set_cloud_home_oauth_tokens(&tokens)?;
     Ok((tokens, ks))
 }
 
@@ -227,13 +227,13 @@ pub async fn restore_from_cloud(
     // would, on any bootstrap failure below, delete that store's database and
     // blobs during cleanup. Dispatching here makes the failure-cleanup only
     // ever remove a directory this invocation created.
-    crate::joining::refuse_completed_or_clear_torn_store(
+    let cleanup = BootstrapCleanup::new(
         &store_dir,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
-        store_id,
-    )?;
+    );
+    cleanup.refuse_completed_or_clear(store_id)?;
 
     let result = async {
         on_status("Preparing restore...");
@@ -342,13 +342,7 @@ pub async fn restore_from_cloud(
             );
             Ok(config)
         }
-        Err(err) => Err(cleanup_after_bootstrap_failure(
-            &store_dir,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            err,
-        )),
+        Err(err) => Err(cleanup.after_failure(err)),
     }
 }
 

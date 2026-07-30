@@ -8,6 +8,7 @@
 //! let _ = coven::store_sync::StoreSync::connect;
 //! ```
 
+pub(crate) mod atomic_file;
 pub(crate) mod blob;
 pub(crate) mod changeset;
 pub(crate) mod circles;

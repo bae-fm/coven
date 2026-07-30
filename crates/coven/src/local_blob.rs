@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
 /// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
 /// destination.
-pub(crate) const TEMP_BLOB_PREFIX: &str = ".tmp.";
+pub(crate) const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
 pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
@@ -1000,55 +1000,6 @@ pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String
 pub(crate) async fn write_atomic_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_atomic(path, bytes).await?;
     sync_parent_dir(path).await
-}
-
-/// Blocking atomic file installation for synchronous persistence boundaries.
-/// The temp file is a unique sibling, so the rename cannot cross filesystems.
-pub(crate) fn write_atomic_durable_blocking(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("path has no parent directory: {}", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("create parent directory {}: {error}", parent.display()))?;
-    let named = tempfile::Builder::new()
-        .prefix(TEMP_BLOB_PREFIX)
-        .tempfile_in(parent)
-        .map_err(|error| format!("create temporary file under {}: {error}", parent.display()))?;
-    let (mut file, temp) = named.into_parts();
-    let temp = temp
-        .keep()
-        .map_err(|error| format!("retain temporary file path: {error}"))?;
-    let write = (|| {
-        file.write_all(bytes)
-            .map_err(|error| format!("write temp file {}: {error}", temp.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("fsync temp file {}: {error}", temp.display()))?;
-        drop(file);
-        std::fs::rename(&temp, path).map_err(|error| {
-            format!(
-                "rename temp file {} to {}: {error}",
-                temp.display(),
-                path.display()
-            )
-        })?;
-        std::fs::File::open(parent)
-            .map_err(|error| format!("open parent directory {}: {error}", parent.display()))?
-            .sync_all()
-            .map_err(|error| format!("fsync parent directory {}: {error}", parent.display()))
-    })();
-    if let Err(operation) = write {
-        return match std::fs::remove_file(&temp) {
-            Ok(()) => Err(operation),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(operation),
-            Err(cleanup) => Err(format!(
-                "{operation}; remove failed temp file {}: {cleanup}",
-                temp.display()
-            )),
-        };
-    }
-    Ok(())
 }
 
 pub(crate) async fn exists(path: &Path) -> Result<bool, String> {

@@ -20,7 +20,7 @@ use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::joining::MembershipFloor;
 use crate::joining::{
-    bootstrap_and_save_store, cleanup_after_bootstrap_failure, open_db_and_pull, BootstrapError,
+    bootstrap_and_save_store, open_db_and_pull, BootstrapCleanup, BootstrapError,
     RestoreBootstrapContext,
 };
 use crate::keys::{StoreKeys, UserKeypair};
@@ -985,13 +985,13 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "the cloud home credentials must have been written before the late failure",
     );
 
-    let wrapped = cleanup_after_bootstrap_failure(
+    let cleanup = BootstrapCleanup::new(
         &store_dir,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
-        err,
     );
+    let wrapped = cleanup.after_failure(err);
     assert!(
         !matches!(wrapped, BootstrapError::Cleanup { .. }),
         "cleanup of a directory blocked only by its own contents must fully succeed, got {wrapped:?}",

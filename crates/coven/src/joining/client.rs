@@ -103,119 +103,86 @@ impl From<InviteError> for BootstrapError {
     }
 }
 
-/// Undo everything a bootstrap attempt may have durably written (see
-/// [`remove_bootstrap_residue`]), then return the error to propagate. The
-/// completion-marker guard at the top of every join/restore entry point
-/// establishes that this invocation owns everything under the store id — no
-/// completed store existed when it started — which makes total removal
-/// unconditionally safe here. On a clean run the original `cause` is returned
-/// unchanged; if any removal step fails, every failure is carried in a
-/// [`BootstrapError::Cleanup`] so none is lost. Shared by join and restore.
-pub(crate) fn cleanup_after_bootstrap_failure(
-    store_dir: &StoreDir,
-    store_keys: &StoreKeys,
-    custody: &dyn MasterKeyCustody,
-    identity_custody: &dyn DeviceIdentityCustody,
-    cause: BootstrapError,
-) -> BootstrapError {
-    let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
-    if failures.is_empty() {
-        cause
-    } else {
-        BootstrapError::Cleanup {
-            cleanup: failures.join("; "),
-            cause: Box::new(cause),
-        }
-    }
+/// The complete local cleanup capability for one bootstrap attempt.
+pub(crate) struct BootstrapCleanup<'a> {
+    store_dir: &'a StoreDir,
+    store_keys: &'a StoreKeys,
+    custody: &'a dyn MasterKeyCustody,
+    identity_custody: &'a dyn DeviceIdentityCustody,
 }
 
-/// Remove everything a bootstrap attempt may have durably written under this
-/// store id, returning a message for each step that failed (empty ⇒ a clean
-/// removal). Four steps, each best-effort so one failing doesn't skip the
-/// others: the store directory (tolerating it never having existed, and also
-/// covering a Passphrase custody's wrapped file, which lives inside it), the
-/// master key via custody (idempotent regardless of policy), this store's
-/// identity via its own custody (idempotent the same way — a no-op if the
-/// identity was never established), and the cloud-home credentials (OAuth tokens
-/// are stored *as* credentials — see `StoreKeys::set_cloud_home_oauth_tokens` —
-/// so this one delete covers both). Shared by the post-failure cleanup and the
-/// torn-bootstrap guard: both own everything under the store id, because the
-/// completion-marker guard establishes no completed store exists at that id.
-fn remove_bootstrap_residue(
-    store_dir: &StoreDir,
-    store_keys: &StoreKeys,
-    custody: &dyn MasterKeyCustody,
-    identity_custody: &dyn DeviceIdentityCustody,
-) -> Vec<String> {
-    let mut failures: Vec<String> = Vec::new();
-
-    match std::fs::remove_dir_all(&**store_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => failures.push(format!("store directory: {e}")),
-    }
-
-    if let Err(e) = custody.forget() {
-        failures.push(format!("master key: {e}"));
-    }
-
-    if let Err(e) = identity_custody.forget() {
-        failures.push(format!("identity: {e}"));
-    }
-
-    if let Err(e) = store_keys.delete_cloud_home_credentials() {
-        failures.push(format!("cloud home credentials: {e}"));
-    }
-
-    failures
-}
-
-/// Dispatch a join or restore on the completion marker rather than bare
-/// directory existence.
-///
-/// A store is *complete* once its `config.yaml` — the last durable write of a
-/// successful bootstrap — exists. If it does, the directory holds real data:
-/// refuse with [`BootstrapError::StoreExists`], leaving it untouched. A store
-/// directory *without* that config is the residue of a bootstrap a hard crash
-/// (power loss, kill) interrupted before the config save. The host records a
-/// store only on `Ok`, so nothing references that residue and it is this
-/// retry's to clear: remove the directory and the same store-scoped keyring
-/// entries a failed bootstrap's cleanup removes, then let the caller proceed
-/// with a fresh attempt. A residue-removal failure blocks the retry (the
-/// leftovers would collide), so it surfaces as
-/// [`BootstrapError::TornBootstrapCleanup`] rather than a silent proceed.
-///
-/// Cloud protocol state is append-only. A retry reuses the pending join identity
-/// or the identity carried by the restore code, so it verifies and continues the
-/// same signed registration chain instead of deleting published objects.
-pub(crate) fn refuse_completed_or_clear_torn_store(
-    store_dir: &StoreDir,
-    store_keys: &StoreKeys,
-    custody: &dyn MasterKeyCustody,
-    identity_custody: &dyn DeviceIdentityCustody,
-    store_id: &str,
-) -> Result<(), BootstrapError> {
-    if store_dir.config_path().exists() {
-        return Err(BootstrapError::StoreExists(store_id.to_string()));
-    }
-
-    if store_dir.exists() {
-        warn!(
-            store_dir = %store_dir.display(),
-            "clearing a torn bootstrap: a store directory with no saved config, left by a join or restore a crash interrupted before completion"
-        );
-        // The directory and keyring entries are this retry's to clear. Immutable
-        // Store objects remain in cloud storage and are verified on reuse.
-        let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
-        if !failures.is_empty() {
-            return Err(BootstrapError::TornBootstrapCleanup {
-                store_id: store_id.to_string(),
-                failures: failures.join("; "),
-            });
+impl<'a> BootstrapCleanup<'a> {
+    pub(crate) fn new(
+        store_dir: &'a StoreDir,
+        store_keys: &'a StoreKeys,
+        custody: &'a dyn MasterKeyCustody,
+        identity_custody: &'a dyn DeviceIdentityCustody,
+    ) -> Self {
+        Self {
+            store_dir,
+            store_keys,
+            custody,
+            identity_custody,
         }
     }
 
-    Ok(())
+    /// Refuse a completed store and remove all local state from a torn attempt.
+    pub(crate) fn refuse_completed_or_clear(&self, store_id: &str) -> Result<(), BootstrapError> {
+        if self.store_dir.config_path().exists() {
+            return Err(BootstrapError::StoreExists(store_id.to_string()));
+        }
+
+        if self.store_dir.exists() {
+            warn!(
+                store_dir = %self.store_dir.display(),
+                "clearing a torn bootstrap: a store directory with no saved config, left by a join or restore a crash interrupted before completion"
+            );
+            let failures = self.remove();
+            if !failures.is_empty() {
+                return Err(BootstrapError::TornBootstrapCleanup {
+                    store_id: store_id.to_string(),
+                    failures: failures.join("; "),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove partial local state and preserve the initiating bootstrap error.
+    pub(crate) fn after_failure(&self, cause: BootstrapError) -> BootstrapError {
+        let failures = self.remove();
+        if failures.is_empty() {
+            cause
+        } else {
+            BootstrapError::Cleanup {
+                cleanup: failures.join("; "),
+                cause: Box::new(cause),
+            }
+        }
+    }
+
+    /// Remove every local artifact the bound bootstrap attempt may have written.
+    pub(crate) fn remove(&self) -> Vec<String> {
+        let mut failures = Vec::new();
+
+        match std::fs::remove_dir_all(&**self.store_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("store directory: {error}")),
+        }
+        if let Err(error) = self.custody.forget() {
+            failures.push(format!("master key: {error}"));
+        }
+        if let Err(error) = self.identity_custody.forget() {
+            failures.push(format!("identity: {error}"));
+        }
+        if let Err(error) = self.store_keys.delete_cloud_home_credentials() {
+            failures.push(format!("cloud home credentials: {error}"));
+        }
+
+        failures
+    }
 }
 
 /// Fail with [`BootstrapError::Cancelled`] if the caller's cancel signal has
@@ -258,30 +225,6 @@ impl RestoreBootstrapContext<'_> {
     }
 }
 
-/// Persist the caller-supplied OAuth tokens for the store `ks` is scoped to, so
-/// the next launch's home construction (`parse_oauth_tokens` in
-/// `storage::cloud`) can read them back from the keyring instead of erroring on
-/// their absence. Both join and restore build an OAuth provider home from
-/// tokens the caller already holds; both must save them here before returning
-/// that home.
-#[cfg(feature = "oauth-providers")]
-pub(crate) fn persist_oauth_tokens(
-    ks: &StoreKeys,
-    tokens: &crate::oauth::OAuthTokens,
-) -> Result<(), KeyError> {
-    ks.set_cloud_home_oauth_tokens(tokens)
-}
-
-#[cfg(feature = "oauth-providers")]
-fn require_join_oauth(
-    oauth_tokens: Option<crate::oauth::OAuthTokens>,
-    provider_name: &str,
-) -> Result<crate::oauth::OAuthTokens, BootstrapError> {
-    oauth_tokens.ok_or_else(|| {
-        BootstrapError::Provider(format!("{provider_name} join requires an OAuth token"))
-    })
-}
-
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
@@ -319,7 +262,9 @@ async fn build_cloud_home_for_join(
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
-            let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
+            let tokens = oauth_tokens.ok_or_else(|| {
+                BootstrapError::Provider("Google Drive join requires an OAuth token".to_string())
+            })?;
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::GoogleDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
@@ -333,7 +278,9 @@ async fn build_cloud_home_for_join(
         }
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
-            let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
+            let tokens = oauth_tokens.ok_or_else(|| {
+                BootstrapError::Provider("Dropbox join requires an OAuth token".to_string())
+            })?;
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::Dropbox)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
@@ -350,7 +297,9 @@ async fn build_cloud_home_for_join(
             drive_id,
             folder_id,
         } => {
-            let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
+            let tokens = oauth_tokens.ok_or_else(|| {
+                BootstrapError::Provider("OneDrive join requires an OAuth token".to_string())
+            })?;
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::OneDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
@@ -578,12 +527,14 @@ impl DeviceJoinClient {
         if store_dir.config_path().exists() {
             return Err(BootstrapError::StoreExists(self.code.store_id.clone()));
         }
-        let failures = remove_bootstrap_residue(
+        let store_keys = StoreKeys::new(self.code.store_id.clone());
+        let cleanup = BootstrapCleanup::new(
             &store_dir,
-            &StoreKeys::new(self.code.store_id.clone()),
+            &store_keys,
             self.custody.as_ref(),
             self.identity_custody.as_ref(),
         );
+        let failures = cleanup.remove();
         if !failures.is_empty() {
             return Err(BootstrapError::CancelledJoinCleanup {
                 store_id: self.code.store_id.clone(),
@@ -774,7 +725,7 @@ impl DeviceJoinClient {
         }
         #[cfg(feature = "oauth-providers")]
         if let Some(tokens) = &self.oauth_tokens {
-            persist_oauth_tokens(&store_keys, tokens)?;
+            store_keys.set_cloud_home_oauth_tokens(tokens)?;
         }
         let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
         let mut config = build_config(
@@ -1212,13 +1163,13 @@ mod tests {
             .expect("seed the master key");
         let identity_custody = IdentityCustody::Keyring.resolve("guard-completed-test", &store_dir);
 
-        let result = refuse_completed_or_clear_torn_store(
+        let cleanup = BootstrapCleanup::new(
             &store_dir,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            "guard-completed-test",
         );
+        let result = cleanup.refuse_completed_or_clear("guard-completed-test");
 
         assert!(
             matches!(result, Err(BootstrapError::StoreExists(ref id)) if id == "guard-completed-test"),
@@ -1259,13 +1210,13 @@ mod tests {
             })
             .expect("seed cloud home credentials");
 
-        let result = refuse_completed_or_clear_torn_store(
+        let cleanup = BootstrapCleanup::new(
             &store_dir,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            "guard-torn-test",
         );
+        let result = cleanup.refuse_completed_or_clear("guard-torn-test");
 
         assert!(
             result.is_ok(),
@@ -1309,13 +1260,13 @@ mod tests {
         let identity_custody =
             IdentityCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
 
-        let wrapped = cleanup_after_bootstrap_failure(
+        let cleanup = BootstrapCleanup::new(
             &blocked,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            BootstrapError::Database("bootstrap boom".to_string()),
         );
+        let wrapped = cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
 
         match wrapped {
             BootstrapError::Cleanup { cleanup, cause } => {
@@ -1343,13 +1294,14 @@ mod tests {
         let identity_custody =
             IdentityCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
 
-        let returned = cleanup_after_bootstrap_failure(
+        let cleanup = BootstrapCleanup::new(
             &store_dir,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            BootstrapError::Database("bootstrap boom".to_string()),
         );
+        let returned =
+            cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
 
         assert!(
             matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
@@ -1374,13 +1326,14 @@ mod tests {
         let identity_custody =
             IdentityCustody::Keyring.resolve("never-created-dir-test", &never_created);
 
-        let returned = cleanup_after_bootstrap_failure(
+        let cleanup = BootstrapCleanup::new(
             &never_created,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            BootstrapError::Database("bootstrap boom".to_string()),
         );
+        let returned =
+            cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
 
         assert!(
             matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
@@ -1417,13 +1370,14 @@ mod tests {
             })
             .expect("seed cloud home credentials");
 
-        let returned = cleanup_after_bootstrap_failure(
+        let cleanup = BootstrapCleanup::new(
             &store_dir,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            BootstrapError::Database("bootstrap boom".to_string()),
         );
+        let returned =
+            cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
 
         assert!(
             matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),

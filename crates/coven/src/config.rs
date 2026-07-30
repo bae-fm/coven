@@ -187,11 +187,9 @@ impl Config {
         let yaml: ConfigYaml = self.into();
         let text =
             serde_yaml::to_string(&yaml).map_err(|e| ConfigError::Serialization(e.to_string()))?;
-        crate::local_blob::write_atomic_durable_blocking(
-            &self.store_dir.config_path(),
-            text.as_bytes(),
-        )
-        .map_err(ConfigError::Config)
+        crate::atomic_file::AtomicFile::new(self.store_dir.config_path())
+            .replace(text.as_bytes())
+            .map_err(ConfigError::Config)
     }
 
     /// Read `store_dir/config.yaml` back into a runtime `Config`; `store_dir`
