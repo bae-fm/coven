@@ -181,7 +181,7 @@ pub(crate) use store_authority_records::{
     ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
     install_store_root_authority_on, load_local_store_founder_graph_on,
-    load_store_root_authority_on, validate_founder_graph, DurableFounderMembershipJournal,
+    load_store_root_authority_on, DurableFounderMembershipJournal,
 };
 pub(crate) use store_authority_records::{
     load_generation_zero_replay_baseline_on, required_store_root_authority_on,

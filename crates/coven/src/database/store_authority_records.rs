@@ -13,6 +13,130 @@ pub(crate) struct DurableFounderGraph {
     pub registration_state: LocalDeviceRegistrationState,
 }
 
+impl DurableFounderGraph {
+    pub(crate) fn validate(&self) -> Result<(), DbError> {
+        let root = StoreProtocolRoot::parse(&self.root.bytes)
+            .map_err(|error| DbError::Message(format!("founder Store root: {error}")))?;
+        if root != self.root.value
+            || root.object_hash() != self.root.value.object_hash()
+            || self.root.object != *self.root.prepared.reference()
+        {
+            return Err(DbError::Message(
+                "founder Store root differs from its prepared exact object".to_string(),
+            ));
+        }
+        let root_ref = crate::protocol::store_commit::StoreRootRef {
+            store_root_id: root.descriptor.store_root_id(),
+            store_root_hash: root.object_hash(),
+            object: self.root.object.clone(),
+        };
+        let registration = StoreDeviceRegistration::parse_at(
+            &self.registration.bytes,
+            &root_ref,
+            self.registration.value.device_id,
+        )
+        .map_err(|error| DbError::Message(format!("founder Store registration: {error}")))?;
+        if registration != self.registration.value
+            || self.registration.object != *self.registration.prepared.reference()
+            || registration.author_pubkey != root.descriptor.founder_pubkey
+            || self.registration.object.slot() != &root.descriptor.founder_registration
+            || registration.provider != root.descriptor.founder_provider_admin.provider
+            || !matches!(
+                registration.origin,
+                crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+            )
+        {
+            return Err(DbError::Message(
+                "founder registration differs from its root or prepared exact object".to_string(),
+            ));
+        }
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            self.registration.object.clone(),
+        );
+        let initial_ack = StoreAck::parse_at(
+            &self.initial_ack.bytes,
+            &root_ref,
+            &self.initial_ack_ref,
+            &registration,
+        )
+        .map_err(|error| DbError::Message(format!("founder initial acknowledgement: {error}")))?;
+        if initial_ack != self.initial_ack.value
+            || self.initial_ack_ref.registration != registration_ref
+            || self.initial_ack_ref.sequence != 1
+            || self.initial_ack_ref.object != self.initial_ack.object
+            || self.initial_ack.object != *self.initial_ack.prepared.reference()
+            || initial_ack.successor.predecessor.is_some()
+            || initial_ack.registration != registration_ref
+            || !initial_ack.store_cut.0.is_empty()
+        {
+            return Err(DbError::Message(
+                "founder initial acknowledgement differs from its exact root graph".to_string(),
+            ));
+        }
+        {
+            let entry = &self.membership.entry;
+            let entry_ref = &self.membership.entry_ref;
+            let head = &self.membership.head;
+            let head_ref = &self.membership.head_ref;
+            let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
+                .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
+            if parsed_entry != entry.value
+                || root
+                    .descriptor
+                    .validate_merge_founder_entry(&parsed_entry)
+                    .is_err()
+                || entry_ref.coord != parsed_entry.coord()
+                || entry_ref.object != entry.object
+                || entry.object != *entry.prepared.reference()
+            {
+                return Err(DbError::Message(
+                    "founder membership entry differs from its root or exact reference".to_string(),
+                ));
+            }
+            let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
+                .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
+            let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
+                DbError::Message("founder entry has no Store membership anchor".to_string())
+            })?;
+            let crate::protocol::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
+                anchor
+            else {
+                return Err(DbError::Message(
+                    "founder membership entry uses a recovery anchor".to_string(),
+                ));
+            };
+            if parsed_head != head.value
+                || !parsed_head.verify(&registration)
+                || parsed_head.body.author_registration != registration_ref
+                || parsed_head.body.entry != *entry_ref
+                || parsed_head.body.predecessor.is_some()
+                || parsed_head.entry_coord() != parsed_entry.coord()
+                || head_ref.coord != parsed_entry.coord()
+                || head_ref.head_hash != parsed_head.head_hash()
+                || head_ref.object != head.object
+                || head.object != *head.prepared.reference()
+                || head.object.slot() != &first_slot
+                || parsed_head.body.successor.activation
+                    != crate::protocol::store_commit::StreamActivation::grant_authorized(
+                        root_ref.store_root_hash,
+                        registration_ref.clone(),
+                        parsed_entry.author_owner_grant.clone(),
+                        crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
+                            first_slot: first_slot.clone(),
+                        },
+                    )
+                    .activation_id()
+            {
+                return Err(DbError::Message(
+                    "founder membership head differs from its exact root graph".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DurableFounderMembership {
     pub entry: ExactProtocolObject<MembershipEntry>,
@@ -546,128 +670,6 @@ pub(crate) fn install_store_founder_state_on(
     Ok(())
 }
 
-pub(crate) fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
-    let root = StoreProtocolRoot::parse(&graph.root.bytes)
-        .map_err(|error| DbError::Message(format!("founder Store root: {error}")))?;
-    if root != graph.root.value
-        || root.object_hash() != graph.root.value.object_hash()
-        || graph.root.object != *graph.root.prepared.reference()
-    {
-        return Err(DbError::Message(
-            "founder Store root differs from its prepared exact object".to_string(),
-        ));
-    }
-    let root_ref = crate::protocol::store_commit::StoreRootRef {
-        store_root_id: root.descriptor.store_root_id(),
-        store_root_hash: root.object_hash(),
-        object: graph.root.object.clone(),
-    };
-    let registration = StoreDeviceRegistration::parse_at(
-        &graph.registration.bytes,
-        &root_ref,
-        graph.registration.value.device_id,
-    )
-    .map_err(|error| DbError::Message(format!("founder Store registration: {error}")))?;
-    if registration != graph.registration.value
-        || graph.registration.object != *graph.registration.prepared.reference()
-        || registration.author_pubkey != root.descriptor.founder_pubkey
-        || graph.registration.object.slot() != &root.descriptor.founder_registration
-        || registration.provider != root.descriptor.founder_provider_admin.provider
-        || !matches!(
-            registration.origin,
-            crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
-        )
-    {
-        return Err(DbError::Message(
-            "founder registration differs from its root or prepared exact object".to_string(),
-        ));
-    }
-    let registration_ref = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        graph.registration.object.clone(),
-    );
-    let initial_ack = StoreAck::parse_at(
-        &graph.initial_ack.bytes,
-        &root_ref,
-        &graph.initial_ack_ref,
-        &registration,
-    )
-    .map_err(|error| DbError::Message(format!("founder initial acknowledgement: {error}")))?;
-    if initial_ack != graph.initial_ack.value
-        || graph.initial_ack_ref.registration != registration_ref
-        || graph.initial_ack_ref.sequence != 1
-        || graph.initial_ack_ref.object != graph.initial_ack.object
-        || graph.initial_ack.object != *graph.initial_ack.prepared.reference()
-        || initial_ack.successor.predecessor.is_some()
-        || initial_ack.registration != registration_ref
-        || !initial_ack.store_cut.0.is_empty()
-    {
-        return Err(DbError::Message(
-            "founder initial acknowledgement differs from its exact root graph".to_string(),
-        ));
-    }
-    {
-        let entry = &graph.membership.entry;
-        let entry_ref = &graph.membership.entry_ref;
-        let head = &graph.membership.head;
-        let head_ref = &graph.membership.head_ref;
-        let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
-            .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
-        if parsed_entry != entry.value
-            || root
-                .descriptor
-                .validate_merge_founder_entry(&parsed_entry)
-                .is_err()
-            || entry_ref.coord != parsed_entry.coord()
-            || entry_ref.object != entry.object
-            || entry.object != *entry.prepared.reference()
-        {
-            return Err(DbError::Message(
-                "founder membership entry differs from its root or exact reference".to_string(),
-            ));
-        }
-        let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
-            .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
-        let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
-            DbError::Message("founder entry has no Store membership anchor".to_string())
-        })?;
-        let crate::protocol::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
-            anchor
-        else {
-            return Err(DbError::Message(
-                "founder membership entry uses a recovery anchor".to_string(),
-            ));
-        };
-        if parsed_head != head.value
-            || !parsed_head.verify(&registration)
-            || parsed_head.body.author_registration != registration_ref
-            || parsed_head.body.entry != *entry_ref
-            || parsed_head.body.predecessor.is_some()
-            || parsed_head.entry_coord() != parsed_entry.coord()
-            || head_ref.coord != parsed_entry.coord()
-            || head_ref.head_hash != parsed_head.head_hash()
-            || head_ref.object != head.object
-            || head.object != *head.prepared.reference()
-            || head.object.slot() != &first_slot
-            || parsed_head.body.successor.activation
-                != crate::protocol::store_commit::StreamActivation::grant_authorized(
-                    root_ref.store_root_hash,
-                    registration_ref.clone(),
-                    parsed_entry.author_owner_grant.clone(),
-                    crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
-                        first_slot: first_slot.clone(),
-                    },
-                )
-                .activation_id()
-        {
-            return Err(DbError::Message(
-                "founder membership head differs from its exact root graph".to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn load_local_store_founder_graph_on(
     conn: &Connection,
 ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
@@ -809,6 +811,6 @@ pub(crate) fn load_local_store_founder_graph_on(
         membership,
         registration_state,
     };
-    validate_founder_graph(&graph)?;
+    graph.validate()?;
     Ok(Some(Box::new(graph)))
 }

@@ -282,6 +282,23 @@ impl SealedBlobHeader {
         self.plaintext_len
     }
 
+    /// Chunk `index`'s AAD: the format label, this complete header, the blob's
+    /// context, and the index. Binding the header makes a rewritten chunk size
+    /// or plaintext length fail the first open; binding the context and index
+    /// makes a chunk refuse to open as a different blob's chunk, or as a
+    /// different position in its own.
+    fn chunk_aad(self, aad_context: &[u8], index: u64) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(
+            BLOB_AEAD_LABEL.len() + SEALED_BLOB_HEADER_LEN + 16 + aad_context.len(),
+        );
+        aad.extend_from_slice(BLOB_AEAD_LABEL);
+        aad.extend_from_slice(&self.to_bytes());
+        aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
+        aad.extend_from_slice(aad_context);
+        aad.extend_from_slice(&index.to_le_bytes());
+        aad
+    }
+
     /// How many chunks the plaintext occupies. An empty blob still seals one
     /// tag-only chunk, so opening it authenticates its emptiness rather than
     /// trusting a zero-length object.
@@ -413,22 +430,6 @@ fn blob_nonce_base(key: &[u8; 32], aad_context: &[u8]) -> [u8; NONCE_SIZE] {
     base
 }
 
-/// Chunk `index`'s AAD: the format label, the whole header, the blob's context,
-/// and the index. Binding the header makes a rewritten chunk size or plaintext
-/// length fail the first open; binding the context and index makes a chunk
-/// refuse to open as a different blob's chunk, or as a different position in its
-/// own.
-fn sealed_blob_chunk_aad(header: SealedBlobHeader, aad_context: &[u8], index: u64) -> Vec<u8> {
-    let mut aad =
-        Vec::with_capacity(BLOB_AEAD_LABEL.len() + SEALED_BLOB_HEADER_LEN + 16 + aad_context.len());
-    aad.extend_from_slice(BLOB_AEAD_LABEL);
-    aad.extend_from_slice(&header.to_bytes());
-    aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
-    aad.extend_from_slice(aad_context);
-    aad.extend_from_slice(&index.to_le_bytes());
-    aad
-}
-
 /// Seals one blob's chunks in order, so an upload streams without ever holding
 /// the whole plaintext or ciphertext. The header it emits first is what a later
 /// read needs to compute every chunk offset.
@@ -467,7 +468,7 @@ impl SealedBlobSealer {
         );
         self.next_index += 1;
         let nonce = chunk_nonce(&self.base_nonce, index);
-        let aad = sealed_blob_chunk_aad(self.header, &self.aad_context, index);
+        let aad = self.header.chunk_aad(&self.aad_context, index);
         self.cipher
             .encrypt(
                 GenericArray::from_slice(&nonce),
@@ -517,7 +518,7 @@ impl SealedBlobOpener {
             });
         }
         let nonce = chunk_nonce(&self.base_nonce, index);
-        let aad = sealed_blob_chunk_aad(self.header, &self.aad_context, index);
+        let aad = self.header.chunk_aad(&self.aad_context, index);
         self.cipher
             .decrypt(
                 GenericArray::from_slice(&nonce),
@@ -955,20 +956,22 @@ impl EncryptionService {
             let (chunk_start, chunk_end) =
                 layout.chunk_bounds(encrypted_data.len(), chunk_index)?;
             let chunk_data = &encrypted_data[chunk_start..chunk_end];
-            let decrypted = decrypt_chunk_with_cipher(
-                &cipher,
-                &base_nonce,
-                aad_context,
-                chunk_index as u64,
-                layout.total_chunks as u64,
-                chunk_data,
-            )
-            .map_err(|_| {
-                EncryptionError::Decryption(format!(
-                    "Authentication failed for chunk {}",
-                    chunk_index
-                ))
-            })?;
+            let nonce = chunk_nonce(&base_nonce, chunk_index as u64);
+            let aad = chunk_aad(aad_context, chunk_index as u64, layout.total_chunks as u64);
+            let decrypted = cipher
+                .decrypt(
+                    GenericArray::from_slice(&nonce),
+                    Payload {
+                        msg: chunk_data,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| {
+                    EncryptionError::Decryption(format!(
+                        "Authentication failed for chunk {}",
+                        chunk_index
+                    ))
+                })?;
             result.extend(decrypted);
         }
 
@@ -1191,28 +1194,6 @@ fn chunk_aad(aad_context: &[u8], chunk_index: u64, total_chunks: u64) -> Vec<u8>
     aad.extend_from_slice(&chunk_index.to_le_bytes());
     aad.extend_from_slice(&total_chunks.to_le_bytes());
     aad
-}
-
-fn decrypt_chunk_with_cipher(
-    cipher: &XChaCha20Poly1305,
-    base_nonce: &[u8; NONCE_SIZE],
-    aad_context: &[u8],
-    chunk_index: u64,
-    total_chunks: u64,
-    chunk_data: &[u8],
-) -> Result<Vec<u8>, ()> {
-    let nonce = chunk_nonce(base_nonce, chunk_index);
-    let nonce_arr = GenericArray::from_slice(&nonce);
-    let aad = chunk_aad(aad_context, chunk_index, total_chunks);
-    cipher
-        .decrypt(
-            nonce_arr,
-            Payload {
-                msg: chunk_data,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| ())
 }
 
 /// Derive nonce for chunk i: base_nonce XOR i (little-endian)

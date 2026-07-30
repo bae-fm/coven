@@ -166,12 +166,12 @@ impl StoreDatabase {
         &self,
         graph: Box<DurableFounderGraph>,
     ) -> Result<(), DbError> {
-        validate_founder_graph(&graph)?;
+        graph.validate()?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 if let Some(existing) = load_local_store_founder_graph_on(&tx)? {
-                    validate_founder_graph(&existing)?;
+                    existing.validate()?;
                     if founder_graph_identity(&existing) == founder_graph_identity(&graph) {
                         return Ok(());
                     }
@@ -488,7 +488,7 @@ impl StoreDatabase {
         &self,
         expected: &DurableFounderGraph,
     ) -> Result<(), DbError> {
-        validate_founder_graph(expected)?;
+        expected.validate()?;
         let expected_identity = founder_graph_identity(expected);
         self.connection
             .call(move |conn| {
