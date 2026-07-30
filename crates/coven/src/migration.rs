@@ -47,6 +47,15 @@ pub enum MigrationStep {
     Run(MigrationFn),
 }
 
+impl MigrationStep {
+    fn apply(&self, conn: &Connection) -> Result<(), DbError> {
+        match self {
+            Self::Sql(sql) => conn.execute_batch(sql.as_ref()).map_err(DbError::from),
+            Self::Run(run) => run(conn),
+        }
+    }
+}
+
 impl Migration {
     /// A migration whose `up` is a static DDL batch.
     pub fn sql(version: u32, name: &'static str, sql: &'static str) -> Self {
@@ -138,7 +147,7 @@ pub(crate) fn run_migrations_in_transaction(
         .iter()
         .filter(|migration| migration.version > current)
     {
-        if let Err(source) = apply_step(conn, &migration.up) {
+        if let Err(source) = migration.up.apply(conn) {
             return Err(MigrationError::Failed {
                 version: migration.version,
                 name: migration.name,
@@ -220,13 +229,6 @@ fn read_user_version(conn: &Connection) -> Result<u32, MigrationError> {
     conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .map(|v| v as u32)
         .map_err(|e| MigrationError::Ledger(DbError::from(e)))
-}
-
-fn apply_step(conn: &Connection, step: &MigrationStep) -> Result<(), DbError> {
-    match step {
-        MigrationStep::Sql(sql) => conn.execute_batch(sql.as_ref()).map_err(DbError::from),
-        MigrationStep::Run(f) => f(conn),
-    }
 }
 
 #[cfg(test)]
