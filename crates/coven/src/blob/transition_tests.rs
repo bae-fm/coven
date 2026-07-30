@@ -197,7 +197,7 @@ async fn invite_and_activate_peer(
     observer_db: &Database,
     peer_db: &Database,
     peer: &UserKeypair,
-) {
+) -> crate::sync::test_helpers::TestDevice {
     storage
         .invite_member(
             observer_db,
@@ -223,6 +223,10 @@ async fn invite_and_activate_peer(
     )
     .await
     .expect("activate peer Store device");
+    storage
+        .bind_device(peer_db, peer)
+        .await
+        .expect("bind activated peer Store device")
 }
 
 async fn photo_ref(db: &Database, id: &str) -> RowBlobRef {
@@ -781,8 +785,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let db_b = open_test_db_with_blob(photo_decl());
     let (_tmp_b, lib_b) = temp_store_dir();
     let kp_b = UserKeypair::generate();
-    invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
-    crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+    let peer = invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
+    peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a gated-off (Local) release does not reach a peer",
@@ -842,7 +846,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
-    crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+    peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "B receives the release once its blobs are up and the gate flips",
@@ -1081,7 +1085,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let (_tmp_b, lib_b) = temp_store_dir();
         let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
-        Box::pin(invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b)).await;
+        let peer = Box::pin(invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b)).await;
         Box::pin(seed_remote_release(
             &storage,
             &db_a,
@@ -1104,7 +1108,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
             &storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None,
         ))
         .await;
-        crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+        peer.pull_store(&lib_b).await.expect("pull peer Store");
         assert!(
             row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
             "B has the Remote release",
@@ -1626,7 +1630,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .await
         .expect("store the host-provided cover in the local store");
 
-    invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
+    let peer = invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
 
     // A cycle while gated off: nothing reaches a peer.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
@@ -1656,7 +1660,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
 
     // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
-    crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+    peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
         exact_cache_path(&lib_b, &cover_ref(&db_b, "coveraaa").await).exists(),
         "B fetches the CacheEager cover eagerly into its cache",
@@ -2159,7 +2163,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 
     let db_b = remote_root_db(cover_decl());
     let (_tmp_b, lib_b) = temp_store_dir();
-    invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
+    let peer = invite_and_activate_peer(&storage, &db_a, &db_b, &kp_b).await;
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
@@ -2174,7 +2178,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 
-    crate::sync::test_helpers::pull_into(&db_b, &storage, &lib_b).await;
+    peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n-remote-root'").await,
         "the peer receives the remote-root row"

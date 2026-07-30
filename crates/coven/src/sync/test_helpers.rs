@@ -1837,6 +1837,34 @@ impl TestDevice {
             .await
             .map_err(|error| error.to_string())
     }
+
+    pub(crate) async fn pull_store(
+        &self,
+        store_dir: &StoreDir,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<String, u64>,
+            crate::sync::store::StorePullResult,
+        ),
+        crate::sync::store::StorePullError,
+    > {
+        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let mut authorization = self
+            .store
+            .authorize_writer()
+            .await
+            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
+        let result = authorization
+            .pull(store_dir, Some(&routing_encryption))
+            .await
+            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
+        let sequences = result
+            .frontier
+            .iter()
+            .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
+            .collect();
+        Ok((sequences, result))
+    }
 }
 
 struct TestStoreProducers {
@@ -2411,22 +2439,7 @@ pub(crate) async fn pull_into_result(
             crate::sync::store::StorePullMembershipError::Message(error),
         )
     })?;
-    let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-    let mut authorization = device
-        .store
-        .authorize_writer()
-        .await
-        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
-    let result = authorization
-        .pull(store_dir, Some(&routing_encryption))
-        .await
-        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
-    let sequences = result
-        .frontier
-        .iter()
-        .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
-        .collect();
-    Ok((sequences, result))
+    device.pull_store(store_dir).await
 }
 
 pub(crate) async fn pull_into(
