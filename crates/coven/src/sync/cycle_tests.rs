@@ -399,7 +399,7 @@ async fn activate_joined_test_device(
     owner_db: &Database,
     joining_db: &Database,
     joining_identity: &UserKeypair,
-) {
+) -> TestDevice {
     crate::sync::test_helpers::install_active_device_fixture(
         storage,
         owner_db,
@@ -409,6 +409,10 @@ async fn activate_joined_test_device(
     )
     .await
     .expect("install active exact device fixture");
+    storage
+        .bind_device(joining_db, joining_identity)
+        .await
+        .expect("bind installed exact device fixture")
 }
 
 fn exercise_pre_attempt_abandonment<'a>(
@@ -1273,7 +1277,7 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
         .await
         .expect("invite exact pending-upload peer");
     let db_b = open_test_db_with_blob(blob_decl);
-    activate_joined_test_device(&storage, &db, &db_b, &peer).await;
+    let peer_device = activate_joined_test_device(&storage, &db, &db_b, &peer).await;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1323,7 +1327,10 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
     .expect("publish gated-true write beside pending upload");
 
     // The activated peer pulls: it gets the shareable row, never the gated-false one.
-    pull_into(&db_b, &storage, &ld).await;
+    peer_device
+        .pull_store(&ld)
+        .await
+        .expect("pull exact pending-upload peer");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'pub'").await,
         "Shareable",
@@ -1381,7 +1388,7 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
         .await
         .expect("invite exact gate-flip peer");
     let db_b = open_test_db_with_blob(blob_decl);
-    activate_joined_test_device(&storage, &db, &db_b, &peer).await;
+    let peer_device = activate_joined_test_device(&storage, &db, &db_b, &peer).await;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -1418,7 +1425,10 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
     .await
     .expect("publish gated-false Store write");
 
-    pull_into(&db_b, &storage, &ld).await;
+    peer_device
+        .pull_store(&ld)
+        .await
+        .expect("pull gated-false Store state");
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a gated-false row must not reach a peer",
@@ -1446,7 +1456,10 @@ async fn run_gated_false_row_propagates_once_its_gate_flips() {
     // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
     // re-emits it at seq 1. Re-pull from empty positions to pick it up wherever it
     // landed.
-    pull_into(&db_b, &storage, &ld).await;
+    peer_device
+        .pull_store(&ld)
+        .await
+        .expect("pull gate-flip Store state");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Album Title",
@@ -3100,7 +3113,9 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
          VALUES ('m_mid', 'WrittenMidCycle', NULL, 1, '0000000002000-0000-M', '2026-01-01')",
                 );
                 let db_c = open_test_db();
-                activate_joined_test_device(&storage.inner, &producer_db, &db_c, &keypair).await;
+                let device_c =
+                    activate_joined_test_device(&storage.inner, &producer_db, &db_c, &keypair)
+                        .await;
 
                 drop(a_src);
                 drop(producer_db);
@@ -3123,7 +3138,10 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                     // peer C pulls M's output and must receive 'm_mid'.
                     run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
-                    pull_into(&db_c, &storage.inner, &ld).await;
+                    device_c
+                        .pull_store(&ld)
+                        .await
+                        .expect("pull injected host write into C");
                     assert!(
                         row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'm_mid'").await,
                         "M's next Store commit carries the injected host write",
@@ -3170,11 +3188,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .await
         .expect("retain producer Store device");
     let db_m = open_test_db();
-    activate_joined_test_device(&storage, &producer_db, &db_m, &keypair).await;
-    let device_m = storage
-        .bind_device(&db_m, &keypair)
-        .await
-        .expect("retain M Store device");
+    let device_m = activate_joined_test_device(&storage, &producer_db, &db_m, &keypair).await;
     let device_id = db_m
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -5189,12 +5203,11 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         .await
         .expect("invite exact behind Member identity");
     let behind_db = open_test_db();
-    activate_joined_test_device(&storage, &owner_db, &behind_db, &behind).await;
-    pull_into(&behind_db, &storage, &ld).await;
-    let behind_store = storage
-        .bind_device(&behind_db, &behind)
+    let behind_store = activate_joined_test_device(&storage, &owner_db, &behind_db, &behind).await;
+    behind_store
+        .pull_store(&ld)
         .await
-        .expect("bind behind Member Store");
+        .expect("pull initial behind Member Store state");
 
     let behind_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
         crate::database::StoreDatabase::new(&behind_db)
@@ -5263,7 +5276,10 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             "reclamation keeps the package the behind device still needs",
         );
 
-        pull_into(&behind_db, &storage, &ld).await;
+        behind_store
+            .pull_store(&ld)
+            .await
+            .expect("pull retained changeset into behind Member Store");
         assert!(
             row_exists(&behind_db, "SELECT 1 FROM notes WHERE id = 'a2'").await,
             "the behind device pulls the retained changeset",
