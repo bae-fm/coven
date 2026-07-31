@@ -24,36 +24,6 @@ impl MergeStreamBlock {
     }
 }
 
-pub(crate) async fn load_active_merge_registrations(
-    database: &StoreDatabase,
-    history_verifier: &MergeHistoryVerifier<'_>,
-) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
-    let durable = database
-        .activated_store_device_registration_records()
-        .await?;
-    let mut verified = Vec::with_capacity(durable.len());
-    for (reference, expected) in durable {
-        let opened = history_verifier.load_registration(&reference).await?;
-        if opened.value != expected {
-            return Err(StorePullError::Database(format!(
-                "activated Store registration {} differs from its exact remote bytes",
-                reference.device_id
-            )));
-        }
-        if !matches!(
-            opened.value.store_commits,
-            DeviceStreamAnchor::StoreAnnouncements { .. }
-        ) {
-            return Err(StorePullError::Database(format!(
-                "activated Store registration {} has no Merge announcement anchor",
-                reference.device_id
-            )));
-        }
-        verified.push((reference, opened.value));
-    }
-    Ok(verified)
-}
-
 pub(crate) async fn discover_merge_owner_recoveries(
     history_verifier: &MergeHistoryVerifier<'_>,
     membership: &MembershipChain,

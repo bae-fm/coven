@@ -1332,7 +1332,31 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )>,
         pull::StorePullError,
     > {
-        pull::load_active_merge_registrations(&self.database, &self.history_verifier).await
+        let durable = self
+            .database
+            .activated_store_device_registration_records()
+            .await?;
+        let mut verified = Vec::with_capacity(durable.len());
+        for (reference, expected) in durable {
+            let opened = self.history_verifier.load_registration(&reference).await?;
+            if opened.value != expected {
+                return Err(pull::StorePullError::Database(format!(
+                    "activated Store registration {} differs from its exact remote bytes",
+                    reference.device_id
+                )));
+            }
+            if !matches!(
+                opened.value.store_commits,
+                crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
+            ) {
+                return Err(pull::StorePullError::Database(format!(
+                    "activated Store registration {} has no Merge announcement anchor",
+                    reference.device_id
+                )));
+            }
+            verified.push((reference, opened.value));
+        }
+        Ok(verified)
     }
 
     pub(super) async fn discover_pull_owner_recoveries(
