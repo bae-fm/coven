@@ -5,7 +5,7 @@ use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store::StoreError;
 
-use crate::sync::store::operations::{blocked_status, publish_prepared_remote_objects};
+use crate::sync::store::operations::blocked_status;
 
 use super::AuthorizedWriterOperation;
 
@@ -55,8 +55,7 @@ async fn drain_prepared_store_writes(
                 commit.body,
                 crate::protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
             ) {
-                publish_prepared_remote_objects(&database, storage, &write_id, store_root_hash)
-                    .await?;
+                operation.publish_prepared_remote_objects(&write_id).await?;
                 database.retire_uploaded_blob_spools().await?;
             }
             let head = &batch.head.value;

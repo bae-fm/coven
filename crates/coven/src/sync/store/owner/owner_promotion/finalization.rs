@@ -1,4 +1,3 @@
-use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::keys;
 use crate::protocol::circle_control::StoreMembershipStateRef;
@@ -7,7 +6,6 @@ use crate::protocol::store_commit::{
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionStaleReason, StreamActivation,
 };
 use crate::protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKey};
-use crate::storage::SyncStorage;
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
@@ -64,6 +62,46 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
                 }
             }
         }
+    }
+
+    async fn delete_candidate_objects(
+        &self,
+        targets: Vec<crate::database::CandidateCleanupObject>,
+    ) -> Result<(), OwnerPromotionError> {
+        for target in targets {
+            self.storage
+                .delete_protocol_object(&target.object)
+                .await
+                .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+            self.database
+                .mark_candidate_cleanup_absent(target.object)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Delete whatever a lost candidate still has in storage. The stale state
+    /// names the candidate and the objects it published, and each object's
+    /// durable record says whether it is still there, so retry resumes an
+    /// interrupted deletion and a completed deletion has no remaining targets.
+    pub(super) async fn finish_stale_cleanup(
+        &self,
+        evidence: &OwnerPromotionStaleEvidence,
+    ) -> Result<(), OwnerPromotionError> {
+        let OwnerPromotionStaleEvidence::Candidate {
+            receipt, published, ..
+        } = evidence
+        else {
+            return Ok(());
+        };
+        let targets = self
+            .database
+            .owner_promotion_candidate_cleanup_targets(
+                receipt.candidate.reference.clone(),
+                published.clone(),
+            )
+            .await?;
+        self.delete_candidate_objects(targets).await
     }
 }
 
@@ -437,8 +475,7 @@ async fn activate_owner_promotion_merge_head(
                     *nonactivation,
                 )
                 .await?;
-            delete_promotion_candidate_objects(&database, operation.storage.as_ref(), targets)
-                .await?;
+            operation.delete_candidate_objects(targets).await?;
             Ok(MergeHeadPublication::Ended { reason })
         }
         StoreOperationPublicationOutcome::Nonactivated(_) => Err(OwnerPromotionError::Protocol(
@@ -448,47 +485,6 @@ async fn activate_owner_promotion_merge_head(
             "promotion finalization used acknowledgement reprepare".to_string(),
         )),
     }
-}
-
-async fn delete_promotion_candidate_objects(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    targets: Vec<crate::database::CandidateCleanupObject>,
-) -> Result<(), OwnerPromotionError> {
-    for target in targets {
-        storage
-            .delete_protocol_object(&target.object)
-            .await
-            .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-        database
-            .mark_candidate_cleanup_absent(target.object)
-            .await?;
-    }
-    Ok(())
-}
-
-/// Delete whatever a lost candidate still has in storage. The stale state names
-/// the candidate and the objects it published, and each object's durable record
-/// says whether it is still there, so running this again after an interrupted
-/// deletion resumes it and running it on a finished one does nothing.
-pub(super) async fn finish_stale_owner_promotion_cleanup(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    evidence: &OwnerPromotionStaleEvidence,
-) -> Result<(), OwnerPromotionError> {
-    let OwnerPromotionStaleEvidence::Candidate {
-        receipt, published, ..
-    } = evidence
-    else {
-        return Ok(());
-    };
-    let targets = database
-        .owner_promotion_candidate_cleanup_targets(
-            receipt.candidate.reference.clone(),
-            published.clone(),
-        )
-        .await?;
-    delete_promotion_candidate_objects(database, storage, targets).await
 }
 
 enum OwnerPromotionResumeOutcome {
@@ -627,12 +623,7 @@ async fn resume_owner_promotion_finalization(
             OwnerPromotionJournalState::Stale {
                 reason, evidence, ..
             } => {
-                finish_stale_owner_promotion_cleanup(
-                    &database,
-                    operation.storage.as_ref(),
-                    &evidence,
-                )
-                .await?;
+                operation.finish_stale_cleanup(&evidence).await?;
                 return Err(OwnerPromotionError::Stale(Box::new(reason)));
             }
             OwnerPromotionJournalState::Allocated

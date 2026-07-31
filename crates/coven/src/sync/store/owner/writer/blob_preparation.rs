@@ -388,9 +388,7 @@ impl AuthorizedWriterOperation<'_> {
             }) {
             Ok(spool_write) => spool_write,
             Err(error) => {
-                return Err(
-                    cleanup_failed_partition_blob(&spool_path, &source, false, error).await,
-                );
+                return Err(source.cleanup_failure(None, error).await);
             }
         };
         let prepared = async {
@@ -425,13 +423,9 @@ impl AuthorizedWriterOperation<'_> {
         let (binding, stored) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err(cleanup_failed_partition_blob(
-                    &spool_path,
-                    &source,
-                    spool_write == crate::storage::BlobSpoolWrite::Created,
-                    error,
-                )
-                .await);
+                let created_spool = (spool_write == crate::storage::BlobSpoolWrite::Created)
+                    .then(|| PreparedBlobSpool::new(&spool_path));
+                return Err(source.cleanup_failure(created_spool, error).await);
             }
         };
         Ok((
@@ -479,31 +473,6 @@ impl AuthorizedWriterOperation<'_> {
     }
 }
 
-async fn cleanup_failed_partition_blob(
-    spool_path: &std::path::Path,
-    source: &PartitionBlobSource,
-    spool_created_by_attempt: bool,
-    error: StoreError,
-) -> StoreError {
-    let mut failures = Vec::new();
-    if let Err(cleanup_error) = source.retire_temporary().await {
-        failures.push(cleanup_error.to_string());
-    }
-    if spool_created_by_attempt {
-        if let Err(cleanup_error) = PreparedBlobSpool::new(spool_path).rollback().await {
-            failures.push(cleanup_error);
-        }
-    }
-    if failures.is_empty() {
-        error
-    } else {
-        StoreError::InvalidOutbound(format!(
-            "blob preparation failed: {error}; cleanup failed: {}",
-            failures.join("; ")
-        ))
-    }
-}
-
 struct PartitionBlobSource {
     path: std::path::PathBuf,
     temporary: bool,
@@ -535,6 +504,30 @@ impl PartitionBlobSource {
         remove_durable_file(&self.path, false)
             .await
             .map_err(StoreError::InvalidOutbound)
+    }
+
+    async fn cleanup_failure(
+        &self,
+        created_spool: Option<PreparedBlobSpool<'_>>,
+        error: StoreError,
+    ) -> StoreError {
+        let mut failures = Vec::new();
+        if let Err(cleanup_error) = self.retire_temporary().await {
+            failures.push(cleanup_error.to_string());
+        }
+        if let Some(spool) = created_spool {
+            if let Err(cleanup_error) = spool.rollback().await {
+                failures.push(cleanup_error);
+            }
+        }
+        if failures.is_empty() {
+            error
+        } else {
+            StoreError::InvalidOutbound(format!(
+                "blob preparation failed: {error}; cleanup failed: {}",
+                failures.join("; ")
+            ))
+        }
     }
 }
 

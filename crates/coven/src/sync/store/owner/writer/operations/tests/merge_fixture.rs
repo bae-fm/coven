@@ -1,7 +1,7 @@
 use super::*;
-use crate::protocol::store_commit::commit_semantic_prefix;
 use crate::protocol::store_commit::StorePackageInput;
 use crate::protocol::store_commit::SuccessorLink;
+use crate::protocol::store_commit::{commit_semantic_prefix, package_semantic_prefix};
 
 pub(super) struct PreparedWriteFixture {
     pub(super) home: InMemoryCloudHome,

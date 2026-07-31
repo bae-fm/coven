@@ -166,12 +166,7 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
                         // slots are the ones this attempt composes into.
                         if let OwnerPromotionJournalState::Stale { evidence, .. } = &previous.state
                         {
-                            super::finalization::finish_stale_owner_promotion_cleanup(
-                                &database,
-                                operation.storage.as_ref(),
-                                evidence,
-                            )
-                            .await?;
+                            operation.finish_stale_cleanup(evidence).await?;
                         }
                         database
                             .replace_failed_owner_promotion_journal(previous, allocation)

@@ -250,10 +250,11 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         &mut chain,
         plan,
         progress,
-        MutationPersistence {
-            database: &database,
+        MutationPersistence::new(
+            &database,
+            std::sync::Arc::clone(operation.storage),
             intent_hash,
-        },
+        ),
     ))
     .await?;
     operation.membership = chain;

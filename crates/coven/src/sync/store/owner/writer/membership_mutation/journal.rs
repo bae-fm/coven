@@ -1,5 +1,6 @@
 use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::{
     self, AuthorHead, MemberRole, MembershipChange, MembershipEntry, MembershipEntryRef,
@@ -9,8 +10,8 @@ use crate::protocol::membership::{
 use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
 use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
-use crate::storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
-use crate::storage::{ExactObjectRef, PreparedExactObject};
+use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeJoinInfo};
+use crate::storage::{ExactObjectRef, PreparedExactObject, SyncStorage};
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
 use super::{validate_prepared_publication, validate_prepared_transition, InviteError};
@@ -370,11 +371,24 @@ pub(super) enum MembershipMutationProgress {
 }
 
 pub(super) struct MutationPersistence<'a> {
-    pub(super) database: &'a StoreDatabase,
-    pub(super) intent_hash: ObjectHash,
+    database: &'a StoreDatabase,
+    storage: std::sync::Arc<dyn SyncStorage>,
+    intent_hash: ObjectHash,
 }
 
 impl MutationPersistence<'_> {
+    pub(super) fn new(
+        database: &StoreDatabase,
+        storage: std::sync::Arc<dyn SyncStorage>,
+        intent_hash: ObjectHash,
+    ) -> MutationPersistence<'_> {
+        MutationPersistence {
+            database,
+            storage,
+            intent_hash,
+        }
+    }
+
     pub(super) async fn record_progress(
         &self,
         progress: &MembershipMutationProgress,
@@ -388,9 +402,230 @@ impl MutationPersistence<'_> {
         Ok(())
     }
 
+    pub(super) fn intent_hash(&self) -> ObjectHash {
+        self.intent_hash
+    }
+
+    pub(super) async fn mark_remote_object_uploaded(
+        &self,
+        remote: RemoteObjectRecord,
+    ) -> Result<(), InviteError> {
+        self.database.mark_remote_object_uploaded(remote).await?;
+        Ok(())
+    }
+
+    pub(super) async fn record_direct_revoke_activation(
+        &self,
+        generation: u64,
+    ) -> Result<(), InviteError> {
+        self.database
+            .record_direct_revoke_activation(
+                self.intent_hash,
+                encode_membership_progress(&MembershipMutationProgress::RevokeActivated {
+                    candidate: None,
+                })?,
+                generation,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn adopt_candidate_head(
+        &mut self,
+        plan_bytes: Vec<u8>,
+        previous: RemoteObjectRecord,
+        replacement: RemoteObjectRecord,
+        rotation_generation: Option<u64>,
+    ) -> Result<(ObjectHash, ObjectHash), InviteError> {
+        let previous_intent = self.intent_hash;
+        let replacement_intent = self
+            .database
+            .adopt_merge_membership_candidate_head(
+                previous_intent,
+                plan_bytes,
+                previous,
+                replacement,
+                rotation_generation,
+            )
+            .await?;
+        self.intent_hash = replacement_intent;
+        Ok((previous_intent, replacement_intent))
+    }
+
     pub(super) async fn complete(&self) -> Result<(), InviteError> {
         self.database
             .complete_membership_mutation(self.intent_hash)
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn finish_nonactivating_revoke(
+        &self,
+        plan: &RevokeMutationPlan,
+        cloud_home: &dyn CloudHome,
+    ) -> Result<(), InviteError> {
+        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
+        else {
+            return Err(InviteError::InvalidDurableMutation(
+                "direct membership removal has no candidate cleanup".to_string(),
+            ));
+        };
+        let (candidate_objects, _) = plan.candidate_cleanup_objects();
+        let cleanup = self
+            .database
+            .membership_candidate_cleanup_targets(
+                self.intent_hash,
+                candidate.reference.clone(),
+                candidate_objects,
+            )
+            .await?;
+        self.finish_nonactivating_revoke_with_targets(plan, cloud_home, cleanup)
+            .await
+    }
+
+    pub(super) async fn begin_nonactivating_revoke(
+        &self,
+        plan: &RevokeMutationPlan,
+        cloud_home: &dyn CloudHome,
+        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+    ) -> Result<(), InviteError> {
+        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
+        else {
+            return Err(InviteError::InvalidDurableMutation(
+                "direct membership removal has no candidate nonactivation".to_string(),
+            ));
+        };
+        let progress = MembershipMutationProgress::RevokeCandidateNonactivating {
+            nonactivation: nonactivation.clone().into_durable(),
+        };
+        let cleanup = self
+            .database
+            .begin_membership_candidate_nonactivation(
+                self.intent_hash,
+                candidate.reference.clone(),
+                candidate_objects,
+                retained,
+                encode_membership_progress(&progress)?,
+                nonactivation,
+            )
+            .await?;
+        self.finish_nonactivating_revoke_with_targets(plan, cloud_home, cleanup)
+            .await
+    }
+
+    async fn finish_nonactivating_revoke_with_targets(
+        &self,
+        plan: &RevokeMutationPlan,
+        cloud_home: &dyn CloudHome,
+        cleanup: Vec<crate::database::CandidateCleanupObject>,
+    ) -> Result<(), InviteError> {
+        let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
+        else {
+            return Err(InviteError::InvalidDurableMutation(
+                "direct membership removal has no candidate terminalization".to_string(),
+            ));
+        };
+        match cloud_home.set_access(plan.prior_access.clone()).await? {
+            CloudAccessOutcome::Present(_) => {}
+            CloudAccessOutcome::Absent(_) => {
+                return Err(InviteError::InvalidDurableMutation(
+                    "provider returned absent while restoring a nonactivated removal".to_string(),
+                ));
+            }
+        }
+        for target in cleanup {
+            self.storage
+                .delete_protocol_object(&target.object)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            self.database
+                .mark_candidate_cleanup_absent(target.object)
+                .await?;
+        }
+        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        self.database
+            .complete_nonactivating_membership_candidate_mutation(
+                self.intent_hash,
+                candidate.reference.clone(),
+                candidate_objects,
+                retained,
+                Some(
+                    EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
+                        .map_err(|error| {
+                            InviteError::Crypto(format!("parse rotated keyring: {error}"))
+                        })?
+                        .current_generation(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn finish_nonactivating_resolution(
+        &self,
+        plan: &ResolveMutationPlan,
+    ) -> Result<(), InviteError> {
+        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        let cleanup = self
+            .database
+            .membership_candidate_cleanup_targets(
+                self.intent_hash,
+                plan.candidate.reference.clone(),
+                candidate_objects.iter().chain(&retained).cloned().collect(),
+            )
+            .await?;
+        self.finish_nonactivating_resolution_with_targets(plan, cleanup)
+            .await
+    }
+
+    pub(super) async fn begin_nonactivating_resolution(
+        &self,
+        plan: &ResolveMutationPlan,
+        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+    ) -> Result<(), InviteError> {
+        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        let progress = MembershipMutationProgress::ResolutionCandidateNonactivating {
+            nonactivation: nonactivation.clone().into_durable(),
+        };
+        let cleanup = self
+            .database
+            .begin_membership_candidate_nonactivation(
+                self.intent_hash,
+                plan.candidate.reference.clone(),
+                candidate_objects,
+                retained,
+                encode_membership_progress(&progress)?,
+                nonactivation,
+            )
+            .await?;
+        self.finish_nonactivating_resolution_with_targets(plan, cleanup)
+            .await
+    }
+
+    async fn finish_nonactivating_resolution_with_targets(
+        &self,
+        plan: &ResolveMutationPlan,
+        cleanup: Vec<crate::database::CandidateCleanupObject>,
+    ) -> Result<(), InviteError> {
+        let (candidate_objects, retained) = plan.candidate_cleanup_objects();
+        for target in cleanup {
+            self.storage
+                .delete_protocol_object(&target.object)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            self.database
+                .mark_candidate_cleanup_absent(target.object)
+                .await?;
+        }
+        self.database
+            .complete_nonactivating_membership_candidate_mutation(
+                self.intent_hash,
+                plan.candidate.reference.clone(),
+                candidate_objects,
+                retained,
+                None,
+            )
             .await?;
         Ok(())
     }

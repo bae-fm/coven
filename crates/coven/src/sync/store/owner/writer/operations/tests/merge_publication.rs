@@ -491,14 +491,9 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    publish_prepared_remote_objects(
-        &fixture.db,
-        &fixture.storage,
-        &fixture.write_id,
-        fixture.root.store_root_hash,
-    )
-    .await
-    .expect("publish original candidate objects");
+    publish_prepared_remote_objects(&fixture.store, &fixture.write_id)
+        .await
+        .expect("publish original candidate objects");
     fixture
         .storage
         .create_protocol_object(&batch.commit.prepared)
@@ -563,14 +558,9 @@ async fn original_candidate_activation_wins_abandonment_race() {
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    publish_prepared_remote_objects(
-        &fixture.db,
-        &fixture.storage,
-        &fixture.write_id,
-        fixture.root.store_root_hash,
-    )
-    .await
-    .expect("publish original candidate objects");
+    publish_prepared_remote_objects(&fixture.store, &fixture.write_id)
+        .await
+        .expect("publish original candidate objects");
     fixture
         .storage
         .create_protocol_object(&batch.commit.prepared)

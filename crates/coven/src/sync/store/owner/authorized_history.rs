@@ -6,6 +6,7 @@ use super::history::{abandonment, OwnerPromotionHistory, ReclaimHistory, Restore
 use super::pull;
 use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
+use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
@@ -1506,7 +1507,42 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         load_merge_predecessor_membership_with_history(&mut self.history_verifier, state).await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    async fn materialized_reference_status(
+        &mut self,
+        coverage: &CommitFrontier,
+        stream_id: &str,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<pull::MaterializedCheck, pull::StorePullError> {
+        if pull::commit_stream_id(&reference.coord) != stream_id {
+            return Ok(pull::MaterializedCheck::Held(
+                pull::HeldStorePositionReason::WrongSlot(format!(
+                    "commit reference stream {} differs from dependency stream {stream_id}",
+                    pull::commit_stream_id(&reference.coord)
+                )),
+            ));
+        }
+        if let Some(actual) = self
+            .database
+            .exact_materialized_ref(stream_id, reference.coord.sequence())
+            .await?
+        {
+            if actual != *reference {
+                return Ok(pull::MaterializedCheck::Held(
+                    pull::HeldStorePositionReason::HashMismatch {
+                        referenced_device_id: stream_id.to_string(),
+                        referenced_commit: reference.clone(),
+                        materialized_hash: actual.commit_hash,
+                    },
+                ));
+            }
+            return Ok(pull::MaterializedCheck::Yes);
+        }
+        Ok(self
+            .history_verifier
+            .covered_reference_status(coverage, stream_id, reference)
+            .await)
+    }
+
     pub(super) async fn pull_readiness(
         &mut self,
         coverage: &CommitFrontier,
@@ -1516,17 +1552,150 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         commit_ref: &StoreBatchCommitRef,
         commit: &crate::protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
-        self.history_verifier
-            .readiness(
-                &self.database,
-                coverage,
-                frontier,
-                device_state,
-                exclusion_freezes,
-                commit_ref,
-                commit,
-            )
-            .await
+        let stream_id = pull::commit_stream_id(&commit_ref.coord);
+        if let Some(current) = frontier.get(&stream_id) {
+            if commit_ref.coord.sequence() <= current.coord.sequence() {
+                match self
+                    .materialized_reference_status(coverage, &stream_id, commit_ref)
+                    .await?
+                {
+                    pull::MaterializedCheck::Yes => {
+                        return Ok(pull::Readiness::AlreadyMaterialized)
+                    }
+                    pull::MaterializedCheck::Missing => {
+                        return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                            commit_ref,
+                            pull::HeldStorePositionReason::MissingCommit,
+                        )))
+                    }
+                    pull::MaterializedCheck::Held(reason) => {
+                        return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                            commit_ref, reason,
+                        )))
+                    }
+                }
+            }
+            if commit.order.predecessor() != Some(current) {
+                let reason = match commit.order.predecessor() {
+                    Some(missing) => {
+                        pull::HeldStorePositionReason::MissingPredecessor(missing.clone())
+                    }
+                    None => pull::HeldStorePositionReason::InvalidObject(
+                        "non-genesis Merge commit omits its exact predecessor".to_string(),
+                    ),
+                };
+                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                    commit_ref, reason,
+                )));
+            }
+            if commit_ref.coord.sequence() != current.coord.sequence() + 1 {
+                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                        commit_ref,
+                        pull::HeldStorePositionReason::InvalidObject(
+                            "Merge commit sequence does not immediately follow its materialized frontier"
+                                .to_string(),
+                        ),
+                    )));
+            }
+        } else if commit_ref.coord.sequence() != 1 || commit.order.predecessor().is_some() {
+            let reason = match commit.order.predecessor() {
+                Some(missing) => pull::HeldStorePositionReason::MissingPredecessor(missing.clone()),
+                None => pull::HeldStorePositionReason::InvalidObject(
+                    "Merge commit beyond genesis omits its exact predecessor".to_string(),
+                ),
+            };
+            return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                commit_ref, reason,
+            )));
+        }
+
+        for record in device_state.devices.values() {
+            let target_stream = StreamActivation::device_authorized_stream_id(
+                self.root.reference().store_root_hash,
+                &record.registration,
+                StreamAnchorDomain::StoreAnnouncements,
+            );
+            if target_stream.to_string() != stream_id {
+                continue;
+            }
+            let StoreDeviceStatus::Inactive {
+                terminals,
+                accepted_cut,
+            } = &record.status
+            else {
+                break;
+            };
+            let target_cut = accepted_cut.commits();
+            let terminal_sequence = match target_cut.get(&target_stream) {
+                Some(reference) => reference.coord.sequence(),
+                None => 0,
+            };
+            if commit_ref.coord.sequence() > terminal_sequence {
+                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                    commit_ref,
+                    pull::HeldStorePositionReason::InactiveDevice {
+                        terminals: terminals.clone(),
+                        accepted_cut: accepted_cut.clone(),
+                    },
+                )));
+            }
+            break;
+        }
+
+        for freeze in exclusion_freezes {
+            let target_stream = StreamActivation::device_authorized_stream_id(
+                self.root.reference().store_root_hash,
+                &freeze.proposal.target,
+                StreamAnchorDomain::StoreAnnouncements,
+            );
+            if target_stream.to_string() != stream_id {
+                continue;
+            }
+            let target_cut = freeze.target_cut.commits();
+            let frozen_sequence = match target_cut.get(&target_stream) {
+                Some(reference) => reference.coord.sequence(),
+                None => 0,
+            };
+            if commit_ref.coord.sequence() > frozen_sequence {
+                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                    commit_ref,
+                    pull::HeldStorePositionReason::DeviceExclusionFreeze {
+                        proposal: freeze.proposal.clone(),
+                        target_cut: freeze.target_cut.clone(),
+                    },
+                )));
+            }
+        }
+
+        for (required_stream, required_ref) in commit.merge_dependencies() {
+            let required_stream = required_stream.to_string();
+            match self
+                .materialized_reference_status(coverage, &required_stream, required_ref)
+                .await?
+            {
+                pull::MaterializedCheck::Yes => {}
+                pull::MaterializedCheck::Missing => {
+                    return Ok(pull::Readiness::Held(pull::HeldStorePosition::dependency(
+                        commit_ref,
+                        &required_stream,
+                        required_ref,
+                        pull::HeldStorePositionReason::MissingDependency {
+                            device_id: required_stream.clone(),
+                            commit: required_ref.clone(),
+                        },
+                    )))
+                }
+                pull::MaterializedCheck::Held(reason) => {
+                    return Ok(pull::Readiness::Held(pull::HeldStorePosition::dependency(
+                        commit_ref,
+                        &required_stream,
+                        required_ref,
+                        reason,
+                    )))
+                }
+            }
+        }
+        Ok(pull::Readiness::Ready)
     }
 
     pub(super) async fn verified_pull_membership_objects(
@@ -2911,17 +3080,15 @@ impl AuthorizedStoreHistory<'_> {
         commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
         commit: &crate::protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
-        self.history_verifier
-            .readiness(
-                &self.database,
-                coverage,
-                frontier,
-                device_state,
-                exclusion_freezes,
-                commit_ref,
-                commit,
-            )
-            .await
+        self.pull_readiness(
+            coverage,
+            frontier,
+            device_state,
+            exclusion_freezes,
+            commit_ref,
+            commit,
+        )
+        .await
     }
 
     pub(super) async fn verified_merge_membership_prefix_for_test(

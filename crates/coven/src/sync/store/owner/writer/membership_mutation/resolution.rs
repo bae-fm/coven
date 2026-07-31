@@ -4,7 +4,7 @@ use crate::protocol::remote_object;
 use crate::protocol::store_commit;
 use crate::protocol::store_commit::membership_head_slot_prefix;
 use crate::storage as store_objects;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations;
 
 use super::{
@@ -15,6 +15,25 @@ use super::{
 };
 
 impl ResolveMutationPlan {
+    pub(super) fn candidate_cleanup_objects(
+        &self,
+    ) -> (
+        Vec<crate::storage::ExactObjectRef>,
+        Vec<crate::storage::ExactObjectRef>,
+    ) {
+        (
+            vec![
+                self.candidate.reference.object.clone(),
+                self.transition.entry_ref.object.clone(),
+                self.publication.head_ref.object.clone(),
+            ],
+            vec![
+                self.reference.object.clone(),
+                self.candidate.head_ref().object,
+            ],
+        )
+    }
+
     fn remote_objects(&self) -> Result<Vec<remote_object::RemoteObjectRecord>, InviteError> {
         self.candidate
             .merge_membership_resolution_remote_objects(
@@ -259,49 +278,6 @@ async fn build_resolution_mutation(
     Ok(plan)
 }
 
-async fn finish_nonactivating_resolution(
-    plan: &ResolveMutationPlan,
-    persistence: &MutationPersistence<'_>,
-    storage: &dyn SyncStorage,
-) -> Result<(), InviteError> {
-    let candidate_objects = vec![
-        plan.candidate.reference.object.clone(),
-        plan.transition.entry_ref.object.clone(),
-        plan.publication.head_ref.object.clone(),
-    ];
-    let mut retained = vec![plan.reference.object.clone()];
-    retained.push(plan.candidate.head_ref().object);
-    let cleanup = persistence
-        .database
-        .membership_candidate_cleanup_targets(
-            persistence.intent_hash,
-            plan.candidate.reference.clone(),
-            candidate_objects.iter().chain(&retained).cloned().collect(),
-        )
-        .await?;
-    for target in cleanup {
-        storage
-            .delete_protocol_object(&target.object)
-            .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
-        persistence
-            .database
-            .mark_candidate_cleanup_absent(target.object)
-            .await?;
-    }
-    persistence
-        .database
-        .complete_nonactivating_membership_candidate_mutation(
-            persistence.intent_hash,
-            plan.candidate.reference.clone(),
-            candidate_objects,
-            retained,
-            None,
-        )
-        .await?;
-    Ok(())
-}
-
 async fn execute_resolution_mutation(
     operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
     chain: &mut MembershipChain,
@@ -322,7 +298,7 @@ async fn execute_resolution_mutation(
                 "resolution nonactivation names another candidate".to_string(),
             ));
         }
-        finish_nonactivating_resolution(&plan, &persistence, operation.storage.as_ref()).await?;
+        persistence.finish_nonactivating_resolution(&plan).await?;
         return Err(InviteError::InvalidDurableMutation(
             "membership resolution candidate did not activate".to_string(),
         ));
@@ -370,14 +346,12 @@ async fn execute_resolution_mutation(
     .await
     .map_err(|error| InviteError::Crypto(error.to_string()))?;
     persistence
-        .database
         .mark_remote_object_uploaded(exact_owned_remote(&remotes, &plan.reference.object)?)
         .await?;
     AuthorizedMembershipPublication::new(operation)
         .publish_authority(&plan.transition, &[])
         .await?;
     persistence
-        .database
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.transition.entry_ref.object,
@@ -388,7 +362,6 @@ async fn execute_resolution_mutation(
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence
-        .database
         .mark_remote_object_uploaded(exact_owned_remote(
             &remotes,
             &plan.candidate.reference.object,
@@ -403,7 +376,7 @@ async fn execute_resolution_mutation(
                 &plan.publication,
                 plan.candidate.clone(),
                 operations::StoreMembershipJournalCompletion::Mutation {
-                    intent_hash: persistence.intent_hash,
+                    intent_hash: persistence.intent_hash(),
                     progress_bytes: encode_membership_progress(
                         &MembershipMutationProgress::ResolutionActivated {
                             candidate: plan.candidate.reference.clone(),
@@ -431,10 +404,8 @@ async fn execute_resolution_mutation(
                 let replacement_head = plan.candidate.head_ref();
                 let bytes =
                     encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
-                persistence.intent_hash = persistence
-                    .database
-                    .adopt_merge_membership_candidate_head(
-                        persistence.intent_hash,
+                persistence
+                    .adopt_candidate_head(
                         bytes,
                         exact_owned_remote(&previous_remotes, &previous_head.object)?,
                         exact_owned_remote(&replacement_remotes, &replacement_head.object)?,
@@ -446,40 +417,8 @@ async fn execute_resolution_mutation(
                 candidate,
                 nonactivation,
             } if candidate.as_ref() == plan.candidate.as_ref() => {
-                let progress = MembershipMutationProgress::ResolutionCandidateNonactivating {
-                    nonactivation: nonactivation.clone().into_durable(),
-                };
-                let cleanup = persistence
-                    .database
-                    .begin_membership_candidate_nonactivation(
-                        persistence.intent_hash,
-                        plan.candidate.reference.clone(),
-                        vec![
-                            plan.candidate.reference.object.clone(),
-                            plan.transition.entry_ref.object.clone(),
-                            plan.publication.head_ref.object.clone(),
-                        ],
-                        vec![
-                            plan.reference.object.clone(),
-                            plan.candidate.head_ref().object,
-                        ],
-                        encode_membership_progress(&progress)?,
-                        *nonactivation,
-                    )
-                    .await?;
-                for target in cleanup {
-                    operation
-                        .storage
-                        .as_ref()
-                        .delete_protocol_object(&target.object)
-                        .await
-                        .map_err(|error| InviteError::Crypto(error.to_string()))?;
-                    persistence
-                        .database
-                        .mark_candidate_cleanup_absent(target.object)
-                        .await?;
-                }
-                finish_nonactivating_resolution(&plan, &persistence, operation.storage.as_ref())
+                persistence
+                    .begin_nonactivating_resolution(&plan, *nonactivation)
                     .await?;
                 return Err(InviteError::InvalidDurableMutation(
                     "membership resolution candidate did not activate".to_string(),
@@ -547,10 +486,11 @@ pub(crate) async fn resolve_membership_conflict(
         chain,
         plan,
         progress,
-        MutationPersistence {
-            database: &database,
+        MutationPersistence::new(
+            &database,
+            std::sync::Arc::clone(operation.storage),
             intent_hash,
-        },
+        ),
     )
     .await
 }

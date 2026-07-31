@@ -174,11 +174,46 @@ async fn apply_deferred_local_blob_drop(
                 })?;
         }
         (crate::sync::cycle::DeferredLocalBlobDisposition::Drop, _) => {}
-        (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, None) => {
-            return recognize_applied_disposition_or_fail(store_dir, deferred).await;
-        }
-        (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, None) => {
-            return recognize_applied_disposition_or_fail(store_dir, deferred).await;
+        (
+            crate::sync::cycle::DeferredLocalBlobDisposition::Pin
+            | crate::sync::cycle::DeferredLocalBlobDisposition::Cache,
+            None,
+        ) => {
+            let exact = match deferred.disposition {
+                crate::sync::cycle::DeferredLocalBlobDisposition::Pin => {
+                    store_dir
+                        .pinned_blob_is_exact(
+                            &deferred.namespace,
+                            deferred.locator_hash,
+                            deferred.size,
+                            deferred.plaintext_hash,
+                        )
+                        .await
+                }
+                crate::sync::cycle::DeferredLocalBlobDisposition::Cache => {
+                    store_dir
+                        .cached_blob_is_exact(
+                            &deferred.namespace,
+                            deferred.locator_hash,
+                            deferred.size,
+                            deferred.plaintext_hash,
+                        )
+                        .await
+                }
+                crate::sync::cycle::DeferredLocalBlobDisposition::Drop => unreachable!(),
+            }
+            .map_err(|error| {
+                crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+            })?;
+            if exact {
+                return Ok(());
+            }
+            return Err(crate::sync::store::StorePreparationError::AssetUpload(
+                format!(
+                    "published blob {}/{} is missing from both the local store and its {:?} destination",
+                    deferred.namespace, deferred.id, deferred.disposition
+                ),
+            ));
         }
     }
     store_dir
@@ -186,43 +221,4 @@ async fn apply_deferred_local_blob_drop(
         .await
         .map(|_| ())
         .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))
-}
-
-async fn recognize_applied_disposition_or_fail(
-    store_dir: &crate::store_dir::StoreDir,
-    deferred: &crate::sync::cycle::DeferredLocalBlobDrop,
-) -> Result<(), crate::sync::store::StorePreparationError> {
-    let exact = match deferred.disposition {
-        crate::sync::cycle::DeferredLocalBlobDisposition::Pin => {
-            store_dir
-                .pinned_blob_is_exact(
-                    &deferred.namespace,
-                    deferred.locator_hash,
-                    deferred.size,
-                    deferred.plaintext_hash,
-                )
-                .await
-        }
-        crate::sync::cycle::DeferredLocalBlobDisposition::Cache => {
-            store_dir
-                .cached_blob_is_exact(
-                    &deferred.namespace,
-                    deferred.locator_hash,
-                    deferred.size,
-                    deferred.plaintext_hash,
-                )
-                .await
-        }
-        crate::sync::cycle::DeferredLocalBlobDisposition::Drop => Ok(false),
-    }
-    .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))?;
-    if exact {
-        return Ok(());
-    }
-    Err(crate::sync::store::StorePreparationError::AssetUpload(
-        format!(
-            "published blob {}/{} is missing from both the local store and its {:?} destination",
-            deferred.namespace, deferred.id, deferred.disposition
-        ),
-    ))
 }

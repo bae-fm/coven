@@ -27,55 +27,6 @@ pub(crate) struct LoadedDeviceJoinCleanupActivation {
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
 }
 
-async fn validate_commit_reclaim_authorization(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    commit: &StoreBatchCommit,
-    reference: &super::store_reclaim::ReclaimAuthorizationRef,
-    activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&MembershipChain>,
-    accepted: VerifiedMergePredecessorHistory<'_>,
-) -> Result<(), RegistrationLoadError> {
-    let predecessor = predecessor.ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "reclaim authorization activation has no exact predecessor owner authority".to_string(),
-        )
-    })?;
-    let opened = history_verifier
-        .load_reclaim_authorization(reference)
-        .await
-        .map_err(RegistrationLoadError::Object)?;
-    let evidence = &opened.evidence.value;
-    let authorization = &opened.authorization.value;
-    let owner_authorized = authorization.authority.membership == commit.membership_state
-        && predecessor_verifies_owner(
-            predecessor,
-            &authorization.authority.membership,
-            &evidence.author_pubkey,
-            &authorization.authority.owner_grant,
-        );
-    if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
-        return Err(RegistrationLoadError::Invalid(
-            "reclaim authorization signer is not an active Owner at its exact predecessor"
-                .to_string(),
-        ));
-    }
-    // Each kind of activating authority is re-read differently, so the binding
-    // between the evidence and the object it authorizes deleting dispatches on
-    // which authority published the target.
-    let target = evidence.claim.target();
-    match target.activation() {
-        super::store_reclaim::ReclaimActivation::Commit(activating_commit) => {
-            validate_commit_activated_reclaim_target(&target, activating_commit, accepted)
-        }
-        super::store_reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
-            validate_circle_snapshot_activated_reclaim_target(&target, &activation)
-        }
-        super::store_reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
-            validate_package_bound_reclaim_target(&target, &activation, accepted)
-        }
-    }
-}
-
 /// Bind a row blob to the package that published it. The blob is never named in a
 /// commit body — only inside the package's bindings — so what a commit establishes
 /// is that the named package was activated by a commit in this device's
@@ -291,15 +242,46 @@ pub(crate) async fn load_commit_registrations(
             .await?;
     }
     if let Some(reference) = commit.reclaim_authorization() {
-        Box::pin(validate_commit_reclaim_authorization(
-            history_verifier,
-            commit,
-            reference,
-            activating_author,
-            predecessor,
-            accepted,
-        ))
-        .await?;
+        let predecessor = predecessor.ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "reclaim authorization activation has no exact predecessor owner authority"
+                    .to_string(),
+            )
+        })?;
+        let opened = history_verifier
+            .load_reclaim_authorization(reference)
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        let evidence = &opened.evidence.value;
+        let authorization = &opened.authorization.value;
+        let owner_authorized = authorization.authority.membership == commit.membership_state
+            && predecessor_verifies_owner(
+                predecessor,
+                &authorization.authority.membership,
+                &evidence.author_pubkey,
+                &authorization.authority.owner_grant,
+            );
+        if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
+            return Err(RegistrationLoadError::Invalid(
+                "reclaim authorization signer is not an active Owner at its exact predecessor"
+                    .to_string(),
+            ));
+        }
+        // Each kind of activating authority is re-read differently, so the binding
+        // between the evidence and the object it authorizes deleting dispatches on
+        // which authority published the target.
+        let target = evidence.claim.target();
+        match target.activation() {
+            super::store_reclaim::ReclaimActivation::Commit(activating_commit) => {
+                validate_commit_activated_reclaim_target(&target, activating_commit, accepted)
+            }
+            super::store_reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
+                validate_circle_snapshot_activated_reclaim_target(&target, &activation)
+            }
+            super::store_reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
+                validate_package_bound_reclaim_target(&target, &activation, accepted)
+            }
+        }?;
     }
     if let Some(reference) = commit.reclaim_receipt() {
         Box::pin(validate_commit_reclaim_receipt(

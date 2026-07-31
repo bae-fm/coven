@@ -1,6 +1,6 @@
 //! Proof-gated deletion of exact Store packages covered by an exact snapshot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -1080,13 +1080,14 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         // A missing or unstable Store snapshot leaves Store packages uncovered but must
         // not block Circle package reclamation, which carries its own Circle coverage.
         let store_targets = match Box::pin(self.choose_snapshot(&registrations)).await {
-            Ok(snapshot) => {
-                exact_package_targets(&mut self.history(), &snapshot.snapshot.meta.coverage)
-                    .await?
-                    .into_iter()
-                    .map(|(commit, package)| (commit, package, snapshot.clone()))
-                    .collect::<Vec<_>>()
-            }
+            Ok(snapshot) => self
+                .history()
+                .store_package_targets(&snapshot.snapshot.meta.coverage)
+                .await
+                .map_err(reclaim_pull_error)?
+                .into_iter()
+                .map(|(commit, package)| (commit, package, snapshot.clone()))
+                .collect::<Vec<_>>(),
             Err(
                 StoreReclaimError::NoSnapshot | StoreReclaimError::MissingAcknowledgement { .. },
             ) => Vec::new(),
@@ -1168,9 +1169,12 @@ impl AuthorizedReclaim<'_, '_> {
         let frontier = CommitFrontier::from_refs(database.materialized_frontier().await?)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         let epochs = database.circle_replay_epoch_index(root.clone()).await?;
-        for (commit, package) in
-            exact_circle_package_targets(&mut self.history(), circle_id, &frontier).await?
-        {
+        let targets = self
+            .history()
+            .circle_package_targets(circle_id, &frontier)
+            .await
+            .map_err(reclaim_pull_error)?;
+        for (commit, package) in targets {
             // `permits` is the same predicate the pull path applies; a package it
             // accepts is live history. A package whose control it cannot resolve, or
             // that conflicts with the cutoff, errors rather than being reclaimed.
@@ -1386,12 +1390,11 @@ impl AuthorizedReclaim<'_, '_> {
             let Some(selected) = selected else {
                 continue;
             };
-            let targets = exact_circle_package_targets(
-                &mut self.history(),
-                circle_id,
-                &selected.meta.bootstrap.coverage,
-            )
-            .await?;
+            let targets = self
+                .history()
+                .circle_package_targets(circle_id, &selected.meta.bootstrap.coverage)
+                .await
+                .map_err(reclaim_pull_error)?;
             for (commit, package) in targets {
                 if database
                     .circle_package_is_retained_for_replay(
@@ -1570,32 +1573,6 @@ async fn choose_circle_snapshot(
     .await?;
     let stable = Box::pin(stable_circle_snapshots(history, circle_id, &streams)).await?;
     Ok(maximal_stable_circle_snapshot(&stable).cloned())
-}
-
-/// Every Circle package addressed to `circle_id` whose activating commit lies at
-/// or before `coverage`, paired with its exact activation. Walks the covered
-/// commit history exactly like the Store package enumeration.
-async fn exact_circle_package_targets(
-    history: &mut ReclaimHistory<'_, '_>,
-    circle_id: CircleId,
-    coverage: &CommitFrontier,
-) -> Result<Vec<(StoreBatchCommitRef, CirclePackageRef)>, StoreReclaimError> {
-    let mut targets = BTreeMap::new();
-    for (reference, commit) in history
-        .load_covered_commits(coverage)
-        .await
-        .map_err(reclaim_pull_error)?
-    {
-        if let Some(package) = commit
-            .value()
-            .circle_packages()
-            .iter()
-            .find(|package| package.circle_id == circle_id)
-        {
-            targets.insert(reference, package.clone());
-        }
-    }
-    Ok(targets.into_iter().collect())
 }
 
 /// A stable Circle snapshot strictly supersedes a bootstrap seed when its cut
@@ -1939,7 +1916,6 @@ impl AuthorizedReclaim<'_, '_> {
         activation
             .validate()
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        let database = self.database.clone();
         let commit_ref = activation.commit();
         let verified_commit = self
             .history()
@@ -1975,7 +1951,7 @@ impl AuthorizedReclaim<'_, '_> {
             ));
         }
         self.history()
-            .verify_currently_materialized(&database, commit)
+            .verify_currently_materialized(commit)
             .await
             .map_err(reclaim_pull_error)
     }
@@ -2062,122 +2038,114 @@ impl AuthorizedReclaim<'_, '_> {
                     .await
                     .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::AudienceBlob(
-                    verify_audience_blob_reclaim_claim(
-                        &database,
-                        self.storage.as_ref(),
-                        &root,
-                        &activation,
-                        claim,
-                    )
-                    .await?,
+                    self.verify_audience_blob_reclaim_claim(&activation, claim)
+                        .await?,
                 ))
             }
         }
     }
-}
 
-/// Re-verify that a row blob is free. The package the claim names is re-read from
-/// storage and must itself bind this exact blob — the signed statement that
-/// published it — and the orphan test is re-run against this device's own
-/// materialized rows rather than taken from the claim.
-async fn verify_audience_blob_reclaim_claim(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    activation: &VerifiedStoreBatchCommit,
-    claim: &AudienceBlobReclaimClaim,
-) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
-    if audience_blob_binding_package(activation.value(), claim.target.blob.locator().audience())
-        .as_ref()
-        != Some(&claim.target.package)
-    {
-        return Err(StoreReclaimError::Authorization(
-            "audience blob reclaim activation names another package".to_string(),
-        ));
+    /// Re-verify that a row blob is free. The package the claim names is re-read
+    /// from storage and must itself bind this exact blob — the signed statement
+    /// that published it — and the orphan test is re-run against this device's
+    /// own materialized rows rather than taken from the claim.
+    async fn verify_audience_blob_reclaim_claim(
+        &self,
+        activation: &VerifiedStoreBatchCommit,
+        claim: &AudienceBlobReclaimClaim,
+    ) -> Result<AudienceBlobReclaimTarget, StoreReclaimError> {
+        if audience_blob_binding_package(activation.value(), claim.target.blob.locator().audience())
+            .as_ref()
+            != Some(&claim.target.package)
+        {
+            return Err(StoreReclaimError::Authorization(
+                "audience blob reclaim activation names another package".to_string(),
+            ));
+        }
+        let package = self
+            .read_audience_blob_binding_package(&claim.target.package, &claim.target.activation)
+            .await?;
+        if !package
+            .blob_bindings()
+            .iter()
+            .any(|binding| binding.blob() == &claim.target.blob)
+        {
+            return Err(StoreReclaimError::Authorization(
+                "audience blob reclaim package does not bind the target blob".to_string(),
+            ));
+        }
+        if !self
+            .database
+            .stored_blob_is_row_orphaned(claim.target.blob.clone())
+            .await?
+        {
+            return Err(StoreReclaimError::Authorization(
+                "a live row still binds the audience blob as a remote reference".to_string(),
+            ));
+        }
+        Ok(claim.target.clone())
     }
-    let package = read_audience_blob_binding_package(
-        database,
-        storage,
-        root,
-        &claim.target.package,
-        &claim.target.activation,
-    )
-    .await?;
-    if !package
-        .blob_bindings()
-        .iter()
-        .any(|binding| binding.blob() == &claim.target.blob)
-    {
-        return Err(StoreReclaimError::Authorization(
-            "audience blob reclaim package does not bind the target blob".to_string(),
-        ));
-    }
-    if !database
-        .stored_blob_is_row_orphaned(claim.target.blob.clone())
-        .await?
-    {
-        return Err(StoreReclaimError::Authorization(
-            "a live row still binds the audience blob as a remote reference".to_string(),
-        ));
-    }
-    Ok(claim.target.clone())
-}
 
-/// Read back the exact package body that published a blob. A Store package is
-/// sealed to the Store and a Circle package to its epoch, so the audience selects
-/// both the read context and the semantic prefix.
-async fn read_audience_blob_binding_package(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    package: &AudienceBlobBindingPackage,
-    activation: &StoreBatchCommitRef,
-) -> Result<crate::protocol::audience_package::AudiencePackage, StoreReclaimError> {
-    let (context, prefix, object) = match package {
-        AudienceBlobBindingPackage::Store(package) => (
-            ProtocolObjectContext::store_encrypted(
-                root.store_root_hash,
-                ProtocolObjectDomain::StorePackage,
-            ),
-            crate::protocol::store_commit::package_semantic_prefix(
-                package.candidate_family,
-                &activation.coord.stream_id.to_string(),
-                activation.coord.sequence(),
-                package.content_hash,
-            ),
-            &package.object,
-        ),
-        AudienceBlobBindingPackage::Circle(package) => {
-            let access = database
-                .circle_package_access(root.clone(), package.circle_id, package.control.clone())
-                .await?
-                .ok_or_else(|| {
-                    StoreReclaimError::Authorization(
-                        "audience blob reclaim package key is not resolvable".to_string(),
-                    )
-                })?;
-            (
-                ProtocolObjectContext::circle(
-                    root.store_root_hash,
-                    ProtocolObjectDomain::CirclePackage,
-                    access.into_encryption(),
+    /// Read back the exact package body that published a blob. A Store package
+    /// is sealed to the Store and a Circle package to its epoch, so the audience
+    /// selects both the read context and the semantic prefix.
+    async fn read_audience_blob_binding_package(
+        &self,
+        package: &AudienceBlobBindingPackage,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<crate::protocol::audience_package::AudiencePackage, StoreReclaimError> {
+        let (context, prefix, object) = match package {
+            AudienceBlobBindingPackage::Store(package) => (
+                ProtocolObjectContext::store_encrypted(
+                    self.root.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
                 ),
-                crate::protocol::store_commit::circle_package_semantic_prefix(
-                    package.circle_id,
-                    package.package.candidate_family,
+                crate::protocol::store_commit::package_semantic_prefix(
+                    package.candidate_family,
                     &activation.coord.stream_id.to_string(),
                     activation.coord.sequence(),
-                    package.package.content_hash,
+                    package.content_hash,
                 ),
-                &package.package.object,
-            )
-        }
-    };
-    let bytes = storage
-        .read_protocol_object(&context, object, &prefix)
-        .await?;
-    crate::protocol::audience_package::AudiencePackage::parse(&bytes)
-        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+                &package.object,
+            ),
+            AudienceBlobBindingPackage::Circle(package) => {
+                let access = self
+                    .database
+                    .circle_package_access(
+                        self.root.clone(),
+                        package.circle_id,
+                        package.control.clone(),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        StoreReclaimError::Authorization(
+                            "audience blob reclaim package key is not resolvable".to_string(),
+                        )
+                    })?;
+                (
+                    ProtocolObjectContext::circle(
+                        self.root.store_root_hash,
+                        ProtocolObjectDomain::CirclePackage,
+                        access.into_encryption(),
+                    ),
+                    crate::protocol::store_commit::circle_package_semantic_prefix(
+                        package.circle_id,
+                        package.package.candidate_family,
+                        &activation.coord.stream_id.to_string(),
+                        activation.coord.sequence(),
+                        package.package.content_hash,
+                    ),
+                    &package.package.object,
+                )
+            }
+        };
+        let bytes = self
+            .storage
+            .read_protocol_object(&context, object, &prefix)
+            .await?;
+        crate::protocol::audience_package::AudiencePackage::parse(&bytes)
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+    }
 }
 
 /// Re-verify that a later generation of the reclaimed image's own stream
@@ -2653,7 +2621,15 @@ async fn snapshot_covers_target(
 ) -> Result<bool, StoreReclaimError> {
     let covering = coverage.0.get(&target.coord.stream_id);
     match covering {
-        Some(covering) => position_covers(history, covering, target).await,
+        Some(covering) => history
+            .commit_position_covers(covering, target)
+            .await
+            .map_err(|error| match error {
+                super::pull::CommitCoverageError::Object(error) => StoreReclaimError::Object(error),
+                super::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
+                    StoreReclaimError::MissingAncestry { commit_hash }
+                }
+            }),
         None => Ok(false),
     }
 }
@@ -3088,45 +3064,6 @@ impl AuthorizedReclaim<'_, '_> {
             acknowledgements,
         })
     }
-}
-
-async fn position_covers(
-    history: &mut ReclaimHistory<'_, '_>,
-    covering: &StoreBatchCommitRef,
-    covered: &StoreBatchCommitRef,
-) -> Result<bool, StoreReclaimError> {
-    history
-        .commit_position_covers(covering, covered)
-        .await
-        .map_err(|error| match error {
-            super::pull::CommitCoverageError::Object(error) => StoreReclaimError::Object(error),
-            super::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
-                StoreReclaimError::MissingAncestry { commit_hash }
-            }
-        })
-}
-
-async fn exact_package_targets(
-    history: &mut ReclaimHistory<'_, '_>,
-    coverage: &CommitFrontier,
-) -> Result<
-    Vec<(
-        StoreBatchCommitRef,
-        crate::protocol::store_commit::StorePackageRef,
-    )>,
-    StoreReclaimError,
-> {
-    let mut targets = BTreeMap::new();
-    for (reference, commit) in history
-        .load_covered_commits(coverage)
-        .await
-        .map_err(reclaim_pull_error)?
-    {
-        if let Some(package) = commit.value().store_package().cloned() {
-            targets.insert(reference, package);
-        }
-    }
-    Ok(targets.into_iter().collect())
 }
 
 #[cfg(test)]

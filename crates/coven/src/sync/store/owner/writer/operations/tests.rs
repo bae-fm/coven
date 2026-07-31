@@ -114,18 +114,15 @@ async fn abandon_merge_candidate(
 }
 
 async fn publish_prepared_remote_objects(
-    db: &Database,
-    storage: &dyn SyncStorage,
+    store: &Store,
     write_id: &crate::WriteId,
-    store_root_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    super::publish_prepared_remote_objects(
-        &StoreDatabase::new(db),
-        storage,
-        write_id,
-        store_root_hash,
-    )
-    .await
+    store
+        .authorize_writer()
+        .await
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+        .publish_prepared_remote_objects(write_id)
+        .await
 }
 
 #[path = "tests/common.rs"]

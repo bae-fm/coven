@@ -4,20 +4,18 @@ use super::*;
 use crate::database::{MergeMaterializationTransaction, StoreDatabase};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
-    circle_package_semantic_prefix, head_slot_prefix, package_semantic_prefix,
-    ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
-    StoreCommitOrder, StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreHistoryCut, StoreOperationMembershipAuthority, StoreRootRef,
+    head_slot_prefix, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef,
+    DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
+    StoreDeviceHeadRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
+    StoreOperationMembershipAuthority, StoreRootRef,
 };
 use crate::protocol::{
-    audience_package, circle_control, membership, provider, remote_object, store_commit,
-    wrapped_store_key,
+    circle_control, membership, provider, remote_object, store_commit, wrapped_store_key,
 };
 use crate::storage::StoreObjectError;
 use crate::storage::{
-    BlobWriteAuthority, ExactObjectRef, PreparedExactObject, ProtocolObjectContext,
-    ProtocolObjectDomain,
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
 use crate::sync::store::owner::{device_join, owner_promotion};
 use crate::sync::store::{StoreError, StorePreparationError};

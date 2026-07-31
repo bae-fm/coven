@@ -68,6 +68,50 @@ impl LoadedExactMembershipGraph {
         }
         Ok(())
     }
+
+    fn add_exact_suffix(&self, chain: &mut MembershipChain) -> Result<(), AnchoredChainError> {
+        let mut pending = self
+            .entries
+            .iter()
+            .filter(|(coord, _)| !chain.contains_coord(coord))
+            .map(|(coord, entry)| (coord.clone(), entry.clone()))
+            .collect::<BTreeMap<_, _>>();
+        while !pending.is_empty() {
+            let next = pending.iter().find_map(|(coord, entry)| {
+                let dependencies_loaded = entry
+                    .dependencies
+                    .iter()
+                    .all(|dependency| chain.contains_coord(dependency));
+                let predecessor_loaded = entry.previous_hash.is_none()
+                    || self.entries.keys().any(|candidate| {
+                        candidate.author_pubkey == coord.author_pubkey
+                            && candidate.author_owner_grant == coord.author_owner_grant
+                            && candidate.stream_id == coord.stream_id
+                            && candidate.seq.checked_add(1) == Some(coord.seq)
+                            && Some(candidate.entry_hash) == entry.previous_hash
+                            && chain.contains_coord(candidate)
+                    });
+                (dependencies_loaded && predecessor_loaded).then(|| coord.clone())
+            });
+            let Some(coord) = next else {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership resolution suffix has an unresolved causal predecessor".to_string(),
+                ));
+            };
+            let entry = pending
+                .remove(&coord)
+                .expect("selected membership resolution suffix entry remains pending");
+            chain
+                .add_entry_at(coord, entry)
+                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        }
+        for (reference, _) in &self.heads {
+            chain
+                .activate_head_ref(reference.clone())
+                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 type LoadedMembershipHeadFuture<'a> = Pin<
@@ -601,53 +645,6 @@ fn exact_membership_chain_from_graph(
     Ok(chain)
 }
 
-fn add_exact_membership_suffix(
-    chain: &mut MembershipChain,
-    graph: &LoadedExactMembershipGraph,
-) -> Result<(), AnchoredChainError> {
-    let mut pending = graph
-        .entries
-        .iter()
-        .filter(|(coord, _)| !chain.contains_coord(coord))
-        .map(|(coord, entry)| (coord.clone(), entry.clone()))
-        .collect::<BTreeMap<_, _>>();
-    while !pending.is_empty() {
-        let next = pending.iter().find_map(|(coord, entry)| {
-            let dependencies_loaded = entry
-                .dependencies
-                .iter()
-                .all(|dependency| chain.contains_coord(dependency));
-            let predecessor_loaded = entry.previous_hash.is_none()
-                || graph.entries.keys().any(|candidate| {
-                    candidate.author_pubkey == coord.author_pubkey
-                        && candidate.author_owner_grant == coord.author_owner_grant
-                        && candidate.stream_id == coord.stream_id
-                        && candidate.seq.checked_add(1) == Some(coord.seq)
-                        && Some(candidate.entry_hash) == entry.previous_hash
-                        && chain.contains_coord(candidate)
-                });
-            (dependencies_loaded && predecessor_loaded).then(|| coord.clone())
-        });
-        let Some(coord) = next else {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership resolution suffix has an unresolved causal predecessor".to_string(),
-            ));
-        };
-        let entry = pending
-            .remove(&coord)
-            .expect("selected membership resolution suffix entry remains pending");
-        chain
-            .add_entry_at(coord, entry)
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    }
-    for (reference, _) in &graph.heads {
-        chain
-            .activate_head_ref(reference.clone())
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    }
-    Ok(())
-}
-
 type LayeredMembershipFuture<'a> =
     Pin<Box<dyn Future<Output = Result<MembershipChain, AnchoredChainError>> + Send + 'a>>;
 
@@ -787,7 +784,7 @@ fn load_layered_membership_chain<'a>(
         chain
             .apply_resolutions(root.store_root_hash, &introduced_resolutions)
             .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-        add_exact_membership_suffix(&mut chain, &graph)?;
+        graph.add_exact_suffix(&mut chain)?;
         graph.validate_stream_anchors(root, &chain)?;
         if chain.head_refs() != exact_heads || chain.resolution_refs() != exact_resolutions {
             return Err(AnchoredChainError::LoadFailed(

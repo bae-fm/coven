@@ -26,11 +26,6 @@ struct LocalBlobDropRequest {
     disposition: crate::sync::cycle::DeferredLocalBlobDisposition,
 }
 
-struct PreparedStorePayload {
-    local_cleanup: Vec<LocalBlobDropRequest>,
-    completion: crate::database::StoreBatchCompletion,
-}
-
 pub(super) async fn prepare_store_write(
     operation: &mut AuthorizedWriterOperation<'_>,
     store_dir: &StoreDir,
@@ -80,9 +75,58 @@ pub(super) async fn prepare_store_write(
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let membership_authority = operation.membership_authority(&authorization.membership)?;
-        let payload = prepare_store_payload(&blob_facts, store_dir)
-            .await
-            .map_err(StoreError::Preparation)?;
+        let mut local_cleanup_by_blob = std::collections::BTreeMap::new();
+        for fact in &blob_facts.blobs {
+            if matches!(
+                fact.audience_move,
+                Some(crate::database::StoreWriteBlobMoveDestination::Local)
+            ) || fact.blob.provenance != crate::blob::Provenance::HostProvided
+            {
+                continue;
+            }
+            let present = store_dir
+                .local_blob_path_if_present(
+                    &fact.blob.namespace,
+                    &fact.blob.id,
+                    fact.plaintext_size,
+                )
+                .await
+                .map_err(|error| {
+                    StoreError::Preparation(crate::sync::store::StorePreparationError::AssetScan(
+                        error.to_string(),
+                    ))
+                })?;
+            if present.is_none() {
+                continue;
+            }
+            let disposition = match fact.blob.fill {
+                crate::blob::CacheFill::CacheEager => {
+                    crate::sync::cycle::DeferredLocalBlobDisposition::Cache
+                }
+                crate::blob::CacheFill::CacheLazy => {
+                    crate::sync::cycle::DeferredLocalBlobDisposition::Drop
+                }
+            };
+            let drop = LocalBlobDropRequest {
+                namespace: fact.blob.namespace.clone(),
+                id: fact.blob.id.clone(),
+                size: fact.plaintext_size,
+                plaintext_hash: fact.plaintext_hash,
+                disposition,
+            };
+            let key = (drop.namespace.clone(), drop.id.clone());
+            if let Some(prior) = local_cleanup_by_blob.insert(key, drop.clone()) {
+                if prior != drop {
+                    return Err(StoreError::Preparation(
+                        crate::sync::store::StorePreparationError::AssetScan(format!(
+                            "captured Store write gives blob {}/{} conflicting local cleanup facts",
+                            drop.namespace, drop.id,
+                        )),
+                    ));
+                }
+            }
+        }
+        let local_cleanup_requests = local_cleanup_by_blob.into_values().collect();
         let membership_state = authorization.membership_state;
         let device_state = authorization.device_state_ref;
         let active_store_members: std::collections::BTreeSet<String> = membership
@@ -274,7 +318,7 @@ pub(super) async fn prepare_store_write(
             .map_err(StoreObjectError::from)?;
         let (remote_objects, audience_objects) =
             close_prepared_packages(prepared_packages, commit.value(), &commit_ref)?;
-        let local_cleanup = bind_local_cleanup(payload.local_cleanup, &audience_objects.blobs)
+        let local_cleanup = bind_local_cleanup(local_cleanup_requests, &audience_objects.blobs)
             .map_err(StoreError::Preparation)?;
         Ok::<_, StoreError>(StoreWritePreparation {
             root,
@@ -291,7 +335,7 @@ pub(super) async fn prepare_store_write(
             },
             history_summary: successor.summary,
             local_cleanup,
-            completion: payload.completion,
+            completion: crate::database::StoreBatchCompletion {},
         })
     }
     .await;
@@ -304,63 +348,6 @@ pub(super) async fn prepare_store_write(
     };
     database.prepare_store_write_commit(preparation).await?;
     Ok(true)
-}
-
-async fn prepare_store_payload(
-    blob_facts: &crate::database::StoreWriteBlobFacts,
-    store_dir: &StoreDir,
-) -> Result<PreparedStorePayload, crate::sync::store::StorePreparationError> {
-    let mut drops = std::collections::BTreeMap::new();
-    for fact in &blob_facts.blobs {
-        if matches!(
-            fact.audience_move,
-            Some(crate::database::StoreWriteBlobMoveDestination::Local)
-        ) {
-            continue;
-        }
-        if fact.blob.provenance != crate::blob::Provenance::HostProvided {
-            continue;
-        }
-        let present = store_dir
-            .local_blob_path_if_present(&fact.blob.namespace, &fact.blob.id, fact.plaintext_size)
-            .await
-            .map_err(|error| {
-                crate::sync::store::StorePreparationError::AssetScan(error.to_string())
-            })?;
-        if present.is_none() {
-            continue;
-        }
-        let disposition = match fact.blob.fill {
-            crate::blob::CacheFill::CacheEager => {
-                crate::sync::cycle::DeferredLocalBlobDisposition::Cache
-            }
-            crate::blob::CacheFill::CacheLazy => {
-                crate::sync::cycle::DeferredLocalBlobDisposition::Drop
-            }
-        };
-        let drop = LocalBlobDropRequest {
-            namespace: fact.blob.namespace.clone(),
-            id: fact.blob.id.clone(),
-            size: fact.plaintext_size,
-            plaintext_hash: fact.plaintext_hash,
-            disposition,
-        };
-        let key = (drop.namespace.clone(), drop.id.clone());
-        if let Some(prior) = drops.insert(key, drop.clone()) {
-            if prior != drop {
-                return Err(crate::sync::store::StorePreparationError::AssetScan(
-                    format!(
-                        "captured Store write gives blob {}/{} conflicting local cleanup facts",
-                        drop.namespace, drop.id,
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(PreparedStorePayload {
-        local_cleanup: drops.into_values().collect(),
-        completion: crate::database::StoreBatchCompletion {},
-    })
 }
 
 fn bind_local_cleanup(

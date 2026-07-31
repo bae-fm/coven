@@ -64,6 +64,50 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.load_covered_commits(coverage).await
     }
 
+    pub(crate) async fn store_package_targets(
+        &mut self,
+        coverage: &CommitFrontier,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::protocol::store_commit::StorePackageRef,
+        )>,
+        crate::sync::store::owner::pull::StorePullError,
+    > {
+        let mut targets = std::collections::BTreeMap::new();
+        for (reference, commit) in self.load_covered_commits(coverage).await? {
+            if let Some(package) = commit.value().store_package().cloned() {
+                targets.insert(reference, package);
+            }
+        }
+        Ok(targets.into_iter().collect())
+    }
+
+    pub(crate) async fn circle_package_targets(
+        &mut self,
+        circle_id: crate::protocol::circle::CircleId,
+        coverage: &CommitFrontier,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::protocol::store_commit::CirclePackageRef,
+        )>,
+        crate::sync::store::owner::pull::StorePullError,
+    > {
+        let mut targets = std::collections::BTreeMap::new();
+        for (reference, commit) in self.load_covered_commits(coverage).await? {
+            if let Some(package) = commit
+                .value()
+                .circle_packages()
+                .iter()
+                .find(|package| package.circle_id == circle_id)
+            {
+                targets.insert(reference, package.clone());
+            }
+        }
+        Ok(targets.into_iter().collect())
+    }
+
     pub(crate) async fn commit_position_covers(
         &mut self,
         covering: &StoreBatchCommitRef,
@@ -113,12 +157,42 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     pub(crate) async fn verify_currently_materialized(
         &mut self,
-        database: &StoreDatabase,
         reference: &StoreBatchCommitRef,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.history
-            .verify_currently_materialized(database, reference)
-            .await
+        use crate::sync::store::owner::pull::{
+            commit_stream_id, HeldStorePositionReason, MaterializedCheck, StorePullError,
+        };
+
+        let stream_id = commit_stream_id(&reference.coord);
+        let coverage = self.database.snapshot_coverage_frontier().await?;
+        let status = if let Some(actual) = self
+            .database
+            .exact_materialized_ref(&stream_id, reference.coord.sequence())
+            .await?
+        {
+            if actual == *reference {
+                MaterializedCheck::Yes
+            } else {
+                MaterializedCheck::Held(HeldStorePositionReason::HashMismatch {
+                    referenced_device_id: stream_id.clone(),
+                    referenced_commit: reference.clone(),
+                    materialized_hash: actual.commit_hash,
+                })
+            }
+        } else {
+            self.history
+                .covered_reference_status(&coverage, &stream_id, reference)
+                .await
+        };
+        match status {
+            MaterializedCheck::Yes => Ok(()),
+            MaterializedCheck::Missing => Err(StorePullError::Database(
+                "Merge activation commit is absent from current accepted history".to_string(),
+            )),
+            MaterializedCheck::Held(reason) => Err(StorePullError::Database(format!(
+                "Merge activation commit is not current accepted history: {reason:?}"
+            ))),
+        }
     }
 
     pub(crate) async fn load_registration(

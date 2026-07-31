@@ -6,8 +6,8 @@ use crate::protocol::store_commit::{
     DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash, OpenedRetainedMergeHistorySummary,
     OwnerRecoveryNode, OwnerRecoveryNodeRef, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalAck,
-    StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
+    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
@@ -29,6 +29,7 @@ use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::verification::DeviceStateResolver;
 use super::{device_join, reclaim as store_reclaim};
 
 pub(super) mod join_validation;
@@ -715,31 +716,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier
             .load_head(reference, registration, commit)
             .await
-    }
-
-    pub(crate) async fn readiness(
-        &mut self,
-        database: &StoreDatabase,
-        coverage: &CommitFrontier,
-        frontier: &BTreeMap<String, StoreBatchCommitRef>,
-        device_state: &ResolvedStoreDeviceState,
-        exclusion_freezes: &[StoreDeviceProposalAck],
-        commit_ref: &StoreBatchCommitRef,
-        commit: &StoreBatchCommit,
-    ) -> Result<Readiness, StorePullError> {
-        let root = self.root.reference().clone();
-        readiness(
-            &root,
-            database,
-            self,
-            coverage,
-            frontier,
-            device_state,
-            exclusion_freezes,
-            commit_ref,
-            commit,
-        )
-        .await
     }
 
     pub(crate) async fn discover_merge_stream(
@@ -2150,12 +2126,51 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(cursor == *covered)
     }
 
-    pub(crate) async fn verify_currently_materialized(
+    pub(super) async fn covered_reference_status(
         &mut self,
-        database: &StoreDatabase,
+        coverage: &CommitFrontier,
+        stream_id: &str,
         reference: &StoreBatchCommitRef,
-    ) -> Result<(), StorePullError> {
-        verify_merge_commit_currently_materialized(database, self, reference).await
+    ) -> MaterializedCheck {
+        if commit_stream_id(&reference.coord) != stream_id {
+            return MaterializedCheck::Held(HeldStorePositionReason::WrongSlot(format!(
+                "commit reference stream {} differs from dependency stream {stream_id}",
+                commit_stream_id(&reference.coord)
+            )));
+        }
+        let coverage = coverage.clone().into_refs();
+        let Some(covered) = coverage.get(stream_id) else {
+            return MaterializedCheck::Missing;
+        };
+        if reference.coord.sequence() > covered.coord.sequence() {
+            return MaterializedCheck::Missing;
+        }
+        let mut cursor = covered.clone();
+        loop {
+            if cursor == *reference {
+                return MaterializedCheck::Yes;
+            }
+            if cursor.coord.sequence() <= reference.coord.sequence() {
+                return MaterializedCheck::Held(HeldStorePositionReason::HashMismatch {
+                    referenced_device_id: stream_id.to_string(),
+                    referenced_commit: reference.clone(),
+                    materialized_hash: cursor.commit_hash,
+                });
+            }
+            let verified_commit = match self.load_ref(&cursor).await {
+                Ok(commit) => commit,
+                Err(error) => {
+                    return MaterializedCheck::Held(HeldStorePositionReason::ObjectUnreadable {
+                        key: "exact Store commit".to_string(),
+                        detail: error.to_string(),
+                    });
+                }
+            };
+            let Some(predecessor) = verified_commit.value().order.predecessor() else {
+                return MaterializedCheck::Missing;
+            };
+            cursor = predecessor.clone();
+        }
     }
 
     pub(crate) async fn authenticate_bytes(
@@ -3838,10 +3853,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                 genesis: &self.history.genesis,
                 states: &states,
             };
-            let operations = Box::pin(load_commit_device_operations(
-                self.root.reference(),
+            let operations = Box::pin(self.commit_verifier.load_commit_device_operations(
                 Some(&resolver),
-                &mut self.commit_verifier,
                 &commit,
                 &authorized_predecessor,
                 Some(&membership),

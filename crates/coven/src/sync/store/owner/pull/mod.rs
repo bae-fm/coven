@@ -15,14 +15,11 @@ use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     CirclePackageRef, CommitFrontier, ObjectHash, OwnerRecoveryCursor, OwnerRecoveryPosition,
-    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
-    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
-    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
-    StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
-    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
+    StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
@@ -39,7 +36,6 @@ use crate::sync::store::StoreError;
 use crate::sync::{gate, hlc};
 
 mod device_lifecycle_state;
-mod device_operations;
 mod discovery;
 mod join_activation;
 mod local_device_operations;
@@ -75,6 +71,12 @@ pub(super) struct LoadedMergePredecessorMemberships {
     pub(super) by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
+pub(super) enum MaterializedCheck {
+    Yes,
+    Missing,
+    Held(HeldStorePositionReason),
+}
+
 impl LoadedMergePredecessorMemberships {
     pub(super) fn membership_for(
         &self,
@@ -108,9 +110,9 @@ pub(super) async fn execute(
         .await
 }
 
+use super::verification::DeviceStateResolver;
 pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
 pub(crate) use device_lifecycle_state::*;
-pub(crate) use device_operations::*;
 pub(crate) use discovery::*;
 pub(crate) use join_activation::*;
 pub(crate) use local_device_operations::{
