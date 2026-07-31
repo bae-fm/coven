@@ -288,7 +288,7 @@ pub(crate) async fn discover_merge_stream(
                 verified.value().clone()
             }
             Ok(_) => {
-                block = Some(MergeStreamBlock::Authenticated(held_commit(
+                block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
                     &unverified.commit,
                     HeldStorePositionReason::Unauthorized,
                 )));
@@ -299,7 +299,7 @@ pub(crate) async fn discover_merge_stream(
                     StorePullError::Object(error) => held_object_error(error),
                     error => HeldStorePositionReason::InvalidObject(error.to_string()),
                 };
-                block = Some(MergeStreamBlock::Authenticated(held_commit(
+                block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
                     &unverified.commit,
                     reason,
                 )));

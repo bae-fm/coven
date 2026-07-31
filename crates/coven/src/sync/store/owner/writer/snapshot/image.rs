@@ -179,6 +179,46 @@ impl StagedDatabaseImage {
         self.finish(outcome)
     }
 
+    fn strip_circle_transport_state(&self) -> Result<(), SnapshotError> {
+        let mut connection = Connection::open(&self.path).map_err(|error| {
+            SnapshotError::ClearFailed(format!(
+                "open Circle snapshot transport projection: {error}"
+            ))
+        })?;
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        transaction
+            .execute_batch(
+                "DELETE FROM row_blob_locators;
+                 DELETE FROM blob_locators;
+                 DELETE FROM retained_replay_objects;
+                 DELETE FROM remote_objects;
+                 DELETE FROM retained_merge_materializations;",
+            )
+            .map_err(|error| {
+                SnapshotError::ClearFailed(format!(
+                    "strip Circle snapshot transport state: {error}"
+                ))
+            })?;
+        transaction
+            .commit()
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        connection.execute_batch("VACUUM").map_err(|error| {
+            SnapshotError::ClearFailed(format!(
+                "vacuum Circle snapshot transport projection: {error}"
+            ))
+        })?;
+        connection.close().map_err(|(_, error)| {
+            SnapshotError::ClearFailed(format!(
+                "close Circle snapshot transport projection: {error}"
+            ))
+        })
+    }
+
     fn canonicalize(mut self) -> Result<Self, SnapshotError> {
         match std::fs::canonicalize(&self.path) {
             Ok(path) => {
@@ -630,7 +670,7 @@ fn create_snapshot_for_audience_with_host_blobs(
         }
     };
     if matches!(audience, crate::protocol::circle::Audience::Circle(_)) {
-        if let Err(error) = strip_circle_snapshot_transport_state(snapshot_path) {
+        if let Err(error) = snapshot_image.strip_circle_transport_state() {
             return snapshot_image.finish(Err(error));
         }
     }
@@ -1087,41 +1127,6 @@ fn clear_non_synced(
             .map_err(|e| SnapshotError::ClearFailed(format!("vacuum: {e}")))?;
     }
     Ok(())
-}
-
-fn strip_circle_snapshot_transport_state(path: &Path) -> Result<(), SnapshotError> {
-    let mut conn = Connection::open(path).map_err(|error| {
-        SnapshotError::ClearFailed(format!(
-            "open Circle snapshot transport projection: {error}"
-        ))
-    })?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    tx.execute_batch(
-        "DELETE FROM row_blob_locators;
-         DELETE FROM blob_locators;
-         DELETE FROM retained_replay_objects;
-         DELETE FROM remote_objects;
-         DELETE FROM retained_merge_materializations;",
-    )
-    .map_err(|error| {
-        SnapshotError::ClearFailed(format!("strip Circle snapshot transport state: {error}"))
-    })?;
-    tx.commit()
-        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    conn.execute_batch("VACUUM").map_err(|error| {
-        SnapshotError::ClearFailed(format!(
-            "vacuum Circle snapshot transport projection: {error}"
-        ))
-    })?;
-    conn.close().map_err(|(_, error)| {
-        SnapshotError::ClearFailed(format!(
-            "close Circle snapshot transport projection: {error}"
-        ))
-    })
 }
 
 fn scope_authenticated_blob_graph(

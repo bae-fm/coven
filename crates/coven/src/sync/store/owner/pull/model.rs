@@ -104,6 +104,53 @@ pub struct HeldStorePosition {
     pub reason: HeldStorePositionReason,
 }
 
+impl HeldStorePosition {
+    pub(crate) fn commit(reference: &StoreBatchCommitRef, reason: HeldStorePositionReason) -> Self {
+        Self {
+            coordinate: HeldStoreCoordinate::Commit {
+                device_id: commit_stream_id(&reference.coord),
+                commit: reference.clone(),
+            },
+            reason,
+        }
+    }
+
+    pub(crate) fn package(
+        reference: &StoreBatchCommitRef,
+        commit: &StoreBatchCommit,
+        reason: HeldStorePositionReason,
+    ) -> Self {
+        let package = commit
+            .store_package()
+            .expect("held Store package is named by the commit");
+        Self {
+            coordinate: HeldStoreCoordinate::Package {
+                device_id: commit_stream_id(&reference.coord),
+                seq: commit.seq(),
+                package_hash: package.content_hash,
+            },
+            reason,
+        }
+    }
+
+    pub(crate) fn dependency(
+        dependent: &StoreBatchCommitRef,
+        required_device_id: &str,
+        required: &StoreBatchCommitRef,
+        reason: HeldStorePositionReason,
+    ) -> Self {
+        Self {
+            coordinate: HeldStoreCoordinate::Dependency {
+                dependent_device_id: commit_stream_id(&dependent.coord),
+                dependent_commit: dependent.clone(),
+                required_device_id: required_device_id.to_string(),
+                required_commit: required.clone(),
+            },
+            reason,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct StorePullResult {
     pub changesets_applied: u64,
@@ -278,54 +325,6 @@ pub(crate) fn parse_candidate_circle_package(
         .validate_blob_uploader(&commit.author_registration)
         .map_err(|error| format!("invalid Circle blob authority: {error}"))?;
     Ok(package)
-}
-
-pub(crate) fn held_commit(
-    reference: &StoreBatchCommitRef,
-    reason: HeldStorePositionReason,
-) -> HeldStorePosition {
-    HeldStorePosition {
-        coordinate: HeldStoreCoordinate::Commit {
-            device_id: commit_stream_id(&reference.coord),
-            commit: reference.clone(),
-        },
-        reason,
-    }
-}
-
-pub(crate) fn held_package(
-    reference: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    reason: HeldStorePositionReason,
-) -> HeldStorePosition {
-    let package = commit
-        .store_package()
-        .expect("held Store package is named by the commit");
-    HeldStorePosition {
-        coordinate: HeldStoreCoordinate::Package {
-            device_id: commit_stream_id(&reference.coord),
-            seq: commit.seq(),
-            package_hash: package.content_hash,
-        },
-        reason,
-    }
-}
-
-pub(crate) fn held_dependency(
-    dependent: &StoreBatchCommitRef,
-    required_device_id: &str,
-    required: &StoreBatchCommitRef,
-    reason: HeldStorePositionReason,
-) -> HeldStorePosition {
-    HeldStorePosition {
-        coordinate: HeldStoreCoordinate::Dependency {
-            dependent_device_id: commit_stream_id(&dependent.coord),
-            dependent_commit: dependent.clone(),
-            required_device_id: required_device_id.to_string(),
-            required_commit: required.clone(),
-        },
-        reason,
-    }
 }
 
 pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {

@@ -1,5 +1,5 @@
 use crate::encryption::EncryptionService;
-use crate::keys::{self, UserKeypair};
+use crate::keys;
 use crate::protocol::membership::{
     AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipError,
 };
@@ -84,37 +84,6 @@ async fn build_invite_mutation(
         },
         wrapped_key,
     })
-}
-
-fn invite_plan_matches_request(
-    plan: &InviteMutationPlan,
-    owner_keypair: &UserKeypair,
-    invitee_pubkey: &str,
-    invitee_email: Option<&str>,
-    role: &MemberRole,
-    store_id: &str,
-) -> bool {
-    plan.publication.entry.author_pubkey == hex::encode(owner_keypair.public_key())
-        && plan.publication.entry.store_id == store_id
-        && plan.invitee_pubkey == invitee_pubkey
-        && plan.invitee_email.as_deref() == invitee_email
-        && &plan.role == role
-        && plan.desired_access
-            == (CloudAccessState::Present {
-                member_pubkey: invitee_pubkey.to_string(),
-                provider_account_email: invitee_email.map(str::to_string),
-            })
-        && matches!(
-            &plan.publication.entry.change,
-            MembershipChange::SetMember {
-                user_pubkey,
-                provider_account_email,
-                role: entry_role,
-                ..
-            } if user_pubkey == invitee_pubkey
-                && provider_account_email.as_deref() == invitee_email
-                && entry_role.role() == *role
-        )
 }
 
 async fn execute_invite_mutation(
@@ -247,8 +216,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
                     "a member removal is pending".to_string(),
                 ));
             };
-            if !invite_plan_matches_request(
-                &plan,
+            if !plan.matches_request(
                 &owner_keypair,
                 invitee_ed25519_pubkey,
                 invitee_email,

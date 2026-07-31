@@ -62,13 +62,15 @@ pub(crate) async fn readiness(
             {
                 MaterializedCheck::Yes => return Ok(Readiness::AlreadyMaterialized),
                 MaterializedCheck::Missing => {
-                    return Ok(Readiness::Held(held_commit(
+                    return Ok(Readiness::Held(HeldStorePosition::commit(
                         commit_ref,
                         HeldStorePositionReason::MissingCommit,
                     )))
                 }
                 MaterializedCheck::Held(reason) => {
-                    return Ok(Readiness::Held(held_commit(commit_ref, reason)))
+                    return Ok(Readiness::Held(HeldStorePosition::commit(
+                        commit_ref, reason,
+                    )))
                 }
             }
         }
@@ -79,10 +81,12 @@ pub(crate) async fn readiness(
                     "non-genesis Merge commit omits its exact predecessor".to_string(),
                 ),
             };
-            return Ok(Readiness::Held(held_commit(commit_ref, reason)));
+            return Ok(Readiness::Held(HeldStorePosition::commit(
+                commit_ref, reason,
+            )));
         }
         if commit_ref.coord.sequence() != current.coord.sequence() + 1 {
-            return Ok(Readiness::Held(held_commit(
+            return Ok(Readiness::Held(HeldStorePosition::commit(
                 commit_ref,
                 HeldStorePositionReason::InvalidObject(
                     "Merge commit sequence does not immediately follow its materialized frontier"
@@ -97,7 +101,9 @@ pub(crate) async fn readiness(
                 "Merge commit beyond genesis omits its exact predecessor".to_string(),
             ),
         };
-        return Ok(Readiness::Held(held_commit(commit_ref, reason)));
+        return Ok(Readiness::Held(HeldStorePosition::commit(
+            commit_ref, reason,
+        )));
     }
 
     for record in device_state.devices.values() {
@@ -122,7 +128,7 @@ pub(crate) async fn readiness(
             None => 0,
         };
         if commit_ref.coord.sequence() > terminal_sequence {
-            return Ok(Readiness::Held(held_commit(
+            return Ok(Readiness::Held(HeldStorePosition::commit(
                 commit_ref,
                 HeldStorePositionReason::InactiveDevice {
                     terminals: terminals.clone(),
@@ -148,7 +154,7 @@ pub(crate) async fn readiness(
             None => 0,
         };
         if commit_ref.coord.sequence() > frozen_sequence {
-            return Ok(Readiness::Held(held_commit(
+            return Ok(Readiness::Held(HeldStorePosition::commit(
                 commit_ref,
                 HeldStorePositionReason::DeviceExclusionFreeze {
                     proposal: freeze.proposal.clone(),
@@ -171,7 +177,7 @@ pub(crate) async fn readiness(
         {
             MaterializedCheck::Yes => {}
             MaterializedCheck::Missing => {
-                return Ok(Readiness::Held(held_dependency(
+                return Ok(Readiness::Held(HeldStorePosition::dependency(
                     commit_ref,
                     &required_stream,
                     required_ref,
@@ -182,7 +188,7 @@ pub(crate) async fn readiness(
                 )))
             }
             MaterializedCheck::Held(reason) => {
-                return Ok(Readiness::Held(held_dependency(
+                return Ok(Readiness::Held(HeldStorePosition::dependency(
                     commit_ref,
                     &required_stream,
                     required_ref,

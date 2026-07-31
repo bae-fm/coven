@@ -1,13 +1,10 @@
 use crate::database::StoreDatabase;
 use crate::encryption::{self, EncryptionService};
-use crate::keys::{self, UserKeypair};
+use crate::keys;
 use crate::protocol::membership::{
     self, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
 };
-use crate::protocol::remote_object;
-use crate::protocol::store_commit;
 use crate::protocol::wrapped_store_key::{load_wrapped_store_key, WrappedStoreKey};
-use crate::storage;
 use crate::storage as cloud_storage;
 use crate::storage as store_objects;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, RevokeOutcome};
@@ -16,9 +13,9 @@ use crate::storage::SyncStorage;
 use super::{
     chain_with_exact_entry, decode_membership_mutation, encode_membership_mutation,
     encode_membership_progress, exact_owned_remote, select_mutation_author_stream,
-    validate_prepared_publication, validate_prepared_transition, AuthorizedMembershipPublication,
-    InviteError, MembershipMutationPlan, MembershipMutationProgress, MutationPersistence,
-    ReplacementWrappedKey, RevokeMembershipPublication, RevokeMutationPlan,
+    AuthorizedMembershipPublication, InviteError, MembershipMutationPlan,
+    MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey,
+    RevokeMembershipPublication, RevokeMutationPlan,
 };
 
 /// Build a removal that revokes provider access, rotates the Store key, and
@@ -180,210 +177,6 @@ async fn build_revoke_mutation(
             .to_keyring_payload()
             .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?,
     })
-}
-
-fn revoke_plan_matches_request(
-    plan: &RevokeMutationPlan,
-    owner_keypair: &UserKeypair,
-    revokee_pubkey: &str,
-    store_id: &str,
-) -> bool {
-    plan.publication.entry().author_pubkey == hex::encode(owner_keypair.public_key())
-        && plan.publication.entry().store_id == store_id
-        && plan.revokee_pubkey == revokee_pubkey
-        && matches!(
-            &plan.publication.entry().change,
-            MembershipChange::RemoveMember { user_pubkey, .. }
-                if user_pubkey == revokee_pubkey
-        )
-        && matches!(
-            &plan.desired_access,
-            CloudAccessState::Absent { member_pubkey, .. }
-                if member_pubkey == revokee_pubkey
-        )
-        && matches!(
-            &plan.prior_access,
-            CloudAccessState::Present { member_pubkey, .. }
-                if member_pubkey == revokee_pubkey
-        )
-}
-
-impl RevokeMutationPlan {
-    fn validate_closed_shape(&self) -> Result<(), InviteError> {
-        let publication = self.publication.publication();
-        validate_prepared_publication(publication)?;
-        let (desired_member, desired_email) = match &self.desired_access {
-            CloudAccessState::Absent {
-                member_pubkey,
-                provider_account_email,
-            } => (member_pubkey, provider_account_email),
-            CloudAccessState::Present { .. } => {
-                return Err(InviteError::InvalidDurableMutation(
-                    "membership removal requests present provider access".to_string(),
-                ))
-            }
-        };
-        let (prior_member, prior_email) = match &self.prior_access {
-            CloudAccessState::Present {
-                member_pubkey,
-                provider_account_email,
-            } => (member_pubkey, provider_account_email),
-            CloudAccessState::Absent { .. } => {
-                return Err(InviteError::InvalidDurableMutation(
-                    "membership removal compensation requests absent provider access".to_string(),
-                ))
-            }
-        };
-        if desired_member != &self.revokee_pubkey
-            || prior_member != &self.revokee_pubkey
-            || desired_email != prior_email
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership removal access and compensation intents disagree".to_string(),
-            ));
-        }
-        let MembershipChange::RemoveMember {
-            user_pubkey,
-            wrapped_keys,
-            retirement_device_state,
-            retirement_barriers,
-            ..
-        } = &publication.entry.change
-        else {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership removal plan contains another change".to_string(),
-            ));
-        };
-        let planned_wraps = self
-            .wraps
-            .iter()
-            .map(|wrap| wrap.prepared.reference.clone())
-            .collect::<Vec<_>>();
-        if user_pubkey != &self.revokee_pubkey || wrapped_keys != &planned_wraps {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership removal plan differs from its exact entry".to_string(),
-            ));
-        }
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => {
-                if retirement_device_state.is_some()
-                    || retirement_barriers.values().any(|barrier| {
-                        matches!(
-                            barrier,
-                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-                        )
-                    })
-                    || !matches!(
-                        publication.head.activation,
-                        membership::MembershipHeadActivation::Direct
-                    )
-                {
-                    return Err(InviteError::InvalidDurableMutation(
-                        "direct membership removal carries Owner retirement authority".to_string(),
-                    ));
-                }
-            }
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                ..
-            } => {
-                validate_prepared_transition(transition)?;
-                candidate
-                    .validate_closed_shape()
-                    .map_err(InviteError::InvalidDurableMutation)?;
-                if transition.entry != publication.entry
-                    || transition.entry_ref != publication.entry_ref
-                    || transition.entry_object != publication.entry_object
-                    || retirement_device_state.as_ref() != Some(&candidate.commit.device_state)
-                    || !retirement_barriers.values().any(|barrier| {
-                        matches!(
-                            barrier,
-                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
-                        )
-                    })
-                    || candidate.commit.control()
-                        != Some(&store_commit::StoreControl {
-                            transition: transition.transition.clone(),
-                        })
-                    || !transition
-                        .transition
-                        .matches_head(&publication.head, &publication.head_ref)
-                    || !matches!(
-                        &publication.head.activation,
-                        membership::MembershipHeadActivation::StoreCommit { commit }
-                            if commit == &candidate.reference
-                    )
-                {
-                    return Err(InviteError::InvalidDurableMutation(
-                        "Owner retirement differs from its exact Store activation graph"
-                            .to_string(),
-                    ));
-                }
-                candidate
-                    .merge_membership_activation_remote_objects(
-                        transition,
-                        publication,
-                        &self
-                            .wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn candidate_remote_objects(
-        &self,
-    ) -> Result<Option<Vec<remote_object::RemoteObjectRecord>>, InviteError> {
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => Ok(None),
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                publication,
-            } => candidate
-                .merge_membership_activation_remote_objects(
-                    transition,
-                    publication,
-                    &self
-                        .wraps
-                        .iter()
-                        .map(|wrap| wrap.prepared.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .map(Some)
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string())),
-        }
-    }
-
-    fn candidate_cleanup_objects(
-        &self,
-    ) -> (Vec<storage::ExactObjectRef>, Vec<storage::ExactObjectRef>) {
-        match &self.publication {
-            RevokeMembershipPublication::Direct { .. } => (Vec::new(), Vec::new()),
-            RevokeMembershipPublication::StoreActivated {
-                transition,
-                candidate,
-                publication,
-            } => {
-                let candidate_objects = std::iter::once(candidate.reference.object.clone())
-                    .chain(std::iter::once(transition.entry_ref.object.clone()))
-                    .chain(std::iter::once(publication.head_ref.object.clone()))
-                    .chain(
-                        self.wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.reference.object.clone()),
-                    )
-                    .collect();
-                let retained = vec![candidate.head_ref().object];
-                (candidate_objects, retained)
-            }
-        }
-    }
 }
 
 async fn finish_nonactivating_revoke(
@@ -920,14 +713,25 @@ async fn complete_already_removed_member(
         return Err(InviteError::LastOwner);
     }
     let keyring = operation.open_keyring_for_membership(chain).await?;
-    revoke_provider_access(
-        cloud_home,
-        CloudAccessState::Absent {
+    match cloud_home
+        .set_access(CloudAccessState::Absent {
             member_pubkey: revokee_pubkey.to_string(),
             provider_account_email: None,
-        },
-    )
-    .await?;
+        })
+        .await?
+    {
+        CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => {}
+        CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
+            tracing::info!(
+                "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
+            );
+        }
+        CloudAccessOutcome::Present(_) => {
+            return Err(InviteError::Crypto(
+                "provider returned present outcome for absent access request".to_string(),
+            ));
+        }
+    }
     Ok(keyring)
 }
 
@@ -954,7 +758,7 @@ pub(crate) async fn revoke_member_durable(
                     "an invitation is pending".to_string(),
                 ));
             };
-            if !revoke_plan_matches_request(&plan, &owner_keypair, revokee_pubkey, store_id) {
+            if !plan.matches_request(&owner_keypair, revokee_pubkey, store_id) {
                 return Err(InviteError::PendingMutation(
                     "the pending removal has different immutable inputs".to_string(),
                 ));
@@ -1092,22 +896,4 @@ pub(crate) async fn complete_revoke_rotation_adoption(
         .await?;
     pending_rotation.install_durable_gate(gate);
     Ok(())
-}
-
-async fn revoke_provider_access(
-    cloud_home: &dyn CloudHome,
-    absent_access: CloudAccessState,
-) -> Result<bool, InviteError> {
-    match cloud_home.set_access(absent_access).await? {
-        CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => Ok(true),
-        CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
-            tracing::info!(
-                "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
-            );
-            Ok(false)
-        }
-        CloudAccessOutcome::Present(_) => Err(InviteError::Crypto(
-            "provider returned present outcome for absent access request".to_string(),
-        )),
-    }
 }

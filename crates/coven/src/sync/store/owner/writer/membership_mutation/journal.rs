@@ -2,18 +2,19 @@ use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
 use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::{
-    AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipEntry, MembershipEntryRef,
-    MembershipError, MembershipHeadRef, MergeMembershipHeadTransition,
-    StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
+    self, AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
+    MembershipEntry, MembershipEntryRef, MembershipError, MembershipHeadRef,
+    MergeMembershipHeadTransition, StoreMembershipConflictResolution,
+    StoreMembershipConflictResolutionRef,
 };
 use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
+use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::cloud::{CloudAccessState, CloudHomeJoinInfo};
 use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
-use super::InviteError;
+use super::{validate_prepared_publication, validate_prepared_transition, InviteError};
 
 /// Select the exact author stream without overwriting its committed prefix.
 /// Streams are persisted per database, so independently restored devices use
@@ -60,6 +61,39 @@ pub(super) struct InviteMutationPlan {
     pub(super) wrapped_key: PreparedWrappedStoreKey,
 }
 
+impl InviteMutationPlan {
+    pub(super) fn matches_request(
+        &self,
+        owner_keypair: &UserKeypair,
+        invitee_pubkey: &str,
+        invitee_email: Option<&str>,
+        role: &MemberRole,
+        store_id: &str,
+    ) -> bool {
+        self.publication.entry.author_pubkey == hex::encode(owner_keypair.public_key())
+            && self.publication.entry.store_id == store_id
+            && self.invitee_pubkey == invitee_pubkey
+            && self.invitee_email.as_deref() == invitee_email
+            && &self.role == role
+            && self.desired_access
+                == (CloudAccessState::Present {
+                    member_pubkey: invitee_pubkey.to_string(),
+                    provider_account_email: invitee_email.map(str::to_string),
+                })
+            && matches!(
+                &self.publication.entry.change,
+                MembershipChange::SetMember {
+                    user_pubkey,
+                    provider_account_email,
+                    role: entry_role,
+                    ..
+                } if user_pubkey == invitee_pubkey
+                    && provider_account_email.as_deref() == invitee_email
+                    && entry_role.role() == *role
+            )
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RevokeMutationPlan {
@@ -69,6 +103,208 @@ pub(super) struct RevokeMutationPlan {
     pub(super) prior_access: CloudAccessState,
     pub(super) wraps: Vec<ReplacementWrappedKey>,
     pub(super) keyring_payload: Vec<u8>,
+}
+
+impl RevokeMutationPlan {
+    pub(super) fn matches_request(
+        &self,
+        owner_keypair: &UserKeypair,
+        revokee_pubkey: &str,
+        store_id: &str,
+    ) -> bool {
+        self.publication.entry().author_pubkey == hex::encode(owner_keypair.public_key())
+            && self.publication.entry().store_id == store_id
+            && self.revokee_pubkey == revokee_pubkey
+            && matches!(
+                &self.publication.entry().change,
+                MembershipChange::RemoveMember { user_pubkey, .. }
+                    if user_pubkey == revokee_pubkey
+            )
+            && matches!(
+                &self.desired_access,
+                CloudAccessState::Absent { member_pubkey, .. }
+                    if member_pubkey == revokee_pubkey
+            )
+            && matches!(
+                &self.prior_access,
+                CloudAccessState::Present { member_pubkey, .. }
+                    if member_pubkey == revokee_pubkey
+            )
+    }
+
+    pub(super) fn validate_closed_shape(&self) -> Result<(), InviteError> {
+        let publication = self.publication.publication();
+        validate_prepared_publication(publication)?;
+        let (desired_member, desired_email) = match &self.desired_access {
+            CloudAccessState::Absent {
+                member_pubkey,
+                provider_account_email,
+            } => (member_pubkey, provider_account_email),
+            CloudAccessState::Present { .. } => {
+                return Err(InviteError::InvalidDurableMutation(
+                    "membership removal requests present provider access".to_string(),
+                ));
+            }
+        };
+        let (prior_member, prior_email) = match &self.prior_access {
+            CloudAccessState::Present {
+                member_pubkey,
+                provider_account_email,
+            } => (member_pubkey, provider_account_email),
+            CloudAccessState::Absent { .. } => {
+                return Err(InviteError::InvalidDurableMutation(
+                    "membership removal compensation requests absent provider access".to_string(),
+                ));
+            }
+        };
+        if desired_member != &self.revokee_pubkey
+            || prior_member != &self.revokee_pubkey
+            || desired_email != prior_email
+        {
+            return Err(InviteError::InvalidDurableMutation(
+                "membership removal access and compensation intents disagree".to_string(),
+            ));
+        }
+        let MembershipChange::RemoveMember {
+            user_pubkey,
+            wrapped_keys,
+            retirement_device_state,
+            retirement_barriers,
+            ..
+        } = &publication.entry.change
+        else {
+            return Err(InviteError::InvalidDurableMutation(
+                "membership removal plan contains another change".to_string(),
+            ));
+        };
+        let planned_wraps = self
+            .wraps
+            .iter()
+            .map(|wrap| wrap.prepared.reference.clone())
+            .collect::<Vec<_>>();
+        if user_pubkey != &self.revokee_pubkey || wrapped_keys != &planned_wraps {
+            return Err(InviteError::InvalidDurableMutation(
+                "membership removal plan differs from its exact entry".to_string(),
+            ));
+        }
+        match &self.publication {
+            RevokeMembershipPublication::Direct { .. } => {
+                if retirement_device_state.is_some()
+                    || retirement_barriers.values().any(|barrier| {
+                        matches!(
+                            barrier,
+                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+                        )
+                    })
+                    || !matches!(
+                        publication.head.activation,
+                        membership::MembershipHeadActivation::Direct
+                    )
+                {
+                    return Err(InviteError::InvalidDurableMutation(
+                        "direct membership removal carries Owner retirement authority".to_string(),
+                    ));
+                }
+            }
+            RevokeMembershipPublication::StoreActivated {
+                transition,
+                candidate,
+                ..
+            } => {
+                validate_prepared_transition(transition)?;
+                candidate
+                    .validate_closed_shape()
+                    .map_err(InviteError::InvalidDurableMutation)?;
+                if transition.entry != publication.entry
+                    || transition.entry_ref != publication.entry_ref
+                    || transition.entry_object != publication.entry_object
+                    || retirement_device_state.as_ref() != Some(&candidate.commit.device_state)
+                    || !retirement_barriers.values().any(|barrier| {
+                        matches!(
+                            barrier,
+                            membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+                        )
+                    })
+                    || candidate.commit.control()
+                        != Some(&store_commit::StoreControl {
+                            transition: transition.transition.clone(),
+                        })
+                    || !transition
+                        .transition
+                        .matches_head(&publication.head, &publication.head_ref)
+                    || !matches!(
+                        &publication.head.activation,
+                        membership::MembershipHeadActivation::StoreCommit { commit }
+                            if commit == &candidate.reference
+                    )
+                {
+                    return Err(InviteError::InvalidDurableMutation(
+                        "Owner retirement differs from its exact Store activation graph"
+                            .to_string(),
+                    ));
+                }
+                candidate
+                    .merge_membership_activation_remote_objects(
+                        transition,
+                        publication,
+                        &self
+                            .wraps
+                            .iter()
+                            .map(|wrap| wrap.prepared.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn candidate_remote_objects(
+        &self,
+    ) -> Result<Option<Vec<RemoteObjectRecord>>, InviteError> {
+        match &self.publication {
+            RevokeMembershipPublication::Direct { .. } => Ok(None),
+            RevokeMembershipPublication::StoreActivated {
+                transition,
+                candidate,
+                publication,
+            } => candidate
+                .merge_membership_activation_remote_objects(
+                    transition,
+                    publication,
+                    &self
+                        .wraps
+                        .iter()
+                        .map(|wrap| wrap.prepared.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .map(Some)
+                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string())),
+        }
+    }
+
+    pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
+        match &self.publication {
+            RevokeMembershipPublication::Direct { .. } => (Vec::new(), Vec::new()),
+            RevokeMembershipPublication::StoreActivated {
+                transition,
+                candidate,
+                publication,
+            } => {
+                let candidate_objects = std::iter::once(candidate.reference.object.clone())
+                    .chain(std::iter::once(transition.entry_ref.object.clone()))
+                    .chain(std::iter::once(publication.head_ref.object.clone()))
+                    .chain(
+                        self.wraps
+                            .iter()
+                            .map(|wrap| wrap.prepared.reference.object.clone()),
+                    )
+                    .collect();
+                let retained = vec![candidate.head_ref().object];
+                (candidate_objects, retained)
+            }
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

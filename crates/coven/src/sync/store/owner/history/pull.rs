@@ -74,9 +74,8 @@ pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
 pub(crate) use join_activation::*;
 pub(crate) use model::{
-    commit_stream_id, held_commit, held_dependency, held_package, parse_candidate_circle_package,
-    parse_candidate_store_package, Candidate, LoadedCirclePackage, LocalStoreMembership,
-    StorePullFuture,
+    commit_stream_id, parse_candidate_circle_package, parse_candidate_store_package, Candidate,
+    LoadedCirclePackage, LocalStoreMembership, StorePullFuture,
 };
 pub(crate) use model::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
@@ -272,7 +271,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             }
             for (activation_head_ref, activation_head, commit_ref, commit) in discovered.commits {
                 if commit_ref.coord.sequence() != commit.seq() {
-                    held.push(held_commit(
+                    held.push(HeldStorePosition::commit(
                         &commit_ref,
                         HeldStorePositionReason::InvalidObject(
                             "exact commit coordinate differs from signed sequence".to_string(),
@@ -288,7 +287,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     if materialized == commit_ref {
                         continue;
                     }
-                    held.push(held_commit(
+                    held.push(HeldStorePosition::commit(
                         &commit_ref,
                         HeldStorePositionReason::HashMismatch {
                             referenced_device_id: stream_id,
@@ -300,7 +299,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 }
                 if let Some(package) = commit.store_package() {
                     if package.schema_version > db.schema_version() {
-                        held.push(held_commit(
+                        held.push(HeldStorePosition::commit(
                             &commit_ref,
                             HeldStorePositionReason::NewerSchema {
                                 local: db.schema_version(),
@@ -315,7 +314,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         StorePullError::Object(error) => held_object_error(error),
                         error => HeldStorePositionReason::InvalidObject(error.to_string()),
                     };
-                    held.push(held_commit(&commit_ref, reason));
+                    held.push(HeldStorePosition::commit(&commit_ref, reason));
                     continue;
                 }
                 let verified = history_verifier
@@ -329,7 +328,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                         )
                     })?;
                 if verified.verified.value() != &commit {
-                    held.push(held_commit(
+                    held.push(HeldStorePosition::commit(
                         &commit_ref,
                         HeldStorePositionReason::InvalidObject(
                             "Merge candidate differs from its operation-verified history"
@@ -356,7 +355,11 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 {
                     Ok(package) => package.map(|package| package.value),
                     Err(error) => {
-                        held.push(held_package(&commit_ref, &commit, held_object_error(error)));
+                        held.push(HeldStorePosition::package(
+                            &commit_ref,
+                            &commit,
+                            held_object_error(error),
+                        ));
                         continue;
                     }
                 };
@@ -515,8 +518,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                                 if matches!(reason, HeldStorePositionReason::BlobDownloadFailed) {
                                     asset_downloads_failed = true;
                                 }
-                                let held_position =
-                                    held_commit(candidate.candidate.commit_ref(), reason);
+                                let held_position = HeldStorePosition::commit(
+                                    candidate.candidate.commit_ref(),
+                                    reason,
+                                );
                                 candidates.insert(key.clone(), candidate);
                                 blocked.insert(key, held_position);
                             }

@@ -1307,28 +1307,6 @@ fn insert_latest_announcement(
     }
 }
 
-fn insert_membership_proof(
-    target: &mut BTreeMap<StoreBatchCommitRef, store_commit::RetainedMergeMembershipProof>,
-    reference: StoreBatchCommitRef,
-    value: store_commit::RetainedMergeMembershipProof,
-) -> Result<(), StorePullError> {
-    if target
-        .keys()
-        .any(|existing| existing.coord == reference.coord && existing != &reference)
-    {
-        return Err(StorePullError::Database(
-            "Merge predecessor checkpoints contain conflicting membership proofs at one Store coordinate"
-                .to_string(),
-        ));
-    }
-    insert_exact(
-        target,
-        reference,
-        value,
-        "Merge predecessor checkpoints disagree on a membership proof",
-    )
-}
-
 pub(crate) struct MergedRetainedMergeHistory {
     causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
     registrations: BTreeMap<store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
@@ -1341,16 +1319,43 @@ pub(crate) struct MergedRetainedMergeHistory {
     >,
 }
 
+impl MergedRetainedMergeHistory {
+    fn insert_membership_proof(
+        &mut self,
+        reference: StoreBatchCommitRef,
+        value: store_commit::RetainedMergeMembershipProof,
+    ) -> Result<(), StorePullError> {
+        if self
+            .membership_proofs
+            .keys()
+            .any(|existing| existing.coord == reference.coord && existing != &reference)
+        {
+            return Err(StorePullError::Database(
+                "Merge predecessor checkpoints contain conflicting membership proofs at one Store coordinate"
+                    .to_string(),
+            ));
+        }
+        insert_exact(
+            &mut self.membership_proofs,
+            reference,
+            value,
+            "Merge predecessor checkpoints disagree on a membership proof",
+        )
+    }
+}
+
 pub(crate) fn merge_retained_merge_history(
     root: &StoreRootRef,
     membership: &MembershipChain,
     predecessors: Vec<OpenedRetainedMergeHistorySummary>,
 ) -> Result<MergedRetainedMergeHistory, StorePullError> {
-    let mut causal_cut = BTreeMap::new();
-    let mut registrations = BTreeMap::new();
-    let mut acknowledgements = BTreeMap::new();
-    let mut membership_proofs = BTreeMap::new();
-    let mut announcement_frontier = BTreeMap::new();
+    let mut merged = MergedRetainedMergeHistory {
+        causal_cut: BTreeMap::new(),
+        registrations: BTreeMap::new(),
+        acknowledgements: BTreeMap::new(),
+        membership_proofs: BTreeMap::new(),
+        announcement_frontier: BTreeMap::new(),
+    };
     for predecessor in predecessors {
         let predecessor_cut = predecessor.summary.causal_cut.clone();
         if predecessor.summary.store_root_hash != root.store_root_hash {
@@ -1382,7 +1387,7 @@ pub(crate) fn merge_retained_merge_history(
         }
         for (key, value) in predecessor.summary.causal_cut {
             insert_exact(
-                &mut causal_cut,
+                &mut merged.causal_cut,
                 key,
                 value,
                 "Merge predecessor checkpoints disagree on a Store coordinate",
@@ -1390,14 +1395,14 @@ pub(crate) fn merge_retained_merge_history(
         }
         for (key, value) in predecessor.summary.registrations {
             insert_exact(
-                &mut registrations,
+                &mut merged.registrations,
                 key,
                 value,
                 "Merge predecessor checkpoints disagree on a device registration",
             )?;
         }
         for (key, value) in predecessor.summary.acknowledgements {
-            insert_latest_acknowledgement(&mut acknowledgements, key, value)?;
+            insert_latest_acknowledgement(&mut merged.acknowledgements, key, value)?;
         }
         for (key, mut value) in predecessor.summary.membership_proofs {
             if predecessor_cut.get(&value.commit.coord) == Some(&value.commit)
@@ -1410,19 +1415,13 @@ pub(crate) fn merge_retained_merge_history(
                     .filter(|announcement| announcement.value.commit == value.commit)
                     .cloned();
             }
-            insert_membership_proof(&mut membership_proofs, key, value)?;
+            merged.insert_membership_proof(key, value)?;
         }
         for (key, value) in predecessor.announcement_frontier {
-            insert_latest_announcement(&mut announcement_frontier, key, value)?;
+            insert_latest_announcement(&mut merged.announcement_frontier, key, value)?;
         }
     }
-    Ok(MergedRetainedMergeHistory {
-        causal_cut,
-        registrations,
-        acknowledgements,
-        membership_proofs,
-        announcement_frontier,
-    })
+    Ok(merged)
 }
 
 pub(crate) fn compose_merge_history_successor(
@@ -1435,16 +1434,10 @@ pub(crate) fn compose_merge_history_successor(
     predecessors: Vec<OpenedRetainedMergeHistorySummary>,
     evidence: MergeHistorySuccessorEvidence,
 ) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
-    let MergedRetainedMergeHistory {
-        mut causal_cut,
-        mut registrations,
-        mut acknowledgements,
-        mut membership_proofs,
-        announcement_frontier,
-    } = merge_retained_merge_history(root, membership, predecessors)?;
+    let mut merged = merge_retained_merge_history(root, membership, predecessors)?;
     let mut membership_floor = store_commit::MembershipCausalFloor::from_membership(membership);
     insert_exact(
-        &mut causal_cut,
+        &mut merged.causal_cut,
         commit_ref.coord.clone(),
         commit_ref.clone(),
         "Merge successor conflicts at its Store coordinate",
@@ -1460,7 +1453,7 @@ pub(crate) fn compose_merge_history_successor(
             ));
         }
         insert_exact(
-            &mut registrations,
+            &mut merged.registrations,
             registration.reference.device_id,
             registration,
             "Merge successor registration conflicts with retained authority",
@@ -1481,7 +1474,7 @@ pub(crate) fn compose_merge_history_successor(
             ));
         }
         insert_latest_acknowledgement(
-            &mut acknowledgements,
+            &mut merged.acknowledgements,
             reference.registration.device_id,
             retained,
         )?;
@@ -1498,14 +1491,14 @@ pub(crate) fn compose_merge_history_successor(
                 &proof.head_value.body.resolutions,
             )
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        insert_membership_proof(&mut membership_proofs, commit_ref.clone(), proof)?;
+        merged.insert_membership_proof(commit_ref.clone(), proof)?;
     }
     let author_ref = commit.author_registration.clone();
     author_ref
         .verify_registration(author)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     insert_exact(
-        &mut registrations,
+        &mut merged.registrations,
         author_ref.device_id,
         RetainedVerifiedRegistration {
             reference: author_ref.clone(),
@@ -1514,7 +1507,7 @@ pub(crate) fn compose_merge_history_successor(
         "Merge successor author registration conflicts with retained authority",
     )?;
     let mut post_frontier = BTreeMap::new();
-    for reference in causal_cut.values() {
+    for reference in merged.causal_cut.values() {
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -1531,6 +1524,13 @@ pub(crate) fn compose_merge_history_successor(
             std::collections::btree_map::Entry::Occupied(_) => {}
         }
     }
+    let MergedRetainedMergeHistory {
+        causal_cut,
+        registrations,
+        acknowledgements,
+        membership_proofs,
+        announcement_frontier,
+    } = merged;
     let summary = RetainedVerifiedMergeHistorySummary {
         version: store_commit::STORE_PROTOCOL_VERSION,
         store_root_hash: root.store_root_hash,
