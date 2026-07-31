@@ -12,7 +12,6 @@ use crate::protocol::circle::{
     CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef,
     PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
 };
-use crate::protocol::circle_roster::CircleMaterializedRoster;
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
@@ -797,14 +796,6 @@ async fn verify_epoch_reopen(
         ));
     }
     Ok(())
-}
-
-fn verify_circle_owner_authority(
-    author_pubkey: &str,
-    control: &CircleControl,
-    roster: &CircleMaterializedRoster,
-) -> bool {
-    verify_merge_circle_owner_authority(author_pubkey, &control.value.author_authority, roster)
 }
 
 fn verify_merge_circle_owner_authority(
@@ -1814,9 +1805,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                             &mut consumed_stream_activations,
                         )
                         .await?;
-                    if !verify_circle_owner_authority(
+                    if !verify_merge_circle_owner_authority(
                         &control.value.author_pubkey,
-                        &control.value,
+                        &control.value.value.author_authority,
                         &authority_roster,
                     ) {
                         return Err(CircleOperationError::InvalidState(
