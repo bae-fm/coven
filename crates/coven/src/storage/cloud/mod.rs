@@ -719,13 +719,6 @@ pub(crate) fn combine_cleanup_failure(
     }
 }
 
-async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> CloudHomeError {
-    if matches!(&operation, CloudHomeError::CleanupFailed { .. }) {
-        return operation;
-    }
-    combine_cleanup_failure(operation, sink.abort().await)
-}
-
 /// The central upload driver: pick single-request vs multipart by size and pump
 /// the parts. A blob at or below the home's `multipart_threshold` goes up as one
 /// bounded `put_object`; a larger one opens a multipart/resumable session and
@@ -745,48 +738,68 @@ async fn write_blob<C: CloudHome + ?Sized>(
         return Ok(());
     }
     let sink = home.open_multipart(key, body.len()).await?;
-    pump_body_into_sink(key, body, sink, progress).await
+    MultipartUpload::new(key, body, sink, progress).run().await
 }
 
-/// Stream `body` into `sink` one part at a time, reporting cumulative progress
-/// and aborting the sink if the body or a send fails, then finish it.
-///
-/// This is the pump for sinks whose upload is settled by [`PartSink::finish`].
-/// Backends whose final part *is* the commit, or that publish on an explicit
-/// call afterwards, run their own loop — the completion protocol is the part
-/// that differs between them, so it is not a parameter here.
-pub(crate) async fn pump_body_into_sink(
-    key: &str,
-    mut body: BlobBody,
-    mut sink: BoxPartSink<'_>,
-    progress: &UploadProgress<'_>,
-) -> Result<(), CloudHomeError> {
-    let part_size = sink.part_size();
-    let total = body.len();
-    let mut offset = 0u64;
-    loop {
-        let part = match body.next_part(part_size).await {
-            Ok(Some(part)) => part,
-            Ok(None) if offset == total => break,
-            Ok(None) => {
-                let operation = CloudHomeError::Transport(format!(
-                    "upload body for {key} ended after {offset} of {total} bytes"
-                ));
-                return Err(abort_part_sink(sink.as_mut(), operation).await);
-            }
-            Err(operation) => {
-                return Err(abort_part_sink(sink.as_mut(), operation).await);
-            }
-        };
-        let n = part.len() as u64;
-        let is_last = offset + n >= total;
-        if let Err(operation) = sink.send_part(part, offset, is_last).await {
-            return Err(abort_part_sink(sink.as_mut(), operation).await);
+/// One open multipart upload, including its source body, provider session, and
+/// progress reporting. The operation either finishes the provider session or
+/// awaits its abort and preserves both the operation and cleanup failures.
+struct MultipartUpload<'sink, 'progress> {
+    key: String,
+    body: BlobBody,
+    sink: BoxPartSink<'sink>,
+    progress: &'progress UploadProgress<'progress>,
+}
+
+impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
+    fn new(
+        key: &str,
+        body: BlobBody,
+        sink: BoxPartSink<'sink>,
+        progress: &'progress UploadProgress<'progress>,
+    ) -> Self {
+        Self {
+            key: key.to_string(),
+            body,
+            sink,
+            progress,
         }
-        offset += n;
-        progress(offset);
     }
-    sink.finish().await
+
+    async fn run(mut self) -> Result<(), CloudHomeError> {
+        let part_size = self.sink.part_size();
+        let total = self.body.len();
+        let mut offset = 0u64;
+        loop {
+            let part = match self.body.next_part(part_size).await {
+                Ok(Some(part)) => part,
+                Ok(None) if offset == total => break,
+                Ok(None) => {
+                    let operation = CloudHomeError::Transport(format!(
+                        "upload body for {} ended after {offset} of {total} bytes",
+                        self.key
+                    ));
+                    return Err(self.abort(operation).await);
+                }
+                Err(operation) => return Err(self.abort(operation).await),
+            };
+            let n = part.len() as u64;
+            let is_last = offset + n >= total;
+            if let Err(operation) = self.sink.send_part(part, offset, is_last).await {
+                return Err(self.abort(operation).await);
+            }
+            offset += n;
+            (self.progress)(offset);
+        }
+        self.sink.finish().await
+    }
+
+    async fn abort(&mut self, operation: CloudHomeError) -> CloudHomeError {
+        if matches!(&operation, CloudHomeError::CleanupFailed { .. }) {
+            return operation;
+        }
+        combine_cleanup_failure(operation, self.sink.abort().await)
+    }
 }
 
 /// Low-level cloud storage. Implementations handle a single store.

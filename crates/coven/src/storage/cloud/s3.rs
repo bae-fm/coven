@@ -17,9 +17,9 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    combine_cleanup_failure, pump_body_into_sink, range_header, require_logical_slot, BlobBody,
-    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, range_header, require_logical_slot, BlobBody, CloudAccessOutcome,
+    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
+    MultipartUpload, ObjectSlot, RevokeOutcome, UploadProgress,
 };
 use runtime::S3Runtime;
 
@@ -238,7 +238,7 @@ impl S3CloudHome {
         let sink = self
             .open_multipart_sink(key, MultipartCompletion::CreateOnly)
             .await?;
-        pump_body_into_sink(key, body, sink, progress).await
+        MultipartUpload::new(key, body, sink, progress).run().await
     }
 }
 

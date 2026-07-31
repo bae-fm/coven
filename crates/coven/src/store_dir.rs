@@ -1,6 +1,6 @@
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::config::{Config, ConfigError};
 
@@ -453,6 +453,74 @@ impl StoreDir {
         self.cache_folder_namespace_dir("cache", namespace)
     }
 
+    /// Remove unpublished local, cached, and pinned blob files left by an
+    /// earlier process. Files created at or after `process_start` belong to the
+    /// current process and are left untouched.
+    pub(crate) fn remove_orphaned_blob_temps(
+        &self,
+        process_start: std::time::SystemTime,
+    ) -> std::io::Result<()> {
+        let storage = self.storage_dir();
+        for folder in ["local", "cache", "pinned"] {
+            self.remove_orphaned_temps_in_dir(&storage.join(folder), process_start)?;
+        }
+        Ok(())
+    }
+
+    fn remove_orphaned_temps_in_dir(
+        &self,
+        dir: &Path,
+        process_start: std::time::SystemTime,
+    ) -> std::io::Result<()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!(
+                    path = %dir.display(),
+                    store_dir = %self.display(),
+                    "blob directory absent during orphaned temp cleanup"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                self.remove_orphaned_temps_in_dir(&path, process_start)?;
+            } else if file_type.is_file() && crate::local_blob::is_temp_blob_path(&path) {
+                let modified = entry.metadata()?.modified()?;
+                if modified >= process_start {
+                    debug!(
+                        path = %path.display(),
+                        "leaving fresh blob temp created at or after process start"
+                    );
+                    continue;
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        debug!(
+                            path = %path.display(),
+                            "file already absent during local blob cleanup"
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if file_type.is_file()
+                && path.file_name().and_then(|name| name.to_str()).is_none()
+            {
+                debug!(
+                    path = %path.display(),
+                    "skipping blob path with non-utf8 file name during orphaned temp cleanup"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Create a store directory, generate a device_id, and save config.yaml.
     ///
     /// The caller is responsible for encryption key setup and calling
@@ -517,6 +585,8 @@ impl From<PathBuf> for StoreDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Duration;
 
     /// A normal id partitions by its first two dash-stripped byte-pairs, with the
     /// full id (dashes kept) as the file name — the layout the cloud and local
@@ -657,5 +727,95 @@ mod tests {
                 .expect("pinned path"),
             store.storage_dir().join("pinned/images").join(shard)
         );
+    }
+
+    /// The open-time orphan sweep clears crash-left atomic-write temps under
+    /// every blob folder that predate this open, while leaving current-process
+    /// temps and committed blobs untouched.
+    #[test]
+    fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(tmp.path());
+        let process_start = std::time::SystemTime::now();
+        let stale = process_start - Duration::from_secs(3600);
+        let fresh = process_start + Duration::from_secs(3600);
+
+        let write_with_mtime = |path: &Path, mtime: std::time::SystemTime| {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create dir");
+            std::fs::write(path, b"x").expect("write file");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open to set mtime")
+                .set_modified(mtime)
+                .expect("set mtime");
+        };
+        let temp_name = |marker: &str| format!("{marker}{}", uuid::Uuid::new_v4());
+        let cache_shard = store_dir.storage_dir().join("cache/release_files/ab/cd");
+        let pinned_shard = store_dir.storage_dir().join("pinned/photos/ef/gh");
+        let local_namespace = store_dir.storage_dir().join("local/audio");
+
+        let stale_cache_temp = cache_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_cache_temp = cache_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let committed_cache = cache_shard.join("blob0aaa");
+        let stale_pinned_temp = pinned_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_pinned_temp = pinned_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let stale_local_temp = local_namespace.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_local_temp = local_namespace.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let committed_local = local_namespace.join("blob0bbb");
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let stale_local_stage = runtime.block_on(async {
+            let mut stage =
+                crate::local_blob::AtomicStagedFile::create(&local_namespace.join("blob"))
+                    .await
+                    .expect("local staging path");
+            stage.write_bytes(b"x").await.expect("write local stage");
+            stage.leave_unpublished_for_test()
+        });
+
+        for path in [
+            &stale_cache_temp,
+            &committed_cache,
+            &stale_pinned_temp,
+            &stale_local_temp,
+            &committed_local,
+        ] {
+            write_with_mtime(path, stale);
+        }
+        for path in [&fresh_cache_temp, &fresh_pinned_temp, &fresh_local_temp] {
+            write_with_mtime(path, fresh);
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale_local_stage)
+            .expect("open local stage to set mtime")
+            .set_modified(stale)
+            .expect("set local stage mtime");
+
+        store_dir
+            .remove_orphaned_blob_temps(process_start)
+            .expect("orphan sweep");
+
+        for path in [
+            &stale_cache_temp,
+            &stale_pinned_temp,
+            &stale_local_temp,
+            &stale_local_stage,
+        ] {
+            assert!(!path.exists(), "stale temp remained: {}", path.display());
+        }
+        for path in [
+            &fresh_cache_temp,
+            &fresh_pinned_temp,
+            &fresh_local_temp,
+            &committed_cache,
+            &committed_local,
+        ] {
+            assert!(
+                path.exists(),
+                "live or committed blob removed: {}",
+                path.display()
+            );
+        }
     }
 }
