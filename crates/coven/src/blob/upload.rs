@@ -555,17 +555,14 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
         let cleanup = async {
             match state {
                 OutboxUploadState::Pending => {}
-                OutboxUploadState::Prepared {
-                    stored, spool_path, ..
-                }
-                | OutboxUploadState::Created {
-                    stored, spool_path, ..
-                } => {
+                OutboxUploadState::Prepared { stored, .. }
+                | OutboxUploadState::Created { stored, .. } => {
                     self.storage
                         .delete_blob_object(stored)
                         .await
                         .map_err(UploadFailureCause::Storage)?;
-                    Self::remove_spool(spool_path)
+                    self.store_dir
+                        .remove_outbound_blob_spool(stored.locator().locator_hash())
                         .await
                         .map_err(UploadFailureCause::Local)?;
                     crate::blob::cache::drop_cached_stored_blob(self.store_dir, stored)
@@ -667,17 +664,6 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                 }
             },
             OutboxOperation::Delete { stored } => stored.object().slot().logical_key().to_string(),
-        }
-    }
-
-    async fn remove_spool(path: &std::path::Path) -> Result<(), String> {
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => crate::local_blob::sync_parent_dir(path).await,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "remove exact blob spool {}: {error}",
-                path.display()
-            )),
         }
     }
 }

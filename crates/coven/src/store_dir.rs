@@ -301,6 +301,21 @@ impl StoreDir {
             .join(locator_hash.to_string())
     }
 
+    pub(crate) async fn remove_outbound_blob_spool(
+        &self,
+        locator_hash: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        let path = self.outbound_blob_spool_path(locator_hash);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => crate::local_blob::sync_parent_dir(&path).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove exact blob spool {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
     /// `storage/pinned/<namespace>/{ab}/{cd}/<locator-hash>`. The kept sibling of
     /// [`Self::cache_blob_path`] — same per-namespace shard layout, in the `pinned`

@@ -8,20 +8,18 @@ pub(super) enum CovenMetadataOpen<'a> {
     VerifiedSnapshot(&'a VerifiedSnapshotBootstrapInstall),
 }
 
-fn protocol_state_exists(conn: &Connection) -> Result<bool, DbError> {
-    conn.query_row(
-        "SELECT EXISTS(\
+fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
+    let protocol_state_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(\
              SELECT 1 FROM main.sqlite_schema \
              WHERE type = 'table' AND name = 'protocol_state'\
          )",
-        [],
-        |row| row.get(0),
-    )
-    .map_err(DbError::from)
-}
-
-fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
-    if !protocol_state_exists(conn)? {
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if !protocol_state_exists {
         return Ok(false);
     }
     let marker = get_protocol_state_on(conn, COVEN_INITIALIZED_STATE_KEY)?;
