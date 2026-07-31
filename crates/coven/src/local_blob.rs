@@ -258,6 +258,56 @@ impl AtomicStagedFile {
         }
     }
 
+    async fn write_open_file_with_facts(
+        mut self,
+        mut input: tokio::fs::File,
+        source: &Path,
+    ) -> Result<(Self, u64, crate::protocol::store_commit::ObjectHash), String> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
+        let copy = async {
+            let staged = self.staged.as_mut().expect("atomic stage is unpublished");
+            let mut buffer = vec![0u8; 1 << 20];
+            let mut size = 0_u64;
+            let mut hasher = Sha256::new();
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| format!("read pin source {}: {error}", source.display()))?;
+                if read == 0 {
+                    break;
+                }
+                size = size
+                    .checked_add(read as u64)
+                    .ok_or_else(|| format!("copy source size overflow: {}", source.display()))?;
+                hasher.update(&buffer[..read]);
+                staged
+                    .file_mut()
+                    .write_all(&buffer[..read])
+                    .await
+                    .map_err(|error| {
+                        format!("write temp pin {}: {error}", staged.path.display())
+                    })?;
+            }
+            staged
+                .file_mut()
+                .sync_all()
+                .await
+                .map_err(|error| format!("fsync temp pin {}: {error}", staged.path.display()))?;
+            Ok::<_, String>((
+                size,
+                crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
+            ))
+        }
+        .await;
+        match copy {
+            Ok((size, hash)) => Ok((self, size, hash)),
+            Err(operation) => self.take_stage().fail(operation).await,
+        }
+    }
+
     pub(crate) async fn commit(self) -> Result<(), String> {
         self.commit_with_sync(|path| {
             let path = path.to_path_buf();
@@ -361,7 +411,7 @@ impl AtomicStagedFile {
 
         if let Err(operation) = sync_committed_parent(&self.destination).await {
             let mut failures = Vec::new();
-            if let Err(error) = rollback_new_destination(&self.destination, &operation).await {
+            if let Err(error) = self.rollback_new_destination(&operation).await {
                 failures.push(error.to_string());
             }
             if let Err(error) = staged.cleanup().await {
@@ -377,11 +427,11 @@ impl AtomicStagedFile {
             };
         }
         if let Err(operation) = staged.cleanup().await {
-            rollback_new_destination(&self.destination, &operation).await?;
+            self.rollback_new_destination(&operation).await?;
             return Err(CommitNewFileError::Filesystem(operation));
         }
         if let Err(operation) = sync_committed_parent(&self.destination).await {
-            rollback_new_destination(&self.destination, &operation).await?;
+            self.rollback_new_destination(&operation).await?;
             return Err(CommitNewFileError::Filesystem(operation));
         }
         Ok(())
@@ -414,24 +464,24 @@ impl AtomicStagedFile {
     fn take_stage(&mut self) -> AtomicTempFile {
         self.staged.take().expect("atomic stage is unpublished")
     }
-}
 
-async fn rollback_new_destination(
-    destination: &Path,
-    operation: &str,
-) -> Result<(), CommitNewFileError> {
-    tokio::fs::remove_file(destination).await.map_err(|error| {
-        CommitNewFileError::RollbackFailed {
-            operation: operation.to_string(),
-            rollback: format!("remove new destination {}: {error}", destination.display()),
-        }
-    })?;
-    sync_parent_dir(destination)
-        .await
-        .map_err(|rollback| CommitNewFileError::RollbackFailed {
-            operation: operation.to_string(),
-            rollback,
-        })
+    async fn rollback_new_destination(&self, operation: &str) -> Result<(), CommitNewFileError> {
+        tokio::fs::remove_file(&self.destination)
+            .await
+            .map_err(|error| CommitNewFileError::RollbackFailed {
+                operation: operation.to_string(),
+                rollback: format!(
+                    "remove new destination {}: {error}",
+                    self.destination.display()
+                ),
+            })?;
+        sync_parent_dir(&self.destination)
+            .await
+            .map_err(|rollback| CommitNewFileError::RollbackFailed {
+                operation: operation.to_string(),
+                rollback,
+            })
+    }
 }
 
 impl Drop for AtomicStagedFile {
@@ -821,64 +871,10 @@ pub(crate) async fn copy_atomic_with_facts(
     let input = tokio::fs::File::open(src)
         .await
         .map_err(|error| format!("open copy source {}: {error}", src.display()))?;
-    copy_open_file_atomic_with_facts(input, src, dst).await
-}
-
-async fn copy_open_file_atomic_with_facts(
-    mut input: tokio::fs::File,
-    src: &Path,
-    dst: &Path,
-) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-
-    let parent = dst
-        .parent()
-        .ok_or_else(|| format!("blob path has no parent dir: {}", dst.display()))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|e| format!("create parent dir for {}: {e}", dst.display()))?;
-    let mut temp = AtomicTempFile::create_in(parent)?;
-
-    let copy = async {
-        let mut buf = vec![0u8; 1 << 20];
-        let mut size = 0_u64;
-        let mut hasher = Sha256::new();
-        loop {
-            let read = input
-                .read(&mut buf)
-                .await
-                .map_err(|e| format!("read pin source {}: {e}", src.display()))?;
-            if read == 0 {
-                break;
-            }
-            size = size
-                .checked_add(read as u64)
-                .ok_or_else(|| format!("copy source size overflow: {}", src.display()))?;
-            hasher.update(&buf[..read]);
-            temp.file_mut()
-                .write_all(&buf[..read])
-                .await
-                .map_err(|e| format!("write temp pin {}: {e}", temp.path.display()))?;
-        }
-        temp.file_mut()
-            .sync_all()
-            .await
-            .map_err(|e| format!("fsync temp pin {}: {e}", temp.path.display()))?;
-        Ok::<_, String>((
-            size,
-            crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
-        ))
-    }
-    .await;
-    let facts = match copy {
-        Ok(facts) => facts,
-        Err(error) => {
-            return temp.fail(error).await;
-        }
-    };
-    temp.commit(dst).await?;
-    Ok(facts)
+    let staged = AtomicStagedFile::create(dst).await?;
+    let (staged, size, hash) = staged.write_open_file_with_facts(input, src).await?;
+    staged.commit().await?;
+    Ok((size, hash))
 }
 
 pub(crate) async fn write_byte_stream_atomic<E: Send>(
@@ -1247,9 +1243,14 @@ mod tests {
         write_atomic(&source, replacement)
             .await
             .expect("replace source path after open");
-        let (size, hash) = copy_open_file_atomic_with_facts(open, &source, &destination)
+        let staged = AtomicStagedFile::create(&destination)
+            .await
+            .expect("reserve destination stage");
+        let (staged, size, hash) = staged
+            .write_open_file_with_facts(open, &source)
             .await
             .expect("copy the already-open exact file");
+        staged.commit().await.expect("publish exact copy");
 
         assert_eq!(read(&destination).await.expect("read copy"), original);
         assert_eq!(size, original.len() as u64);
