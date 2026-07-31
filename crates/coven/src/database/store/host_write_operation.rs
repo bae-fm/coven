@@ -297,12 +297,14 @@ impl StoreDatabase {
                                 for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
                                     let _ = cleanup_store_dir
                                         .local_blob_path(&blob.namespace, &blob.id)?;
-                                    if crate::blob::local_cleanup::logical_blob_is_referenced_on(
-                                        transaction,
-                                        &blob_decls,
-                                        &blob.namespace,
-                                        &blob.id,
-                                    )? {
+                                    if blob_decls
+                                        .blob_id_is_referenced(
+                                            transaction,
+                                            &blob.namespace,
+                                            &blob.id,
+                                        )
+                                        .map_err(|error| DbError::Message(error.to_string()))?
+                                    {
                                         return Err(HostWriteError::BlobStillReferenced {
                                             namespace: blob.namespace.clone(),
                                             id: blob.id.clone(),

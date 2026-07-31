@@ -4709,7 +4709,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
 
     // This device now holds no copy of the blob at all: the push moved the local-store
     // copy into the cache, and the cache copy is then evicted.
-    local_files::drop_blob(&ld, "photos", "p1cover")
+    ld.remove_local_blob("photos", "p1cover")
         .await
         .expect("drop any local-store copy");
     let cached = exact_cache_path(&ld, &row_blob_ref(&db, "note_photos", "p1cover").await);
@@ -5431,7 +5431,7 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
     store_local(&ld1, "p2cover", new_bytes).await;
-    local_files::drop_blob(&ld1, "photos", "p1cover")
+    ld1.remove_local_blob("photos", "p1cover")
         .await
         .expect("drop the replaced blob's local copy");
     let outgoing = capture_bytes(

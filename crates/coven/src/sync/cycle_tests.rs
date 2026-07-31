@@ -1719,7 +1719,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .is_none());
     assert!(!pending_spool.exists());
 
-    crate::blob::local_files::drop_blob(&ld, "photos", "cover1")
+    ld.remove_local_blob("photos", "cover1")
         .await
         .expect("remove source blob before restore");
     let (restore_temp, restore_dir) = temp_store_dir();

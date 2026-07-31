@@ -150,6 +150,13 @@ impl StoreDatabase {
             .await
     }
 
+    /// Complete a Created upload journal entry without exposing a Remote row that lacks
+    /// exact object authority. Every blob-bearing row below the same gated root must
+    /// still match its queued row version and have reached Created. The final transaction
+    /// then flips the gate, clears external-file ownership, records the pending Store
+    /// write, and binds the transition intent to that write together. The intent and
+    /// Created handoffs remain until that Store write activates, so a crash cannot make
+    /// the upload drain mistake a published object for an orphan.
     pub(crate) async fn finalize_created_blob_upload(
         &self,
         entry: &OutboxEntry,

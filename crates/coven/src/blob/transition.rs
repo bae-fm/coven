@@ -46,7 +46,6 @@ use std::collections::HashMap;
 use crate::blob::{Provenance, RowBlobRef};
 use crate::database::DbError;
 use crate::database::StoreDatabase;
-use crate::db::OutboxEntry;
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
@@ -361,24 +360,6 @@ pub(crate) enum PostUpload {
     Waiting,
     Cancelled,
     MadeRemote { root_table: String, root_id: String },
-}
-
-/// Complete a Created upload journal entry without exposing a Remote row that lacks
-/// exact object authority. Every blob-bearing row below the same gated root must
-/// still match its queued row version and have reached Created. The final transaction
-/// then flips the gate, clears external-file ownership, records the pending Store
-/// write, and binds the transition intent to that write together. The intent and
-/// Created handoffs remain until that Store write activates, so a crash cannot make
-/// the upload drain mistake a published object for an orphan.
-pub(crate) async fn finalize_created_upload(
-    database: &StoreDatabase,
-    entry: &OutboxEntry,
-    stamp: String,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
-) -> Result<PostUpload, DbError> {
-    database
-        .finalize_created_blob_upload(entry, stamp, routing_encryption)
-        .await
 }
 
 // ===========================================================================
@@ -710,24 +691,13 @@ async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
 /// more urgent signal, since that leftover is a readable copy of a still-Remote
 /// blob (a retry re-materializes over it).
 async fn roll_back(written: &[PathBuf], abort_err: MakeLocalError) -> MakeLocalError {
-    match cleanup_partial(written).await {
-        Ok(()) => abort_err,
-        Err(cleanup_err) => cleanup_err,
-    }
-}
-
-/// Delete every file this operation published before an aborted make_local.
-/// An already-absent path is idempotent; any filesystem failure is returned to
-/// the initiator because the operation cannot claim rollback while a destination
-/// remains visible.
-async fn cleanup_partial(written: &[PathBuf]) -> Result<(), MakeLocalError> {
     for path in written {
-        crate::local_blob::remove_file(path)
-            .await
-            .map_err(|detail| MakeLocalError::Cleanup {
+        if let Err(detail) = crate::local_blob::remove_file(path).await {
+            return MakeLocalError::Cleanup {
                 path: path.display().to_string(),
                 detail,
-            })?;
+            };
+        }
     }
-    Ok(())
+    abort_err
 }

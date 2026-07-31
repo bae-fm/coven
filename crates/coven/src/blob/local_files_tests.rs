@@ -37,7 +37,8 @@ async fn store_read_drop_round_trip() {
         "an unstored blob reads back as None",
     );
 
-    let removed = local_files::drop_blob(&ld, "covers", "cov0aaaa")
+    let removed = ld
+        .remove_local_blob("covers", "cov0aaaa")
         .await
         .expect("drop");
     assert!(removed, "drop reports the file was there");
@@ -49,9 +50,7 @@ async fn store_read_drop_round_trip() {
         "after the drop the blob is gone",
     );
     assert!(
-        !local_files::drop_blob(&ld, "covers", "cov0aaaa")
-            .await
-            .unwrap(),
+        !ld.remove_local_blob("covers", "cov0aaaa").await.unwrap(),
         "dropping an already-absent blob reports false, not an error",
     );
 }

@@ -57,6 +57,21 @@ pub(crate) enum CachedLocatorRemovalError {
     Io(String),
 }
 
+#[derive(Debug)]
+pub(crate) enum LocalBlobRemovalError {
+    Path(PathTokenError),
+    Io(String),
+}
+
+impl std::fmt::Display for LocalBlobRemovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(error) => write!(formatter, "local blob path: {error}"),
+            Self::Io(error) => write!(formatter, "local blob file: {error}"),
+        }
+    }
+}
+
 impl std::fmt::Display for CachedLocatorRemovalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -408,6 +423,19 @@ impl StoreDir {
             }),
             Err(error) => Err(RequiredLocalBlobPathError::Io(error)),
         }
+    }
+
+    pub(crate) async fn remove_local_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> Result<bool, LocalBlobRemovalError> {
+        let path = self
+            .local_blob_path(namespace, id)
+            .map_err(LocalBlobRemovalError::Path)?;
+        crate::local_blob::remove_file(&path)
+            .await
+            .map_err(LocalBlobRemovalError::Io)
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.

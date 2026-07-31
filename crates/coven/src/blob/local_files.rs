@@ -124,17 +124,3 @@ async fn ensure_file_len(path: &std::path::Path, expected_size: u64) -> Result<(
     }
     Ok(())
 }
-
-/// Drop a host-provided blob from the local store, returning whether a file
-/// was there. An already-absent file is the expected case (the blob became Remote,
-/// or was never Local here), not an error.
-pub(crate) async fn drop_blob(
-    store_dir: &StoreDir,
-    namespace: &str,
-    id: &str,
-) -> Result<bool, LocalBlobError> {
-    let path = store_dir.local_blob_path(namespace, id)?;
-    crate::local_blob::remove_file(&path)
-        .await
-        .map_err(LocalBlobError::Io)
-}

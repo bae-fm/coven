@@ -140,12 +140,11 @@ impl LocalBlobCleanupIntent {
 
     pub(crate) async fn apply(&self, store_dir: &StoreDir) -> Result<(), DbError> {
         let cleanup = match &self.identity {
-            LocalBlobCleanupIdentity::Local => {
-                crate::blob::local_files::drop_blob(store_dir, self.namespace(), self.blob_id())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            }
+            LocalBlobCleanupIdentity::Local => store_dir
+                .remove_local_blob(self.namespace(), self.blob_id())
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
             LocalBlobCleanupIdentity::Exact(locator_hash) => store_dir
                 .remove_cached_locator(self.namespace(), *locator_hash)
                 .await
@@ -164,20 +163,6 @@ impl LocalBlobCleanupIntent {
             ))
         })
     }
-}
-
-/// Whether any live row still carries this logical blob ID. Author-requested
-/// deletion uses this as its transaction-local policy gate before recording
-/// copy-specific cleanup obligations.
-pub(crate) fn logical_blob_is_referenced_on(
-    conn: &Connection,
-    decls: &BlobDecls,
-    namespace: &str,
-    blob_id: &str,
-) -> Result<bool, DbError> {
-    decls
-        .blob_id_is_referenced(conn, namespace, blob_id)
-        .map_err(|error| DbError::Message(error.to_string()))
 }
 
 /// Record cleanup obligations for each copy identity no live row needs in this

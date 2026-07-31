@@ -194,7 +194,8 @@ async fn apply_deferred_local_blob_drop(
             return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }
     }
-    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
+    store_dir
+        .remove_local_blob(&deferred.namespace, &deferred.id)
         .await
         .map(|_| ())
         .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))
