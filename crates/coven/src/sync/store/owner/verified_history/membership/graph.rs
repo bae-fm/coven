@@ -30,6 +30,44 @@ impl LoadedExactMembershipGraph {
             .into_iter()
             .collect()
     }
+
+    fn validate_stream_anchors(
+        &self,
+        root: &StoreRootRef,
+        chain: &MembershipChain,
+    ) -> Result<(), AnchoredChainError> {
+        for node in self.path_heads.values() {
+            let grant = &node.reference.coord.author_owner_grant;
+            let anchor = chain.membership_anchor(grant).ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "membership head author has no exact membership stream anchor".to_string(),
+                )
+            })?;
+            let GrantStreamAnchor::StoreMembership { first_slot } = anchor else {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership head author uses a recovery stream anchor".to_string(),
+                ));
+            };
+            if node.reference.coord.seq == 1 && node.reference.object.slot() != first_slot {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership stream does not begin at its grant-authorized slot".to_string(),
+                ));
+            }
+            let expected = crate::protocol::store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                node.head.body.author_registration.clone(),
+                grant.clone(),
+                anchor.clone(),
+            )
+            .activation_id();
+            if node.head.body.successor.activation != expected {
+                return Err(AnchoredChainError::LoadFailed(
+                    "membership head carries another grant stream activation".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 type LoadedMembershipHeadFuture<'a> = Pin<
@@ -122,44 +160,6 @@ fn validate_exact_membership_head_paths(
                 }
             }
             current = node.head.body.predecessor.as_ref();
-        }
-    }
-    Ok(())
-}
-
-fn validate_exact_membership_stream_anchors(
-    root: &StoreRootRef,
-    graph: &LoadedExactMembershipGraph,
-    chain: &MembershipChain,
-) -> Result<(), AnchoredChainError> {
-    for node in graph.path_heads.values() {
-        let grant = &node.reference.coord.author_owner_grant;
-        let anchor = chain.membership_anchor(grant).ok_or_else(|| {
-            AnchoredChainError::LoadFailed(
-                "membership head author has no exact membership stream anchor".to_string(),
-            )
-        })?;
-        let GrantStreamAnchor::StoreMembership { first_slot } = anchor else {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head author uses a recovery stream anchor".to_string(),
-            ));
-        };
-        if node.reference.coord.seq == 1 && node.reference.object.slot() != first_slot {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership stream does not begin at its grant-authorized slot".to_string(),
-            ));
-        }
-        let expected = crate::protocol::store_commit::StreamActivation::grant_authorized(
-            root.store_root_hash,
-            node.head.body.author_registration.clone(),
-            grant.clone(),
-            anchor.clone(),
-        )
-        .activation_id();
-        if node.head.body.successor.activation != expected {
-            return Err(AnchoredChainError::LoadFailed(
-                "membership head carries another grant stream activation".to_string(),
-            ));
         }
     }
     Ok(())
@@ -597,7 +597,7 @@ fn exact_membership_chain_from_graph(
         provider_admin,
     )
     .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    validate_exact_membership_stream_anchors(root, &graph, &chain)?;
+    graph.validate_stream_anchors(root, &chain)?;
     Ok(chain)
 }
 
@@ -788,7 +788,7 @@ fn load_layered_membership_chain<'a>(
             .apply_resolutions(root.store_root_hash, &introduced_resolutions)
             .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
         add_exact_membership_suffix(&mut chain, &graph)?;
-        validate_exact_membership_stream_anchors(root, &graph, &chain)?;
+        graph.validate_stream_anchors(root, &chain)?;
         if chain.head_refs() != exact_heads || chain.resolution_refs() != exact_resolutions {
             return Err(AnchoredChainError::LoadFailed(
                 "membership resolution reconstruction differs from its exact state".to_string(),
