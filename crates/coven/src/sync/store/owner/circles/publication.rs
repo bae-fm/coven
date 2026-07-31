@@ -47,17 +47,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         operation_id: &CircleOperationId,
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
-        let current_membership = match self.membership.conflict() {
-            Some(conflict) => {
-                return Err(CircleOperationError::InvalidState(
-                    crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
-                        conflict.clone(),
-                    ))
-                    .to_string(),
-                ));
-            }
-            None => self.membership.clone(),
-        };
         let identity = self.identity;
         let mut journal = self
             .database
@@ -123,7 +112,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if let CurrentMergeAuthority::Revoked { grant_id } =
-            current_merge_authority(self.history.root(), &current_membership, commit, &author)?
+            self.current_merge_authority(commit, &author)?
         {
             let block = crate::protocol::circle::CircleOperationBlock::AuthorityLost { grant_id };
             self.database
@@ -699,58 +688,69 @@ enum CurrentMergeAuthority {
     },
 }
 
-fn current_merge_authority(
-    root: &crate::protocol::store_commit::StoreRootRef,
-    current: &crate::protocol::membership::MembershipChain,
-    commit: &StoreBatchCommit,
-    author: &StoreDeviceRegistration,
-) -> Result<CurrentMergeAuthority, CircleOperationError> {
-    if root.store_root_hash != commit.store_root_hash {
-        return Err(CircleOperationError::InvalidState(
-            "Circle commit names a different Store root".to_string(),
-        ));
-    }
-    let authority = commit.membership_authority.as_ref().ok_or_else(|| {
-        CircleOperationError::InvalidState(
-            "Circle commit has no Store membership authority".to_string(),
-        )
-    })?;
-    let crate::protocol::membership::MembershipStatus::Resolved(resolved) = current.status() else {
-        return Err(CircleOperationError::InvalidState(
-            "current Store membership is conflicted".to_string(),
-        ));
-    };
-    let mut matching = resolved.grants.iter().filter(|(_, state)| {
-        let record = state.record();
-        record.member_pubkey == author.author_pubkey
-            && matches!(
-                record.role,
-                crate::protocol::membership::StoreMembershipRoleGrant::Owner { .. }
-                    | crate::protocol::membership::StoreMembershipRoleGrant::Member
-            )
-            && &record.creation_authority == authority
-    });
-    let Some((grant_id, state)) = matching.next() else {
-        return Err(CircleOperationError::InvalidState(
-            "Circle commit Store membership authority identifies no exact grant".to_string(),
-        ));
-    };
-    if matching.next().is_some() {
-        return Err(CircleOperationError::InvalidState(
-            "Circle commit Store membership authority identifies multiple grants".to_string(),
-        ));
-    }
-    Ok(match state {
-        crate::protocol::causal_grants::GrantState::Active { .. } => CurrentMergeAuthority::Active,
-        crate::protocol::causal_grants::GrantState::Tombstoned { .. } => {
-            CurrentMergeAuthority::Revoked {
-                grant_id: grant_id.clone(),
-            }
-        }
-    })
-}
-
 impl CircleCandidatePublisher<'_, '_> {
+    fn current_merge_authority(
+        &self,
+        commit: &StoreBatchCommit,
+        author: &StoreDeviceRegistration,
+    ) -> Result<CurrentMergeAuthority, CircleOperationError> {
+        if let Some(conflict) = self.membership.conflict() {
+            return Err(CircleOperationError::InvalidState(
+                crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
+                    conflict.clone(),
+                ))
+                .to_string(),
+            ));
+        }
+        if self.history.root().store_root_hash != commit.store_root_hash {
+            return Err(CircleOperationError::InvalidState(
+                "Circle commit names a different Store root".to_string(),
+            ));
+        }
+        let authority = commit.membership_authority.as_ref().ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "Circle commit has no Store membership authority".to_string(),
+            )
+        })?;
+        let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+            self.membership.status()
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "current Store membership is conflicted".to_string(),
+            ));
+        };
+        let mut matching = resolved.grants.iter().filter(|(_, state)| {
+            let record = state.record();
+            record.member_pubkey == author.author_pubkey
+                && matches!(
+                    record.role,
+                    crate::protocol::membership::StoreMembershipRoleGrant::Owner { .. }
+                        | crate::protocol::membership::StoreMembershipRoleGrant::Member
+                )
+                && &record.creation_authority == authority
+        });
+        let Some((grant_id, state)) = matching.next() else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle commit Store membership authority identifies no exact grant".to_string(),
+            ));
+        };
+        if matching.next().is_some() {
+            return Err(CircleOperationError::InvalidState(
+                "Circle commit Store membership authority identifies multiple grants".to_string(),
+            ));
+        }
+        Ok(match state {
+            crate::protocol::causal_grants::GrantState::Active { .. } => {
+                CurrentMergeAuthority::Active
+            }
+            crate::protocol::causal_grants::GrantState::Tombstoned { .. } => {
+                CurrentMergeAuthority::Revoked {
+                    grant_id: grant_id.clone(),
+                }
+            }
+        })
+    }
+
     async fn append_step(
         &self,
         journal: &mut CircleOperationJournal,
