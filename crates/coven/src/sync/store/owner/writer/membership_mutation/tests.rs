@@ -3,8 +3,7 @@ use crate::protocol::membership::MemberRole;
 use crate::protocol::store_commit::ObjectHash;
 
 use super::{
-    select_mutation_author_stream, validate_prepared_publication, validate_prepared_transition,
-    AuthorizedMembershipPublication,
+    validate_prepared_publication, validate_prepared_transition, AuthorizedMembershipPublication,
 };
 
 #[tokio::test]
@@ -18,15 +17,20 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     )
     .await
     .expect("create Merge Store");
-    let database = crate::database::StoreDatabase::new(&db);
-    let chain = store
+    let device = store
         .bind_device(&db, &owner)
         .await
-        .expect("bind membership transition Store")
+        .expect("bind membership publication Store");
+    let chain = device
         .membership_for_test()
         .await
         .expect("load exact membership chain");
-    let stream_id = select_mutation_author_stream(&database, &chain, &owner)
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize membership publication writer");
+    let stream_id = writer
+        .select_membership_author_stream(&chain)
         .await
         .expect("select membership stream");
     let entry = chain
@@ -39,14 +43,6 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
             "2026-07-21T00:00:00Z".to_string(),
         )
         .expect("sign membership entry");
-    let device = store
-        .bind_device(&db, &owner)
-        .await
-        .expect("bind membership publication Store");
-    let mut writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize membership publication writer");
     let mut publication = AuthorizedMembershipPublication::new(&mut writer);
     let prepared = publication
         .prepare_transition(&chain, entry)

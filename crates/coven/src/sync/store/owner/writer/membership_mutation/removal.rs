@@ -1,4 +1,3 @@
-use crate::database::StoreDatabase;
 use crate::encryption::{self, EncryptionService};
 use crate::keys;
 use crate::protocol::membership::{
@@ -12,9 +11,8 @@ use crate::storage::SyncStorage;
 
 use super::{
     chain_with_exact_entry, decode_membership_mutation, encode_membership_mutation,
-    encode_membership_progress, exact_owned_remote, select_mutation_author_stream,
-    AuthorizedMembershipPublication, InviteError, MembershipMutationPlan,
-    MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey,
+    encode_membership_progress, exact_owned_remote, AuthorizedMembershipPublication, InviteError,
+    MembershipMutationPlan, MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey,
     RevokeMembershipPublication, RevokeMutationPlan,
 };
 
@@ -779,7 +777,7 @@ pub(crate) async fn revoke_member_durable(
                 )
                 .await;
             }
-            let stream_id = select_mutation_author_stream(&database, chain, &owner_keypair).await?;
+            let stream_id = operation.select_membership_author_stream(chain).await?;
             let plan = Box::pin(build_revoke_mutation(
                 operation,
                 chain,
@@ -848,45 +846,4 @@ pub(crate) async fn revoke_member_durable(
         pending_rotation,
     ))
     .await
-}
-
-pub(crate) async fn complete_revoke_rotation_adoption(
-    database: &StoreDatabase,
-    pending_rotation: &cloud_storage::PendingRotation,
-    adopted_generation: u64,
-) -> Result<(), InviteError> {
-    let _mutation = database.membership_mutation_permit().await;
-    let row = database
-        .outbound_membership_mutation()
-        .await?
-        .ok_or_else(|| {
-            InviteError::InvalidDurableMutation(
-                "activated removal journal is absent during key adoption".to_string(),
-            )
-        })?;
-    let intent_hash = row.intent_hash;
-    let (plan, progress) = decode_membership_mutation(row)?;
-    let MembershipMutationPlan::Revoke(plan) = plan else {
-        return Err(InviteError::InvalidDurableMutation(
-            "key adoption found another membership mutation".to_string(),
-        ));
-    };
-    if !matches!(progress, MembershipMutationProgress::RevokeActivated { .. }) {
-        return Err(InviteError::InvalidDurableMutation(
-            "key adoption found a removal that is not activated".to_string(),
-        ));
-    }
-    let planned_generation = EncryptionService::from_keyring_payload(plan.keyring_payload)
-        .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
-        .current_generation();
-    if planned_generation != adopted_generation {
-        return Err(InviteError::InvalidDurableMutation(format!(
-            "adopted key generation {adopted_generation} differs from the activated removal generation {planned_generation}"
-        )));
-    }
-    let gate = database
-        .complete_local_rotation_adoption(intent_hash, adopted_generation)
-        .await?;
-    pending_rotation.install_durable_gate(gate);
-    Ok(())
 }

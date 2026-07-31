@@ -1,10 +1,9 @@
 use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
-use crate::keys::{self, UserKeypair};
+use crate::keys::UserKeypair;
 use crate::protocol::membership::{
-    self, AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
-    MembershipEntry, MembershipEntryRef, MembershipError, MembershipHeadRef,
-    MergeMembershipHeadTransition, StoreMembershipConflictResolution,
+    self, AuthorHead, MemberRole, MembershipChange, MembershipEntry, MembershipEntryRef,
+    MembershipHeadRef, MergeMembershipHeadTransition, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
 use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
@@ -15,27 +14,6 @@ use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
 use super::{validate_prepared_publication, validate_prepared_transition, InviteError};
-
-/// Select the exact author stream without overwriting its committed prefix.
-/// Streams are persisted per database, so independently restored devices use
-/// different streams; copied state that reuses one exposes an immutable fork.
-pub(super) async fn select_mutation_author_stream(
-    database: &StoreDatabase,
-    chain: &MembershipChain,
-    signer: &UserKeypair,
-) -> Result<AuthorStreamId, InviteError> {
-    let author = keys::public_key_hex(signer);
-    let grant = chain
-        .active_owner_grant(&author)
-        .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-    let mut reusable = chain.reusable_author_streams(&author, &grant);
-    if let Some(anchored) = chain.membership_stream_id(&grant) {
-        reusable.insert(anchored);
-    }
-    Ok(database
-        .select_membership_author_stream(&author, &grant, reusable)
-        .await?)
-}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(

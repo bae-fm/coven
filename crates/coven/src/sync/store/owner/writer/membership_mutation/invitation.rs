@@ -11,9 +11,9 @@ use crate::sync::blocking;
 
 use super::{
     chain_with_exact_entry, decode_membership_mutation, encode_membership_mutation,
-    encode_membership_progress, select_mutation_author_stream, validate_prepared_publication,
-    AuthorizedMembershipPublication, InviteError, InviteMutationPlan, MembershipMutationPlan,
-    MembershipMutationProgress, MutationPersistence,
+    encode_membership_progress, validate_prepared_publication, AuthorizedMembershipPublication,
+    InviteError, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
+    MutationPersistence,
 };
 
 async fn build_invite_mutation(
@@ -222,8 +222,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             (plan, progress, intent_hash)
         }
         None => {
-            let stream_id =
-                select_mutation_author_stream(&database, &chain, &owner_keypair).await?;
+            let stream_id = operation.select_membership_author_stream(&chain).await?;
             let plan = Box::pin(build_invite_mutation(
                 operation,
                 &chain,

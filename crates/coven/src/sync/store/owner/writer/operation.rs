@@ -274,6 +274,27 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.prepare_wrapped_key(recipient, value).await
     }
 
+    /// Select the exact author stream without overwriting its committed prefix.
+    /// Streams are persisted per database, so independently restored devices use
+    /// different streams; copied state that reuses one exposes an immutable fork.
+    pub(super) async fn select_membership_author_stream(
+        &self,
+        chain: &crate::protocol::membership::MembershipChain,
+    ) -> Result<crate::protocol::membership::AuthorStreamId, super::membership::InviteError> {
+        let author = crate::keys::public_key_hex(self.writer.identity);
+        let grant = chain.active_owner_grant(&author).ok_or_else(|| {
+            crate::protocol::membership::MembershipError::SignerIsNotOwner(author.clone())
+        })?;
+        let mut reusable = chain.reusable_author_streams(&author, &grant);
+        if let Some(anchored) = chain.membership_stream_id(&grant) {
+            reusable.insert(anchored);
+        }
+        Ok(self
+            .database
+            .select_membership_author_stream(&author, &grant, reusable)
+            .await?)
+    }
+
     pub(super) async fn verify_membership_publication_author(
         &self,
         publication: &PreparedMembershipPublication,
@@ -782,13 +803,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 source,
             }
         })?;
-        let database = self.database.clone();
-        membership_mutation::complete_revoke_rotation_adoption(
-            &database,
-            pending_rotation,
-            generation,
-        )
-        .await?;
+        self.complete_revoke_rotation_adoption(pending_rotation, generation)
+            .await?;
         Ok(fingerprint)
     }
 
@@ -846,12 +862,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         pending_rotation: &crate::storage::PendingRotation,
         adopted_generation: u64,
     ) -> Result<(), crate::sync::store::membership::InviteError> {
-        membership_mutation::complete_revoke_rotation_adoption(
-            &self.database,
-            pending_rotation,
-            adopted_generation,
-        )
-        .await
+        self.complete_revoke_rotation_adoption(pending_rotation, adopted_generation)
+            .await
+    }
+
+    async fn complete_revoke_rotation_adoption(
+        &self,
+        pending_rotation: &crate::storage::PendingRotation,
+        adopted_generation: u64,
+    ) -> Result<(), crate::sync::store::membership::InviteError> {
+        let _mutation = self.database.membership_mutation_permit().await;
+        let row = self
+            .database
+            .outbound_membership_mutation()
+            .await?
+            .ok_or_else(|| {
+                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                    "activated removal journal is absent during key adoption".to_string(),
+                )
+            })?;
+        let intent_hash =
+            membership_mutation::validate_revoke_rotation_adoption(row, adopted_generation)?;
+        let gate = self
+            .database
+            .complete_local_rotation_adoption(intent_hash, adopted_generation)
+            .await?;
+        pending_rotation.install_durable_gate(gate);
+        Ok(())
     }
 
     pub(crate) async fn resolve_membership_conflict(
