@@ -66,7 +66,6 @@ pub(crate) trait PlaintextChunkReader: Send {
 
 enum AtomicChunkWriteError<E> {
     Source(E),
-    SourceCleanup { source: E, cleanup: String },
     Local(String),
 }
 
@@ -244,9 +243,6 @@ impl AtomicStagedFile {
                 Ok(()) => Err(ByteStreamWriteError::Source(source)),
                 Err(cleanup) => Err(ByteStreamWriteError::SourceCleanup { source, cleanup }),
             },
-            Err(AtomicChunkWriteError::SourceCleanup { .. }) => {
-                unreachable!("source cleanup errors are assembled after writing")
-            }
             Err(AtomicChunkWriteError::Local(operation)) => {
                 let error = self
                     .take_stage()
@@ -575,6 +571,7 @@ impl AtomicTempFile {
         }
     }
 
+    #[cfg(test)]
     async fn commit(mut self, destination: &Path) -> Result<(), String> {
         self.close();
         if let Err(error) = tokio::fs::rename(&self.path, destination).await {
@@ -881,76 +878,11 @@ pub(crate) async fn write_byte_stream_atomic<E: Send>(
     path: &Path,
     stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
 ) -> Result<u64, ByteStreamWriteError<E>> {
-    write_atomic_chunks(path, stream)
+    let staged = AtomicStagedFile::create(path)
         .await
-        .map_err(|error| match error {
-            AtomicChunkWriteError::Source(error) => ByteStreamWriteError::Source(error),
-            AtomicChunkWriteError::SourceCleanup { source, cleanup } => {
-                ByteStreamWriteError::SourceCleanup { source, cleanup }
-            }
-            AtomicChunkWriteError::Local(error) => ByteStreamWriteError::Local(error),
-        })
-}
-
-async fn write_atomic_chunks<E: Send>(
-    path: &Path,
-    mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
-) -> Result<u64, AtomicChunkWriteError<E>> {
-    use tokio::io::AsyncWriteExt;
-
-    let parent = path.parent().ok_or_else(|| {
-        AtomicChunkWriteError::Local(format!("blob path has no parent dir: {}", path.display()))
-    })?;
-    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-        AtomicChunkWriteError::Local(format!("create parent dir for {}: {e}", path.display()))
-    })?;
-    let mut temp = AtomicTempFile::create_in(parent).map_err(AtomicChunkWriteError::Local)?;
-    let write = async {
-        let mut written = 0u64;
-        while let Some(chunk) = stream
-            .next()
-            .await
-            .transpose()
-            .map_err(AtomicChunkWriteError::Source)?
-        {
-            let temp_path = temp.path.clone();
-            temp.file_mut().write_all(&chunk).await.map_err(|e| {
-                AtomicChunkWriteError::Local(format!(
-                    "write temp blob {}: {e}",
-                    temp_path.display()
-                ))
-            })?;
-            written += chunk.len() as u64;
-        }
-        let temp_path = temp.path.clone();
-        temp.file_mut().sync_all().await.map_err(|e| {
-            AtomicChunkWriteError::Local(format!("fsync temp blob {}: {e}", temp_path.display()))
-        })?;
-        Ok(written)
-    }
-    .await;
-    let written = match write {
-        Ok(written) => written,
-        Err(AtomicChunkWriteError::Source(source)) => {
-            return match temp.cleanup().await {
-                Ok(()) => Err(AtomicChunkWriteError::Source(source)),
-                Err(cleanup) => Err(AtomicChunkWriteError::SourceCleanup { source, cleanup }),
-            };
-        }
-        Err(AtomicChunkWriteError::SourceCleanup { .. }) => {
-            unreachable!("source cleanup errors are assembled after writing")
-        }
-        Err(AtomicChunkWriteError::Local(operation)) => {
-            let error = temp
-                .fail::<()>(operation)
-                .await
-                .expect_err("failed temporary write returns an error");
-            return Err(AtomicChunkWriteError::Local(error));
-        }
-    };
-    temp.commit(path)
-        .await
-        .map_err(AtomicChunkWriteError::Local)?;
+        .map_err(ByteStreamWriteError::Local)?;
+    let (staged, written) = staged.write_byte_stream(stream).await?;
+    staged.commit().await.map_err(ByteStreamWriteError::Local)?;
     Ok(written)
 }
 

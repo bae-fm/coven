@@ -469,18 +469,9 @@ impl ConnectedBlobTransitions {
         // tracks what to remove; the loop's result drives the cleanup-or-commit
         // decision.
         let mut written: Vec<PathBuf> = Vec::new();
-        let materialized = match materialize_blobs(
-            &self.blob_access,
-            &self.local.store_dir,
-            self.observer.as_deref(),
-            root_table,
-            root_id,
-            &refs,
-            dest,
-            cancel,
-            &mut written,
-        )
-        .await
+        let materialized = match self
+            .materialize_blobs(root_table, root_id, &refs, dest, cancel, &mut written)
+            .await
         {
             Ok(m) => m,
             Err(e) => return Err(roll_back(&written, e).await),
@@ -507,153 +498,156 @@ impl ConnectedBlobTransitions {
         }
         Ok(())
     }
-}
 
-/// Read each of `refs`'s blobs and write it durably to its local file, pushing each
-/// written path into `written` as it lands and returning the per-blob [`Materialized`]
-/// records the commit needs. A user-provided blob goes to its `dest` path (required,
-/// else [`MakeLocalError::MissingDest`]); a host-provided blob goes to coven's local
-/// store (no dest). Any error (cancel, a missing user-provided dest, a read or write
-/// failure, a key-derivation failure) returns early; the caller rolls back `written`.
-/// Separated from the commit so every error path runs that one rollback.
-#[allow(clippy::too_many_arguments)]
-async fn materialize_blobs(
-    blob_access: &crate::sync::store::blob::RemoteStoreBlobAccess,
-    store_dir: &StoreDir,
-    observer: Option<&dyn BlobTransitionObserver>,
-    root_table: &str,
-    root_id: &str,
-    refs: &[RowBlobRef],
-    dest: &HashMap<String, PathBuf>,
-    cancel: &watch::Receiver<bool>,
-    written: &mut Vec<PathBuf>,
-) -> Result<Vec<crate::database::MaterializedLocalBlob>, MakeLocalError> {
-    let total = refs.len() as u64;
-    let mut materialized = Vec::new();
+    /// Materialize every remote blob through this operation's retained access,
+    /// local store, and observer, recording published paths for rollback.
+    async fn materialize_blobs(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        refs: &[RowBlobRef],
+        dest: &HashMap<String, PathBuf>,
+        cancel: &watch::Receiver<bool>,
+        written: &mut Vec<PathBuf>,
+    ) -> Result<Vec<crate::database::MaterializedLocalBlob>, MakeLocalError> {
+        let total = refs.len() as u64;
+        let mut materialized = Vec::new();
 
-    for (i, reference) in refs.iter().enumerate() {
-        if *cancel.borrow() {
-            return Err(MakeLocalError::Cancelled);
-        }
-        let blob = reference.blob();
-        let stored = reference.stored().cloned().ok_or_else(|| {
-            MakeLocalError::Read(
-                blob.id.clone(),
-                "remote row has no exact stored blob reference".to_string(),
-            )
-        })?;
-
-        // Where the blob's bytes go is its provenance's Local home: a user-provided
-        // blob to the user's chosen `dest` path (registered as an external ref); a
-        // host-provided blob to coven's local store (no path, no ref). The kind is
-        // recorded in `written` so an abort's rollback treats a local-store leftover
-        // loud.
-        let record = match blob.provenance {
-            Provenance::UserProvided => {
-                let dest_path = dest
-                    .get(&blob.id)
-                    .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
-                    .clone();
-                prepare_parent_dir(&dest_path)
-                    .await
-                    .map_err(|detail| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: dest_path.display().to_string(),
-                        detail,
-                    })?;
-                let staged = blob_access
-                    .stage_verified_local_copy(reference, &dest_path)
-                    .await
-                    .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
-                staged
-                    .commit_new()
-                    .await
-                    .map_err(|detail| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: dest_path.display().to_string(),
-                        detail: detail.to_string(),
-                    })?;
-                verify_durable(&dest_path, reference.plaintext_size())
-                    .await
-                    .map_err(|detail| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: dest_path.display().to_string(),
-                        detail,
-                    })?;
-                written.push(dest_path.clone());
-                crate::database::MaterializedLocalBlob {
-                    remote: reference.clone(),
-                    stored,
-                    destination: Some(dest_path),
-                }
+        for (i, reference) in refs.iter().enumerate() {
+            if *cancel.borrow() {
+                return Err(MakeLocalError::Cancelled);
             }
-            Provenance::HostProvided => {
-                let store_path = store_dir
-                    .local_blob_path(&blob.namespace, &blob.id)
-                    .map_err(|e| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: format!("local/{}/{}", blob.namespace, blob.id),
-                        detail: e.to_string(),
-                    })?;
-                let staged = blob_access
-                    .stage_verified_local_copy(reference, &store_path)
-                    .await
-                    .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
-                match staged.commit_new().await {
-                    Ok(()) => written.push(store_path.clone()),
-                    Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
-                        let (size, hash) = crate::local_blob::exact_file_facts(&store_path)
-                            .await
-                            .map_err(|detail| MakeLocalError::Write {
+            let blob = reference.blob();
+            let stored = reference.stored().cloned().ok_or_else(|| {
+                MakeLocalError::Read(
+                    blob.id.clone(),
+                    "remote row has no exact stored blob reference".to_string(),
+                )
+            })?;
+
+            // Where the blob's bytes go is its provenance's Local home: a user-provided
+            // blob to the user's chosen `dest` path (registered as an external ref); a
+            // host-provided blob to coven's local store (no path, no ref). The kind is
+            // recorded in `written` so an abort's rollback treats a local-store leftover
+            // loud.
+            let record = match blob.provenance {
+                Provenance::UserProvided => {
+                    let dest_path = dest
+                        .get(&blob.id)
+                        .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
+                        .clone();
+                    prepare_parent_dir(&dest_path).await.map_err(|detail| {
+                        MakeLocalError::Write {
                             blob_id: blob.id.clone(),
-                            path: store_path.display().to_string(),
+                            path: dest_path.display().to_string(),
+                            detail,
+                        }
+                    })?;
+                    let staged = self
+                        .blob_access
+                        .stage_verified_local_copy(reference, &dest_path)
+                        .await
+                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                    staged
+                        .commit_new()
+                        .await
+                        .map_err(|detail| MakeLocalError::Write {
+                            blob_id: blob.id.clone(),
+                            path: dest_path.display().to_string(),
+                            detail: detail.to_string(),
+                        })?;
+                    verify_durable(&dest_path, reference.plaintext_size())
+                        .await
+                        .map_err(|detail| MakeLocalError::Write {
+                            blob_id: blob.id.clone(),
+                            path: dest_path.display().to_string(),
                             detail,
                         })?;
-                        if size != reference.plaintext_size() || hash != reference.plaintext_hash()
-                        {
-                            return Err(MakeLocalError::Write {
+                    written.push(dest_path.clone());
+                    crate::database::MaterializedLocalBlob {
+                        remote: reference.clone(),
+                        stored,
+                        destination: Some(dest_path),
+                    }
+                }
+                Provenance::HostProvided => {
+                    let store_path = self
+                        .local
+                        .store_dir
+                        .local_blob_path(&blob.namespace, &blob.id)
+                        .map_err(|e| MakeLocalError::Write {
+                            blob_id: blob.id.clone(),
+                            path: format!("local/{}/{}", blob.namespace, blob.id),
+                            detail: e.to_string(),
+                        })?;
+                    let staged = self
+                        .blob_access
+                        .stage_verified_local_copy(reference, &store_path)
+                        .await
+                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                    match staged.commit_new().await {
+                        Ok(()) => written.push(store_path.clone()),
+                        Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
+                            let (size, hash) = crate::local_blob::exact_file_facts(&store_path)
+                                .await
+                                .map_err(|detail| MakeLocalError::Write {
+                                    blob_id: blob.id.clone(),
+                                    path: store_path.display().to_string(),
+                                    detail,
+                                })?;
+                            if size != reference.plaintext_size()
+                                || hash != reference.plaintext_hash()
+                            {
+                                return Err(MakeLocalError::Write {
                                 blob_id: blob.id.clone(),
                                 path: store_path.display().to_string(),
                                 detail:
                                     "existing local-store file differs from the exact remote blob"
                                         .to_string(),
                             });
+                            }
+                        }
+                        Err(error) => {
+                            return Err(MakeLocalError::Write {
+                                blob_id: blob.id.clone(),
+                                path: store_path.display().to_string(),
+                                detail: error.to_string(),
+                            });
                         }
                     }
-                    Err(error) => {
-                        return Err(MakeLocalError::Write {
+                    verify_durable(&store_path, reference.plaintext_size())
+                        .await
+                        .map_err(|detail| MakeLocalError::Write {
                             blob_id: blob.id.clone(),
                             path: store_path.display().to_string(),
-                            detail: error.to_string(),
-                        });
+                            detail,
+                        })?;
+                    crate::database::MaterializedLocalBlob {
+                        remote: reference.clone(),
+                        stored,
+                        destination: None,
                     }
                 }
-                verify_durable(&store_path, reference.plaintext_size())
-                    .await
-                    .map_err(|detail| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: store_path.display().to_string(),
-                        detail,
-                    })?;
-                crate::database::MaterializedLocalBlob {
-                    remote: reference.clone(),
-                    stored,
-                    destination: None,
-                }
-            }
-        };
-        materialized.push(record);
+            };
+            materialized.push(record);
 
-        if let Some(obs) = observer {
-            obs.on_blob_materialize_progress(root_table, root_id, &blob.id, (i + 1) as u64, total)
+            if let Some(obs) = self.observer.as_deref() {
+                obs.on_blob_materialize_progress(
+                    root_table,
+                    root_id,
+                    &blob.id,
+                    (i + 1) as u64,
+                    total,
+                )
                 .await;
+            }
         }
-    }
 
-    if *cancel.borrow() {
-        return Err(MakeLocalError::Cancelled);
+        if *cancel.borrow() {
+            return Err(MakeLocalError::Cancelled);
+        }
+        Ok(materialized)
     }
-    Ok(materialized)
 }
 
 /// Prove a materialized local file has the expected length and fsync its parent
