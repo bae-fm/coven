@@ -20,7 +20,7 @@
 //! out-of-band, on a signed build.
 #![cfg(target_os = "macos")]
 
-use apple_native_keyring_store::protected::{AccessPolicy, Cred, Store};
+use apple_native_keyring_store::protected::{AccessPolicy, Store};
 
 #[test]
 fn entry_for_dispatches_to_the_protected_store_device_only() {
@@ -33,24 +33,20 @@ fn entry_for_dispatches_to_the_protected_store_device_only() {
         "a fresh process with no store pre-installed gets the real protected store",
     );
 
-    let entry = coven::entry_for_test("coven-apple-keyring-test-account")
+    let facts = coven::apple_keyring_entry_facts_for_test("coven-apple-keyring-test-account")
         .expect("entry_for builds an entry with no keychain I/O");
-    let cred = entry
-        .as_any()
-        .downcast_ref::<Cred>()
-        .expect("entry_for's Apple branch returns a protected::Cred");
 
     assert_eq!(
-        cred.access_policy,
+        facts.access_policy,
         AccessPolicy::WhenUnlockedThisDeviceOnly,
         "entry_for must select the device-only policy directly (Cred::build), \
          never the modifier-string path apple-native-keyring-store maps to \
          the non-device-only AccessPolicy::WhenUnlocked",
     );
     assert!(
-        !cred.cloud_synchronize,
+        !facts.cloud_synchronize,
         "coven never opts a keyring item into iCloud sync",
     );
-    assert_eq!(cred.service, "coven-apple-keyring-test");
-    assert_eq!(cred.account, "coven-apple-keyring-test-account");
+    assert_eq!(facts.service, "coven-apple-keyring-test");
+    assert_eq!(facts.account, "coven-apple-keyring-test-account");
 }

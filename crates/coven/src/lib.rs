@@ -93,8 +93,11 @@ pub use joining::{
 pub use joining::{
     close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub use keys::entry_for_test;
+#[cfg(all(
+    any(test, feature = "test-utils"),
+    any(target_os = "macos", target_os = "ios")
+))]
+pub use keys::{apple_keyring_entry_facts_for_test, AppleKeyringEntryFacts};
 pub use keys::{
     keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
     IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,

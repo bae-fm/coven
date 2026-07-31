@@ -239,7 +239,7 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
 /// every Coven-created Apple keyring item therefore enters the device-only
 /// class at its first write.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
+fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
     let service = keyring_service()?;
     let store = keyring_core::get_default_store().ok_or(KeyError::StoreNotInstalled)?;
     match store
@@ -259,17 +259,45 @@ pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> 
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
+fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
     keyring_core::Entry::new(keyring_service()?, account).map_err(map_keyring_error)
 }
 
-/// Test-only: reaches `entry_for` across the crate boundary. Exists so an
-/// integration test can install a specific keyring store and assert which
-/// entry-construction path the chokepoint took, without re-implementing its
-/// dispatch.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn entry_for_test(account: &str) -> Result<keyring_core::Entry, KeyError> {
-    entry_for(account)
+#[cfg(all(
+    any(test, feature = "test-utils"),
+    any(target_os = "macos", target_os = "ios")
+))]
+pub struct AppleKeyringEntryFacts {
+    pub access_policy: apple_native_keyring_store::protected::AccessPolicy,
+    pub cloud_synchronize: bool,
+    pub service: String,
+    pub account: String,
+}
+
+/// Test-only facts about the entry produced by the real Apple construction
+/// boundary. The raw keyring entry remains inside the keys module.
+#[cfg(all(
+    any(test, feature = "test-utils"),
+    any(target_os = "macos", target_os = "ios")
+))]
+pub fn apple_keyring_entry_facts_for_test(
+    account: &str,
+) -> Result<AppleKeyringEntryFacts, KeyError> {
+    let entry = entry_for(account)?;
+    let credential = entry
+        .as_any()
+        .downcast_ref::<apple_native_keyring_store::protected::Cred>()
+        .ok_or_else(|| {
+            KeyError::Persistence(
+                "Apple keyring entry was not constructed by the protected-data store".to_string(),
+            )
+        })?;
+    Ok(AppleKeyringEntryFacts {
+        access_policy: credential.access_policy.clone(),
+        cloud_synchronize: credential.cloud_synchronize,
+        service: credential.service.clone(),
+        account: credential.account.clone(),
+    })
 }
 
 pub(crate) fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
@@ -412,6 +440,13 @@ impl StoreKeys {
             info!("Encryption key deleted from keyring");
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_empty_encryption_key_for_test(&self) -> Result<(), KeyError> {
+        entry_for(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()).account())?
+            .set_password("")
+            .map_err(map_keyring_error)
     }
 
     pub fn get_cloud_home_credentials(&self) -> Result<Option<CloudHomeCredentials>, KeyError> {

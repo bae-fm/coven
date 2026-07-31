@@ -223,10 +223,8 @@ mod tests {
     fn keyring_preset_unlock_does_not_read_a_corrupt_empty_entry_as_absent() {
         crate::keys::test_keyring::install();
         let store_id = "custody-keyring-corrupt-empty".to_string();
-        let account = crate::keys::KeyringSlot::EncryptionMasterKey(store_id.clone()).account();
-        crate::keys::entry_for(&account)
-            .expect("create entry")
-            .set_password("")
+        StoreKeys::new(store_id.clone())
+            .write_empty_encryption_key_for_test()
             .expect("write empty entry");
 
         let custody = KeyringCustody::new(store_id);
