@@ -41,34 +41,3 @@ pub(crate) struct VerifiedSnapshotState {
         (StoreDeviceRegistrationRef, StoreDeviceRegistration),
     >,
 }
-
-pub(crate) async fn load_active_history_registrations(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    state: &ResolvedStoreDeviceState,
-) -> Result<
-    BTreeMap<
-        super::store_commit::StoreDeviceId,
-        (StoreDeviceRegistrationRef, StoreDeviceRegistration),
-    >,
-    StorePullError,
-> {
-    let mut active = BTreeMap::new();
-    for (device_id, record) in &state.devices {
-        if !matches!(record.status, StoreDeviceStatus::Active) {
-            continue;
-        }
-        let registration = commit_verifier
-            .load_registration(&record.registration)
-            .await?;
-        if registration.value.device_id != *device_id {
-            return Err(StorePullError::Database(
-                "resolved Store device state names another exact registration".to_string(),
-            ));
-        }
-        active.insert(
-            *device_id,
-            (record.registration.clone(), registration.value),
-        );
-    }
-    Ok(active)
-}

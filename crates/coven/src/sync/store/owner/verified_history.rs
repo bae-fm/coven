@@ -2651,9 +2651,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         let authority = self
             .verify_merge_history_authority(frontier, membership_ref)
             .await?;
-        let active_registrations =
-            load_active_history_registrations(&self.commit_verifier, &authority.device_state)
-                .await?;
+        let active_registrations = self
+            .commit_verifier
+            .load_active_registrations(&authority.device_state)
+            .await?;
         let checkpoints = frontier
             .values()
             .map(|reference| {

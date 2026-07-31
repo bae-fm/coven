@@ -537,6 +537,32 @@ impl<'a> StoreCommitVerifier<'a> {
         .map_err(|error| StorePullError::Database(error.to_string()))
     }
 
+    pub(crate) async fn load_active_registrations(
+        &self,
+        state: &ResolvedStoreDeviceState,
+    ) -> Result<
+        BTreeMap<StoreDeviceId, (StoreDeviceRegistrationRef, StoreDeviceRegistration)>,
+        StorePullError,
+    > {
+        let mut active = BTreeMap::new();
+        for (device_id, record) in &state.devices {
+            if !matches!(record.status, StoreDeviceStatus::Active) {
+                continue;
+            }
+            let registration = self.load_registration(&record.registration).await?;
+            if registration.value.device_id != *device_id {
+                return Err(StorePullError::Database(
+                    "resolved Store device state names another exact registration".to_string(),
+                ));
+            }
+            active.insert(
+                *device_id,
+                (record.registration.clone(), registration.value),
+            );
+        }
+        Ok(active)
+    }
+
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {

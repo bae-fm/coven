@@ -472,7 +472,7 @@ pub(crate) async fn verify_canonical_owner_registration(
     owner_pubkey: &str,
     selected: &StoreDeviceRegistrationRef,
 ) -> Result<(), StorePullError> {
-    let active = load_active_history_registrations(commit_verifier, state).await?;
+    let active = commit_verifier.load_active_registrations(state).await?;
     let canonical = active
         .values()
         .filter(|(_, registration)| registration.author_pubkey == owner_pubkey)
