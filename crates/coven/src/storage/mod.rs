@@ -49,3 +49,8 @@ pub use cloud::{
     CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, ObjectSlot,
     PartSink, PhysicalObjectLocator, UploadProgress,
 };
+mod local_file;
+pub(crate) use local_file::{
+    AtomicStagedFile as StagedBlobFile, CommitNewFileError as PublishBlobFileError,
+    OpenFile as LocalBlobFile, PublishedAtomicFile as PublishedBlobFile,
+};

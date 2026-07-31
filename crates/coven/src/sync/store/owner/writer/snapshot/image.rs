@@ -461,11 +461,21 @@ impl<'storage> BootstrapResult<'storage> {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+            let database = crate::database::StoreDatabase::from_database(db);
+            let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+                database.clone(),
+                storage,
+                root.clone(),
+            );
+            let keyrings =
+                crate::sync::store::owner::keyring::StoreKeyrings::new(storage, root.clone());
             Ok(
                 crate::sync::store::owner::history::AuthorizedStoreHistory::from_snapshot(
                     super::SnapshotHistoryConstruction,
-                    crate::database::StoreDatabase::from_database(db),
+                    database,
                     history_verifier,
+                    blob_source,
+                    keyrings,
                 )
                 .bind_restore(storage, membership, restorer_identity, requested),
             )
@@ -1247,7 +1257,7 @@ pub(crate) async fn bootstrap_from_snapshot<'storage>(
 ) -> Result<BootstrapResult<'storage>, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let selected = Box::pin(super::SnapshotBootstrapAuthority::open(
+    let selected = Box::pin(super::open_snapshot_bootstrap_authority(
         storage,
         &expected_store_root,
     ))
@@ -2943,9 +2953,14 @@ mod tests {
         )
         .await;
         let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
-        crate::blob::local_files::store(&source_dir, "photos", "photo1", b"cover-bytes")
-            .await
-            .expect("stage source blob");
+        crate::store_dir::StoreDir::store_local_blob(
+            &source_dir,
+            "photos",
+            "photo1",
+            b"cover-bytes",
+        )
+        .await
+        .expect("stage source blob");
         let writer = crate::storage::CloudSyncStorage::new(
             store.home.clone(),
             crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(

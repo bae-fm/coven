@@ -1122,6 +1122,19 @@ impl ExactObjectRef {
         }
         Ok(())
     }
+
+    pub(crate) async fn verify_file(&self, path: &std::path::Path) -> Result<(), StorageError> {
+        super::local_file::verify_exact_file(self, path)
+            .await
+            .map_err(|error| match error {
+                super::local_file::ExactFileVerificationError::Filesystem(error) => {
+                    StorageError::LocalFilesystem(error)
+                }
+                super::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
+                    StorageError::InvalidContent(error)
+                }
+            })
+    }
 }
 
 /// Immutable stored bytes and the exact reference derived from them.
@@ -1398,7 +1411,7 @@ pub(crate) trait SyncStorage: Send + Sync {
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError>;
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError>;
 
     /// Download and exact-verify the stored object, open it under the
     /// audience-owned protection, and return an unpublished plaintext file only
@@ -1408,7 +1421,7 @@ pub(crate) trait SyncStorage: Send + Sync {
         blob: &crate::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError>;
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError>;
 
     /// Open a reader that serves plaintext ranges of a stored blob by fetching
     /// only the sealed chunks covering each range. The ranged counterpart of
@@ -1587,7 +1600,7 @@ where
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
         (**self).stage_exact_blob_download(blob, dest).await
     }
 
@@ -1596,7 +1609,7 @@ where
         blob: &crate::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
         (**self)
             .stage_verified_blob_plaintext(blob, protection, dest)
             .await

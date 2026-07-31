@@ -111,9 +111,7 @@ pub(super) async fn execute(
         .await
 }
 
-pub(crate) use super::verification::{
-    load_provider_access_activation, CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
-};
+pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use device_operations::*;
 pub(crate) use discovery::*;

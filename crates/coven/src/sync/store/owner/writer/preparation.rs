@@ -321,14 +321,12 @@ async fn prepare_store_payload(
         if fact.blob.provenance != crate::blob::Provenance::HostProvided {
             continue;
         }
-        let present = crate::blob::local_files::path_if_present(
-            store_dir,
-            &fact.blob.namespace,
-            &fact.blob.id,
-            fact.plaintext_size,
-        )
-        .await
-        .map_err(|error| crate::sync::store::StorePreparationError::AssetScan(error.to_string()))?;
+        let present = store_dir
+            .local_blob_path_if_present(&fact.blob.namespace, &fact.blob.id, fact.plaintext_size)
+            .await
+            .map_err(|error| {
+                crate::sync::store::StorePreparationError::AssetScan(error.to_string())
+            })?;
         if present.is_none() {
             continue;
         }

@@ -1,19 +1,18 @@
 use std::sync::Arc;
 
-use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::StoreDatabase;
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::BlobChunking;
-use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync};
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobCache};
+use crate::sync::{BlobCacheError, BlobStream};
 
 #[derive(Clone)]
-struct ReadOnlyBlobStorage {
+pub(crate) struct ReadOnlyBlobStorage {
     config_provider: ConfigProvider,
     security: StoreSecurity,
     clock: ClockRef,
@@ -22,6 +21,23 @@ struct ReadOnlyBlobStorage {
 }
 
 impl ReadOnlyBlobStorage {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        config_provider: ConfigProvider,
+        security: StoreSecurity,
+        clock: ClockRef,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        blob_chunking: BlobChunking,
+    ) -> Self {
+        Self {
+            config_provider,
+            security,
+            clock,
+            cloudkit_ops,
+            blob_chunking,
+        }
+    }
+
     fn config(&self) -> Config {
         (self.config_provider)()
     }
@@ -32,7 +48,7 @@ impl ReadOnlyBlobStorage {
     ) -> Result<StoreBlobAccess, StorageSetupError> {
         let config = self.config();
         if config.cloud_home.provider.is_none() {
-            return Ok(StoreBlobAccess::new(local, None));
+            return Ok(StoreBlobAccess::local(local));
         }
         let storage = self
             .security
@@ -44,22 +60,32 @@ impl ReadOnlyBlobStorage {
                 self.blob_chunking,
             )
             .await?;
-        Ok(StoreBlobAccess::new(local, Some(Arc::new(storage))))
+        let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
+        Ok(StoreBlobAccess::remote(local.connect(storage)))
     }
 }
 
-trait BlobAccessSource: Clone {
+pub(crate) trait BlobAccessSource: Clone {
     async fn access(&self, local: LocalStoreBlobAccess) -> Result<StoreBlobAccess, BlobCacheError>;
 }
 
 #[derive(Clone)]
-struct ConnectedBlobStorage {
+pub(crate) struct ConnectedBlobStorage {
     sync: StoreSync,
 }
 
+impl ConnectedBlobStorage {
+    pub(crate) fn new(sync: StoreSync) -> Self {
+        Self { sync }
+    }
+}
+
 impl BlobAccessSource for ConnectedBlobStorage {
-    async fn access(&self, local: LocalStoreBlobAccess) -> Result<StoreBlobAccess, BlobCacheError> {
-        self.sync.blob_access(local).await
+    async fn access(
+        &self,
+        _local: LocalStoreBlobAccess,
+    ) -> Result<StoreBlobAccess, BlobCacheError> {
+        self.sync.blob_access().await
     }
 }
 
@@ -72,17 +98,21 @@ impl BlobAccessSource for ReadOnlyBlobStorage {
 }
 
 #[derive(Clone)]
-struct StoreBlobReads<Storage> {
+pub(crate) struct StoreBlobReads<Storage> {
     access: LocalStoreBlobAccess,
     cache: StoreBlobCache,
     storage: Storage,
 }
 
 impl<Storage> StoreBlobReads<Storage> {
-    fn new(database: StoreDatabase, store_dir: StoreDir, storage: Storage) -> Self {
+    pub(crate) fn new(
+        access: LocalStoreBlobAccess,
+        cache: StoreBlobCache,
+        storage: Storage,
+    ) -> Self {
         Self {
-            access: LocalStoreBlobAccess::new(database.clone(), store_dir.clone()),
-            cache: StoreBlobCache::new(database, store_dir),
+            access,
+            cache,
             storage,
         }
     }
@@ -134,14 +164,14 @@ pub(crate) struct StoreBlobs {
 }
 
 impl StoreBlobs {
-    pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir, sync: StoreSync) -> Self {
+    pub(crate) fn new(
+        database: StoreDatabase,
+        reads: StoreBlobReads<ConnectedBlobStorage>,
+        sync: StoreSync,
+    ) -> Self {
         Self {
-            database: database.clone(),
-            reads: StoreBlobReads::new(
-                database,
-                store_dir,
-                ConnectedBlobStorage { sync: sync.clone() },
-            ),
+            database,
+            reads,
             sync,
         }
     }
@@ -290,30 +320,8 @@ pub(crate) struct ReadStoreBlobs {
 }
 
 impl ReadStoreBlobs {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        database: StoreDatabase,
-        store_dir: StoreDir,
-        config_provider: ConfigProvider,
-        security: StoreSecurity,
-        clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: BlobChunking,
-    ) -> Self {
-        Self {
-            database: database.clone(),
-            reads: StoreBlobReads::new(
-                database,
-                store_dir,
-                ReadOnlyBlobStorage {
-                    config_provider,
-                    security,
-                    clock,
-                    cloudkit_ops,
-                    blob_chunking,
-                },
-            ),
-        }
+    pub(crate) fn new(database: StoreDatabase, reads: StoreBlobReads<ReadOnlyBlobStorage>) -> Self {
+        Self { database, reads }
     }
 
     pub(crate) async fn row_blob_ref(

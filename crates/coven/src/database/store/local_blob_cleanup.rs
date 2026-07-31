@@ -138,60 +138,47 @@ async fn apply_deferred_local_blob_drop(
     store_dir: &crate::store_dir::StoreDir,
     deferred: &crate::sync::cycle::DeferredLocalBlobDrop,
 ) -> Result<(), crate::sync::store::StorePreparationError> {
-    let local = crate::blob::local_files::path_if_present(
-        store_dir,
-        &deferred.namespace,
-        &deferred.id,
-        deferred.size,
-    )
-    .await
-    .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))?;
+    let local = store_dir
+        .local_blob_path_if_present(&deferred.namespace, &deferred.id, deferred.size)
+        .await
+        .map_err(|error| {
+            crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+        })?;
     match (deferred.disposition, local) {
         (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, Some(source)) => {
-            crate::blob::cache::populate_pinned_from_file(
-                store_dir,
-                &deferred.namespace,
-                deferred.locator_hash,
-                deferred.size,
-                deferred.plaintext_hash,
-                &source,
-            )
-            .await
-            .map_err(|error| {
-                crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
-            })?;
+            store_dir
+                .populate_pinned_blob_from_file(
+                    &deferred.namespace,
+                    deferred.locator_hash,
+                    deferred.size,
+                    deferred.plaintext_hash,
+                    &source,
+                )
+                .await
+                .map_err(|error| {
+                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
         }
         (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, Some(source)) => {
-            crate::blob::cache::write_blob_from_file(
-                database,
-                store_dir,
-                &deferred.namespace,
-                deferred.locator_hash,
-                deferred.size,
-                deferred.plaintext_hash,
-                &source,
-            )
-            .await
-            .map_err(|error| {
-                crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
-            })?;
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone())
+                .populate_from_file(
+                    &deferred.namespace,
+                    deferred.locator_hash,
+                    deferred.size,
+                    deferred.plaintext_hash,
+                    &source,
+                )
+                .await
+                .map_err(|error| {
+                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
+                })?;
         }
         (crate::sync::cycle::DeferredLocalBlobDisposition::Drop, _) => {}
         (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, None) => {
-            let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, deferred.locator_hash)
-                .map_err(|error| {
-                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
-                })?;
-            return recognize_applied_disposition_or_fail(&pinned, deferred).await;
+            return recognize_applied_disposition_or_fail(store_dir, deferred).await;
         }
         (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, None) => {
-            let cached = store_dir
-                .cache_blob_path(&deferred.namespace, deferred.locator_hash)
-                .map_err(|error| {
-                    crate::sync::store::StorePreparationError::AssetUpload(error.to_string())
-                })?;
-            return recognize_applied_disposition_or_fail(&cached, deferred).await;
+            return recognize_applied_disposition_or_fail(store_dir, deferred).await;
         }
     }
     store_dir
@@ -202,24 +189,35 @@ async fn apply_deferred_local_blob_drop(
 }
 
 async fn recognize_applied_disposition_or_fail(
-    destination: &std::path::Path,
+    store_dir: &crate::store_dir::StoreDir,
     deferred: &crate::sync::cycle::DeferredLocalBlobDrop,
 ) -> Result<(), crate::sync::store::StorePreparationError> {
-    match crate::local_blob::exists(destination).await {
-        Ok(true) => {
-            let (size, hash) = crate::local_blob::exact_file_facts(destination)
+    let exact = match deferred.disposition {
+        crate::sync::cycle::DeferredLocalBlobDisposition::Pin => {
+            store_dir
+                .pinned_blob_is_exact(
+                    &deferred.namespace,
+                    deferred.locator_hash,
+                    deferred.size,
+                    deferred.plaintext_hash,
+                )
                 .await
-                .map_err(crate::sync::store::StorePreparationError::AssetUpload)?;
-            if size == deferred.size && hash == deferred.plaintext_hash {
-                return Ok(());
-            }
         }
-        Ok(false) => {}
-        Err(error) => {
-            return Err(crate::sync::store::StorePreparationError::AssetUpload(
-                error,
-            ))
+        crate::sync::cycle::DeferredLocalBlobDisposition::Cache => {
+            store_dir
+                .cached_blob_is_exact(
+                    &deferred.namespace,
+                    deferred.locator_hash,
+                    deferred.size,
+                    deferred.plaintext_hash,
+                )
+                .await
         }
+        crate::sync::cycle::DeferredLocalBlobDisposition::Drop => Ok(false),
+    }
+    .map_err(|error| crate::sync::store::StorePreparationError::AssetUpload(error.to_string()))?;
+    if exact {
+        return Ok(());
     }
     Err(crate::sync::store::StorePreparationError::AssetUpload(
         format!(

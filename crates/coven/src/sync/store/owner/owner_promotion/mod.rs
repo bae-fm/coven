@@ -66,6 +66,44 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         }
         Ok(grant.clone())
     }
+
+    async fn advance_journal(
+        &self,
+        previous: journal::OwnerPromotionJournalPredecessor,
+        next: OwnerPromotionJournal,
+    ) -> Result<
+        (
+            journal::OwnerPromotionJournalPredecessor,
+            journal::OwnerPromotionJournalState,
+        ),
+        OwnerPromotionError,
+    > {
+        let remote_objects = match &next.state {
+            journal::OwnerPromotionJournalState::MergeHeadPrepared {
+                wrapped_key,
+                transition,
+                publication,
+                candidate,
+                ..
+            } => candidate.merge_owner_promotion_remote_objects(
+                transition,
+                publication,
+                wrapped_key,
+            )?,
+            _ => Vec::new(),
+        };
+        let transition = previous.transition_to(&next, remote_objects)?;
+        let (successor, state) = next.into_predecessor()?;
+        self.database
+            .advance_owner_promotion_journal(transition)
+            .await
+            .map_err(|error| {
+                OwnerPromotionError::Protocol(format!(
+                    "advance exact Owner-promotion journal: {error}"
+                ))
+            })?;
+        Ok((successor, state))
+    }
 }
 
 #[cfg(test)]

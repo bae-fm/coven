@@ -58,6 +58,12 @@ use crate::protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHea
 use crate::storage::PreparedExactObject;
 use crate::sync::PreparedStoreOperationCommit;
 
+const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
+
+fn cache_budget_state_key(namespace: &str) -> String {
+    format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")
+}
+
 pub(crate) use blob_outbox::PublishedBlobDropIntent;
 pub(crate) use blob_transitions::MaterializedLocalBlob;
 #[cfg(test)]
@@ -314,7 +320,7 @@ impl StoreDatabase {
     }
 
     pub(crate) async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
-        let key = crate::blob::cache::cache_budget_state_key(namespace);
+        let key = cache_budget_state_key(namespace);
         match self.get_protocol_state(&key).await? {
             Some(raw) => raw.parse::<u64>().map(Some).map_err(|error| {
                 DbError::Message(format!(
@@ -331,8 +337,18 @@ impl StoreDatabase {
         namespace: &str,
         max_bytes: u64,
     ) -> Result<(), DbError> {
-        let key = crate::blob::cache::cache_budget_state_key(namespace);
+        let key = cache_budget_state_key(namespace);
         self.set_protocol_state(&key, &max_bytes.to_string()).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_invalid_cache_budget_for_test(
+        &self,
+        namespace: &str,
+        value: &str,
+    ) -> Result<(), DbError> {
+        let key = cache_budget_state_key(namespace);
+        self.set_protocol_state(&key, value).await
     }
 
     pub(crate) async fn write_status(

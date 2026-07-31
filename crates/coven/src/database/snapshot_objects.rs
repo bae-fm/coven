@@ -35,7 +35,9 @@ pub(crate) async fn verify_snapshot_blob_spools(
 ) -> Result<(), DbError> {
     for blob in blobs {
         if let Some(spool_path) = &blob.spool_path {
-            crate::local_blob::verify_exact_file(blob.remote.object(), spool_path)
+            blob.remote
+                .object()
+                .verify_file(spool_path)
                 .await
                 .map_err(|error| {
                     DbError::Message(format!("{label} snapshot blob spool: {error}"))

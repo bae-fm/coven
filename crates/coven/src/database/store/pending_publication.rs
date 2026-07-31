@@ -287,7 +287,9 @@ impl StoreDatabase {
         if let Some(batch) = &loaded {
             for blob in &batch.audiences.blobs {
                 if let Some(spool_path) = blob.spool_path() {
-                    crate::local_blob::verify_exact_file(blob.blob().object(), spool_path)
+                    blob.blob()
+                        .object()
+                        .verify_file(spool_path)
                         .await
                         .map_err(|error| {
                             DbError::Message(format!("prepared blob spool: {error}"))

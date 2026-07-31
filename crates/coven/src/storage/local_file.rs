@@ -1,3 +1,5 @@
+//! Private local-file machinery used by storage and store-directory capabilities.
+
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -9,16 +11,16 @@ use tokio::io::AsyncReadExt;
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
 /// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
 /// destination.
-pub(crate) const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
+pub(super) const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
-pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
+pub(super) fn is_temp_blob_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(TEMP_BLOB_PREFIX))
 }
 
-pub(crate) struct PlaintextReader(Box<dyn PlaintextChunkReader>);
+pub(super) struct PlaintextReader(Box<dyn PlaintextChunkReader>);
 
 impl PlaintextReader {
     pub(crate) async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
@@ -35,7 +37,7 @@ impl PlaintextReader {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PlaintextChunkError {
+pub(super) enum PlaintextChunkError {
     #[error(transparent)]
     Remote(#[from] crate::storage::StorageError),
     #[error("invalid remote content: {0}")]
@@ -45,7 +47,7 @@ pub(crate) enum PlaintextChunkError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum StreamWriteError {
+pub(super) enum StreamWriteError {
     #[error(transparent)]
     Source(#[from] PlaintextChunkError),
     #[error("local destination: {0}")]
@@ -53,14 +55,14 @@ pub(crate) enum StreamWriteError {
 }
 
 #[derive(Debug)]
-pub(crate) enum ByteStreamWriteError<E> {
+pub(super) enum ByteStreamWriteError<E> {
     Source(E),
     SourceCleanup { source: E, cleanup: String },
     Local(String),
 }
 
 #[async_trait]
-pub(crate) trait PlaintextChunkReader: Send {
+pub(super) trait PlaintextChunkReader: Send {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError>;
 }
 
@@ -99,6 +101,10 @@ pub(crate) enum CommitNewFileError {
 }
 
 impl AtomicStagedFile {
+    pub(crate) fn is_staging_path(path: &Path) -> bool {
+        is_temp_blob_path(path)
+    }
+
     pub(crate) async fn create(destination: &Path) -> Result<Self, String> {
         let parent = destination
             .parent()
@@ -113,12 +119,25 @@ impl AtomicStagedFile {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+        let mut staged = Self::create(destination).await?;
+        staged.write_bytes(bytes).await?;
+        staged.commit().await
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self
             .staged
             .as_ref()
             .expect("atomic stage is unpublished")
             .path
+    }
+
+    pub(crate) async fn read_bytes(&self) -> Result<Vec<u8>, String> {
+        tokio::fs::read(self.path())
+            .await
+            .map_err(|error| format!("read staged blob {}: {error}", self.path().display()))
     }
 
     /// Hand the reserved path to a writer that performs its own atomic
@@ -155,7 +174,7 @@ impl AtomicStagedFile {
     /// Fill this unpublished stage from a plaintext stream and fsync the
     /// completed file. The caller verifies higher-level content facts before
     /// publishing the stage.
-    pub(crate) async fn write_plaintext(
+    pub(super) async fn write_plaintext(
         &mut self,
         source: &mut dyn PlaintextChunkReader,
     ) -> Result<u64, StreamWriteError> {
@@ -189,7 +208,7 @@ impl AtomicStagedFile {
         Ok(written)
     }
 
-    pub(crate) async fn write_byte_stream<E: Send>(
+    pub(super) async fn write_byte_stream<E: Send>(
         mut self,
         mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
     ) -> Result<(Self, u64), ByteStreamWriteError<E>> {
@@ -583,21 +602,6 @@ impl AtomicTempFile {
         }
     }
 
-    #[cfg(test)]
-    async fn commit(mut self, destination: &Path) -> Result<(), String> {
-        self.close();
-        if let Err(error) = tokio::fs::rename(&self.path, destination).await {
-            let operation = format!(
-                "rename temporary blob {} -> {}: {error}",
-                self.path.display(),
-                destination.display()
-            );
-            return self.fail(operation).await;
-        }
-        self.armed = false;
-        Ok(())
-    }
-
     fn publish_blocking(mut self, destination: &Path) -> Result<(), String> {
         self.close();
         let operation = match std::fs::rename(&self.path, destination) {
@@ -680,7 +684,7 @@ impl PlaintextChunkReader for FilePlaintextReader {
     }
 }
 
-pub(crate) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
+pub(super) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| format!("open local blob {} for streaming: {e}", path.display()))?;
@@ -690,7 +694,7 @@ pub(crate) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> 
     })))
 }
 
-pub(crate) async fn file_len(path: &Path) -> Result<u64, String> {
+pub(super) async fn file_len(path: &Path) -> Result<u64, String> {
     tokio::fs::metadata(path)
         .await
         .map(|metadata| metadata.len())
@@ -698,7 +702,7 @@ pub(crate) async fn file_len(path: &Path) -> Result<u64, String> {
 }
 
 /// Stream the exact stored size and SHA-256 identity of a local file.
-pub(crate) async fn exact_file_facts(
+pub(super) async fn exact_file_facts(
     path: &Path,
 ) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
     let (_, size, hash) = read_selected_with_facts(path, ExactReadSelection::IdentityOnly).await?;
@@ -708,16 +712,8 @@ pub(crate) async fn exact_file_facts(
 #[derive(Clone, Copy)]
 enum ExactReadSelection {
     IdentityOnly,
+    #[cfg(test)]
     Whole,
-}
-
-/// Read bytes and calculate their whole-file identity through one open file
-/// handle. Replacing the path during the read cannot make the returned bytes come
-/// from a different inode than the size and hash.
-pub(crate) async fn read_with_facts(
-    path: &Path,
-) -> Result<(Vec<u8>, u64, crate::protocol::store_commit::ObjectHash), String> {
-    read_selected_with_facts(path, ExactReadSelection::Whole).await
 }
 
 async fn read_selected_with_facts(
@@ -737,7 +733,10 @@ async fn read_open_file_with_facts(
 ) -> Result<(Vec<u8>, u64, crate::protocol::store_commit::ObjectHash), String> {
     use sha2::{Digest, Sha256};
 
+    #[cfg(test)]
     let mut selected = Vec::new();
+    #[cfg(not(test))]
+    let selected = Vec::new();
     let mut size = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
@@ -755,6 +754,7 @@ async fn read_open_file_with_facts(
         hasher.update(&buffer[..read]);
         match selection {
             ExactReadSelection::IdentityOnly => {}
+            #[cfg(test)]
             ExactReadSelection::Whole => selected.extend_from_slice(&buffer[..read]),
         }
     }
@@ -843,14 +843,14 @@ impl OpenFile {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ExactFileVerificationError {
+pub(super) enum ExactFileVerificationError {
     #[error("inspect exact file: {0}")]
     Filesystem(String),
     #[error("{0}")]
     IdentityMismatch(String),
 }
 
-pub(crate) async fn verify_exact_file(
+pub(super) async fn verify_exact_file(
     object: &crate::storage::ExactObjectRef,
     path: &Path,
 ) -> Result<(), ExactFileVerificationError> {
@@ -868,70 +868,36 @@ pub(crate) async fn verify_exact_file(
 }
 
 #[cfg(test)]
-pub(crate) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+pub(super) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     let staged = AtomicStagedFile::create(dst).await?;
     let (staged, _, _) = staged.copy_from(src).await?;
     staged.commit().await?;
     Ok(())
 }
 
-pub(crate) async fn read(path: &Path) -> Result<Vec<u8>, String> {
+#[cfg(test)]
+pub(super) async fn read(path: &Path) -> Result<Vec<u8>, String> {
     tokio::fs::read(path)
         .await
         .map_err(|e| format!("read local blob {}: {e}", path.display()))
 }
 
 #[cfg(test)]
-pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-    let mut temp = AtomicTempFile::create_in(parent)?;
-
-    let write = async {
-        let temp_path = temp.path.clone();
-        temp.file_mut()
-            .write_all(bytes)
-            .await
-            .map_err(|e| format!("write temp blob {}: {e}", temp_path.display()))?;
-        temp.file_mut()
-            .sync_all()
-            .await
-            .map_err(|e| format!("fsync temp blob {}: {e}", temp_path.display()))
-    }
-    .await;
-    if let Err(error) = write {
-        return temp.fail(error).await;
-    }
-    temp.commit(path).await
-}
-
-/// Write atomically and fsync the parent directory containing the committed name.
-#[cfg(test)]
-pub(crate) async fn write_atomic_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    write_atomic(path, bytes).await?;
-    sync_parent_dir(path).await
-}
-
-pub(crate) async fn exists(path: &Path) -> Result<bool, String> {
+pub(super) async fn exists(path: &Path) -> Result<bool, String> {
     tokio::fs::try_exists(path)
         .await
         .map_err(|e| format!("check local blob {}: {e}", path.display()))
 }
 
 #[cfg(test)]
-pub(crate) async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+pub(super) async fn rename(from: &Path, to: &Path) -> Result<(), String> {
     tokio::fs::rename(from, to)
         .await
         .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
 }
 
-pub(crate) async fn remove_file(path: &Path) -> Result<bool, String> {
+#[cfg(test)]
+pub(super) async fn remove_file(path: &Path) -> Result<bool, String> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -939,22 +905,7 @@ pub(crate) async fn remove_file(path: &Path) -> Result<bool, String> {
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn remove_dir_all(path: &Path) -> Result<bool, String> {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("remove dir tree {}: {error}", path.display())),
-    }
-}
-
-pub(crate) async fn create_dir_all(path: &Path) -> Result<(), String> {
-    tokio::fs::create_dir_all(path)
-        .await
-        .map_err(|e| format!("create dir tree {}: {e}", path.display()))
-}
-
-pub(crate) async fn sync_parent_dir(path: &Path) -> Result<(), String> {
+pub(super) async fn sync_parent_dir(path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("path has no parent dir: {}", path.display()))?;
@@ -977,7 +928,8 @@ fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
 }
 
 /// Every committed file under `dir` as `(path, mtime_ms, size)`.
-pub(crate) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+#[cfg(test)]
+pub(super) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -1019,6 +971,7 @@ pub(crate) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, S
     Ok(files)
 }
 
+#[cfg(test)]
 fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
     Ok(metadata
         .modified()
@@ -1055,12 +1008,16 @@ mod tests {
         let renamed = tmp.path().join("copy").join("renamed.bin");
         let bytes = b"0123456789";
 
-        write_atomic(&source, bytes).await.expect("write source");
+        AtomicStagedFile::write_for_test(&source, bytes)
+            .await
+            .expect("write source");
         assert!(exists(&source).await.expect("source exists"));
         assert_eq!(file_len(&source).await.expect("source length"), 10);
         assert_eq!(read(&source).await.expect("read source"), bytes);
 
-        write_atomic(&copy, b"old copy").await.expect("seed copy");
+        AtomicStagedFile::write_for_test(&copy, b"old copy")
+            .await
+            .expect("seed copy");
         copy_atomic(&source, &copy).await.expect("replace copy");
         assert_eq!(read(&copy).await.expect("read copy"), bytes);
 
@@ -1077,10 +1034,12 @@ mod tests {
         let path = tmp.path().join("blob.bin");
         let original = b"original exact bytes";
         let replacement = b"replacement bytes";
-        write_atomic(&path, original).await.expect("write original");
+        AtomicStagedFile::write_for_test(&path, original)
+            .await
+            .expect("write original");
         let mut open = tokio::fs::File::open(&path).await.expect("open original");
 
-        write_atomic(&path, replacement)
+        AtomicStagedFile::write_for_test(&path, replacement)
             .await
             .expect("replace path after open");
         let (bytes, size, hash) =
@@ -1108,12 +1067,14 @@ mod tests {
         let original = b"original exact bytes";
         let replacement = b"replaced exact bytes";
         assert_eq!(original.len(), replacement.len());
-        write_atomic(&path, original).await.expect("write original");
+        AtomicStagedFile::write_for_test(&path, original)
+            .await
+            .expect("write original");
 
         let open = OpenFile::open(&path).await.expect("open");
         assert_eq!(open.size(), original.len() as u64);
 
-        write_atomic(&path, replacement)
+        AtomicStagedFile::write_for_test(&path, replacement)
             .await
             .expect("replace the path after the handle opened it");
 
@@ -1156,12 +1117,12 @@ mod tests {
         let destination = tmp.path().join("destination.bin");
         let original = b"original exact bytes";
         let replacement = b"replacement bytes";
-        write_atomic(&source, original)
+        AtomicStagedFile::write_for_test(&source, original)
             .await
             .expect("write original");
         let open = tokio::fs::File::open(&source).await.expect("open original");
 
-        write_atomic(&source, replacement)
+        AtomicStagedFile::write_for_test(&source, replacement)
             .await
             .expect("replace source path after open");
         let staged = AtomicStagedFile::create(&destination)
@@ -1186,7 +1147,7 @@ mod tests {
     async fn staged_file_is_invisible_until_verified_commit() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        write_atomic(&destination, b"prior")
+        AtomicStagedFile::write_for_test(&destination, b"prior")
             .await
             .expect("seed destination");
         let mut staged = AtomicStagedFile::create(&destination)
@@ -1209,7 +1170,7 @@ mod tests {
         let source_path = tmp.path().join("source.bin");
         let destination = tmp.path().join("blob.bin");
         let bytes = b"verified plaintext";
-        write_atomic(&source_path, bytes)
+        AtomicStagedFile::write_for_test(&source_path, bytes)
             .await
             .expect("write plaintext source");
         let mut source = FilePlaintextReader {
@@ -1286,7 +1247,7 @@ mod tests {
     async fn staged_new_file_refuses_to_replace_an_existing_user_file() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("blob.bin");
-        write_atomic(&destination, b"user file")
+        AtomicStagedFile::write_for_test(&destination, b"user file")
             .await
             .expect("seed user destination");
         let mut staged = AtomicStagedFile::create(&destination)
@@ -1365,7 +1326,7 @@ mod tests {
     async fn byte_stream_failure_preserves_destination_and_removes_temp() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let path = tmp.path().join("streamed.bin");
-        write_atomic(&path, b"committed")
+        AtomicStagedFile::write_for_test(&path, b"committed")
             .await
             .expect("seed destination");
         let stream =
@@ -1391,7 +1352,7 @@ mod tests {
     async fn canceled_byte_stream_preserves_destination_and_removes_temp() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let path = tmp.path().join("streamed.bin");
-        write_atomic(&path, b"committed")
+        AtomicStagedFile::write_for_test(&path, b"committed")
             .await
             .expect("seed destination");
         let first_yielded = Arc::new(tokio::sync::Notify::new());
@@ -1454,7 +1415,9 @@ mod tests {
         let temp = root
             .join("nested")
             .join(format!("{TEMP_BLOB_PREFIX}in-progress"));
-        write_atomic(&committed, b"blob").await.expect("write blob");
+        AtomicStagedFile::write_for_test(&committed, b"blob")
+            .await
+            .expect("write blob");
         tokio::fs::write(&temp, b"partial")
             .await
             .expect("write temp");
@@ -1512,7 +1475,7 @@ mod tests {
         let path = tmp.path().join("nested").join("upload_staging.bin");
         let bytes = b"packed outgoing changeset".to_vec();
 
-        write_atomic_durable(&path, &bytes)
+        AtomicStagedFile::write_for_test(&path, &bytes)
             .await
             .expect("durable write");
 

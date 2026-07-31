@@ -22,7 +22,9 @@ mod verified_history;
 pub(super) mod writer;
 
 use super::prepare_registration_object;
-use authorized_history::{AuthorizedStoreHistory, FounderStoreInitialization};
+use authorized_history::{
+    authorized_history_from_verified_root, AuthorizedStoreHistory, FounderStoreInitialization,
+};
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 pub(crate) use host_write::HostWriteBlobStaging;
@@ -243,7 +245,7 @@ impl Store {
         let protocol_root = Self::open_protocol_root(&database, &*storage, expected_root)
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let history = AuthorizedStoreHistory::from_verified_root(
+        let history = authorized_history_from_verified_root(
             database,
             &*storage,
             expected_root,
@@ -515,7 +517,7 @@ impl Store {
     }
 
     async fn authorize_history(&self) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
-        AuthorizedStoreHistory::from_verified_root(
+        authorized_history_from_verified_root(
             self.database.clone(),
             &*self.storage,
             &self.store_root,

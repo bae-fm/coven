@@ -81,7 +81,7 @@ async fn build_cloud_home(
             secret_key,
             key_prefix,
         } => Arc::new(
-            s3::S3CloudHome::new(
+            s3::open_cloud_home(
                 bucket.clone(),
                 region.clone(),
                 endpoint.clone(),
@@ -116,12 +116,11 @@ async fn build_cloud_home(
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::GoogleDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+            let session =
+                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "Google Drive");
             Arc::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
-                oauth_config,
-                tokens,
-                ks,
-                clock,
+                session,
             ))
         }
 
@@ -131,13 +130,9 @@ async fn build_cloud_home(
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::Dropbox)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            Arc::new(dropbox::DropboxCloudHome::new(
-                folder_path.clone(),
-                oauth_config,
-                tokens,
-                ks,
-                clock,
-            ))
+            let session =
+                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "Dropbox");
+            Arc::new(dropbox::DropboxCloudHome::new(folder_path.clone(), session))
         }
 
         #[cfg(feature = "oauth-providers")]
@@ -149,13 +144,12 @@ async fn build_cloud_home(
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::OneDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+            let session =
+                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "OneDrive");
             Arc::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
-                oauth_config,
-                tokens,
-                ks,
-                clock,
+                session,
             ))
         }
 

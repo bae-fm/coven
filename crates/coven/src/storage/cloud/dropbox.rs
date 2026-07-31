@@ -22,9 +22,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink,
     RevokeOutcome, UploadProgress,
 };
-use crate::clock::ClockRef;
-use crate::keys::StoreKeys;
-use crate::oauth::{OAuthConfig, OAuthTokens};
+use crate::oauth::OAuthConfig;
 use tracing::warn;
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
@@ -41,18 +39,12 @@ pub(crate) struct DropboxCloudHome {
 }
 
 impl DropboxCloudHome {
-    pub(crate) fn new(
-        folder_path: String,
-        config: OAuthConfig,
-        tokens: OAuthTokens,
-        key_service: StoreKeys,
-        clock: ClockRef,
-    ) -> Self {
+    pub(crate) fn new(folder_path: String, session: OAuthSession) -> Self {
         Self {
             folder_path,
             api_base: API_BASE.to_string(),
             content_base: CONTENT_BASE.to_string(),
-            session: OAuthSession::new(tokens, key_service, clock, config, "Dropbox"),
+            session,
             namespace_id: OnceLock::new(),
         }
     }
@@ -1352,6 +1344,9 @@ mod tests {
     use axum::Router;
     use std::sync::{Arc, Mutex};
 
+    use crate::keys::StoreKeys;
+    use crate::oauth::OAuthTokens;
+
     fn home() -> DropboxCloudHome {
         home_with_folder("/Apps/your-app/my-store")
     }
@@ -1360,9 +1355,7 @@ mod tests {
         let config = crate::oauth::OAuthClients::for_tests()
             .config_for(crate::config::CloudProvider::Dropbox)
             .expect("Dropbox test client");
-        DropboxCloudHome::new(
-            folder_path.to_string(),
-            config,
+        let session = OAuthSession::new(
             OAuthTokens {
                 access_token: String::new(),
                 refresh_token: None,
@@ -1370,7 +1363,10 @@ mod tests {
             },
             StoreKeys::bind("test".to_string()),
             Arc::new(crate::clock::SystemClock),
-        )
+            config,
+            "Dropbox",
+        );
+        DropboxCloudHome::new(folder_path.to_string(), session)
     }
 
     #[derive(Clone, Debug)]

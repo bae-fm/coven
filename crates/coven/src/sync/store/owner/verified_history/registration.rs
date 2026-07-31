@@ -27,31 +27,6 @@ pub(crate) struct LoadedDeviceJoinCleanupActivation {
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,
 }
 
-pub(crate) async fn load_device_join_cleanup_activation(
-    history_verifier: &mut MergeHistoryVerifier<'_>,
-    activation: &super::device_join::DeviceJoinCleanupActivation,
-) -> Result<LoadedDeviceJoinCleanupActivation, StorePullError> {
-    let verified_commit = history_verifier.load_ref(&activation.activation).await?;
-    if verified_commit.value().device_join_cleanup_receipts()
-        != std::slice::from_ref(&activation.receipt)
-    {
-        return Err(StorePullError::Database(
-            "device join cleanup activation does not contain its exact sole receipt".to_string(),
-        ));
-    }
-    let receipts = history_verifier
-        .load_commit_join_cleanup_receipts(verified_commit.value(), verified_commit.author())
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
-    Ok(LoadedDeviceJoinCleanupActivation {
-        verified_commit,
-        receipts,
-    })
-}
-
 async fn validate_commit_reclaim_authorization(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
@@ -347,8 +322,7 @@ pub(crate) async fn load_commit_registrations(
     let verified_join_outcomes = if commit.device_join_outcomes().is_empty() {
         BTreeMap::new()
     } else {
-        Box::pin(validate_commit_join_outcomes(
-            history_verifier,
+        Box::pin(history_verifier.validate_commit_join_outcomes(
             commit,
             activating_author,
             predecessor,
@@ -385,8 +359,7 @@ pub(crate) async fn load_commit_registrations(
                 "registration activation has no exact predecessor membership authority".to_string(),
             )
         })?;
-        let authority = Box::pin(registration_activation(
-            history_verifier,
+        let authority = Box::pin(history_verifier.registration_activation(
             activated,
             &registration,
             activating_author,

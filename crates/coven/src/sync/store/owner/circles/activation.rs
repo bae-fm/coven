@@ -1204,28 +1204,29 @@ impl CircleActivationVerifier<'_, '_> {
                 ));
             }
         } else {
-            let reached = crate::sync::store::owner::verified_history::join_validation::predecessor_commit_matching(
-            &mut *self.history,
-            &commit.order,
-            Box::new(|predecessor| {
-                predecessor.reference() == &activating_commit
-                    && predecessor
-                        .value()
-                        .stream_activations()
-                        .binary_search(&activation)
-                        .is_ok()
-            }),
-        )
-        .await
-        .map_err(|error| match error {
-            crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
-                CircleOperationError::Object(error)
-            }
-            crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(error) => {
-                CircleOperationError::InvalidState(error)
-            }
-        })?
-        .is_some();
+            let reached = self
+                .history
+                .predecessor_commit_matching(
+                    &commit.order,
+                    Box::new(|predecessor| {
+                        predecessor.reference() == &activating_commit
+                            && predecessor
+                                .value()
+                                .stream_activations()
+                                .binary_search(&activation)
+                                .is_ok()
+                    }),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
+                        CircleOperationError::Object(error)
+                    }
+                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(error) => {
+                        CircleOperationError::InvalidState(error)
+                    }
+                })?
+                .is_some();
             if !reached {
                 return Err(CircleOperationError::InvalidState(
                     "Circle author stream activation is outside the commit predecessor history"

@@ -54,8 +54,8 @@ struct NewBlob {
 struct StagedBlob {
     namespace: String,
     id: String,
-    staged: Option<crate::local_blob::AtomicStagedFile>,
-    published: Option<crate::local_blob::PublishedAtomicFile>,
+    staged: Option<crate::storage::StagedBlobFile>,
+    published: Option<crate::storage::PublishedBlobFile>,
 }
 
 struct StagedBlobBatch {
@@ -65,7 +65,7 @@ struct StagedBlobBatch {
 impl StagedBlob {
     async fn stage<E>(store_dir: &StoreDir, blob: NewBlob) -> Result<Self, HostWriteError<E>> {
         let destination = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let staged = crate::local_blob::AtomicStagedFile::create(&destination)
+        let staged = crate::storage::StagedBlobFile::create(&destination)
             .await
             .map_err(HostWriteError::Blob)?;
         let mut staged_blob = Self {
@@ -86,7 +86,7 @@ impl StagedBlob {
         Ok(staged_blob)
     }
 
-    fn staged_mut(&mut self) -> &mut crate::local_blob::AtomicStagedFile {
+    fn staged_mut(&mut self) -> &mut crate::storage::StagedBlobFile {
         self.staged.as_mut().expect("blob is staged")
     }
 

@@ -557,7 +557,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     })
     .await
     .expect("capture scoped Circle blob row");
-    crate::blob::local_files::store(&store_dir, "files", blob_id, blob_bytes)
+    crate::store_dir::StoreDir::store_local_blob(&store_dir, "files", blob_id, blob_bytes)
         .await
         .expect("stage Circle blob");
     let writer = crate::storage::CloudSyncStorage::new(
@@ -701,9 +701,14 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         })
         .await
         .expect("capture late concurrent Circle row");
-    crate::blob::local_files::store(&concurrent_store_dir, "files", late_id, late_bytes)
-        .await
-        .expect("stage late concurrent Circle blob");
+    crate::store_dir::StoreDir::store_local_blob(
+        &concurrent_store_dir,
+        "files",
+        late_id,
+        late_bytes,
+    )
+    .await
+    .expect("stage late concurrent Circle blob");
     let concurrent_storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
             store.home.clone(),
@@ -979,11 +984,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         error.contains("differs from its exact reference"),
         "{error}"
     );
-    let database = crate::database::StoreDatabase::new(&db);
-    let blob_access = crate::sync::store::blob::StoreBlobAccess::new(
-        crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir.clone()),
-        Some(store.storage.clone()),
-    );
+    let blob_access = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
+    )
+    .blob_access(Some(store.storage.clone()));
     blob_access
         .materialize(&historical_blob)
         .await

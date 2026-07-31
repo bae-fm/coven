@@ -241,7 +241,7 @@ async fn create_exact_blob_with_authority(
     let temp = tempfile::tempdir().expect("create exact blob spool directory");
     let plaintext = temp.path().join("plaintext");
     let spool = temp.path().join("stored");
-    crate::local_blob::write_atomic(&plaintext, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
         .await
         .expect("write exact blob plaintext");
     let slot = storage
@@ -295,7 +295,7 @@ async fn enqueue_local_upload(
         .await
         .expect("load exact Local row blob reference");
     let source_path = source_dir.join(blob_id);
-    crate::local_blob::write_atomic(&source_path, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&source_path, bytes)
         .await
         .expect("write upload source");
     let root_id = format!("note-{blob_id}");
@@ -374,7 +374,7 @@ async fn publish_exact_remote_blob_binding(
     let source = store_dir
         .local_blob_path(&local.blob().namespace, &local.blob().id)
         .expect("resolve host blob source");
-    crate::local_blob::write_atomic(&source, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&source, bytes)
         .await
         .expect("write host blob source");
     let hlc = crate::sync::hlc::Hlc::new(
@@ -382,7 +382,8 @@ async fn publish_exact_remote_blob_binding(
         std::sync::Arc::new(crate::clock::SystemClock),
     );
     let database = StoreDatabase::new(db);
-    crate::blob::transition::LocalBlobTransitions::new(database.clone(), store_dir.clone())
+    crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone())
+        .local_transitions()
         .make_remote("notes", root_id, false)
         .await
         .expect("start exact make_remote");
@@ -812,7 +813,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .expect("load exact upload row");
     let source_dir = tempfile::tempdir().expect("create upload source directory");
     let source_path = source_dir.path().join("upload-row");
-    crate::local_blob::write_atomic(&source_path, b"upload body")
+    crate::storage::StagedBlobFile::write_for_test(&source_path, b"upload body")
         .await
         .expect("write upload source");
     let enqueue_row = row.clone();

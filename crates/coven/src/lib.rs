@@ -27,7 +27,6 @@ pub(crate) mod identity_custody;
 pub(crate) mod joining;
 pub(crate) mod keyring_backend;
 pub(crate) mod keys;
-pub(crate) mod local_blob;
 pub(crate) mod migration;
 pub(crate) mod oauth;
 pub(crate) mod protocol;
@@ -53,9 +52,8 @@ mod blob_facade_tests;
 pub use rusqlite;
 
 pub use blob::{
-    content_hash, BlobCacheError, BlobRef, BlobReplacement, BlobScope, BlobStream,
-    BlobTransitionObserver, CacheFill, ContentHasher, MakeLocalError, MakeRemoteError, Provenance,
-    RowBlobAuthority, RowBlobRef,
+    content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
+    ContentHasher, MakeLocalError, MakeRemoteError, Provenance, RowBlobAuthority, RowBlobRef,
 };
 pub use changeset::{ChangeOp, RowChange};
 pub use circles::{CircleError, Circles};
@@ -145,8 +143,8 @@ pub use storage::{
 };
 pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{
-    BlobDecl, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
-    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
+    BlobCacheError, BlobDecl, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
+    DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
     DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
     DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinProducer, DeviceJoinProducerWriteRevocation,

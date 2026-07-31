@@ -21,9 +21,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, RevokeOutcome,
     UploadProgress,
 };
-use crate::clock::ClockRef;
-use crate::keys::StoreKeys;
-use crate::oauth::{OAuthConfig, OAuthTokens};
+use crate::oauth::OAuthConfig;
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
@@ -45,19 +43,12 @@ enum UploadSessionCompletion {
 }
 
 impl OneDriveCloudHome {
-    pub(crate) fn new(
-        drive_id: String,
-        folder_id: String,
-        config: OAuthConfig,
-        tokens: OAuthTokens,
-        key_service: StoreKeys,
-        clock: ClockRef,
-    ) -> Self {
+    pub(crate) fn new(drive_id: String, folder_id: String, session: OAuthSession) -> Self {
         Self {
             drive_id,
             folder_id,
             graph_api: GRAPH_API.to_string(),
-            session: OAuthSession::new(tokens, key_service, clock, config, "OneDrive"),
+            session,
         }
     }
 
@@ -768,6 +759,9 @@ mod tests {
     use axum::Router;
     use std::sync::{Arc, Mutex};
 
+    use crate::keys::StoreKeys;
+    use crate::oauth::OAuthTokens;
+
     #[test]
     fn onedrive_does_not_accept_drive_cancellation_status() {
         let drive_canceled = StatusCode::from_u16(499).expect("valid Drive cancellation status");
@@ -778,10 +772,7 @@ mod tests {
         let config = crate::oauth::OAuthClients::for_tests()
             .config_for(crate::config::CloudProvider::OneDrive)
             .expect("OneDrive test client");
-        OneDriveCloudHome::new(
-            "drive123".to_string(),
-            "folder456".to_string(),
-            config,
+        let session = OAuthSession::new(
             OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
@@ -789,7 +780,10 @@ mod tests {
             },
             StoreKeys::bind("test".to_string()),
             Arc::new(crate::clock::SystemClock),
-        )
+            config,
+            "OneDrive",
+        );
+        OneDriveCloudHome::new("drive123".to_string(), "folder456".to_string(), session)
     }
 
     #[derive(Clone, Debug)]

@@ -21,6 +21,31 @@ struct UploadedBlobSpool {
     path: PathBuf,
 }
 
+impl UploadedBlobSpool {
+    async fn retire(&self) -> Result<(), String> {
+        match tokio::fs::remove_file(&self.path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove uploaded prepared blob spool {}: {error}",
+                    self.path.display()
+                ))
+            }
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| format!("blob spool has no parent: {}", self.path.display()))?;
+        tokio::fs::File::open(parent)
+            .await
+            .map_err(|error| format!("open blob spool parent {}: {error}", parent.display()))?
+            .sync_all()
+            .await
+            .map_err(|error| format!("sync blob spool parent {}: {error}", parent.display()))
+    }
+}
+
 impl StoreDatabase {
     pub(crate) fn persist_prepared_audience_objects_on(
         conn: &Connection,
@@ -407,7 +432,10 @@ impl StoreDatabase {
         let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
         for prepared in loaded.blobs {
             if let Some(spool_path) = prepared.spool_path() {
-                crate::local_blob::verify_exact_file(prepared.blob().object(), spool_path)
+                prepared
+                    .blob()
+                    .object()
+                    .verify_file(spool_path)
                     .await
                     .map_err(|error| DbError::Message(format!("prepared blob spool: {error}")))?;
             }
@@ -522,22 +550,7 @@ impl StoreDatabase {
             .await?;
 
         for spool in spools {
-            match crate::local_blob::remove_file(&spool.path).await {
-                Ok(_) => crate::local_blob::sync_parent_dir(&spool.path)
-                    .await
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "sync retired prepared blob spool {}: {error}",
-                            spool.path.display()
-                        ))
-                    })?,
-                Err(error) => {
-                    return Err(DbError::Message(format!(
-                        "remove uploaded prepared blob spool {}: {error}",
-                        spool.path.display()
-                    )));
-                }
-            }
+            spool.retire().await.map_err(DbError::Message)?;
             self.clear_uploaded_blob_spool(spool).await?;
         }
         Ok(())

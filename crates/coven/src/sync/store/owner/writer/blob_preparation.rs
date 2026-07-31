@@ -342,18 +342,17 @@ impl AuthorizedWriterOperation<'_> {
             ),
             crate::blob::Provenance::UserProvided => None,
         };
-        let mut temporary_plaintext = false;
-        let source_path = if let Some(path) = &fact.external_path {
+        let source = if let Some(path) = &fact.external_path {
             if fact.blob.provenance != crate::blob::Provenance::UserProvided {
                 return Err(StoreError::InvalidOutbound(format!(
                     "host-provided blob {}/{} carries an external path",
                     fact.blob.namespace, fact.blob.id
                 )));
             }
-            path.clone()
+            PartitionBlobSource::existing(path.clone())
         } else if let Some(path) = host_path {
             match tokio::fs::metadata(&path).await {
-                Ok(metadata) if metadata.is_file() => path,
+                Ok(metadata) if metadata.is_file() => PartitionBlobSource::existing(path),
                 Ok(_) => {
                     return Err(StoreError::InvalidOutbound(format!(
                         "host blob source is not a file: {}",
@@ -361,9 +360,10 @@ impl AuthorizedWriterOperation<'_> {
                     )));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    temporary_plaintext = true;
-                    self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
-                        .await?
+                    PartitionBlobSource::temporary(
+                        self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
+                            .await?,
+                    )
                 }
                 Err(error) => {
                     return Err(StoreError::InvalidOutbound(format!(
@@ -373,12 +373,13 @@ impl AuthorizedWriterOperation<'_> {
                 }
             }
         } else {
-            temporary_plaintext = true;
-            self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
-                .await?
+            PartitionBlobSource::temporary(
+                self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
+                    .await?,
+            )
         };
         let spool_write = match storage
-            .seal_blob_to_spool(&locator, authority, protection, &source_path, &spool_path)
+            .seal_blob_to_spool(&locator, authority, protection, source.path(), &spool_path)
             .await
             .map_err(|source| StoreError::BlobStorage {
                 namespace: fact.blob.namespace.clone(),
@@ -387,29 +388,13 @@ impl AuthorizedWriterOperation<'_> {
             }) {
             Ok(spool_write) => spool_write,
             Err(error) => {
-                return Err(cleanup_failed_partition_blob(
-                    &spool_path,
-                    temporary_plaintext.then_some(source_path.as_path()),
-                    false,
-                    error,
-                )
-                .await);
+                return Err(
+                    cleanup_failed_partition_blob(&spool_path, &source, false, error).await,
+                );
             }
         };
         let prepared = async {
-            if temporary_plaintext {
-                tokio::fs::remove_file(&source_path)
-                    .await
-                    .map_err(|error| {
-                        StoreError::InvalidOutbound(format!(
-                            "remove prepared plaintext {}: {error}",
-                            source_path.display()
-                        ))
-                    })?;
-                crate::local_blob::sync_parent_dir(&source_path)
-                    .await
-                    .map_err(StoreError::InvalidOutbound)?;
-            }
+            source.retire_temporary().await?;
             let slot = storage
                 .allocate_blob_slot(&locator, authority)
                 .await
@@ -442,7 +427,7 @@ impl AuthorizedWriterOperation<'_> {
             Err(error) => {
                 return Err(cleanup_failed_partition_blob(
                     &spool_path,
-                    temporary_plaintext.then_some(source_path.as_path()),
+                    &source,
                     spool_write == crate::storage::BlobSpoolWrite::Created,
                     error,
                 )
@@ -482,7 +467,7 @@ impl AuthorizedWriterOperation<'_> {
             .stage_verified_blob_plaintext(&authority, &previous.stored, &destination)
             .await
             .map_err(|error| match error {
-                crate::blob::cache::BlobCacheError::Storage(source) => StoreError::BlobStorage {
+                crate::sync::BlobCacheError::Storage(source) => StoreError::BlobStorage {
                     namespace: fact.blob.namespace.clone(),
                     id: fact.blob.id.clone(),
                     source,
@@ -496,47 +481,17 @@ impl AuthorizedWriterOperation<'_> {
 
 async fn cleanup_failed_partition_blob(
     spool_path: &std::path::Path,
-    temporary_plaintext: Option<&std::path::Path>,
+    source: &PartitionBlobSource,
     spool_created_by_attempt: bool,
     error: StoreError,
 ) -> StoreError {
     let mut failures = Vec::new();
-    if let Some(path) = temporary_plaintext {
-        match crate::local_blob::remove_file(path).await {
-            Ok(removed) => {
-                if removed {
-                    if let Err(sync_error) = crate::local_blob::sync_parent_dir(path).await {
-                        failures.push(format!(
-                            "sync removed temporary plaintext {}: {sync_error}",
-                            path.display()
-                        ));
-                    }
-                }
-            }
-            Err(cleanup_error) => failures.push(format!(
-                "remove temporary plaintext {}: {cleanup_error}",
-                path.display()
-            )),
-        }
+    if let Err(cleanup_error) = source.retire_temporary().await {
+        failures.push(cleanup_error.to_string());
     }
     if spool_created_by_attempt {
-        match crate::local_blob::remove_file(spool_path).await {
-            Ok(true) => {
-                if let Err(sync_error) = crate::local_blob::sync_parent_dir(spool_path).await {
-                    failures.push(format!(
-                        "sync removed prepared blob spool {}: {sync_error}",
-                        spool_path.display()
-                    ));
-                }
-            }
-            Ok(false) => failures.push(format!(
-                "prepared blob spool {} is absent",
-                spool_path.display()
-            )),
-            Err(cleanup_error) => failures.push(format!(
-                "remove prepared blob spool {}: {cleanup_error}",
-                spool_path.display()
-            )),
+        if let Err(cleanup_error) = PreparedBlobSpool::new(spool_path).rollback().await {
+            failures.push(cleanup_error);
         }
     }
     if failures.is_empty() {
@@ -547,6 +502,76 @@ async fn cleanup_failed_partition_blob(
             failures.join("; ")
         ))
     }
+}
+
+struct PartitionBlobSource {
+    path: std::path::PathBuf,
+    temporary: bool,
+}
+
+impl PartitionBlobSource {
+    fn existing(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            temporary: false,
+        }
+    }
+
+    fn temporary(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            temporary: true,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    async fn retire_temporary(&self) -> Result<(), StoreError> {
+        if !self.temporary {
+            return Ok(());
+        }
+        remove_durable_file(&self.path, false)
+            .await
+            .map_err(StoreError::InvalidOutbound)
+    }
+}
+
+struct PreparedBlobSpool<'a> {
+    path: &'a std::path::Path,
+}
+
+impl<'a> PreparedBlobSpool<'a> {
+    fn new(path: &'a std::path::Path) -> Self {
+        Self { path }
+    }
+
+    async fn rollback(self) -> Result<(), String> {
+        remove_durable_file(self.path, true).await
+    }
+}
+
+async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> Result<(), String> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("prepared blob spool {} is absent", path.display()));
+        }
+        Err(error) => return Err(format!("remove prepared blob {}: {error}", path.display())),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("prepared blob has no parent: {}", path.display()))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|error| format!("open prepared blob parent {}: {error}", parent.display()))?
+        .sync_all()
+        .await
+        .map_err(|error| format!("sync prepared blob parent {}: {error}", parent.display()))
 }
 
 pub(crate) fn prepare_partition_blob_locator(

@@ -20,10 +20,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use tokio::sync::watch;
 
-use crate::blob::transition::{
-    BlobTransitionJournal, ConnectedBlobTransitions, LocalBlobTransitions,
-};
-use crate::blob::{cache, local_files, BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
+use crate::blob::transition::BlobTransitionJournal;
+use crate::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
@@ -50,7 +48,8 @@ async fn make_remote(
     root_id: &str,
     pin: bool,
 ) -> Result<(), crate::blob::transition::MakeRemoteError> {
-    LocalBlobTransitions::new(StoreDatabase::new(db), store_dir.clone())
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(db), store_dir.clone())
+        .local_transitions()
         .make_remote(root_table, root_id, pin)
         .await
 }
@@ -60,10 +59,9 @@ async fn read_blob(
     store_dir: &StoreDir,
     storage: Option<std::sync::Arc<dyn SyncStorage>>,
     reference: &RowBlobRef,
-) -> Result<Vec<u8>, crate::blob::cache::BlobCacheError> {
-    let database = StoreDatabase::new(db);
-    let local = crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir.clone());
-    crate::sync::store::blob::StoreBlobAccess::new(local, storage)
+) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(db), store_dir.clone())
+        .blob_access(storage)
         .read(reference)
         .await
 }
@@ -80,15 +78,10 @@ async fn make_local(
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), crate::blob::transition::MakeLocalError> {
-    ConnectedBlobTransitions::new(
-        StoreDatabase::new(db),
-        storage,
-        store_dir.clone(),
-        routing_encryption,
-        observer,
-    )
-    .make_local(root_table, root_id, dest, cancel)
-    .await
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(db), store_dir.clone())
+        .connected_blob_transitions(storage, routing_encryption, observer)
+        .make_local(root_table, root_id, dest, cancel)
+        .await
 }
 
 async fn cancel_make_remote(
@@ -466,7 +459,7 @@ async fn seed_remote_release(
     bytes: &[u8],
 ) {
     seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes).await;
-    local_files::store(store_dir, "fixture_sources", photo_id, bytes)
+    crate::store_dir::StoreDir::store_local_blob(store_dir, "fixture_sources", photo_id, bytes)
         .await
         .expect("write exact remote fixture source");
     let source = store_dir
@@ -1487,7 +1480,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         ),
     )
     .await;
-    local_files::store(&lib, "covers", "cover-host-scoped", bytes)
+    crate::store_dir::StoreDir::store_local_blob(&lib, "covers", "cover-host-scoped", bytes)
         .await
         .expect("store host-provided fixture");
     make_remote(&db, &lib, "notes", "n-host-scoped", false)
@@ -1621,7 +1614,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         ),
     )
     .await;
-    local_files::store(&lib_a, "covers", "coveraaa", &cover)
+    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coveraaa", &cover)
         .await
         .expect("store the host-provided cover in the local store");
 
@@ -1772,7 +1765,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         ),
     )
     .await;
-    local_files::store(&lib_a, "covers", "coverhost", &cover)
+    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverhost", &cover)
         .await
         .expect("store host-provided cover");
 
@@ -1887,7 +1880,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             ),
         )
         .await;
-        local_files::store(&lib, "covers", cover, bytes)
+        crate::store_dir::StoreDir::store_local_blob(&lib, "covers", cover, bytes)
             .await
             .expect("store host-provided cover");
     }
@@ -1951,12 +1944,16 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     // Recovery republishes the prepared write and applies both dispositions.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
+    let store_cache =
+        crate::sync::store::blob::StoreBlobCache::new(store_database.clone(), lib.clone());
+
     assert!(
         exact_pinned_path(&lib, &cover_ref(&db, "cover-pin").await).exists(),
         "recovery pins the retained cover",
     );
     assert!(
-        cache::is_pinned(&store_database, &lib, &cover_ref(&db, "cover-pin").await)
+        store_cache
+            .all_pinned(std::slice::from_ref(&cover_ref(&db, "cover-pin").await))
             .await
             .unwrap(),
         "is_pinned reports the recovered pin",
@@ -1972,7 +1969,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "recovery drops the un-pinned cover's local copy",
     );
     assert!(
-        !cache::is_pinned(&store_database, &lib, &cover_ref(&db, "cover-drop").await)
+        !store_cache
+            .all_pinned(std::slice::from_ref(&cover_ref(&db, "cover-drop").await))
             .await
             .unwrap(),
         "the dropped cover is not pinned",
@@ -2005,10 +2003,10 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
             crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
         )
         .unwrap();
-    crate::local_blob::create_dir_all(pinned.parent().unwrap())
+    tokio::fs::create_dir_all(pinned.parent().unwrap())
         .await
         .unwrap();
-    crate::local_blob::write_atomic(&pinned, &bytes)
+    crate::storage::StagedBlobFile::write_for_test(&pinned, &bytes)
         .await
         .unwrap();
     let sequence = publish_fixture_position(&storage, &db, &lib, "pin-position").await;
@@ -2053,10 +2051,10 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
             crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
         )
         .unwrap();
-    crate::local_blob::create_dir_all(cached.parent().unwrap())
+    tokio::fs::create_dir_all(cached.parent().unwrap())
         .await
         .unwrap();
-    crate::local_blob::write_atomic(&cached, &bytes)
+    crate::storage::StagedBlobFile::write_for_test(&cached, &bytes)
         .await
         .unwrap();
     let sequence = publish_fixture_position(&storage, &db, &lib, "cache-position").await;
@@ -2152,7 +2150,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         ),
     )
     .await;
-    local_files::store(&lib_a, "covers", "coverrrr", &cover)
+    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverrrr", &cover)
         .await
         .expect("store host-provided blob");
 
@@ -2222,7 +2220,7 @@ async fn make_remote_rejects_remote_root() {
         ),
     )
     .await;
-    local_files::store(&lib, "covers", "coverrrr", b"REMOTE-ROOT")
+    crate::store_dir::StoreDir::store_local_blob(&lib, "covers", "coverrrr", b"REMOTE-ROOT")
         .await
         .expect("store host-provided blob");
 

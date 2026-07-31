@@ -364,7 +364,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::blob::cache::BlobCacheError> {
+    ) -> Result<crate::storage::StagedBlobFile, crate::sync::BlobCacheError> {
         self.history
             .stage_verified_blob_plaintext(authority, stored, destination)
             .await

@@ -1724,7 +1724,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     )
     .await;
     let (owner_tmp, owner_dir) = temp_store_dir();
-    crate::blob::local_files::store(&owner_dir, "photos", "photo1", b"cover-bytes")
+    crate::store_dir::StoreDir::store_local_blob(&owner_dir, "photos", "photo1", b"cover-bytes")
         .await
         .expect("stage owner blob");
     let cycle_storage = CloudSyncStorage::new(

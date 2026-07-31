@@ -49,7 +49,9 @@ fn create_only_put_failed(
 }
 
 impl S3CloudHome {
-    pub async fn new(
+    #[allow(clippy::too_many_arguments)]
+    async fn new(
+        runtime: S3Runtime,
         bucket: String,
         region: String,
         endpoint: Option<String>,
@@ -58,7 +60,6 @@ impl S3CloudHome {
         key_prefix: Option<String>,
         custom_exact_slots: Option<crate::config::CustomS3ExactSlots>,
     ) -> Result<Self, CloudHomeError> {
-        let runtime = S3Runtime::new()?;
         let exact_slots = endpoint.is_none()
             || custom_exact_slots
                 == Some(crate::config::CustomS3ExactSlots::StandardConditionalRequests);
@@ -240,6 +241,29 @@ impl S3CloudHome {
             .await?;
         MultipartUpload::new(key, body, sink, progress).run().await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn open_cloud_home(
+    bucket: String,
+    region: String,
+    endpoint: Option<String>,
+    access_key: String,
+    secret_key: String,
+    key_prefix: Option<String>,
+    custom_exact_slots: Option<crate::config::CustomS3ExactSlots>,
+) -> Result<S3CloudHome, CloudHomeError> {
+    S3CloudHome::new(
+        S3Runtime::new()?,
+        bucket,
+        region,
+        endpoint,
+        access_key,
+        secret_key,
+        key_prefix,
+        custom_exact_slots,
+    )
+    .await
 }
 
 /// A [`PartSink`] over an open S3 multipart upload: each `send_part` is one
@@ -1064,16 +1088,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for FailingBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for FailingBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if !self.emitted {
                 self.emitted = true;
                 return Ok(vec![7; MULTIPART_PART_SIZE]);
             }
-            Err(crate::local_blob::PlaintextChunkError::Local(
+            Err(crate::storage::local_file::PlaintextChunkError::Local(
                 "injected body failure".to_string(),
             ))
         }
@@ -1145,7 +1169,7 @@ mod tests {
         prefix: Option<String>,
         exact_slots: Option<crate::CustomS3ExactSlots>,
     ) -> S3CloudHome {
-        S3CloudHome::new(
+        open_cloud_home(
             bucket,
             region.to_string(),
             Some(endpoint),
@@ -1288,7 +1312,7 @@ mod tests {
             if entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(crate::local_blob::TEMP_BLOB_PREFIX)
+                .starts_with(crate::storage::local_file::TEMP_BLOB_PREFIX)
             {
                 temps.push(entry.path());
             }
@@ -1823,9 +1847,10 @@ mod tests {
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
         .await;
-        let reader = crate::local_blob::PlaintextReader::from_test_reader(FailingBodyReader {
-            emitted: false,
-        });
+        let reader =
+            crate::storage::local_file::PlaintextReader::from_test_reader(FailingBodyReader {
+                emitted: false,
+            });
         let body = BlobBody::from_test_reader((MULTIPART_PART_SIZE + 1) as u64, reader);
 
         let slot = ObjectSlot::logical("immutable/body-failure".to_string()).unwrap();
@@ -2368,7 +2393,7 @@ mod tests {
             .parse()
             .expect("COVEN_TEST_S3_RANGE_END must be a u64");
 
-        let home = S3CloudHome::new(
+        let home = open_cloud_home(
             bucket,
             region,
             Some(creds.endpoint),
@@ -2406,7 +2431,7 @@ mod tests {
             return;
         };
 
-        let home = S3CloudHome::new(
+        let home = open_cloud_home(
             env.bucket,
             env.region,
             Some(env.endpoint),
@@ -2457,7 +2482,7 @@ mod tests {
     async fn probe_succeeds_against_existing_bucket() {
         let creds = test_creds();
         let bucket = format!("coven-probe-ok-{}", uuid::Uuid::new_v4());
-        let home = S3CloudHome::new(
+        let home = open_cloud_home(
             bucket,
             "us-east-1".to_string(),
             Some(creds.endpoint),
@@ -2477,7 +2502,7 @@ mod tests {
     async fn probe_fails_for_missing_bucket() {
         let creds = test_creds();
         let bucket = format!("coven-probe-missing-{}", uuid::Uuid::new_v4());
-        let home = S3CloudHome::new(
+        let home = open_cloud_home(
             bucket.clone(),
             "us-east-1".to_string(),
             Some(creds.endpoint),
@@ -2506,7 +2531,7 @@ mod tests {
         let creds = test_creds();
         let bucket = format!("coven-probe-badkey-{}", uuid::Uuid::new_v4());
         // Provision the bucket with the good creds so the only difference is the bad secret.
-        let good = S3CloudHome::new(
+        let good = open_cloud_home(
             bucket.clone(),
             "us-east-1".to_string(),
             Some(creds.endpoint.clone()),
@@ -2519,7 +2544,7 @@ mod tests {
         .expect("construct good S3CloudHome");
         provision_test_bucket(&good).await;
 
-        let bad = S3CloudHome::new(
+        let bad = open_cloud_home(
             bucket,
             "us-east-1".to_string(),
             Some(creds.endpoint),

@@ -5,7 +5,6 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::blob::local_files::LocalBlobError;
 use crate::blob::BlobTransitionObserver;
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::{Config, HomeStorage};
@@ -15,7 +14,7 @@ use crate::handle::CovenHandle;
 use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
 use crate::migration::{Migration, MigrationError};
-use crate::store_dir::PathTokenError;
+use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
 use crate::sync::session::SyncedTable;
 
@@ -80,8 +79,8 @@ impl From<OpenError> for CovenError {
     }
 }
 
-impl From<LocalBlobError> for CovenError {
-    fn from(value: LocalBlobError) -> Self {
+impl From<LocalBlobStoreError> for CovenError {
+    fn from(value: LocalBlobStoreError) -> Self {
         CovenError::Blob(value.to_string())
     }
 }
@@ -1177,7 +1176,7 @@ mod tests {
     }
 
     async fn write_raw_file(path: &std::path::Path, bytes: &[u8]) {
-        crate::local_blob::write_atomic(path, bytes)
+        crate::storage::StagedBlobFile::write_for_test(path, bytes)
             .await
             .expect("write file");
     }
@@ -1413,7 +1412,7 @@ mod tests {
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
-        let mut staged = crate::local_blob::AtomicStagedFile::create(&final_path)
+        let mut staged = crate::storage::StagedBlobFile::create(&final_path)
             .await
             .expect("allocate local blob stage");
         staged
@@ -2325,7 +2324,7 @@ mod tests {
     async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
-        crate::blob::local_files::store(&dir, "media-files", "oldaaaa", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
             .await
             .expect("store old");
         handle
@@ -2345,7 +2344,7 @@ mod tests {
             .await
             .expect("seed row");
         publish_current_writes(&handle).await;
-        crate::blob::local_files::store(&dir, "media-files", "oldaaaa", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
             .await
             .expect("restore published blob locally");
         let old_ref = BlobRef {
@@ -2575,7 +2574,7 @@ mod tests {
     async fn author_delete_drops_all_local_blob_copies() {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
-        crate::blob::local_files::store(&dir, "media-files", "oldcccc", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("store old");
         handle
@@ -2610,7 +2609,7 @@ mod tests {
         let cached = dir
             .cache_blob_path("media-files", locator_hash)
             .expect("cache path");
-        crate::blob::local_files::store(&dir, "media-files", "oldcccc", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("restore published blob locally");
         write_raw_file(&pinned, b"old").await;
@@ -2654,7 +2653,7 @@ mod tests {
     async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
-        crate::blob::local_files::store(&dir, "media-files", "oldddddd", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldddddd", b"old")
             .await
             .expect("store old");
         handle
@@ -2686,7 +2685,7 @@ mod tests {
         let pinned = dir
             .pinned_blob_path("media-files", locator_hash)
             .expect("pinned path");
-        crate::blob::local_files::store(&dir, "media-files", "oldddddd", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldddddd", b"old")
             .await
             .expect("restore published blob locally");
         std::fs::create_dir_all(&pinned).expect("create pinned blocker");
@@ -2895,7 +2894,7 @@ mod tests {
     async fn replacement_is_rejected_while_sql_still_references_old_blob() {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
-        crate::blob::local_files::store(&dir, "media-files", "oldbbbb", b"old")
+        crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldbbbb", b"old")
             .await
             .expect("store old");
         handle
@@ -3618,15 +3617,13 @@ mod tests {
         let a = vec![b'A'; 64 * 1024];
         let b = vec![b'B'; 64 * 1024];
         let (ra, rb) = tokio::join!(
-            crate::local_blob::write_atomic(&dest, &a),
-            crate::local_blob::write_atomic(&dest, &b),
+            crate::storage::StagedBlobFile::write_for_test(&dest, &a),
+            crate::storage::StagedBlobFile::write_for_test(&dest, &b),
         );
         ra.expect("first concurrent cache write");
         rb.expect("second concurrent cache write");
 
-        let final_bytes = crate::local_blob::read(&dest)
-            .await
-            .expect("read cache file");
+        let final_bytes = tokio::fs::read(&dest).await.expect("read cache file");
         assert!(
             final_bytes == a || final_bytes == b,
             "the cache file is exactly one producer's whole payload, never a torn mix",

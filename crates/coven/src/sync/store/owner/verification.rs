@@ -1,7 +1,7 @@
 use super::pull::*;
 use super::verified_history::{
     load_membership_at_exact_heads_with_verified_activations, predecessor_verifies_owner,
-    MergeHistoryVerifier, VerifiedMergeConflictResolutionActivation, VerifiedMergeMembershipPrefix,
+    VerifiedMergeConflictResolutionActivation, VerifiedMergeMembershipPrefix,
 };
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::*;
@@ -1666,33 +1666,6 @@ pub(crate) enum CommitCoverageError {
     Object(#[from] StoreObjectError),
     #[error("exact Store ancestry is missing commit {commit_hash}")]
     MissingAncestry { commit_hash: ObjectHash },
-}
-
-pub(crate) async fn load_provider_access_activation(
-    history_verifier: &mut MergeHistoryVerifier<'_>,
-    access: &crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-    administrator: &StoreDeviceRegistration,
-) -> Result<VerifiedStoreBatchCommit, StorePullError> {
-    let grant = history_verifier
-        .load_provider_access_grant(&access.grant_ref, administrator)
-        .await?;
-    if grant.value != access.grant {
-        return Err(StorePullError::Database(
-            "device provider approval embeds a different access grant than its exact reference"
-                .to_string(),
-        ));
-    }
-    let activation = history_verifier.load_ref(&access.activation).await?;
-    if activation.value().provider_access_grants() != std::slice::from_ref(&access.grant_ref)
-        || activation.value().author_registration != access.grant.administrator
-        || activation.author() != administrator
-    {
-        return Err(StorePullError::Database(
-            "device provider approval activation is not the administrator's exact sole access grant"
-                .to_string(),
-        ));
-    }
-    Ok(activation)
 }
 
 pub(crate) struct LoadedDeviceJoinAttemptEvidence {

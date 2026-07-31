@@ -2633,7 +2633,7 @@ async fn capture_document_with_file(
         })
         .await
         .expect("capture document and its file row");
-    crate::blob::local_files::store(&fixture.store_dir, "files", file_id, bytes)
+    crate::store_dir::StoreDir::store_local_blob(&fixture.store_dir, "files", file_id, bytes)
         .await
         .expect("stage the document file bytes");
     write_id

@@ -35,6 +35,7 @@ use owner::snapshot;
 use registration_object::prepare_registration_object;
 
 pub(crate) use crate::database::DurableStoreReclaimObject;
+pub use blob::{BlobCacheError, BlobStream};
 pub(crate) use circle_controls::CircleOperationError;
 pub(crate) use circle_controls::{
     CircleAuthoringState, CircleCurrentState, CircleOperationIntent, CircleOperationJournal,
@@ -60,6 +61,13 @@ pub(crate) use owner::device_exclusion::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
+#[cfg(test)]
+pub(crate) use owner::device_join::{begin_joining_store_from_pending, PendingDeviceJoinAuthority};
+pub(crate) use owner::device_join::{
+    observe_pending_device_join, open_pending_device_join_authority, resume_joining_store,
+    DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
+    DeviceProviderResponseReservation, JoiningStore,
+};
 pub use owner::device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
@@ -72,14 +80,9 @@ pub use owner::device_join::{
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
 };
-pub(crate) use owner::device_join::{
-    DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
-    DeviceProviderResponseReservation, JoiningStore, PendingDeviceJoinAuthority,
-    PendingDeviceJoinObservation,
-};
+pub(crate) use owner::history::open_invitation_history;
 #[cfg(test)]
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
-pub(crate) use owner::history::InvitationHistory;
 pub(crate) use owner::operations::{
     CircleAckActivation, PreparedStoreOperationCommit, StoreMembershipJournalCompletion,
 };

@@ -6,8 +6,7 @@ use crate::sync::store::operations::{StoreOperationBatch, StoreOperationPublicat
 
 use super::authority::target_key;
 use super::journal::{
-    advance_owner_promotion_journal, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
-    OwnerPromotionJournalState,
+    OwnerPromotionJournal, OwnerPromotionJournalPredecessor, OwnerPromotionJournalState,
 };
 use super::OwnerPromotionError;
 
@@ -73,9 +72,7 @@ async fn resume_request_publication_state(
                     target: previous.target.clone(),
                     state: next_state,
                 };
-                let database = operation.database.clone();
-                (previous, state) =
-                    advance_owner_promotion_journal(&database, previous, next).await?;
+                (previous, state) = operation.advance_journal(previous, next).await?;
             }
             OwnerPromotionJournalState::AwaitingAcceptance { request, .. }
             | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
@@ -216,8 +213,7 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
             },
         };
         let (previous, _) = allocation.into_predecessor()?;
-        let (previous, state) =
-            advance_owner_promotion_journal(&database, previous, prepared).await?;
+        let (previous, state) = operation.advance_journal(previous, prepared).await?;
         resume_request_publication_state(operation, previous, state).await
     }
 }

@@ -17,6 +17,7 @@ use super::pull::{
 pub(super) struct PullPackageMaterializer<'storage> {
     database: StoreDatabase,
     blob_source: RemoteBlobSource<'storage>,
+    blob_cache: crate::sync::store::blob::StoreBlobCache,
     store_dir: StoreDir,
     schema: Arc<TableSchema>,
 }
@@ -25,10 +26,12 @@ impl<'storage> PullPackageMaterializer<'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         blob_source: RemoteBlobSource<'storage>,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
         store_dir: StoreDir,
         schema: Arc<TableSchema>,
     ) -> Self {
         Self {
+            blob_cache,
             database,
             blob_source,
             store_dir,
@@ -132,7 +135,7 @@ impl<'storage> PullPackageMaterializer<'storage> {
             if let Err(cause) = self
                 .blob_source
                 .verify_plaintext_with_protection(
-                    &self.store_dir,
+                    &self.blob_cache,
                     stored,
                     blob_protection.clone(),
                     retain,

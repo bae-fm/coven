@@ -39,7 +39,7 @@ async fn create_exact_blob(store: &TestStore, bytes: &[u8]) -> StoredBlobRef {
     let directory = tempfile::tempdir().expect("create blob fixture directory");
     let plaintext = directory.path().join("plaintext");
     let spool = directory.path().join("stored");
-    crate::local_blob::write_atomic(&plaintext, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
         .await
         .expect("write exact blob plaintext");
     store
@@ -108,9 +108,9 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
         )
         .await
         .expect("stage the referenced exact blob");
-    assert_eq!(crate::local_blob::read(staged.path()).await.unwrap(), real);
+    assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), real);
     staged.commit().await.expect("publish verified plaintext");
-    assert_eq!(crate::local_blob::read(&destination).await.unwrap(), real);
+    assert_eq!(tokio::fs::read(&destination).await.unwrap(), real);
 }
 
 #[tokio::test]
@@ -168,13 +168,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
         )
         .await
         .expect("stage restored exact blob");
-    assert_eq!(
-        crate::local_blob::read(staged.path()).await.unwrap(),
-        current
-    );
+    assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), current);
     staged.commit().await.expect("publish verified plaintext");
-    assert_eq!(
-        crate::local_blob::read(&destination).await.unwrap(),
-        current
-    );
+    assert_eq!(tokio::fs::read(&destination).await.unwrap(), current);
 }

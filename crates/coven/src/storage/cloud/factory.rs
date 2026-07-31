@@ -66,7 +66,7 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
                     }
                 };
 
-            let s3 = super::s3::S3CloudHome::new(
+            let s3 = super::s3::open_cloud_home(
                 bucket,
                 region,
                 endpoint,
@@ -93,12 +93,15 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::GoogleDrive)
                 .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
-            Ok(Box::new(super::google_drive::GoogleDriveCloudHome::new(
-                folder_id,
-                oauth_config,
+            let session = super::oauth_session::OAuthSession::new(
                 tokens,
                 key_service.clone(),
                 clock,
+                oauth_config,
+                "Google Drive",
+            );
+            Ok(Box::new(super::google_drive::GoogleDriveCloudHome::new(
+                folder_id, session,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -114,12 +117,16 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::Dropbox)
                 .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
-            Ok(Box::new(super::dropbox::DropboxCloudHome::new(
-                folder_path,
-                oauth_config,
+            let session = super::oauth_session::OAuthSession::new(
                 tokens,
                 key_service.clone(),
                 clock,
+                oauth_config,
+                "Dropbox",
+            );
+            Ok(Box::new(super::dropbox::DropboxCloudHome::new(
+                folder_path,
+                session,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -138,13 +145,15 @@ pub(crate) async fn create_cloud_home_with_cloudkit(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::OneDrive)
                 .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
-            Ok(Box::new(super::onedrive::OneDriveCloudHome::new(
-                drive_id,
-                folder_id,
-                oauth_config,
+            let session = super::oauth_session::OAuthSession::new(
                 tokens,
                 key_service.clone(),
                 clock,
+                oauth_config,
+                "OneDrive",
+            );
+            Ok(Box::new(super::onedrive::OneDriveCloudHome::new(
+                drive_id, folder_id, session,
             )))
         }
         #[cfg(not(feature = "oauth-providers"))]

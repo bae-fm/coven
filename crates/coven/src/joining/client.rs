@@ -248,7 +248,7 @@ async fn build_cloud_home_for_join(
             secret_key,
             key_prefix,
         } => {
-            let s3 = s3::S3CloudHome::new(
+            let s3 = s3::open_cloud_home(
                 bucket.clone(),
                 region.clone(),
                 endpoint.clone(),
@@ -268,12 +268,16 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::GoogleDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            Ok(Arc::new(google_drive::GoogleDriveCloudHome::new(
-                folder_id.clone(),
-                oauth_config,
+            let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
                 clock,
+                oauth_config,
+                "Google Drive",
+            );
+            Ok(Arc::new(google_drive::GoogleDriveCloudHome::new(
+                folder_id.clone(),
+                session,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -284,12 +288,16 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::Dropbox)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            Ok(Arc::new(dropbox::DropboxCloudHome::new(
-                folder_path.clone(),
-                oauth_config,
+            let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
                 clock,
+                oauth_config,
+                "Dropbox",
+            );
+            Ok(Arc::new(dropbox::DropboxCloudHome::new(
+                folder_path.clone(),
+                session,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -303,13 +311,17 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients
                 .config_for(CloudProvider::OneDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            Ok(Arc::new(onedrive::OneDriveCloudHome::new(
-                drive_id.clone(),
-                folder_id.clone(),
-                oauth_config,
+            let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
                 clock,
+                oauth_config,
+                "OneDrive",
+            );
+            Ok(Arc::new(onedrive::OneDriveCloudHome::new(
+                drive_id.clone(),
+                folder_id.clone(),
+                session,
             )))
         }
         #[cfg(not(feature = "oauth-providers"))]
@@ -440,7 +452,7 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage = self.transport_storage().await?;
         let pending = self.open_pending_journal()?;
-        let authority = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let authority = crate::sync::store::open_pending_device_join_authority(
             &pending, &storage, &signer, offer,
         )
         .await?;
@@ -453,7 +465,7 @@ impl DeviceJoinClient {
     ) -> Result<crate::DeviceJoinAbandonment, BootstrapError> {
         let storage = self.transport_storage().await?;
         let pending = self.open_pending_journal()?;
-        let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut observation = crate::sync::store::observe_pending_device_join(
             &pending,
             &storage,
             &self.code.store_root,
@@ -483,7 +495,7 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
         let storage = self.transport_storage().await?;
         let pending = self.open_pending_journal()?;
-        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let observation = crate::sync::store::observe_pending_device_join(
             &pending,
             &storage,
             &self.code.store_root,
@@ -508,7 +520,7 @@ impl DeviceJoinClient {
             }
             _ => {
                 let storage = self.transport_storage().await?;
-                let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+                let mut observation = crate::sync::store::observe_pending_device_join(
                     &pending,
                     &storage,
                     &self.code.store_root,
@@ -550,7 +562,7 @@ impl DeviceJoinClient {
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage = self.transport_storage().await?;
         let pending = self.open_pending_journal()?;
-        let mut authority = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut authority = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &storage,
             &signer,
@@ -691,7 +703,7 @@ impl DeviceJoinClient {
         // has to hold those commits and the row data they carry.
         on_status("Catching up on store history...");
         let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let mut joining = crate::sync::store::JoiningStore::resume(
+        let mut joining = crate::sync::store::resume_joining_store(
             &pending,
             database,
             &join.storage,

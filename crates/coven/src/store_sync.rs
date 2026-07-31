@@ -5,7 +5,6 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
-use crate::blob::cache::BlobCacheError;
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
@@ -22,6 +21,7 @@ use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
+use crate::sync::BlobCacheError;
 use crate::sync::Store;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
@@ -130,6 +130,8 @@ pub(crate) struct StoreSync {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
     open_guard: Arc<StoreOpenGuard>,
     blob_chunking: BlobChunking,
+    local_blob_access: LocalStoreBlobAccess,
+    local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
     connection: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
@@ -147,6 +149,8 @@ impl StoreSync {
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
         blob_chunking: BlobChunking,
+        local_blob_access: LocalStoreBlobAccess,
+        local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
     ) -> Self {
         Self {
             config_provider,
@@ -158,6 +162,8 @@ impl StoreSync {
             observer,
             open_guard,
             blob_chunking,
+            local_blob_access,
+            local_blob_transitions,
             connection: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
@@ -243,10 +249,11 @@ impl StoreSync {
                 })?,
         );
         let components = self
-            .initialize_components(Arc::clone(&storage), routing_encryption)
+            .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
-        let loop_handle = self.start_loop(components, config)?;
         let storage: Arc<dyn SyncStorage> = storage;
+        let loop_handle =
+            self.start_loop(components, config, storage.clone(), routing_encryption)?;
         self.install_connection(Some(loop_handle), Some(storage));
         Ok(())
     }
@@ -276,9 +283,18 @@ impl StoreSync {
         &self,
         components: SyncComponents,
         config: Config,
+        storage: Arc<dyn SyncStorage>,
+        routing_encryption: Option<EncryptionService>,
     ) -> Result<Arc<SyncLoopHandle>, SyncError> {
+        let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
+            self.local_blob_transitions.clone(),
+            self.local_blob_access.connect(storage),
+            routing_encryption,
+            self.observer.clone(),
+        );
         let handle = Arc::new(SyncLoopHandle::new(
             components,
+            blob_transitions,
             self.security.clone(),
             self.clock.clone(),
             config,
@@ -355,10 +371,11 @@ impl StoreSync {
                 })?,
         );
         let components = self
-            .initialize_components(Arc::clone(&storage), routing_encryption)
+            .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
-        let loop_handle = self.start_loop(components, config)?;
         let storage: Arc<dyn SyncStorage> = storage;
+        let loop_handle =
+            self.start_loop(components, config, storage.clone(), routing_encryption)?;
         self.install_connection(Some(loop_handle), Some(storage));
         Ok(())
     }
@@ -555,11 +572,13 @@ impl StoreSync {
         Ok(Some(Arc::new(storage)))
     }
 
-    pub(crate) async fn blob_access(
-        &self,
-        local: LocalStoreBlobAccess,
-    ) -> Result<StoreBlobAccess, BlobCacheError> {
-        Ok(StoreBlobAccess::new(local, self.blob_storage().await?))
+    pub(crate) async fn blob_access(&self) -> Result<StoreBlobAccess, BlobCacheError> {
+        match self.blob_storage().await? {
+            Some(storage) => Ok(StoreBlobAccess::remote(
+                self.local_blob_access.connect(storage),
+            )),
+            None => Ok(StoreBlobAccess::local(self.local_blob_access.clone())),
+        }
     }
 
     pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {

@@ -3,7 +3,7 @@ mod owner_promotion;
 mod reclaim;
 mod restore;
 
-pub(crate) use super::authorized_history::{AuthorizedStoreHistory, InvitationHistory};
+pub(crate) use super::authorized_history::{open_invitation_history, AuthorizedStoreHistory};
 pub(super) use super::authorized_history::{
     HistoryConstructionAuthority, MergeConflictResolutionAuthorization,
 };

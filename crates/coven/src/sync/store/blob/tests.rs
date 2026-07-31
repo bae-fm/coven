@@ -7,9 +7,8 @@
 //! folder (`storage/pinned/` vs `storage/cache/`), and a read serves a local copy
 //! without a cloud round-trip.
 
-use super::cache::{
-    clear_cache, drop_cached_blob, evict_to_budget, is_pinned, unpin, write_blob, BlobCacheError,
-};
+use super::cache::BlobCacheError;
+use super::StoreBlobCache;
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::{Database, StoreDatabase};
 use crate::protocol::audience_package::PackageAudience;
@@ -36,11 +35,13 @@ async fn read_blob(
     storage: Option<std::sync::Arc<dyn SyncStorage>>,
     reference: &crate::blob::RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let database = crate::database::StoreDatabase::new(db);
-    let local = crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir.clone());
-    crate::sync::store::blob::StoreBlobAccess::new(local, storage)
-        .read(reference)
-        .await
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(db),
+        store_dir.clone(),
+    )
+    .blob_access(storage)
+    .read(reference)
+    .await
 }
 
 async fn open_blob_stream(
@@ -48,12 +49,14 @@ async fn open_blob_stream(
     store_dir: &crate::store_dir::StoreDir,
     storage: Option<std::sync::Arc<dyn SyncStorage>>,
     reference: &crate::blob::RowBlobRef,
-) -> Result<crate::blob::cache::BlobStream, BlobCacheError> {
-    let database = crate::database::StoreDatabase::new(db);
-    let local = crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir.clone());
-    crate::sync::store::blob::StoreBlobAccess::new(local, storage)
-        .open_stream(reference)
-        .await
+) -> Result<crate::sync::BlobStream, BlobCacheError> {
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(db),
+        store_dir.clone(),
+    )
+    .blob_access(storage)
+    .open_stream(reference)
+    .await
 }
 
 /// Open a stream and read one range from it, for a test whose subject is which
@@ -79,11 +82,13 @@ async fn materialize_row_blob(
     storage: Option<std::sync::Arc<dyn SyncStorage>>,
     reference: &crate::blob::RowBlobRef,
 ) -> Result<(), BlobCacheError> {
-    let database = crate::database::StoreDatabase::new(db);
-    let local = crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir.clone());
-    crate::sync::store::blob::StoreBlobAccess::new(local, storage)
-        .materialize(reference)
-        .await
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(db),
+        store_dir.clone(),
+    )
+    .blob_access(storage)
+    .materialize(reference)
+    .await
 }
 
 async fn pin(
@@ -92,14 +97,12 @@ async fn pin(
     storage: Option<std::sync::Arc<dyn SyncStorage>>,
     references: &[crate::blob::RowBlobRef],
 ) -> Result<(), BlobCacheError> {
-    let database = crate::database::StoreDatabase::new(db);
-    let access = crate::sync::store::blob::StoreBlobAccess::new(
-        crate::sync::store::blob::LocalStoreBlobAccess::new(database.clone(), store_dir.clone()),
-        storage,
+    let owners = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(db),
+        store_dir.clone(),
     );
-    crate::sync::store::blob::StoreBlobCache::new(database, store_dir.clone())
-        .pin(&access, references)
-        .await
+    let access = owners.blob_access(storage);
+    owners.cache().pin(&access, references).await
 }
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
@@ -187,7 +190,7 @@ async fn create_exact_blob_object(
     let content_hash = ObjectHash::digest(bytes);
     let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
     let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
-    crate::local_blob::write_atomic(&plaintext_path, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&plaintext_path, bytes)
         .await
         .expect("write exact blob plaintext");
     let protection = crate::encryption::EncryptionService::from_key([42; 32]);
@@ -252,7 +255,7 @@ async fn create_browsable_blob_object(
     let content_hash = ObjectHash::digest(bytes);
     let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
     let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
-    crate::local_blob::write_atomic(&plaintext_path, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&plaintext_path, bytes)
         .await
         .expect("write browsable blob plaintext");
     let (uploader, registration, _) = storage
@@ -486,7 +489,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     let host_db = open_test_db_with_blob(photo_decl());
     let host_bytes = b"host local exact bytes";
     plant_blob_row(&host_db, "host-corrupt", false, host_bytes).await;
-    crate::blob::local_files::store(&store_dir, "photos", "host-corrupt", host_bytes)
+    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "host-corrupt", host_bytes)
         .await
         .expect("store host-local source");
     let host_path = store_dir
@@ -546,7 +549,10 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     assert_ne!(first_path, second_cache);
     assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
     assert_eq!(std::fs::read(&second_cache).unwrap(), second_bytes);
-    assert!(is_pinned(&store_database, &store_dir, &first)
+    let store_cache =
+        crate::sync::store::blob::StoreBlobCache::new(store_database.clone(), store_dir.clone());
+    assert!(store_cache
+        .all_pinned(std::slice::from_ref(&first))
         .await
         .is_err());
 
@@ -561,13 +567,15 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     assert!(first_path.exists());
     assert!(pinned_path(&store_dir, &second).exists());
 
-    unpin(&store_database, &store_dir, std::slice::from_ref(&second))
+    StoreBlobCache::new(store_database.clone(), store_dir.clone())
+        .unpin(std::slice::from_ref(&second))
         .await
         .expect("unpin only the current exact locator");
     assert!(first_path.exists());
     assert!(second_cache.exists());
 
-    drop_cached_blob(&store_database, &store_dir, &second)
+    store_cache
+        .evict(&second)
         .await
         .expect("evict only the current exact locator");
     assert!(first_path.exists());
@@ -811,7 +819,8 @@ async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
     let bytes = b"REMOTE-BLOB-WITH-INVALID-BUDGET";
     plant_blob_row(&db, id, true, bytes).await;
     let reference = install_exact_remote_blob(&db, &storage, tmp.path(), id, "audio", bytes).await;
-    db.set_protocol_state(&super::cache::cache_budget_state_key("audio"), "invalid")
+    StoreDatabase::new(&db)
+        .set_invalid_cache_budget_for_test("audio", "invalid")
         .await
         .expect("store invalid cache budget metadata");
 
@@ -845,7 +854,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .await
         .expect("first read populates cache");
     let path = cache_path(&ld, &reference);
-    crate::local_blob::write_atomic(&path, &bytes[..8])
+    crate::storage::StagedBlobFile::write_for_test(&path, &bytes[..8])
         .await
         .expect("simulate a torn cache file");
 
@@ -854,7 +863,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .expect_err("corrupt cache file must fail loud");
     assert!(matches!(error, BlobCacheError::LocalIntegrity { .. }));
     assert_eq!(
-        crate::local_blob::read(&path)
+        tokio::fs::read(&path)
             .await
             .expect("read unchanged corrupt cache"),
         bytes[..8],
@@ -998,7 +1007,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
     let cover = b"COVERBYTES";
-    crate::blob::local_files::store(&source_store_dir, "photos", "ph01abcd", cover)
+    crate::store_dir::StoreDir::store_local_blob(&source_store_dir, "photos", "ph01abcd", cover)
         .await
         .expect("store source blob");
     host_exec(
@@ -1087,14 +1096,18 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     );
 
     // Clear the cache → the pinned blob is untouched.
-    clear_cache(&ld).await.expect("clear cache");
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .clear_for_test()
+        .await
+        .expect("clear cache");
     assert!(
         pinned_path(&ld, &reference).exists(),
         "a pinned blob survives a cache sweep",
     );
 
     // Unpin it → moves pinned/ → cache/ (the file stays, now evictable).
-    unpin(&store_database, &ld, std::slice::from_ref(&reference))
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .unpin(std::slice::from_ref(&reference))
         .await
         .expect("unpin demotes the blob");
     assert!(
@@ -1107,7 +1120,10 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     );
 
     // Clear the cache again → the now-unpinned blob is gone.
-    clear_cache(&ld).await.expect("clear cache");
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .clear_for_test()
+        .await
+        .expect("clear cache");
     assert!(
         !cache_path(&ld, &reference).exists(),
         "an unpinned blob is dropped by a cache sweep",
@@ -1128,7 +1144,8 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         eager_bytes,
     )
     .await;
-    unpin(&store_database, &ld, std::slice::from_ref(&eager_reference))
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .unpin(std::slice::from_ref(&eager_reference))
         .await
         .expect("unpinning a never-pinned CacheEager blob is a no-op");
     assert!(
@@ -1387,15 +1404,10 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .expect("delete exact remote blob");
 
     // Write the bytes into the cache.
-    write_blob(
-        &store_database,
-        &ld,
-        &blob.namespace,
-        locator_hash(&reference),
-        &bytes,
-    )
-    .await
-    .expect("write_blob writes into the cache");
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .populate_bytes_for_test(&blob.namespace, locator_hash(&reference), &bytes)
+        .await
+        .expect("write_blob writes into the cache");
     assert!(
         cache_path(&ld, &reference).exists(),
         "write_blob writes to the exact locator cache path",
@@ -1520,7 +1532,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 #[test]
 fn a_blob_stream_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<crate::blob::cache::BlobStream>();
+    assert_send_sync::<crate::sync::BlobStream>();
 }
 
 /// The cost contract of the stream, measured at the cloud: ranges off an
@@ -1655,7 +1667,10 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     );
 
     // Now tamper the stored object with same-length bytes and read it fresh.
-    clear_cache(&ld).await.expect("drop the populated cache");
+    StoreBlobCache::new(StoreDatabase::new(&db), ld.clone())
+        .clear_for_test()
+        .await
+        .expect("drop the populated cache");
     storage
         .home
         .replace_exact_object(stored.object().slot(), vec![b'!'; full.len()]);
@@ -2001,7 +2016,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // and every download uses, which a per-range re-open by name would follow.
     let host_db = open_test_db_with_blob(photo_decl());
     plant_blob_row(&host_db, "strm-hst1", false, &full).await;
-    crate::blob::local_files::store(&ld, "photos", "strm-hst1", &full)
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst1", &full)
         .await
         .expect("store the host-provided local source");
     let host_path = ld
@@ -2015,7 +2030,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .await
         .expect("open a stream over the local store");
 
-    crate::local_blob::write_atomic(&host_path, &decoy)
+    crate::storage::StagedBlobFile::write_for_test(&host_path, &decoy)
         .await
         .expect("atomically replace the local-store file after open");
     assert_eq!(
@@ -2050,7 +2065,10 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .await
         .expect("open a stream over a Remote blob");
 
-    clear_cache(&ld).await.expect("evict the whole cache");
+    StoreBlobCache::new(StoreDatabase::new(&remote_db), ld.clone())
+        .clear_for_test()
+        .await
+        .expect("evict the whole cache");
     assert!(
         !cache_path(&ld, &remote).exists(),
         "the cache file the stream opened is gone from disk",
@@ -2158,7 +2176,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
 
     let host_db = open_test_db_with_blob(photo_decl());
     plant_blob_row(&host_db, "strm-hst3", false, &full).await;
-    crate::blob::local_files::store(&ld, "photos", "strm-hst3", &full)
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst3", &full)
         .await
         .expect("store the host-provided local source");
     let host_path = ld
@@ -2368,18 +2386,22 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     plant_blob_row(&db, &blob.id, false, &ext_bytes).await;
 
     // Decoys at the other on-device stores — both must be ignored.
-    write_blob(
-        &store_database,
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .populate_bytes_for_test(
+            &blob.namespace,
+            crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+            b"OWNED-CACHE-BYTES",
+        )
+        .await
+        .expect("write a same-id cache decoy");
+    crate::store_dir::StoreDir::store_local_blob(
         &ld,
         &blob.namespace,
-        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
-        b"OWNED-CACHE-BYTES",
+        &blob.id,
+        b"STALE-LOCAL-STORE",
     )
     .await
-    .expect("write a same-id cache decoy");
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
-        .await
-        .expect("write a same-id local-store decoy");
+    .expect("write a same-id local-store decoy");
 
     // The real bytes: the user's external file.
     let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
@@ -2443,21 +2465,20 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         b"FROM-CLOUD",
     )
     .await;
-    write_blob(
-        &store_database,
-        &ld,
-        &blob.namespace,
-        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
-        b"FROM-CACHE",
-    )
-    .await
-    .expect("write a same-id cache decoy");
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .populate_bytes_for_test(
+            &blob.namespace,
+            crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+            b"FROM-CACHE",
+        )
+        .await
+        .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
     register_external_blob(&db, "note_photos", &blob.id, &ext_path).await;
 
     // The real bytes: the host-provided local store.
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, &store_bytes)
+    crate::store_dir::StoreDir::store_local_blob(&ld, &blob.namespace, &blob.id, &store_bytes)
         .await
         .expect("store the host-provided local copy");
     let reference = db
@@ -2507,9 +2528,14 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 
     // A stale local-store file (a Remote + user-provided read must NOT serve it) and
     // the real cloud copy with distinct bytes.
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
-        .await
-        .expect("write a stale local-store file");
+    crate::store_dir::StoreDir::store_local_blob(
+        &ld,
+        &blob.namespace,
+        &blob.id,
+        b"STALE-LOCAL-STORE",
+    )
+    .await
+    .expect("write a stale local-store file");
     let reference = install_exact_remote_blob(
         &db,
         &storage,
@@ -2572,9 +2598,14 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
         .expect("delete exact remote blob");
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
-        .await
-        .expect("write a stale local-store file");
+    crate::store_dir::StoreDir::store_local_blob(
+        &ld,
+        &blob.namespace,
+        &blob.id,
+        b"STALE-LOCAL-STORE",
+    )
+    .await
+    .expect("write a stale local-store file");
 
     let err = read_blob(&db, &ld, None, &reference)
         .await
@@ -2635,9 +2666,14 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         .await
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    crate::blob::local_files::store(&source_store_dir, "photos", "lazy0001", b"LAZY-REMOTE-ROOT")
-        .await
-        .expect("store source blob");
+    crate::store_dir::StoreDir::store_local_blob(
+        &source_store_dir,
+        "photos",
+        "lazy0001",
+        b"LAZY-REMOTE-ROOT",
+    )
+    .await
+    .expect("store source blob");
     host_exec(
         &db1,
         &format!(
@@ -2913,7 +2949,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     .expect("plant the colliding-id rows");
 
     // Distinct bytes per source so the result reveals which gate was read.
-    crate::blob::local_files::store(&ld, "ns_local", id, b"LOCAL-STORE-BYTES")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "ns_local", id, b"LOCAL-STORE-BYTES")
         .await
         .expect("store the Local blob's local copy");
     let remote_reference = install_exact_remote_blob_for_row(
@@ -2953,20 +2989,14 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
 // ---- Eviction (per-namespace budgets, folder-model) ----
 
 /// Sum the sizes of every file under `storage/cache/<namespace>/` — the same total
-/// `evict_to_budget` measures for that namespace, recomputed from the test side to
-/// assert the budget is respected. Reuses the production tree walker
-/// ([`crate::local_blob::walk_files`]) over that namespace's cache subtree (which
-/// ignores `pinned/` and every other namespace), so the test measures the cache the
-/// same way eviction does. An absent subtree walks to nothing (0).
+/// cache budget enforcement measures for that namespace, recomputed through the
+/// store directory's cache inventory. An absent subtree contributes nothing.
 async fn cache_total_bytes(ld: &crate::store_dir::StoreDir, namespace: &str) -> u64 {
-    let dir = ld
-        .cache_namespace_dir(namespace)
-        .expect("valid namespace token");
-    crate::local_blob::walk_files(&dir)
+    ld.cached_blob_files(namespace)
         .await
         .expect("walk the namespace cache subtree")
         .iter()
-        .map(|(_, _, size)| *size)
+        .map(|file| file.size())
         .sum()
 }
 
@@ -3004,15 +3034,14 @@ async fn stage_with_mtime(
     mtime_secs: u64,
 ) {
     let blob = blob_ref(id, namespace, CacheFill::CacheLazy);
-    write_blob(
-        db,
-        ld,
-        &blob.namespace,
-        crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
-        bytes,
-    )
-    .await
-    .expect("stage blob into cache");
+    StoreBlobCache::new(db.clone(), ld.clone())
+        .populate_bytes_for_test(
+            &blob.namespace,
+            crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
+            bytes,
+        )
+        .await
+        .expect("stage blob into cache");
     set_cache_mtime(ld, namespace, id, mtime_secs);
 }
 
@@ -3078,7 +3107,8 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         .set_cache_budget("release_files", 250)
         .await
         .expect("set budget");
-    evict_to_budget(&store_database, &ld, "release_files", None)
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", None)
         .await
         .expect("evict to budget");
 
@@ -3186,7 +3216,8 @@ async fn release_files_eviction_leaves_covers_intact() {
         .set_cache_budget("release_files", 250)
         .await
         .expect("set release_files budget");
-    evict_to_budget(&store_database, &ld, "release_files", None)
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", None)
         .await
         .expect("evict release_files to budget");
 
@@ -3323,9 +3354,14 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .await
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    crate::blob::local_files::store(&source_store_dir, "photos", "mir0aaaa", &[9u8; 500])
-        .await
-        .expect("store source blob");
+    crate::store_dir::StoreDir::store_local_blob(
+        &source_store_dir,
+        "photos",
+        "mir0aaaa",
+        &[9u8; 500],
+    )
+    .await
+    .expect("store source blob");
     host_exec(
         &db1,
         &format!(
@@ -3404,15 +3440,10 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .row_blob_ref("note_covers", &lazy.id)
         .await
         .expect("load exact lazy row blob reference");
-    write_blob(
-        &store_database2,
-        &ld,
-        &lazy.namespace,
-        locator_hash(&lazy_reference),
-        &[7u8; 500],
-    )
-    .await
-    .expect("write the lazy blob into the cache");
+    StoreBlobCache::new(store_database2.clone(), ld.clone())
+        .populate_bytes_for_test(&lazy.namespace, locator_hash(&lazy_reference), &[7u8; 500])
+        .await
+        .expect("write the lazy blob into the cache");
     pin(
         &db2,
         &ld,
@@ -3452,10 +3483,12 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .set_cache_budget("audio", 10)
         .await
         .expect("set tiny audio budget");
-    evict_to_budget(&store_database2, &ld, "photos", None)
+    StoreBlobCache::new(store_database2.clone(), ld.clone())
+        .enforce_budget("photos", None)
         .await
         .expect("evict photos to budget");
-    evict_to_budget(&store_database2, &ld, "audio", None)
+    StoreBlobCache::new(store_database2.clone(), ld.clone())
+        .enforce_budget("audio", None)
         .await
         .expect("evict audio to budget");
 
@@ -3540,7 +3573,8 @@ async fn unset_namespace_budget_never_evicts() {
     assert_eq!(cache_total_bytes(&ld, "release_files").await, 15000);
 
     // No budget set for this namespace — an explicit sweep is a no-op.
-    evict_to_budget(&store_database, &ld, "release_files", None)
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", None)
         .await
         .expect("evict is a no-op with no budget");
     assert_eq!(
@@ -3730,7 +3764,8 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
             crate::sync::test_helpers::test_cache_locator_hash("prot0aaa"),
         )
         .unwrap();
-    evict_to_budget(&store_database, &ld, "release_files", Some(&protected))
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", Some(&protected))
         .await
         .expect("evict to budget, protecting the older file");
 
@@ -3800,7 +3835,8 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
             crate::sync::test_helpers::test_cache_locator_hash("biginuse"),
         )
         .unwrap();
-    evict_to_budget(&store_database, &ld, "release_files", Some(&protected))
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", Some(&protected))
         .await
         .expect("eviction returns Ok even when the in-use file alone exceeds budget");
 
@@ -3862,14 +3898,14 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
             crate::sync::test_helpers::test_cache_locator_hash("new0bbbb"),
         )
         .unwrap();
-    let shard = dest.parent().unwrap();
-    std::fs::create_dir_all(shard).expect("create shard dir");
-    let temp_path = shard.join(format!(
-        "{}{}",
-        crate::local_blob::TEMP_BLOB_PREFIX,
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::write(&temp_path, [9u8; 100]).expect("write concurrent populate temp");
+    let mut stage = crate::storage::StagedBlobFile::create(&dest)
+        .await
+        .expect("create concurrent populate stage");
+    stage
+        .write_bytes(&[9u8; 100])
+        .await
+        .expect("write concurrent populate temp");
+    let temp_path = stage.leave_unpublished_for_test();
     std::fs::OpenOptions::new()
         .write(true)
         .open(&temp_path)
@@ -3883,7 +3919,8 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         .set_cache_budget("release_files", 100)
         .await
         .expect("set budget");
-    evict_to_budget(&store_database, &ld, "release_files", None)
+    StoreBlobCache::new(store_database.clone(), ld.clone())
+        .enforce_budget("release_files", None)
         .await
         .expect("evict to budget");
 
@@ -3902,7 +3939,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
     );
 
     // The populate's finishing rename still finds its temp and commits the blob intact.
-    crate::local_blob::rename(&temp_path, &dest)
+    tokio::fs::rename(&temp_path, &dest)
         .await
         .expect("the populate's rename succeeds after the sweep");
     assert_eq!(

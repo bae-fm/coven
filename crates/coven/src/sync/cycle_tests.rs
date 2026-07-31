@@ -338,7 +338,7 @@ async fn create_exact_blob(
     let temp = tempfile::tempdir().expect("create exact blob directory");
     let plaintext = temp.path().join("plaintext");
     let spool = temp.path().join("stored");
-    crate::local_blob::write_atomic(&plaintext, bytes)
+    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
         .await
         .expect("write exact blob plaintext");
     let slot = storage
@@ -417,7 +417,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &*storage.storage,
             member,
@@ -441,7 +441,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             .expect("retry device join abandonment");
         assert_eq!(retried, abandonment);
 
-        let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut observation = crate::sync::store::observe_pending_device_join(
             &pending,
             &*storage.storage,
             &offer.store_root,
@@ -511,7 +511,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             .await
             .expect("begin exact device join");
         let attempt_id = offer.attempt_id;
-        let pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &*storage.storage,
             member,
@@ -600,7 +600,7 @@ fn exercise_post_attempt_cancellation<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &*storage.storage,
             member,
@@ -622,7 +622,7 @@ fn exercise_post_attempt_cancellation<'a>(
             .prepare_registration_request(approval)
             .await
             .expect("prepare exact registration request");
-        let mut joiner_closure = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut joiner_closure = crate::sync::store::observe_pending_device_join(
             &pending,
             &*storage.storage,
             &offer.store_root,
@@ -819,7 +819,7 @@ fn exercise_post_attempt_cancellation<'a>(
         let mut forged_activation = activation.clone();
         forged_activation.activation.commit_hash =
             crate::protocol::store_commit::ObjectHash::digest(b"forged cleanup activation");
-        let mut cleanup_observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut cleanup_observation = crate::sync::store::observe_pending_device_join(
             &pending,
             &*storage.storage,
             &offer.store_root,
@@ -913,7 +913,7 @@ fn exercise_missing_provider_administrator<'a>(
             .await
             .expect("begin cross-principal device join");
         let provider_locator = offer.provider_admin.access.clone();
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &peer_storage,
             member,
@@ -937,7 +937,7 @@ fn exercise_missing_provider_administrator<'a>(
             .prepare_registration_request(approval)
             .await
             .expect("prepare cross-principal registration request");
-        let mut joiner_closure = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut joiner_closure = crate::sync::store::observe_pending_device_join(
             &pending,
             &peer_storage,
             &offer.store_root,
@@ -1022,7 +1022,7 @@ fn exercise_missing_provider_administrator<'a>(
             .complete_owner_device_join_cleanup(activation.clone())
             .await
             .expect("complete owner cleanup");
-        let mut cleanup_observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut cleanup_observation = crate::sync::store::observe_pending_device_join(
             &pending,
             &peer_storage,
             &offer.store_root,
@@ -1062,7 +1062,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &*storage.storage,
             member,
@@ -1093,7 +1093,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .publish_device_provider_challenge(provisional.clone())
             .await
             .expect("publish same-principal provider readiness");
-        let mut joining_store = crate::sync::store::JoiningStore::begin_from_pending(
+        let mut joining_store = crate::sync::store::begin_joining_store_from_pending(
             pending_join,
             crate::database::StoreDatabase::new(&joining_db),
         )
@@ -1118,7 +1118,7 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .close_device_provider_admission(cancellation.clone())
             .await
             .expect("close provider admission during late create");
-        let mut cancellation_join = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut cancellation_join = crate::sync::store::observe_pending_device_join(
             &pending,
             &*storage.storage,
             &offer.store_root,
@@ -1528,7 +1528,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
     // Remove the seed writes so the cycle takes the initial-snapshot path; the rows
@@ -1587,7 +1587,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
     assert_eq!(pending_write_count(&db).await, 0);
@@ -1758,16 +1758,11 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         crate::sync::store::SnapshotBlobReconcile::Complete,
     );
     assert_eq!(
-        crate::blob::cache::read_cached_exact(
-            &restore_dir,
-            &restored
-                .row_blob_ref_for_test("note_photos", "cover1")
-                .await
-                .expect("load restored exact blob reference"),
-        )
-        .await
-        .expect("read restored snapshot blob"),
-        Some(b"cover".to_vec()),
+        restored
+            .read_local_blob_for_test(&restore_dir, "note_photos", "cover1")
+            .await
+            .expect("read restored snapshot blob"),
+        b"cover".to_vec(),
     );
     drop(restore_temp);
 }
@@ -1806,7 +1801,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&store_dir, "photos", "cover1", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided snapshot blob");
     assert_eq!(pending_write_count(&db).await, 0);
@@ -1861,7 +1856,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         "failed preparation must not orphan its current snapshot spool",
     );
     assert_eq!(
-        crate::blob::local_files::read(&store_dir, "photos", "cover1", 5)
+        crate::store_dir::StoreDir::read_local_blob(&store_dir, "photos", "cover1", 5)
             .await
             .expect("read retained snapshot source"),
         Some(b"cover".to_vec()),
@@ -1911,7 +1906,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&store_dir, "photos", "cover1", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
         .await
         .expect("store cleanup source blob");
     storage.open_into(&db).await.expect("open cleanup Store");
@@ -2012,7 +2007,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&store_dir, "assets", "blob-shared", b"shared")
+    crate::store_dir::StoreDir::store_local_blob(&store_dir, "assets", "blob-shared", b"shared")
         .await
         .expect("store shared snapshot blob");
     storage
@@ -2071,7 +2066,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let storage = Arc::new(cycle_test_store(&db, &keypair).await);
     let (external_dir, store_dir) = temp_store_dir();
     let external_path = external_dir.path().join("audio1.flac");
-    crate::local_blob::write_atomic(&external_path, b"AUDIO")
+    crate::storage::StagedBlobFile::write_for_test(&external_path, b"AUDIO")
         .await
         .expect("write external snapshot blob");
     exec(
@@ -3300,7 +3295,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
 
@@ -3428,10 +3423,10 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "blob-a", b"first")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-a", b"first")
         .await
         .expect("store first write's blob");
-    crate::blob::local_files::store(&ld, "photos", "blob-b", b"second")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-b", b"second")
         .await
         .expect("store second write's blob");
 
@@ -3534,7 +3529,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
     let write_id = crate::database::StoreDatabase::new(&db)
@@ -3613,7 +3608,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "rotation pause creates neither a cloud upload nor a Created handoff",
     );
     assert_eq!(
-        crate::blob::local_files::read(&ld, "photos", "hponly", 5)
+        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "hponly", 5)
             .await
             .expect("read rotation-paused local blob"),
         Some(b"cover".to_vec()),
@@ -3664,7 +3659,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .await
         .expect("the activated host blob reads back exactly");
     assert_eq!(
-        crate::local_blob::read(
+        tokio::fs::read(
             &ld.cache_blob_path("photos", activated.locator().locator_hash())
                 .expect("host-blob cache path"),
         )
@@ -3674,7 +3669,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "CacheEager policy retains the published blob in the evictable cache",
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "hponly", 5)
+        ld.read_local_blob("photos", "hponly", 5)
             .await
             .expect("read adopted local source")
             .is_none(),
@@ -3721,13 +3716,14 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
-    crate::blob::transition::LocalBlobTransitions::new(
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
         crate::database::StoreDatabase::new(&db),
         ld.clone(),
     )
+    .local_transitions()
     .make_remote("notes", "n1", false)
     .await
     .expect("queue the host-provided make_remote intent");
@@ -3841,13 +3837,14 @@ async fn ready_make_remote_provider_transport_is_offline() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "transport-blob", b"cover")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "transport-blob", b"cover")
         .await
         .expect("store host-provided blob");
-    crate::blob::transition::LocalBlobTransitions::new(
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
         crate::database::StoreDatabase::new(&db),
         ld.clone(),
     )
+    .local_transitions()
     .make_remote("notes", "transport-root", false)
     .await
     .expect("queue make_remote intent");
@@ -3917,10 +3914,10 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "firstblob", b"first")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "firstblob", b"first")
         .await
         .expect("store first host-provided blob");
-    crate::blob::local_files::store(&ld, "photos", "secondblob", b"second")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "secondblob", b"second")
         .await
         .expect("store second host-provided blob");
 
@@ -3965,7 +3962,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         .await
         .is_err());
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "firstblob", 5)
+        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "firstblob", 5)
             .await
             .expect("read first local")
             .is_some(),
@@ -4056,7 +4053,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "remoteonly", b"already durable")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "remoteonly", b"already durable")
         .await
         .expect("store the first publication's host-provided blob");
 
@@ -4090,7 +4087,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .await
         .expect("read back the first exact remote blob object");
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "remoteonly", 15)
+        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "remoteonly", 15)
             .await
             .expect("read cache-lazy host blob after publication")
             .is_none(),
@@ -4178,7 +4175,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         ),
     )
     .await;
-    crate::blob::local_files::store(&ld, "photos", "lazyblob", b"lazy")
+    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
         .await
         .expect("store cache-lazy host-provided blob");
     let pending = crate::database::StoreDatabase::new(&db)
@@ -4224,7 +4221,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the failed predecessor remains prepared ahead of the blob write",
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
+        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local")
             .is_some(),
@@ -4287,7 +4284,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .await
         .expect("retry leaves the exact cache-lazy blob readable");
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
+        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local after publish")
             .is_none(),
@@ -5537,7 +5534,7 @@ async fn prepare_same_principal_approval_fixture<'storage>(
         .begin_device_join(&pubkey_hex(member))
         .await
         .expect("begin exact device join");
-    let pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+    let pending_join = crate::sync::store::open_pending_device_join_authority(
         &pending,
         &*storage.storage,
         member,

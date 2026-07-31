@@ -1,0 +1,12 @@
+[package]
+name = "owner-construction-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "3.0.3", features = ["full", "visit"] }
+
+[lints]
+workspace = true

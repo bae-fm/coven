@@ -1701,18 +1701,6 @@ impl AuthorizedReclaim<'_, '_> {
     }
 }
 
-async fn reclaim_target_is_recorded(
-    database: &StoreDatabase,
-    target: &ReclaimTarget,
-) -> Result<bool, StoreReclaimError> {
-    for operation in database.store_reclaim_operations().await? {
-        if operation.authorization().target() == target {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 impl AuthorizedReclaim<'_, '_> {
     async fn prepare_authorization(
         &mut self,
@@ -1721,7 +1709,13 @@ impl AuthorizedReclaim<'_, '_> {
         let database = self.database.clone();
         let root = self.root.clone();
         let identity_signer = self.identity.clone();
-        if reclaim_target_is_recorded(&database, &claim.target()).await? {
+        let target = claim.target();
+        if database
+            .store_reclaim_operations()
+            .await?
+            .iter()
+            .any(|operation| operation.authorization().target() == &target)
+        {
             return Ok(());
         }
         let plan = self.writer.prepare_plan().await?;

@@ -1373,7 +1373,7 @@ pub(crate) fn install_cross_principal_device_fixture<'a>(
             .begin_device_join(&pubkey_hex(identity))
             .await
             .map_err(|error| error.to_string())?;
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &peer_storage,
             identity,
@@ -1412,7 +1412,7 @@ pub(crate) fn install_cross_principal_device_fixture<'a>(
             .await
             .map_err(|error| error.to_string())?;
         let mut joining =
-            crate::sync::store::JoiningStore::begin_from_pending(pending_join, local_database)
+            crate::sync::store::begin_joining_store_from_pending(pending_join, local_database)
                 .await
                 .map_err(|error| error.to_string())?;
         let readiness = joining
@@ -2023,7 +2023,7 @@ impl TestStore {
             .begin_device_join(&pubkey_hex(joining_identity))
             .await
             .map_err(|error| format!("begin device join: {error}"))?;
-        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
             &pending,
             &*self.storage,
             joining_identity,
@@ -2055,7 +2055,7 @@ impl TestStore {
             .await
             .map_err(|error| format!("publish device provider challenge: {error}"))?;
         let mut joining =
-            crate::sync::store::JoiningStore::begin_from_pending(pending_join, joining_database)
+            crate::sync::store::begin_joining_store_from_pending(pending_join, joining_database)
                 .await
                 .map_err(|error| format!("begin joining Store: {error}"))?;
         let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
@@ -2773,7 +2773,7 @@ where
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::storage::StorageError> {
+    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
         self.interceptor.before_blob_stage().await?;
         self.inner.stage_exact_blob_download(blob, dest).await
     }
@@ -2783,7 +2783,7 @@ where
         blob: &crate::blob::locator::StoredBlobRef,
         protection: crate::storage::BlobSpoolProtection,
         dest: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::storage::StorageError> {
+    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
         self.interceptor.before_blob_stage().await?;
         self.inner
             .stage_verified_blob_plaintext(blob, protection, dest)

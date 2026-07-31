@@ -837,9 +837,9 @@ impl CloudCipher {
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
     ) -> Result<BlobBody, String> {
-        let plaintext_len = crate::local_blob::file_len(file_path).await?;
+        let plaintext_len = crate::storage::local_file::file_len(file_path).await?;
         let header = SealedBlobHeader::new(chunk_size, plaintext_len);
-        let reader = crate::local_blob::open_reader(file_path).await?;
+        let reader = crate::storage::local_file::open_reader(file_path).await?;
         let (sealer, prefix) = match self {
             CloudCipher::Encrypted(e) => {
                 let (encryption, mut prefix) = sealing_encryption_for_scope(scope, e);
@@ -1386,7 +1386,7 @@ enum ExactBlobOpening {
 /// Opens one already exact-verified stored blob and withholds EOF until the
 /// complete plaintext size and hash match the signed locator.
 struct ExactBlobPlaintextReader {
-    source: crate::local_blob::PlaintextReader,
+    source: crate::storage::local_file::PlaintextReader,
     opening: ExactBlobOpening,
     remaining: u64,
     hasher: Option<crate::blob::ContentHasher>,
@@ -1404,7 +1404,7 @@ impl ExactBlobPlaintextReader {
         protection: crate::storage::BlobSpoolProtection,
     ) -> Result<Self, StorageError> {
         let locator = blob.locator();
-        let mut source = crate::local_blob::open_reader(stored_file)
+        let mut source = crate::storage::local_file::open_reader(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
 
@@ -1486,18 +1486,18 @@ impl ExactBlobPlaintextReader {
         result
     }
 
-    fn verify_complete(&mut self) -> Result<(), crate::local_blob::PlaintextChunkError> {
+    fn verify_complete(&mut self) -> Result<(), crate::storage::local_file::PlaintextChunkError> {
         let Some(hasher) = self.hasher.take() else {
             return Ok(());
         };
         let actual = hasher.finish();
         if actual != self.expected_hash.to_string() {
-            return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
-                format!(
+            return Err(
+                crate::storage::local_file::PlaintextChunkError::InvalidContent(format!(
                     "blob {} plaintext hash mismatch: expected {}, got {actual}",
                     self.locator_hash, self.expected_hash
-                ),
-            ));
+                )),
+            );
         }
         Ok(())
     }
@@ -1581,7 +1581,7 @@ fn check_stored_blob_length(
 }
 
 async fn read_source_exact(
-    source: &mut crate::local_blob::PlaintextReader,
+    source: &mut crate::storage::local_file::PlaintextReader,
     len: usize,
     locator_hash: ObjectHash,
 ) -> Result<Vec<u8>, StorageError> {
@@ -1603,11 +1603,11 @@ async fn read_source_exact(
 }
 
 #[async_trait]
-impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
+impl crate::storage::local_file::PlaintextChunkReader for ExactBlobPlaintextReader {
     async fn next_chunk(
         &mut self,
         max: usize,
-    ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+    ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
         if max == 0 {
             return Ok(Vec::new());
         }
@@ -1622,17 +1622,20 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
         let plaintext = match &mut self.opening {
             ExactBlobOpening::Browsable => {
                 let wanted = usize::try_from(self.remaining.min(max as u64)).map_err(|_| {
-                    crate::local_blob::PlaintextChunkError::InvalidContent(
+                    crate::storage::local_file::PlaintextChunkError::InvalidContent(
                         "blob plaintext read length does not fit this platform".to_string(),
                     )
                 })?;
                 let chunk = self.source.next_chunk(wanted).await.map_err(|error| {
-                    crate::local_blob::PlaintextChunkError::Local(error.to_string())
+                    crate::storage::local_file::PlaintextChunkError::Local(error.to_string())
                 })?;
                 if chunk.is_empty() {
-                    return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
-                        format!("blob {} plaintext ended early", self.locator_hash),
-                    ));
+                    return Err(
+                        crate::storage::local_file::PlaintextChunkError::InvalidContent(format!(
+                            "blob {} plaintext ended early",
+                            self.locator_hash
+                        )),
+                    );
                 }
                 chunk
             }
@@ -1640,15 +1643,15 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
                 let index = *next_chunk;
                 let sealed_len =
                     usize::try_from(opener.header().sealed_chunk_len(index)).map_err(|_| {
-                        crate::local_blob::PlaintextChunkError::InvalidContent(
+                        crate::storage::local_file::PlaintextChunkError::InvalidContent(
                             "one sealed blob chunk does not fit this platform".to_string(),
                         )
                     })?;
                 let sealed = read_source_exact(&mut self.source, sealed_len, self.locator_hash)
                     .await
-                    .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
+                    .map_err(crate::storage::local_file::PlaintextChunkError::Remote)?;
                 let plaintext = opener.open_chunk(index, &sealed).map_err(|error| {
-                    crate::local_blob::PlaintextChunkError::InvalidContent(format!(
+                    crate::storage::local_file::PlaintextChunkError::InvalidContent(format!(
                         "blob {}: {error}",
                         self.locator_hash
                     ))
@@ -1658,9 +1661,12 @@ impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
             }
         };
         if plaintext.len() as u64 > self.remaining {
-            return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
-                format!("blob {} produced excess plaintext", self.locator_hash),
-            ));
+            return Err(
+                crate::storage::local_file::PlaintextChunkError::InvalidContent(format!(
+                    "blob {} produced excess plaintext",
+                    self.locator_hash
+                )),
+            );
         }
         // Present only for a browsable home, where the content hash is what
         // refuses the provider's bytes; a sealed blob is refused by its tags.
@@ -1920,9 +1926,10 @@ impl SyncStorage for CloudSyncStorage {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
-        let (plaintext_size, plaintext_hash) = crate::local_blob::exact_file_facts(plaintext_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
+        let (plaintext_size, plaintext_hash) =
+            crate::storage::local_file::exact_file_facts(plaintext_file)
+                .await
+                .map_err(StorageError::LocalFilesystem)?;
         if plaintext_size != locator.plaintext_size() || plaintext_hash != locator.plaintext_hash()
         {
             return Err(StorageError::InvalidContent(format!(
@@ -1940,9 +1947,10 @@ impl SyncStorage for CloudSyncStorage {
                         spool_file.display()
                     )));
                 }
-                let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(spool_file)
-                    .await
-                    .map_err(StorageError::LocalFilesystem)?;
+                let (stored_size, stored_hash) =
+                    crate::storage::local_file::exact_file_facts(spool_file)
+                        .await
+                        .map_err(StorageError::LocalFilesystem)?;
                 let object = ExactObjectRef::new(
                     ObjectSlot::logical(locator.semantic_key())?,
                     stored_size,
@@ -1954,10 +1962,12 @@ impl SyncStorage for CloudSyncStorage {
                     ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
                         .await?;
                 loop {
-                    let chunk =
-                        crate::local_blob::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
-                            .await
-                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk = crate::storage::local_file::PlaintextChunkReader::next_chunk(
+                        &mut reader,
+                        1 << 20,
+                    )
+                    .await
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -2024,7 +2034,7 @@ impl SyncStorage for CloudSyncStorage {
                 None => Ok::<_, crate::storage::cloud::CloudHomeError>(None),
             }
         });
-        let staged = crate::local_blob::AtomicStagedFile::create(spool_file)
+        let staged = crate::storage::local_file::AtomicStagedFile::create(spool_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let (staged, written) =
@@ -2032,14 +2042,15 @@ impl SyncStorage for CloudSyncStorage {
                 .write_byte_stream(Box::pin(stream))
                 .await
                 .map_err(|error| match error {
-                    crate::local_blob::ByteStreamWriteError::Source(error) => error.into(),
-                    crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
-                        StorageError::CleanupFailed {
-                            operation: Box::new(source.into()),
-                            cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-                        }
-                    }
-                    crate::local_blob::ByteStreamWriteError::Local(error) => {
+                    crate::storage::local_file::ByteStreamWriteError::Source(error) => error.into(),
+                    crate::storage::local_file::ByteStreamWriteError::SourceCleanup {
+                        source,
+                        cleanup,
+                    } => StorageError::CleanupFailed {
+                        operation: Box::new(source.into()),
+                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                    },
+                    crate::storage::local_file::ByteStreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -2051,10 +2062,11 @@ impl SyncStorage for CloudSyncStorage {
         }
         match staged.commit_new().await {
             Ok(()) => Ok(crate::storage::BlobSpoolWrite::Created),
-            Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
-                let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(spool_file)
-                    .await
-                    .map_err(StorageError::LocalFilesystem)?;
+            Err(crate::storage::local_file::CommitNewFileError::DestinationExists(_)) => {
+                let (stored_size, stored_hash) =
+                    crate::storage::local_file::exact_file_facts(spool_file)
+                        .await
+                        .map_err(StorageError::LocalFilesystem)?;
                 let object = ExactObjectRef::new(
                     ObjectSlot::logical(locator.semantic_key())?,
                     stored_size,
@@ -2070,10 +2082,12 @@ impl SyncStorage for CloudSyncStorage {
                 )
                 .await?;
                 loop {
-                    let chunk =
-                        crate::local_blob::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
-                            .await
-                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk = crate::storage::local_file::PlaintextChunkReader::next_chunk(
+                        &mut reader,
+                        1 << 20,
+                    )
+                    .await
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -2101,7 +2115,7 @@ impl SyncStorage for CloudSyncStorage {
                 slot.logical_key()
             )));
         }
-        let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(stored_file)
+        let (stored_size, stored_hash) = crate::storage::local_file::exact_file_facts(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         crate::blob::locator::StoredBlobRef::new(
@@ -2130,13 +2144,13 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        crate::local_blob::verify_exact_file(object, stored_file)
+        crate::storage::local_file::verify_exact_file(object, stored_file)
             .await
             .map_err(|error| match error {
-                crate::local_blob::ExactFileVerificationError::Filesystem(error) => {
+                crate::storage::local_file::ExactFileVerificationError::Filesystem(error) => {
                     StorageError::LocalFilesystem(error)
                 }
-                crate::local_blob::ExactFileVerificationError::IdentityMismatch(error) => {
+                crate::storage::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
                     StorageError::InvalidContent(error)
                 }
             })?;
@@ -2194,7 +2208,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
         let object = blob.object();
         self.validate_blob_locator_home(locator)?;
@@ -2205,7 +2219,7 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        let mut staged = crate::local_blob::AtomicStagedFile::create(dest)
+        let mut staged = crate::storage::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         self.exact
@@ -2221,13 +2235,13 @@ impl SyncStorage for CloudSyncStorage {
                 }
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
             })?;
-        crate::local_blob::verify_exact_file(object, staged.path())
+        crate::storage::local_file::verify_exact_file(object, staged.path())
             .await
             .map_err(|error| match error {
-                crate::local_blob::ExactFileVerificationError::Filesystem(error) => {
+                crate::storage::local_file::ExactFileVerificationError::Filesystem(error) => {
                     StorageError::LocalFilesystem(error)
                 }
-                crate::local_blob::ExactFileVerificationError::IdentityMismatch(error) => {
+                crate::storage::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
                     StorageError::InvalidContent(error)
                 }
             })?;
@@ -2239,12 +2253,12 @@ impl SyncStorage for CloudSyncStorage {
         blob: &crate::blob::locator::StoredBlobRef,
         protection: crate::storage::BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
         let stored_destination = dest.with_extension("coven-stored-download");
         let stored = self
             .stage_exact_blob_download(blob, &stored_destination)
             .await?;
-        let mut plaintext = crate::local_blob::AtomicStagedFile::create(dest)
+        let mut plaintext = crate::storage::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let mut reader =
@@ -2254,16 +2268,16 @@ impl SyncStorage for CloudSyncStorage {
                 .write_plaintext(&mut reader)
                 .await
                 .map_err(|error| match error {
-                    crate::local_blob::StreamWriteError::Source(
-                        crate::local_blob::PlaintextChunkError::Remote(error),
+                    crate::storage::local_file::StreamWriteError::Source(
+                        crate::storage::local_file::PlaintextChunkError::Remote(error),
                     ) => error,
-                    crate::local_blob::StreamWriteError::Source(
-                        crate::local_blob::PlaintextChunkError::InvalidContent(error),
+                    crate::storage::local_file::StreamWriteError::Source(
+                        crate::storage::local_file::PlaintextChunkError::InvalidContent(error),
                     ) => StorageError::InvalidContent(error),
-                    crate::local_blob::StreamWriteError::Source(
-                        crate::local_blob::PlaintextChunkError::Local(error),
+                    crate::storage::local_file::StreamWriteError::Source(
+                        crate::storage::local_file::PlaintextChunkError::Local(error),
                     )
-                    | crate::local_blob::StreamWriteError::Local(error) => {
+                    | crate::storage::local_file::StreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;

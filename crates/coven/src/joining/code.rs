@@ -57,7 +57,7 @@ impl InviteCode {
             .validate()
             .map_err(crate::sync::store::InviteError::Crypto)?;
         let mut history =
-            crate::sync::store::InvitationHistory::open(storage, identity, &self.store_root)
+            crate::sync::store::open_invitation_history(storage, identity, &self.store_root)
                 .await?;
         let chain = history
             .load_membership(&self.membership_floor.0, &self.owner_pubkey)

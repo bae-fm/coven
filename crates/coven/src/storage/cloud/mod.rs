@@ -51,7 +51,7 @@ use std::sync::Arc;
 use futures_util::Stream;
 
 use crate::encryption::{SealedBlobSealer, DEFAULT_BLOB_CHUNK_SIZE};
-use crate::local_blob::PlaintextReader;
+use crate::storage::local_file::PlaintextReader;
 
 /// Errors from raw cloud storage operations.
 #[derive(Debug, thiserror::Error)]
@@ -224,7 +224,7 @@ pub async fn write_cloud_object_stream(
     destination: &Path,
     stream: CloudObjectStream,
 ) -> Result<u64, CloudFileReadError> {
-    let staged = crate::local_blob::AtomicStagedFile::create(destination)
+    let staged = crate::storage::local_file::AtomicStagedFile::create(destination)
         .await
         .map_err(CloudFileReadError::Local)?;
     let (staged, written) =
@@ -232,13 +232,14 @@ pub async fn write_cloud_object_stream(
             .write_byte_stream(stream)
             .await
             .map_err(|error| match error {
-                crate::local_blob::ByteStreamWriteError::Source(error) => {
+                crate::storage::local_file::ByteStreamWriteError::Source(error) => {
                     CloudFileReadError::Source(error)
                 }
-                crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
-                    CloudFileReadError::SourceCleanup { source, cleanup }
-                }
-                crate::local_blob::ByteStreamWriteError::Local(error) => {
+                crate::storage::local_file::ByteStreamWriteError::SourceCleanup {
+                    source,
+                    cleanup,
+                } => CloudFileReadError::SourceCleanup { source, cleanup },
+                crate::storage::local_file::ByteStreamWriteError::Local(error) => {
                     CloudFileReadError::Local(error)
                 }
             })?;
@@ -593,17 +594,17 @@ impl BlobBody {
     }
 
     pub async fn from_file(path: &Path) -> Result<Self, String> {
-        let len = crate::local_blob::file_len(path).await?;
-        let reader = crate::local_blob::open_reader(path).await?;
+        let len = crate::storage::local_file::file_len(path).await?;
+        let reader = crate::storage::local_file::open_reader(path).await?;
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
     }
 
     #[cfg(test)]
-    pub(crate) fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
+    fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
         Self::from_file_with_prefix(len, reader, None, Vec::new())
     }
 
-    pub(crate) fn from_file_with_prefix(
+    pub(super) fn from_file_with_prefix(
         len: u64,
         reader: PlaintextReader,
         sealer: Option<SealedBlobSealer>,
@@ -1120,7 +1121,9 @@ mod streaming_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blob.bin");
         std::fs::write(&path, plaintext).unwrap();
-        let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let reader = crate::storage::local_file::open_reader(&path)
+            .await
+            .unwrap();
         let header = crate::encryption::SealedBlobHeader::new(
             crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
             plaintext.len() as u64,
@@ -1218,7 +1221,9 @@ mod streaming_tests {
         let plaintext: Vec<u8> = (0..200_003u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(&path, &plaintext).unwrap();
 
-        let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let reader = crate::storage::local_file::open_reader(&path)
+            .await
+            .unwrap();
         let streamed = drain(
             BlobBody::from_file_with_prefix(plaintext.len() as u64, reader, None, Vec::new()),
             4096,
@@ -1226,7 +1231,9 @@ mod streaming_tests {
         .await;
         assert_eq!(streamed, plaintext);
 
-        let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let reader = crate::storage::local_file::open_reader(&path)
+            .await
+            .unwrap();
         let collected =
             BlobBody::from_file_with_prefix(plaintext.len() as u64, reader, None, Vec::new())
                 .collect()
@@ -1382,7 +1389,9 @@ mod streaming_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("short.bin");
         std::fs::write(&path, [7; 4]).unwrap();
-        let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let reader = crate::storage::local_file::open_reader(&path)
+            .await
+            .unwrap();
         let body = BlobBody::from_file_with_prefix(5, reader, None, Vec::new());
 
         let error = home

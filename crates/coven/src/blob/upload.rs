@@ -458,8 +458,17 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
         }
 
         if retain_pinned {
-            if let Err(error) =
-                crate::blob::cache::populate_pinned(self.store_dir, &stored, &source_path).await
+            let locator = stored.locator();
+            if let Err(error) = self
+                .store_dir
+                .populate_pinned_blob_from_file(
+                    locator.namespace(),
+                    locator.locator_hash(),
+                    locator.plaintext_size(),
+                    locator.plaintext_hash(),
+                    &source_path,
+                )
+                .await
             {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self

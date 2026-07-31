@@ -16,9 +16,8 @@ use crate::sync::store::owner::writer::{
 };
 
 use super::journal::{
-    advance_owner_promotion_journal, owner_promotion_published_objects,
-    OwnerPromotionFinalizationReceipt, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
-    OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
+    owner_promotion_published_objects, OwnerPromotionFinalizationReceipt, OwnerPromotionJournal,
+    OwnerPromotionJournalPredecessor, OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
 };
 use super::OwnerPromotionError;
 
@@ -30,7 +29,6 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
         acceptance: OwnerPromotionAcceptance,
     ) -> Result<StoreMembershipStateRef, OwnerPromotionError> {
         let operation = self;
-        let database = operation.database.clone();
         Box::pin(
             operation
                 .writer
@@ -54,7 +52,7 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
                     match activate_owner_promotion_merge_head(operation, &previous, pending).await?
                     {
                         MergeHeadPublication::Continue(next) => {
-                            advance_owner_promotion_journal(&database, previous, next).await?;
+                            operation.advance_journal(previous, next).await?;
                         }
                         MergeHeadPublication::DurablyComplete { membership } => {
                             return Ok(membership);
@@ -572,8 +570,7 @@ async fn resume_owner_promotion_finalization(
                         acceptance: acceptance.clone(),
                     },
                 };
-                (previous, state) =
-                    advance_owner_promotion_journal(&database, previous, next).await?;
+                (previous, state) = operation.advance_journal(previous, next).await?;
             }
             OwnerPromotionJournalState::AcceptanceReady { acceptance } => {
                 let preparation = prepare_owner_promotion_finalization(
@@ -582,14 +579,13 @@ async fn resume_owner_promotion_finalization(
                 .await?;
                 match preparation {
                     OwnerPromotionPreparation::Continue(next) => {
-                        (previous, state) =
-                            advance_owner_promotion_journal(&database, previous, next).await?;
+                        (previous, state) = operation.advance_journal(previous, next).await?;
                     }
                     OwnerPromotionPreparation::Stale {
                         journal: next,
                         reason,
                     } => {
-                        advance_owner_promotion_journal(&database, previous, next).await?;
+                        operation.advance_journal(previous, next).await?;
                         return Err(OwnerPromotionError::Stale(Box::new(reason)));
                     }
                 }
@@ -607,8 +603,7 @@ async fn resume_owner_promotion_finalization(
                     transition,
                 )
                 .await?;
-                (previous, state) =
-                    advance_owner_promotion_journal(&database, previous, next).await?;
+                (previous, state) = operation.advance_journal(previous, next).await?;
             }
             OwnerPromotionJournalState::MergeHeadPrepared {
                 acceptance,

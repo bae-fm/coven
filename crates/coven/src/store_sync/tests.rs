@@ -113,6 +113,9 @@ fn store_sync(
     database: crate::database::Database,
     store_dir: &StoreDir,
 ) -> StoreSync {
+    let database = StoreDatabase::from_database(database);
+    let owners =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     StoreSync::new(
         config_provider,
         StoreSecurity::new(
@@ -121,13 +124,15 @@ fn store_sync(
             identity,
             crate::oauth::OAuthClients::empty(),
         ),
-        StoreDatabase::from_database(database),
+        database,
         store_dir.clone(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(store_dir),
         BlobChunking::DEFAULT,
+        owners.local_access(),
+        owners.local_transitions(),
     )
 }
 
@@ -174,16 +179,21 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         established_identity_custody(),
         crate::oauth::OAuthClients::empty(),
     );
+    let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
+    let owners =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     let sync = StoreSync::new(
         Arc::new(move || config.clone()),
         security.clone(),
-        StoreDatabase::from_database(crate::sync::test_helpers::open_test_db()),
+        database,
         store_dir.clone(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
         BlobChunking::DEFAULT,
+        owners.local_access(),
+        owners.local_transitions(),
     );
     let membership = StoreMembership::new(security, sync);
 

@@ -362,7 +362,7 @@ async fn plant_uploads(
             .parent()
             .expect("Store directory has a parent")
             .join(format!("{id}.source"));
-        crate::local_blob::write_atomic(&path, bytes)
+        crate::storage::StagedBlobFile::write_for_test(&path, bytes)
             .await
             .expect("write exact upload source");
         let row = fixture
@@ -378,7 +378,8 @@ async fn plant_uploads(
             .expect("register exact source authority");
         paths.push(path);
     }
-    crate::blob::transition::LocalBlobTransitions::new(fixture.database.clone(), store_dir.clone())
+    crate::sync::test_owner_graph::TestOwnerGraph::new(fixture.database.clone(), store_dir.clone())
+        .local_transitions()
         .make_remote("notes", ROOT_ID, retain_pinned)
         .await
         .expect("enqueue real make_remote upload journals");
@@ -923,7 +924,9 @@ async fn plant_local_rows(
             .parent()
             .expect("Store directory has a parent")
             .join(format!("{id}.source"));
-        crate::local_blob::write_atomic(&path, bytes).await.unwrap();
+        crate::storage::StagedBlobFile::write_for_test(&path, bytes)
+            .await
+            .unwrap();
         let row = fixture.db.row_blob_ref("note_photos", id).await.unwrap();
         let registered = path.clone();
         fixture

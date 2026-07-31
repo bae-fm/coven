@@ -228,7 +228,7 @@ impl Database {
 
     /// How many blob transfers each transfer loop may run at once. Read by the
     /// upload drain ([`crate::blob::upload::drain_uploads`]) and the pin loop
-    /// ([`crate::blob::cache::pin`]). Fixed for this handle's life.
+    /// ([`crate::sync::store::blob::StoreBlobCache::pin`]). Fixed for this handle's life.
     pub(crate) fn transfer_limits(&self) -> crate::blob::TransferLimits {
         self.state.transfer_limits
     }

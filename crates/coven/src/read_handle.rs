@@ -22,7 +22,6 @@
 
 use std::sync::Arc;
 
-use crate::blob::cache::{BlobCacheError, BlobStream};
 use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
 use crate::coven::CovenResult;
@@ -31,10 +30,12 @@ use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::read_store_rows::ReadStoreRows;
-use crate::store_blobs::ReadStoreBlobs;
+use crate::store_blobs::{ReadOnlyBlobStorage, ReadStoreBlobs, StoreBlobReads};
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
+use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
+use crate::sync::{BlobCacheError, BlobStream};
 
 /// A read-only handle over one coven store, for a same-store secondary reader.
 ///
@@ -80,15 +81,18 @@ impl CovenReadHandle {
         let security =
             StoreSecurity::new(key_service, key_custody, identity_custody, oauth_clients);
         let rows = ReadStoreRows::new(database.clone());
-        let blobs = ReadStoreBlobs::new(
-            database.clone(),
-            store_dir,
+        let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
+        let local_blob_access =
+            LocalStoreBlobAccess::new(database.clone(), store_dir, blob_cache.clone());
+        let blob_storage = ReadOnlyBlobStorage::new(
             config_provider,
             security.clone(),
             clock,
             cloudkit_ops,
             blob_chunking,
         );
+        let blob_reads = StoreBlobReads::new(local_blob_access, blob_cache, blob_storage);
+        let blobs = ReadStoreBlobs::new(database.clone(), blob_reads);
         Self {
             rows,
             blobs,

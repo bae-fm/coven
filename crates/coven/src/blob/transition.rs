@@ -50,7 +50,6 @@ use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
 use crate::blob::BlobTransitionObserver;
-use crate::storage::SyncStorage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -115,6 +114,105 @@ pub enum MakeLocalError {
     Db(#[from] DbError),
 }
 
+struct ExactPlaintextFile {
+    path: PathBuf,
+    expected_size: u64,
+    expected_hash: crate::protocol::store_commit::ObjectHash,
+}
+
+impl ExactPlaintextFile {
+    fn new(
+        path: PathBuf,
+        expected_size: u64,
+        expected_hash: crate::protocol::store_commit::ObjectHash,
+    ) -> Self {
+        Self {
+            path,
+            expected_size,
+            expected_hash,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    async fn verify(&self) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(&self.path)
+            .await
+            .map_err(|error| format!("open {}: {error}", self.path.display()))?;
+        let mut size = 0_u64;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1 << 20];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("read {}: {error}", self.path.display()))?;
+            if read == 0 {
+                break;
+            }
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| format!("file size overflow: {}", self.path.display()))?;
+            hasher.update(&buffer[..read]);
+        }
+        let hash = crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
+        if size != self.expected_size || hash != self.expected_hash {
+            return Err(format!(
+                "plaintext facts {size}/{hash} differ from expected facts {}/{}",
+                self.expected_size, self.expected_hash
+            ));
+        }
+        Ok(())
+    }
+
+    async fn ensure_parent(&self) -> Result<(), String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent: {}", self.path.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("create blob parent {}: {error}", parent.display()))
+    }
+
+    async fn verify_durable(&self) -> Result<(), String> {
+        let length = tokio::fs::metadata(&self.path)
+            .await
+            .map_err(|error| format!("stat {}: {error}", self.path.display()))?
+            .len();
+        if length != self.expected_size {
+            return Err(format!(
+                "destination {} has {length} bytes, expected {}",
+                self.path.display(),
+                self.expected_size
+            ));
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent: {}", self.path.display()))?;
+        tokio::fs::File::open(parent)
+            .await
+            .map_err(|error| format!("open blob parent {}: {error}", parent.display()))?
+            .sync_all()
+            .await
+            .map_err(|error| format!("sync blob parent {}: {error}", parent.display()))
+    }
+
+    async fn remove(&self) -> Result<(), String> {
+        match tokio::fs::remove_file(&self.path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("remove {}: {error}", self.path.display())),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BlobTransitionJournal {
     database: StoreDatabase,
@@ -151,11 +249,8 @@ pub(crate) struct LocalBlobTransitions {
 }
 
 impl LocalBlobTransitions {
-    pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
-        Self {
-            journal: BlobTransitionJournal::new(database),
-            store_dir,
-        }
+    pub(crate) fn new(journal: BlobTransitionJournal, store_dir: StoreDir) -> Self {
+        Self { journal, store_dir }
     }
 
     /// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
@@ -231,26 +326,19 @@ impl LocalBlobTransitions {
                         detail: error.to_string(),
                     })?,
             };
-            let (actual_size, actual_hash) = crate::local_blob::exact_file_facts(&source_path)
+            let source = ExactPlaintextFile::new(
+                source_path.clone(),
+                reference.plaintext_size(),
+                reference.plaintext_hash(),
+            );
+            source
+                .verify()
                 .await
                 .map_err(|detail| MakeRemoteError::Source {
                     blob_id: blob.id.clone(),
                     path: source_path.display().to_string(),
                     detail,
                 })?;
-            if actual_size != reference.plaintext_size()
-                || actual_hash != reference.plaintext_hash()
-            {
-                return Err(MakeRemoteError::Source {
-                    blob_id: blob.id.clone(),
-                    path: source_path.display().to_string(),
-                    detail: format!(
-                        "plaintext facts {actual_size}/{actual_hash} differ from row facts {}/{}",
-                        reference.plaintext_size(),
-                        reference.plaintext_hash(),
-                    ),
-                });
-            }
             uploads.push((reference, source_path));
         }
 
@@ -289,17 +377,11 @@ pub(crate) struct ConnectedBlobTransitions {
 
 impl ConnectedBlobTransitions {
     pub(crate) fn new(
-        database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
-        store_dir: StoreDir,
+        local: LocalBlobTransitions,
+        blob_access: crate::sync::store::blob::RemoteStoreBlobAccess,
         routing_encryption: Option<crate::encryption::EncryptionService>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
-        let local = LocalBlobTransitions::new(database.clone(), store_dir.clone());
-        let blob_access = crate::sync::store::blob::RemoteStoreBlobAccess::new(
-            crate::sync::store::blob::LocalStoreBlobAccess::new(database, store_dir),
-            storage,
-        );
         Self {
             local,
             blob_access,
@@ -376,7 +458,7 @@ struct MakeLocalMaterialization<'operation> {
     gate_column: String,
     routing_encryption: Option<crate::encryption::EncryptionService>,
     records: Vec<crate::database::MaterializedLocalBlob>,
-    created_files: Vec<PathBuf>,
+    created_files: Vec<ExactPlaintextFile>,
 }
 
 impl<'operation> MakeLocalMaterialization<'operation> {
@@ -398,8 +480,8 @@ impl<'operation> MakeLocalMaterialization<'operation> {
         }
     }
 
-    fn record_created_file(&mut self, path: PathBuf) {
-        self.created_files.push(path);
+    fn record_created_file(&mut self, file: ExactPlaintextFile) {
+        self.created_files.push(file);
     }
 
     fn record_blob(&mut self, record: crate::database::MaterializedLocalBlob) {
@@ -407,10 +489,10 @@ impl<'operation> MakeLocalMaterialization<'operation> {
     }
 
     async fn abort(self, cause: MakeLocalError) -> MakeLocalError {
-        for path in self.created_files {
-            if let Err(detail) = crate::local_blob::remove_file(&path).await {
+        for file in self.created_files {
+            if let Err(detail) = file.remove().await {
                 return MakeLocalError::Cleanup {
-                    path: path.display().to_string(),
+                    path: file.path().display().to_string(),
                     detail,
                 };
             }
@@ -603,105 +685,110 @@ impl ConnectedBlobTransitions {
             // host-provided blob to coven's local store (no path, no ref). The kind is
             // recorded in `written` so an abort's rollback treats a local-store leftover
             // loud.
-            let record = match blob.provenance {
-                Provenance::UserProvided => {
-                    let dest_path = dest
-                        .get(&blob.id)
-                        .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
-                        .clone();
-                    prepare_parent_dir(&dest_path).await.map_err(|detail| {
-                        MakeLocalError::Write {
-                            blob_id: blob.id.clone(),
-                            path: dest_path.display().to_string(),
-                            detail,
+            let record =
+                match blob.provenance {
+                    Provenance::UserProvided => {
+                        let dest_path = dest
+                            .get(&blob.id)
+                            .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
+                            .clone();
+                        let destination = ExactPlaintextFile::new(
+                            dest_path.clone(),
+                            reference.plaintext_size(),
+                            reference.plaintext_hash(),
+                        );
+                        destination.ensure_parent().await.map_err(|detail| {
+                            MakeLocalError::Write {
+                                blob_id: blob.id.clone(),
+                                path: dest_path.display().to_string(),
+                                detail,
+                            }
+                        })?;
+                        let staged = self
+                            .blob_access
+                            .stage_verified_local_copy(reference, &dest_path)
+                            .await
+                            .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                        staged
+                            .commit_new()
+                            .await
+                            .map_err(|detail| MakeLocalError::Write {
+                                blob_id: blob.id.clone(),
+                                path: dest_path.display().to_string(),
+                                detail: detail.to_string(),
+                            })?;
+                        destination.verify_durable().await.map_err(|detail| {
+                            MakeLocalError::Write {
+                                blob_id: blob.id.clone(),
+                                path: dest_path.display().to_string(),
+                                detail,
+                            }
+                        })?;
+                        materialization.record_created_file(destination);
+                        crate::database::MaterializedLocalBlob {
+                            remote: reference.clone(),
+                            stored,
+                            destination: Some(dest_path),
                         }
-                    })?;
-                    let staged = self
-                        .blob_access
-                        .stage_verified_local_copy(reference, &dest_path)
-                        .await
-                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
-                    staged
-                        .commit_new()
-                        .await
-                        .map_err(|detail| MakeLocalError::Write {
-                            blob_id: blob.id.clone(),
-                            path: dest_path.display().to_string(),
-                            detail: detail.to_string(),
-                        })?;
-                    materialization.record_created_file(dest_path.clone());
-                    verify_durable(&dest_path, reference.plaintext_size())
-                        .await
-                        .map_err(|detail| MakeLocalError::Write {
-                            blob_id: blob.id.clone(),
-                            path: dest_path.display().to_string(),
-                            detail,
-                        })?;
-                    crate::database::MaterializedLocalBlob {
-                        remote: reference.clone(),
-                        stored,
-                        destination: Some(dest_path),
                     }
-                }
-                Provenance::HostProvided => {
-                    let store_path = self
-                        .local
-                        .store_dir
-                        .local_blob_path(&blob.namespace, &blob.id)
-                        .map_err(|e| MakeLocalError::Write {
-                            blob_id: blob.id.clone(),
-                            path: format!("local/{}/{}", blob.namespace, blob.id),
-                            detail: e.to_string(),
-                        })?;
-                    let staged = self
-                        .blob_access
-                        .stage_verified_local_copy(reference, &store_path)
-                        .await
-                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
-                    match staged.commit_new().await {
-                        Ok(()) => materialization.record_created_file(store_path.clone()),
-                        Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
-                            let (size, hash) = crate::local_blob::exact_file_facts(&store_path)
-                                .await
-                                .map_err(|detail| MakeLocalError::Write {
+                    Provenance::HostProvided => {
+                        let store_path = self
+                            .local
+                            .store_dir
+                            .local_blob_path(&blob.namespace, &blob.id)
+                            .map_err(|e| MakeLocalError::Write {
+                                blob_id: blob.id.clone(),
+                                path: format!("local/{}/{}", blob.namespace, blob.id),
+                                detail: e.to_string(),
+                            })?;
+                        let destination = ExactPlaintextFile::new(
+                            store_path.clone(),
+                            reference.plaintext_size(),
+                            reference.plaintext_hash(),
+                        );
+                        let staged = self
+                            .blob_access
+                            .stage_verified_local_copy(reference, &store_path)
+                            .await
+                            .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                        match staged.commit_new().await {
+                            Ok(()) => materialization.record_created_file(destination),
+                            Err(crate::storage::PublishBlobFileError::DestinationExists(_)) => {
+                                destination.verify().await.map_err(|detail| {
+                                    MakeLocalError::Write {
+                                        blob_id: blob.id.clone(),
+                                        path: store_path.display().to_string(),
+                                        detail,
+                                    }
+                                })?;
+                            }
+                            Err(error) => {
+                                return Err(MakeLocalError::Write {
                                     blob_id: blob.id.clone(),
                                     path: store_path.display().to_string(),
-                                    detail,
-                                })?;
-                            if size != reference.plaintext_size()
-                                || hash != reference.plaintext_hash()
-                            {
-                                return Err(MakeLocalError::Write {
-                                blob_id: blob.id.clone(),
-                                path: store_path.display().to_string(),
-                                detail:
-                                    "existing local-store file differs from the exact remote blob"
-                                        .to_string(),
-                            });
+                                    detail: error.to_string(),
+                                });
                             }
                         }
-                        Err(error) => {
-                            return Err(MakeLocalError::Write {
-                                blob_id: blob.id.clone(),
-                                path: store_path.display().to_string(),
-                                detail: error.to_string(),
-                            });
-                        }
-                    }
-                    verify_durable(&store_path, reference.plaintext_size())
+                        ExactPlaintextFile::new(
+                            store_path.clone(),
+                            reference.plaintext_size(),
+                            reference.plaintext_hash(),
+                        )
+                        .verify_durable()
                         .await
                         .map_err(|detail| MakeLocalError::Write {
                             blob_id: blob.id.clone(),
                             path: store_path.display().to_string(),
                             detail,
                         })?;
-                    crate::database::MaterializedLocalBlob {
-                        remote: reference.clone(),
-                        stored,
-                        destination: None,
+                        crate::database::MaterializedLocalBlob {
+                            remote: reference.clone(),
+                            stored,
+                            destination: None,
+                        }
                     }
-                }
-            };
+                };
             materialization.record_blob(record);
 
             if let Some(obs) = self.observer.as_deref() {
@@ -721,33 +808,4 @@ impl ConnectedBlobTransitions {
         }
         Ok(())
     }
-}
-
-/// Prove a materialized local file has the expected length and fsync its parent
-/// directory before make_local can tombstone the cloud copy. The materializer has
-/// already written through a temp file / rename path; this check is the
-/// Local-specific durability gate. A materialized local file is the ONLY copy once
-/// the cloud blob is tombstoned, so a directory-fsync failure is a hard error here:
-/// it aborts the make_local (the cloud copy is still intact) rather than commit a
-/// tombstone over a destination whose entry might not survive a crash.
-async fn verify_durable(dest: &std::path::Path, expected_size: u64) -> Result<(), String> {
-    let len = crate::local_blob::file_len(dest).await?;
-    if len != expected_size {
-        return Err(format!(
-            "dest {} is {len} bytes after materialize, expected {expected_size}",
-            dest.display()
-        ));
-    }
-
-    // fsync the parent dir so the rename's new entry is durable, not just the data.
-    // Hard error (see fn doc): the materialized file is the only copy after the commit.
-    crate::local_blob::sync_parent_dir(dest).await?;
-    Ok(())
-}
-
-async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
-    let parent = dest
-        .parent()
-        .ok_or_else(|| format!("blob path has no parent dir: {}", dest.display()))?;
-    crate::local_blob::create_dir_all(parent).await
 }

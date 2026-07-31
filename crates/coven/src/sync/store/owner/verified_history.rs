@@ -835,7 +835,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         provider_admin: &crate::protocol::provider::ProviderAdminGrantRecord,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), StorePullError> {
-        let activation = load_provider_access_activation(self, access, administrator).await?;
+        let grant = self
+            .load_provider_access_grant(&access.grant_ref, administrator)
+            .await?;
+        if grant.value != access.grant {
+            return Err(StorePullError::Database(
+                "device provider approval embeds a different access grant than its exact reference"
+                    .to_string(),
+            ));
+        }
+        let activation = self.load_ref(&access.activation).await?;
+        if activation.value().provider_access_grants() != std::slice::from_ref(&access.grant_ref)
+            || activation.value().author_registration != access.grant.administrator
+            || activation.author() != administrator
+        {
+            return Err(StorePullError::Database(
+                "device provider approval activation is not the administrator's exact sole access grant"
+                    .to_string(),
+            ));
+        }
         let membership = load_merge_predecessor_membership_with_history(
             self,
             &activation.value().membership_state,
@@ -1006,6 +1024,32 @@ impl<'a> MergeHistoryVerifier<'a> {
             );
         }
         Ok(())
+    }
+
+    pub(crate) async fn load_device_join_cleanup_activation(
+        &mut self,
+        activation: &device_join::DeviceJoinCleanupActivation,
+    ) -> Result<LoadedDeviceJoinCleanupActivation, StorePullError> {
+        let verified_commit = self.load_ref(&activation.activation).await?;
+        if verified_commit.value().device_join_cleanup_receipts()
+            != std::slice::from_ref(&activation.receipt)
+        {
+            return Err(StorePullError::Database(
+                "device join cleanup activation does not contain its exact sole receipt"
+                    .to_string(),
+            ));
+        }
+        let receipts = self
+            .load_commit_join_cleanup_receipts(verified_commit.value(), verified_commit.author())
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+        Ok(LoadedDeviceJoinCleanupActivation {
+            verified_commit,
+            receipts,
+        })
     }
 
     pub(crate) async fn verify_device_join_cleanup_activation(
@@ -1264,6 +1308,8 @@ pub(crate) struct MergeHistoryVerifier<'a> {
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }
+
+type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) struct MergeOutboundAuthorization {
     pub(crate) membership: MembershipChain,
@@ -1814,21 +1860,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
     ) {
         membership::assert_deep_valid_predecessor_path_is_iterative(self, heads).await;
-    }
-
-    pub(super) async fn new(
-        authority: super::history::HistoryConstructionAuthority,
-        storage: &'a dyn SyncStorage,
-        root: &StoreRootRef,
-    ) -> Result<Self, StorePullError> {
-        let verified_root =
-            crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
-                .await
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let commit_verifier =
-            StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
-        Self::from_commit_verifier(authority, commit_verifier).await
     }
 
     pub(super) async fn from_commit_verifier(
@@ -3121,6 +3152,335 @@ impl<'a> MergeHistoryVerifier<'a> {
         .map_err(|error| StorePullError::Database(error.to_string()))
     }
 
+    pub(crate) async fn load_commit_join_evidence(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+    ) -> Result<LoadedCommitJoinEvidence, RegistrationLoadError> {
+        let loaded_cleanup = self
+            .load_commit_join_cleanup_receipts(commit, activating_author)
+            .await?;
+        let mut attempts = BTreeMap::new();
+        let mut cleanup_receipts = Vec::with_capacity(loaded_cleanup.len());
+        for loaded in loaded_cleanup {
+            let attempt = loaded.receipt.cancellation.attempt().clone();
+            attempts.entry(attempt.clone()).or_insert(loaded.attempt);
+            cleanup_receipts.push(CommitJoinCleanupReceiptEvidence {
+                receipt: loaded.receipt,
+                attempt,
+            });
+        }
+        let references = commit
+            .device_join_attempt_decisions()
+            .iter()
+            .filter_map(|decision| match decision {
+                DeviceJoinAttemptDecisionRef::Attempt(reference) => Some(reference),
+                DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
+            })
+            .chain(
+                commit
+                    .device_join_outcomes()
+                    .iter()
+                    .map(|outcome| outcome.attempt()),
+            )
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for reference in references {
+            if attempts.contains_key(&reference) {
+                continue;
+            }
+            let (attempt, owner) = self
+                .load_device_join_attempt_and_owner(&reference)
+                .await
+                .map_err(RegistrationLoadError::Object)?;
+            let evidence = self
+                .validate_device_join_attempt_evidence(attempt, &owner.value)
+                .await
+                .map_err(registration_attempt_error)?;
+            attempts.insert(reference, evidence);
+        }
+        Ok(LoadedCommitJoinEvidence {
+            attempts,
+            cleanup_receipts,
+        })
+    }
+
+    pub(crate) async fn validate_commit_join_outcomes(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+        predecessor: Option<&MembershipChain>,
+        join_evidence: &VerifiedCommitJoinEvidence,
+        accepted: VerifiedMergePredecessorHistory<'_>,
+    ) -> Result<BTreeMap<DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>, RegistrationLoadError>
+    {
+        let predecessor = predecessor.ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "device join outcome activation has no exact predecessor authority".to_string(),
+            )
+        })?;
+        if !predecessor.is_owner_now(&activating_author.author_pubkey) {
+            return Err(RegistrationLoadError::Invalid(
+                "device join outcome activation author is not an active Owner at its predecessor"
+                    .to_string(),
+            ));
+        }
+        let mut verified = BTreeMap::new();
+        for outcome_ref in commit.device_join_outcomes() {
+            if !accepted
+                .contains_join_attempt(outcome_ref.attempt())
+                .map_err(registration_attempt_error)?
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome names an attempt absent from its predecessor history"
+                        .to_string(),
+                ));
+            }
+            let attempt = join_evidence
+                .attempts
+                .get(outcome_ref.attempt())
+                .ok_or_else(|| {
+                    RegistrationLoadError::Invalid(
+                        "device join outcome has no verified exact attempt".to_string(),
+                    )
+                })?;
+            if attempt.owner_registration != commit.author_registration
+                || outcome_ref.slot() != &attempt.outcome_slot
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome differs from its exact Owner attempt".to_string(),
+                ));
+            }
+            let outcome = self
+                .load_device_join_outcome(outcome_ref, activating_author)
+                .await
+                .map_err(RegistrationLoadError::Object)?
+                .value;
+            if outcome.owner_registration != attempt.owner_registration
+                || outcome.owner_grant != attempt.owner_grant
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome signer differs from its attempt".to_string(),
+                ));
+            }
+            let activation = commit.device_registrations().iter().find(|activation| {
+                matches!(
+                    &activation.authority,
+                    StoreDeviceRegistrationActivationRef::Join { outcome, .. }
+                        if outcome == outcome_ref
+                )
+            });
+            if matches!(&outcome.body, DeviceJoinOutcomeBody::Activated { .. })
+                != activation.is_some()
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome and registration activation are not one closed operation"
+                        .to_string(),
+                ));
+            }
+            if verified
+                .insert(
+                    outcome_ref.clone(),
+                    VerifiedCommitJoinOutcome {
+                        attempt: attempt.clone(),
+                        owner: activating_author.clone(),
+                        outcome,
+                    },
+                )
+                .is_some()
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome is duplicated in one commit".to_string(),
+                ));
+            }
+        }
+        Ok(verified)
+    }
+
+    pub(crate) async fn registration_activation(
+        &self,
+        activated: &ActivatedStoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+        activating_author: &StoreDeviceRegistration,
+        predecessor: &MembershipChain,
+        verified_join_outcomes: &BTreeMap<DeviceJoinOutcomeRef, VerifiedCommitJoinOutcome>,
+    ) -> Result<StoreDeviceRegistrationActivation, RegistrationLoadError> {
+        if !predecessor.is_owner_now(&activating_author.author_pubkey) {
+            return Err(RegistrationLoadError::Invalid(
+                "registration activation commit author is not an active Owner at its predecessor"
+                    .to_string(),
+            ));
+        }
+        match (&registration.origin, &activated.authority) {
+            (
+                StoreDeviceRegistrationOrigin::Join {
+                    attempt_id: origin_attempt,
+                    outcome_slot,
+                    ..
+                },
+                StoreDeviceRegistrationActivationRef::Join {
+                    attempt_id,
+                    outcome,
+                },
+            ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
+                let verified = verified_join_outcomes.get(outcome).ok_or_else(|| {
+                    RegistrationLoadError::Invalid(
+                        "registration activation has no verified join outcome".to_string(),
+                    )
+                })?;
+                let attempt = &verified.attempt;
+                let owner = &verified.owner;
+                if attempt.expected_registration != *registration
+                    || attempt.registration_slot != *activated.registration.object.slot()
+                    || !predecessor_verifies_owner(
+                        predecessor,
+                        &attempt.membership,
+                        &owner.author_pubkey,
+                        &attempt.owner_grant,
+                    )
+                {
+                    return Err(RegistrationLoadError::Invalid(
+                        "activated registration differs from its exact join attempt".to_string(),
+                    ));
+                }
+                let outcome_value = &verified.outcome;
+                if outcome_value.owner_registration != attempt.owner_registration
+                    || outcome_value.owner_grant != attempt.owner_grant
+                {
+                    return Err(RegistrationLoadError::Invalid(
+                        "join outcome signer differs from its exact attempt authority".to_string(),
+                    ));
+                }
+                let DeviceJoinOutcomeBody::Activated { readiness } = &outcome_value.body else {
+                    return Err(RegistrationLoadError::Invalid(
+                        "cancelled device join outcome cannot activate a registration".to_string(),
+                    ));
+                };
+                let initial_ack = self
+                    .load_store_ack(&readiness.initial_ack, registration)
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
+                readiness
+                    .verify(
+                        outcome.attempt(),
+                        attempt,
+                        registration,
+                        &readiness.initial_ack,
+                        &initial_ack,
+                    )
+                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                Ok(StoreDeviceRegistrationActivation::Join {
+                    attempt_id: *attempt_id,
+                    outcome: outcome.clone(),
+                })
+            }
+            (
+                StoreDeviceRegistrationOrigin::Recovery {
+                    recovery_id: origin_recovery,
+                    recovery_slot,
+                    ..
+                },
+                StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
+            ) if origin_recovery == recovery_id && recovery_slot == node.slot() => {
+                let node_value = self
+                    .load_owner_recovery_node(node)
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
+                let mut reached_ref = node.clone();
+                let mut reached = node_value.clone();
+                while let Some(predecessor_ref) = reached.predecessor.clone() {
+                    let predecessor_node = self
+                        .load_owner_recovery_node(&predecessor_ref)
+                        .await
+                        .map_err(RegistrationLoadError::Object)?
+                        .value;
+                    if predecessor_node.next_slot != *reached_ref.object.slot() {
+                        return Err(RegistrationLoadError::Invalid(
+                            "recovery node does not occupy its exact predecessor successor slot"
+                                .to_string(),
+                        ));
+                    }
+                    if predecessor_node.recovery_id != node_value.recovery_id {
+                        return Err(RegistrationLoadError::Invalid(
+                            "recovery predecessor belongs to another recovery operation"
+                                .to_string(),
+                        ));
+                    }
+                    reached_ref = predecessor_ref;
+                    reached = predecessor_node;
+                }
+                if node_value.recovery_id != *recovery_id
+                    || node_value.readiness.registration != activated.registration
+                    || node_value.next_slot == *node.object.slot()
+                    || registration.author_pubkey != node_value.owner_pubkey
+                    || !predecessor_verifies_owner(
+                        predecessor,
+                        &node_value.membership,
+                        &node_value.owner_pubkey,
+                        &node_value.owner_grant,
+                    )
+                {
+                    return Err(RegistrationLoadError::Invalid(
+                        "recovery node differs from its exact registration".to_string(),
+                    ));
+                }
+                let initial_ack = self
+                    .load_store_ack(&node_value.readiness.initial_ack, registration)
+                    .await
+                    .map_err(RegistrationLoadError::Object)?
+                    .value;
+                if initial_ack.sequence != 1
+                    || initial_ack.successor.predecessor.is_some()
+                    || initial_ack.registration != activated.registration
+                    || initial_ack.store_cut != node_value.readiness.bootstrap_cut
+                {
+                    return Err(RegistrationLoadError::Invalid(
+                        "recovery readiness differs from its initial acknowledgement".to_string(),
+                    ));
+                }
+                Ok(StoreDeviceRegistrationActivation::Recovery {
+                    recovery_id: *recovery_id,
+                    node: node.clone(),
+                })
+            }
+            _ => Err(RegistrationLoadError::Invalid(format!(
+                "Store registration {} origin differs from its activation authority",
+                registration.device_id
+            ))),
+        }
+    }
+
+    pub(crate) async fn predecessor_commit_matching(
+        &mut self,
+        order: &store_commit::StoreCommitOrder,
+        mut matches: PredecessorCommitPredicate<'_>,
+    ) -> Result<Option<VerifiedStoreBatchCommit>, RegistrationLoadError> {
+        let mut pending = order
+            .predecessor
+            .iter()
+            .chain(order.dependencies.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            let commit = self
+                .load_ref(&reference)
+                .await
+                .map_err(registration_attempt_error)?;
+            if matches(&commit) {
+                return Ok(Some(commit));
+            }
+            pending.extend(commit.value().order.predecessor.iter().cloned());
+            pending.extend(commit.value().order.dependencies.values().cloned());
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn load_merge_commit_registrations(
         &self,
         commit: &StoreBatchCommit,
@@ -3131,7 +3491,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     {
         let accepted =
             VerifiedMergePredecessorHistory::new(&self.history.commits, accepted_frontier);
-        let loaded = load_commit_join_evidence(self, commit, author).await;
+        let loaded = self.load_commit_join_evidence(commit, author).await;
         let loaded = loaded.map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
@@ -3460,4 +3820,19 @@ impl<'a> MergeHistoryVerifier<'a> {
         }
         Ok(())
     }
+}
+
+pub(super) async fn open_merge_history_verifier<'storage>(
+    authority: super::history::HistoryConstructionAuthority,
+    storage: &'storage dyn SyncStorage,
+    root: &StoreRootRef,
+) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
+    let verified_root =
+        crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let commit_verifier =
+        StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+    MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier).await
 }

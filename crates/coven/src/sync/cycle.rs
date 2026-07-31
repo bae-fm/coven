@@ -733,20 +733,6 @@ impl SyncComponents {
         self.store.discard_blocked_write(write_id).await
     }
 
-    pub(crate) fn connected_blob_transitions(
-        &self,
-        store_dir: StoreDir,
-        observer: Option<std::sync::Arc<dyn BlobTransitionObserver>>,
-    ) -> crate::blob::transition::ConnectedBlobTransitions {
-        crate::blob::transition::ConnectedBlobTransitions::new(
-            self.database.clone(),
-            self.storage.clone(),
-            store_dir,
-            self.routing_encryption.clone(),
-            observer,
-        )
-    }
-
     #[cfg(test)]
     pub(crate) async fn list_storage_objects_for_test(
         &self,

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/coven",
+    "tools/owner-construction-check",
 ]
 resolver = "2"
 

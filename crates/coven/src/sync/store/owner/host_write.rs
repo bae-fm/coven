@@ -177,7 +177,9 @@ impl HostWriteBlobStaging {
                         .await
                         .map_err(|error| move_materialization_error(fact, error.to_string()))?;
                     if spool_write == crate::storage::BlobSpoolWrite::Created {
-                        files.created.push(spool_path.clone());
+                        files
+                            .created
+                            .push(StagedAudienceBlobFile::new(spool_path.clone()));
                     }
                     fact.audience_move = Some(StoreWriteBlobMoveDestination::Remote {
                         audience,
@@ -192,7 +194,7 @@ impl HostWriteBlobStaging {
 }
 
 pub(crate) struct StagedAudienceBlobFiles {
-    created: Vec<PathBuf>,
+    created: Vec<StagedAudienceBlobFile>,
 }
 
 impl StagedAudienceBlobFiles {
@@ -204,24 +206,9 @@ impl StagedAudienceBlobFiles {
 
     async fn rollback(self) -> Result<(), DbError> {
         let mut failures = Vec::new();
-        for path in self.created.into_iter().rev() {
-            match crate::local_blob::remove_file(&path).await {
-                Ok(true) => {
-                    if let Err(error) = crate::local_blob::sync_parent_dir(&path).await {
-                        failures.push(format!(
-                            "sync parent after removing staged audience blob {}: {error}",
-                            path.display()
-                        ));
-                    }
-                }
-                Ok(false) => failures.push(format!(
-                    "staged audience blob disappeared before rollback: {}",
-                    path.display()
-                )),
-                Err(error) => failures.push(format!(
-                    "remove staged audience blob {}: {error}",
-                    path.display()
-                )),
+        for file in self.created.into_iter().rev() {
+            if let Err(error) = file.rollback().await {
+                failures.push(error);
             }
         }
         if failures.is_empty() {
@@ -229,6 +216,56 @@ impl StagedAudienceBlobFiles {
         } else {
             Err(DbError::Message(failures.join("; ")))
         }
+    }
+}
+
+struct StagedAudienceBlobFile {
+    path: PathBuf,
+}
+
+impl StagedAudienceBlobFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    async fn rollback(self) -> Result<(), String> {
+        match tokio::fs::remove_file(&self.path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "staged audience blob disappeared before rollback: {}",
+                    self.path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "remove staged audience blob {}: {error}",
+                    self.path.display()
+                ));
+            }
+        }
+        let parent = self.path.parent().ok_or_else(|| {
+            format!(
+                "staged audience blob has no parent: {}",
+                self.path.display()
+            )
+        })?;
+        tokio::fs::File::open(parent)
+            .await
+            .map_err(|error| {
+                format!(
+                    "open staged audience blob parent {}: {error}",
+                    parent.display()
+                )
+            })?
+            .sync_all()
+            .await
+            .map_err(|error| {
+                format!(
+                    "sync staged audience blob parent {}: {error}",
+                    parent.display()
+                )
+            })
     }
 }
 
@@ -323,7 +360,7 @@ fn destination_protection(
 
 enum MoveSourcePlaintext {
     Existing(PathBuf),
-    Downloaded(crate::local_blob::AtomicStagedFile),
+    Downloaded(crate::storage::StagedBlobFile),
 }
 
 impl MoveSourcePlaintext {
@@ -347,7 +384,7 @@ async fn move_source_plaintext(
     if let Some(path) = local_source_path(tx, store_dir, fact, source)? {
         match tokio::fs::metadata(&path).await {
             Ok(metadata) if metadata.is_file() => {
-                verify_plaintext_file(fact, &path).await?;
+                ExactMovePlaintext::new(fact, &path).verify().await?;
                 return Ok(MoveSourcePlaintext::Existing(path));
             }
             Ok(_) => {
@@ -412,7 +449,7 @@ async fn stage_local_destination(
     };
     match tokio::fs::metadata(&destination).await {
         Ok(metadata) if metadata.is_file() => {
-            verify_plaintext_file(fact, &destination).await?;
+            ExactMovePlaintext::new(fact, &destination).verify().await?;
             return Ok(());
         }
         Ok(_) => {
@@ -463,7 +500,9 @@ async fn stage_local_destination(
             .await
             .map_err(|error| move_materialization_error(fact, error.to_string()))?,
     }
-    files.created.push(destination.clone());
+    files
+        .created
+        .push(StagedAudienceBlobFile::new(destination.clone()));
     Ok(())
 }
 
@@ -528,20 +567,51 @@ fn external_local_path_on(
     Ok(Some(PathBuf::from(path)))
 }
 
-async fn verify_plaintext_file(fact: &StoreWriteBlobFact, path: &Path) -> Result<(), DbError> {
-    let (size, hash) = crate::local_blob::exact_file_facts(path)
-        .await
-        .map_err(|error| move_materialization_error(fact, error))?;
-    if size != fact.plaintext_size || hash != fact.plaintext_hash {
-        return Err(move_materialization_error(
-            fact,
-            format!(
-                "plaintext {} differs from declared size/hash",
-                path.display()
-            ),
-        ));
+struct ExactMovePlaintext<'a> {
+    fact: &'a StoreWriteBlobFact,
+    path: &'a Path,
+}
+
+impl<'a> ExactMovePlaintext<'a> {
+    fn new(fact: &'a StoreWriteBlobFact, path: &'a Path) -> Self {
+        Self { fact, path }
     }
-    Ok(())
+
+    async fn verify(&self) -> Result<(), DbError> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(self.path)
+            .await
+            .map_err(|error| move_materialization_error(self.fact, error))?;
+        let mut size = 0_u64;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1 << 20];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|error| move_materialization_error(self.fact, error))?;
+            if read == 0 {
+                break;
+            }
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| move_materialization_error(self.fact, "plaintext size overflow"))?;
+            hasher.update(&buffer[..read]);
+        }
+        let hash = crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
+        if size != self.fact.plaintext_size || hash != self.fact.plaintext_hash {
+            return Err(move_materialization_error(
+                self.fact,
+                format!(
+                    "plaintext {} differs from declared size/hash",
+                    self.path.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn move_materialization_error(

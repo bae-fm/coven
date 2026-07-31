@@ -25,8 +25,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::blob::cache::{BlobCacheError, BlobStream};
-use crate::blob::transition::{MakeLocalError, MakeRemoteError};
+use crate::blob::transition::{
+    BlobTransitionJournal, LocalBlobTransitions, MakeLocalError, MakeRemoteError,
+};
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
@@ -43,7 +44,7 @@ use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::CloudCipher;
 use crate::storage::StorageError;
-use crate::store_blobs::StoreBlobs;
+use crate::store_blobs::{ConnectedBlobStorage, StoreBlobReads, StoreBlobs};
 use crate::store_circles::StoreCircles;
 use crate::store_dir::StoreDir;
 use crate::store_joining::StoreJoining;
@@ -52,7 +53,9 @@ use crate::store_recovery::StoreRecovery;
 use crate::store_rows::StoreRows;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
+use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use crate::sync::sync_loop::SyncLoopStatus;
+use crate::sync::{BlobCacheError, BlobStream};
 use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails
@@ -161,6 +164,13 @@ impl CovenHandle {
             identity_custody.clone(),
             oauth_clients,
         );
+        let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
+        let local_blob_access =
+            LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache.clone());
+        let local_blob_transitions = LocalBlobTransitions::new(
+            BlobTransitionJournal::new(database.clone()),
+            store_dir.clone(),
+        );
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
@@ -171,6 +181,8 @@ impl CovenHandle {
             observer,
             open_guard,
             blob_chunking,
+            local_blob_access.clone(),
+            local_blob_transitions,
         );
         let rows = StoreRows::new(
             database.clone(),
@@ -180,7 +192,12 @@ impl CovenHandle {
             security.clone(),
             sync.clone(),
         );
-        let blobs = StoreBlobs::new(database.clone(), store_dir.clone(), sync.clone());
+        let blob_reads = StoreBlobReads::new(
+            local_blob_access,
+            blob_cache,
+            ConnectedBlobStorage::new(sync.clone()),
+        );
+        let blobs = StoreBlobs::new(database.clone(), blob_reads, sync.clone());
         let membership = StoreMembership::new(security.clone(), sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());

@@ -578,11 +578,8 @@ async fn cleanup_snapshot_spools(
 ) -> Result<(), String> {
     let mut paths = std::collections::BTreeSet::new();
     for path in prepared.iter().filter_map(|blob| blob.spool_path.as_ref()) {
-        if paths.insert(path.clone()) && !crate::local_blob::remove_file(path).await? {
-            return Err(format!(
-                "prepared snapshot spool {} is absent",
-                path.display()
-            ));
+        if paths.insert(path.clone()) {
+            remove_snapshot_spool(path, true).await?;
         }
     }
     Ok(())
@@ -710,7 +707,7 @@ pub(crate) async fn drain_snapshot_spool_cleanup(
         .await
         .map_err(publication_error)?
     {
-        crate::local_blob::remove_file(&path)
+        remove_snapshot_spool(&path, false)
             .await
             .map_err(SnapshotError::PublicationState)?;
         database
@@ -719,6 +716,33 @@ pub(crate) async fn drain_snapshot_spool_cleanup(
             .map_err(publication_error)?;
     }
     Ok(())
+}
+
+async fn remove_snapshot_spool(
+    path: &std::path::Path,
+    require_present: bool,
+) -> Result<(), String> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("snapshot spool {} is absent", path.display()));
+        }
+        Err(error) => {
+            return Err(format!("remove snapshot spool {}: {error}", path.display()));
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("snapshot spool has no parent: {}", path.display()))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|error| format!("open snapshot spool parent {}: {error}", parent.display()))?
+        .sync_all()
+        .await
+        .map_err(|error| format!("sync snapshot spool parent {}: {error}", parent.display()))
 }
 
 fn snapshot_first_slot(
@@ -923,19 +947,12 @@ struct VerifiedSnapshotBootstrap<'storage> {
 }
 
 impl<'storage> SnapshotBootstrapAuthority<'storage> {
-    async fn open(
-        storage: &'storage dyn SyncStorage,
-        root: &StoreRootRef,
-    ) -> Result<Self, SnapshotError> {
-        let history_verifier =
-            crate::sync::store::owner::verified_history::MergeHistoryVerifier::new(
-                SnapshotHistoryConstruction.authorize_history(),
-                storage,
-                root,
-            )
-            .await
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-        Ok(Self { history_verifier })
+    fn new(
+        history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+    ) -> Self {
+        Self { history_verifier }
     }
 
     async fn select(
@@ -1038,6 +1055,21 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
             membership,
         })
     }
+}
+
+async fn open_snapshot_bootstrap_authority<'storage>(
+    storage: &'storage dyn SyncStorage,
+    root: &StoreRootRef,
+) -> Result<SnapshotBootstrapAuthority<'storage>, SnapshotError> {
+    let history_verifier =
+        crate::sync::store::owner::verified_history::open_merge_history_verifier(
+            SnapshotHistoryConstruction.authorize_history(),
+            storage,
+            root,
+        )
+        .await
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+    Ok(SnapshotBootstrapAuthority::new(history_verifier))
 }
 
 impl<'storage> VerifiedSnapshotBootstrap<'storage> {
@@ -1239,7 +1271,7 @@ mod tests {
             .await
             .expect("activate exact snapshot selector acknowledgement");
 
-        let selected = SnapshotBootstrapAuthority::open(&store.storage, &store.root)
+        let selected = open_snapshot_bootstrap_authority(&store.storage, &store.root)
             .await
             .expect("open exact snapshot bootstrap authority")
             .select(

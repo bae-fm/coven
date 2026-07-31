@@ -58,8 +58,8 @@
 //! `CacheEager` cover that falls out of its namespace budget shows a placeholder
 //! until the next read re-fetches it — covers are not pinned. A **Local** blob is not
 //! in the cache: a user-provided Local blob is the user's file at its path (an
-//! external ref); a host-provided Local blob is in coven's local store (see
-//! [`local_files`]). The cache is the mechanism for *remoteness* — so
+//! external ref); a host-provided Local blob is in coven's local store, whose
+//! paths and file operations are owned by [`crate::store_dir::StoreDir`]. The cache is the mechanism for *remoteness* — so
 //! `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote, never
 //! while it is Local.
 //!
@@ -75,9 +75,9 @@
 //!   bytes: a positioned read of a local file, or the sealed chunks covering the
 //!   range fetched from the cloud object and opened — plus pin/unpin, clear, and
 //!   budget eviction.
-//! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
-//!   local store (`storage/local/<namespace>/<id>`). Never evicted; the budget
-//!   sweep never walks it. Store, read, drop.
+//! - [`crate::store_dir::StoreDir`] — coven's own copy of a **host-provided Local**
+//!   blob, in `storage/local/<namespace>/<id>`. Never evicted; the budget sweep
+//!   never walks it.
 //! - [`upload`] — the cloud-write half: drain the durable upload queue, sealing
 //!   each blob under its scope and writing it to the cloud with coalesced progress,
 //!   so a local-only blob becomes uploaded. The sync cycle calls the drain
@@ -100,14 +100,10 @@
 //! upload lands — lives in the [`upload`] drain, the one place that knows an upload
 //! just succeeded.
 
-pub(crate) mod cache;
-#[cfg(test)]
-mod cache_tests;
 pub(crate) mod decl;
 pub(crate) mod delete;
 #[doc(hidden)]
 pub(crate) mod local_cleanup;
-pub(crate) mod local_files;
 pub(crate) mod locator;
 mod retry;
 #[cfg(test)]
@@ -115,7 +111,6 @@ mod row_ref_tests;
 pub(crate) mod transition;
 pub(crate) mod upload;
 
-pub use cache::{BlobCacheError, BlobStream};
 #[cfg(test)]
 pub(crate) use delete::BLOB_TOMBSTONE_GRACE;
 pub use transition::{MakeLocalError, MakeRemoteError};
@@ -213,9 +208,9 @@ mod upload_tests;
 mod transition_tests;
 // The local-files store's tests: store/read round-trip, a host-provided Local blob
 // surviving a budget sweep (the sweep never walks `local/`), and drop. These
-// drive a real temp directory. See [`local_files`].
+// drive a real temp directory through `StoreDir`.
 #[cfg(test)]
-mod local_files_tests;
+mod local_store_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
 // the graced GC that reclaims exact immutable objects, and the delete-outbox row
 // shape. Driven against `InMemoryCloudHome` and
@@ -250,7 +245,7 @@ pub enum Provenance {
     /// the bytes back to a user file, so it **needs a destination path**.
     UserProvided,
     /// The host hands coven the data; coven keeps its own copy in the local store
-    /// (`storage/local/<namespace>/<id>`, see [`local_files`]). `make_local`
+    /// (`storage/local/<namespace>/<id>`, owned by [`crate::store_dir::StoreDir`]). `make_local`
     /// restores it to the local store, so it needs **no path**.
     HostProvided,
 }

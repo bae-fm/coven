@@ -15,16 +15,12 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
-    fn bind(database: StoreDatabase, history_verifier: MergeHistoryVerifier<'storage>) -> Self {
-        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
-            database.clone(),
-            history_verifier.storage(),
-            history_verifier.root().clone(),
-        );
-        let keyrings = super::keyring::StoreKeyrings::new(
-            history_verifier.storage(),
-            history_verifier.root().clone(),
-        );
+    fn new(
+        database: StoreDatabase,
+        history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: super::keyring::StoreKeyrings<'storage>,
+    ) -> Self {
         Self {
             database,
             history_verifier,
@@ -286,10 +282,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         crate::database::DbError,
     > {
         let schema = std::sync::Arc::new(self.database.table_schema_for_apply().await?);
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(self.database.clone(), store_dir.clone());
         Ok(
             super::pull_package_materializer::PullPackageMaterializer::new(
                 self.database.clone(),
                 self.blob_source.clone(),
+                blob_cache,
                 store_dir.clone(),
                 schema,
             ),
@@ -398,16 +397,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
         history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::bind(database, history_verifier)
+        Self::new(database, history_verifier, blob_source, keyrings)
     }
 
     pub(super) fn from_snapshot(
         _authority: super::writer::SnapshotHistoryConstruction,
         database: StoreDatabase,
         history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::bind(database, history_verifier)
+        Self::new(database, history_verifier, blob_source, keyrings)
     }
 }
 
@@ -584,7 +587,7 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
         }
         self.database
             .complete_store_founder_graph(
-                root,
+                root.clone(),
                 registration_ref,
                 self.graph.initial_ack_ref.clone(),
                 crate::database::FounderMembershipRefs {
@@ -600,9 +603,17 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
                 .map_err(|error| {
                     protocol_root::StoreProtocolRootError::Database(error.to_string())
                 })?;
-        Ok(AuthorizedStoreHistory::bind(
+        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+            self.database.clone(),
+            self.storage,
+            root.clone(),
+        );
+        let keyrings = super::keyring::StoreKeyrings::new(self.storage, root);
+        Ok(AuthorizedStoreHistory::new(
             self.database.clone(),
             history_verifier,
+            blob_source,
+            keyrings,
         ))
     }
 }
@@ -643,24 +654,16 @@ pub(crate) struct InvitationHistory<'storage> {
 }
 
 impl<'storage> InvitationHistory<'storage> {
-    pub(crate) async fn open(
-        storage: &'storage dyn crate::storage::SyncStorage,
+    fn new(
+        verifier: MergeHistoryVerifier<'storage>,
         identity: &'storage crate::keys::UserKeypair,
-        root: &StoreRootRef,
-    ) -> Result<Self, crate::sync::store::membership::InviteError> {
-        let verifier = MergeHistoryVerifier::new(HistoryConstructionAuthority(()), storage, root)
-            .await
-            .map_err(invitation_history_error)
-            .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(format!(
-                    "membership chain: {error}"
-                ))
-            })?;
-        Ok(Self {
+        keyrings: super::keyring::StoreKeyrings<'storage>,
+    ) -> Self {
+        Self {
             verifier,
             identity,
-            keyrings: super::keyring::StoreKeyrings::new(storage, root.clone()),
-        })
+            keyrings,
+        }
     }
 
     pub(crate) async fn load_membership(
@@ -690,6 +693,51 @@ impl<'storage> InvitationHistory<'storage> {
     }
 }
 
+pub(crate) async fn open_invitation_history<'storage>(
+    storage: &'storage dyn crate::storage::SyncStorage,
+    identity: &'storage crate::keys::UserKeypair,
+    root: &StoreRootRef,
+) -> Result<InvitationHistory<'storage>, crate::sync::store::membership::InviteError> {
+    let verifier = super::verified_history::open_merge_history_verifier(
+        HistoryConstructionAuthority(()),
+        storage,
+        root,
+    )
+    .await
+    .map_err(invitation_history_error)
+    .map_err(|error| {
+        crate::sync::store::membership::InviteError::Crypto(format!("membership chain: {error}"))
+    })?;
+    let keyrings = super::keyring::StoreKeyrings::new(storage, root.clone());
+    Ok(InvitationHistory::new(verifier, identity, keyrings))
+}
+
+pub(super) async fn authorized_history_from_verified_root<'storage>(
+    database: StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    root: &StoreRootRef,
+    verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+) -> Result<AuthorizedStoreHistory<'storage>, pull::StorePullError> {
+    let authority = HistoryConstructionAuthority(());
+    let commit_verifier =
+        StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+    let history_verifier =
+        MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier).await?;
+    let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+        database.clone(),
+        storage,
+        root.clone(),
+    );
+    let keyrings = super::keyring::StoreKeyrings::new(storage, root.clone());
+    Ok(AuthorizedStoreHistory::new(
+        database,
+        history_verifier,
+        blob_source,
+        keyrings,
+    ))
+}
+
 pub(super) struct MergeConflictResolutionAuthorization {
     pub(super) membership: MembershipChain,
     pub(super) device_state_ref: StoreDeviceStateRef,
@@ -712,27 +760,12 @@ enum TerminalNonactivationCandidate {
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
-    pub(super) async fn from_verified_root(
-        database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
-        root: &StoreRootRef,
-        verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
-    ) -> Result<Self, pull::StorePullError> {
-        let authority = HistoryConstructionAuthority(());
-        let commit_verifier =
-            StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
-                .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        let history_verifier =
-            MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier).await?;
-        Ok(Self::bind(database, history_verifier))
-    }
-
     pub(super) async fn stage_verified_blob_plaintext(
         &self,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_blob::AtomicStagedFile, crate::blob::cache::BlobCacheError> {
+    ) -> Result<crate::storage::StagedBlobFile, crate::sync::BlobCacheError> {
         self.blob_source
             .stage_verified_plaintext(authority, stored, destination)
             .await
@@ -740,13 +773,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn verify_blob_plaintext(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
+        cache: &crate::sync::store::blob::StoreBlobCache,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
         self.blob_source
-            .verify_plaintext(store_dir, authority, stored, retain)
+            .verify_plaintext(cache, authority, stored, retain)
             .await
     }
 
@@ -755,7 +788,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::blob::cache::BlobCacheError> {
+    ) -> Result<crate::storage::BlobSpoolProtection, crate::sync::BlobCacheError> {
         self.blob_source
             .protection_for_test(authority, stored)
             .await

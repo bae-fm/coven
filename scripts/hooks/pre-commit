@@ -49,6 +49,11 @@ run_check "restricted-path Rust visibility" scripts/check-rust-visibility.sh || 
     exit 1
 }
 
+run_check "owner construction boundaries" cargo run --quiet -p owner-construction-check -- . || {
+    echo "Inject retained owners; construct the owner graph only at approved roots"
+    exit 1
+}
+
 run_check "cargo fmt" cargo fmt --all || { echo "cargo fmt failed"; exit 1; }
 restage_and_fail_if_changed "cargo fmt"
 

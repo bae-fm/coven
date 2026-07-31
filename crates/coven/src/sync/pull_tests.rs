@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
-use crate::blob::{local_files, CacheFill, Provenance};
+use crate::blob::{CacheFill, Provenance};
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -649,7 +649,7 @@ async fn create_store(db: &crate::database::Database, signer: UserKeypair) -> Te
 /// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
 /// host-provided cover (its Local home) before the inline push reads it to upload.
 async fn store_local(ld: &crate::store_dir::StoreDir, id: &str, bytes: &[u8]) {
-    local_files::store(ld, "photos", id, bytes)
+    crate::store_dir::StoreDir::store_local_blob(ld, "photos", id, bytes)
         .await
         .expect("store host-provided blob in the local store");
 }
@@ -694,7 +694,8 @@ async fn make_test_root_remote(
         "blob-fixture".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
     );
-    crate::blob::transition::LocalBlobTransitions::new(store_database(db), store_dir.clone())
+    crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
+        .local_transitions()
         .make_remote("notes", root_id, false)
         .await
         .expect("queue exact blob fixture upload");
@@ -5758,10 +5759,10 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     .await;
     // The host stores both blobs in the local store (their Local home) before the
     // inline push reads them to upload.
-    local_files::store(&ld1, "photos", "peager01", b"EAGER-BYTES")
+    crate::store_dir::StoreDir::store_local_blob(&ld1, "photos", "peager01", b"EAGER-BYTES")
         .await
         .expect("store eager blob in local store");
-    local_files::store(&ld1, "covers", "clazy001", b"LAZY-BYTES")
+    crate::store_dir::StoreDir::store_local_blob(&ld1, "covers", "clazy001", b"LAZY-BYTES")
         .await
         .expect("store lazy blob in local store");
     make_test_root_remote(&db1, &storage, &ld1, "n1").await;
@@ -5828,13 +5829,11 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // The source makes the root Local again. Its gate retraction carries the child
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
-    crate::blob::transition::ConnectedBlobTransitions::new(
+    crate::sync::test_owner_graph::TestOwnerGraph::new(
         crate::database::StoreDatabase::new(&db1),
-        storage.storage.clone(),
         source_store_dir.clone(),
-        None,
-        None,
     )
+    .connected_blob_transitions(storage.storage.clone(), None, None)
     .make_local("notes", "n1", &HashMap::new(), &cancel)
     .await
     .expect("make exact blob root Local");
@@ -8027,7 +8026,8 @@ mod blob_path_traversal {
         .await;
         let (_tmp, store_dir) = temp_store_dir();
         let error =
-            crate::blob::transition::LocalBlobTransitions::new(store_database(&db1), store_dir)
+            crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
+                .local_transitions()
                 .make_remote("notes", "n1", false)
                 .await
                 .expect_err("a traversal blob id cannot enter the upload journal");
@@ -8066,7 +8066,8 @@ mod blob_path_traversal {
         .await;
         let (_tmp, store_dir) = temp_store_dir();
         let error =
-            crate::blob::transition::LocalBlobTransitions::new(store_database(&db1), store_dir)
+            crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
+                .local_transitions()
                 .make_remote("notes", "n1", false)
                 .await
                 .expect_err("an unindexable blob id cannot enter the upload journal");

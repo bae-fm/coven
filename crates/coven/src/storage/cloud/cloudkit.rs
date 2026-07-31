@@ -2210,16 +2210,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for FailingBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for FailingBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if !self.emitted {
                 self.emitted = true;
                 return Ok(vec![7; CHUNK_SIZE]);
             }
-            Err(crate::local_blob::PlaintextChunkError::Local(
+            Err(crate::storage::local_file::PlaintextChunkError::Local(
                 "injected body failure".to_string(),
             ))
         }
@@ -2232,11 +2232,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for PausedBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for PausedBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if !self.emitted {
                 self.emitted = true;
                 return Ok(vec![7; CHUNK_SIZE]);
@@ -2252,9 +2252,10 @@ mod tests {
         let (home, ops) = make_cloud_home_with_ops();
         let part_key = chunk_part_key("mutable/body-failure", "cloudkit-upload-0", 0);
         ops.fail_next_delete(&part_key);
-        let reader = crate::local_blob::PlaintextReader::from_test_reader(FailingBodyReader {
-            emitted: false,
-        });
+        let reader =
+            crate::storage::local_file::PlaintextReader::from_test_reader(FailingBodyReader {
+                emitted: false,
+            });
         let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
@@ -2281,11 +2282,12 @@ mod tests {
         let (home, ops) = make_cloud_home_with_ops();
         let waiting = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let reader = crate::local_blob::PlaintextReader::from_test_reader(PausedBodyReader {
-            emitted: false,
-            waiting: waiting.clone(),
-            release: release.clone(),
-        });
+        let reader =
+            crate::storage::local_file::PlaintextReader::from_test_reader(PausedBodyReader {
+                emitted: false,
+                waiting: waiting.clone(),
+                release: release.clone(),
+            });
         let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
         let write =
             tokio::spawn(async move { home.write("mutable/cancel", body, &no_progress()).await });

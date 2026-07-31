@@ -31,6 +31,8 @@ pub(crate) mod sync_loop;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
+pub(crate) mod test_owner_graph;
+#[cfg(test)]
 mod tests;
 pub use crate::store_sync::SyncError;
 pub use hlc::{Hlc, Timestamp, UpdatedAtStamper};
@@ -50,6 +52,7 @@ pub(crate) use store::{
     VerifiedCircleReference, VerifiedStreamActivations, GENERATION_ZERO, OWNER_PUBKEY_STATE_KEY,
     STORE_CREATION_ATTEMPT_STATE_KEY,
 };
+pub use store::{BlobCacheError, BlobStream};
 pub use store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval,
     DeviceJoinApprovalPolicy, DeviceJoinCancellation, DeviceJoinCleanupActivation,

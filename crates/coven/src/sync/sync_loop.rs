@@ -83,7 +83,7 @@ pub enum SyncLoopStatus {
 
 /// Manages the background sync loop and provides access to sync components.
 pub(crate) struct SyncLoopHandle {
-    inner: Arc<SyncLoopInner>,
+    inner: Arc<SyncLoopHandleInner>,
     clock: ClockRef,
     config: Config,
     store_dir: StoreDir,
@@ -101,14 +101,14 @@ pub(crate) struct SyncLoopHandle {
     running: Arc<AtomicBool>,
 }
 
-struct SyncLoopInner {
+struct SyncLoopHandleInner {
     components: SyncComponents,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
     security: StoreSecurity,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, held so it releases only when the loop's
-    /// thread exits. The running thread keeps a clone of this `SyncLoopInner`
+    /// thread exits. The running thread keeps a clone of this `SyncLoopHandleInner`
     /// alive across its whole cycle, so the last handle dropping never releases
     /// `.coven-lock` while a mid-cycle pull or upload is still writing — a second
     /// `open()` of the same store stays refused until this writer is gone.
@@ -170,6 +170,7 @@ enum SyncCommand {
 impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
+        blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
         security: StoreSecurity,
         clock: ClockRef,
         config: Config,
@@ -181,11 +182,9 @@ impl SyncLoopHandle {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let store_dir = config.store_dir.clone();
-        let blob_transitions =
-            components.connected_blob_transitions(store_dir.clone(), observer.clone());
 
         Self {
-            inner: Arc::new(SyncLoopInner {
+            inner: Arc::new(SyncLoopHandleInner {
                 components,
                 blob_transitions,
                 security,
@@ -718,7 +717,7 @@ impl SyncLoopHandle {
     }
 }
 
-async fn execute_command(inner: &SyncLoopInner, store_dir: &StoreDir, command: SyncCommand) {
+async fn execute_command(inner: &SyncLoopHandleInner, store_dir: &StoreDir, command: SyncCommand) {
     match command {
         SyncCommand::CreateCircle { name, reply } => {
             reply_circle_command(reply, inner.components.create_circle(&name).await);
@@ -860,7 +859,7 @@ impl Drop for RunningGuard {
 
 /// Run a single sync cycle.
 async fn run_single_cycle(
-    inner: &SyncLoopInner,
+    inner: &SyncLoopHandleInner,
     clock: &dyn crate::clock::Clock,
     store_dir: &StoreDir,
 ) -> Result<super::cycle::SyncCycleResult, super::cycle::SyncCycleFailure> {

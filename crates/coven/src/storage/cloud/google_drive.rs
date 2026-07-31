@@ -22,10 +22,8 @@ use super::{
     CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PhysicalObjectLocator,
     RevokeOutcome, UploadProgress,
 };
-use crate::clock::ClockRef;
 use crate::id_provider::{IdRef, UuidProvider};
-use crate::keys::StoreKeys;
-use crate::oauth::{OAuthConfig, OAuthTokens};
+use crate::oauth::OAuthConfig;
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
@@ -156,19 +154,13 @@ enum DriveSlotState {
 }
 
 impl GoogleDriveCloudHome {
-    pub(crate) fn new(
-        folder_id: String,
-        config: OAuthConfig,
-        tokens: OAuthTokens,
-        key_service: StoreKeys,
-        clock: ClockRef,
-    ) -> Self {
+    pub(crate) fn new(folder_id: String, session: OAuthSession) -> Self {
         Self {
             folder_id,
             drive_api: DRIVE_API.to_string(),
             upload_api: UPLOAD_API.to_string(),
             ids: std::sync::Arc::new(UuidProvider),
-            session: OAuthSession::new(tokens, key_service, clock, config, "Google Drive"),
+            session,
         }
     }
 
@@ -1563,13 +1555,14 @@ mod tests {
     use axum::Router;
     use std::sync::{Arc, Mutex};
 
+    use crate::keys::StoreKeys;
+    use crate::oauth::OAuthTokens;
+
     fn home() -> GoogleDriveCloudHome {
         let config = crate::oauth::OAuthClients::for_tests()
             .config_for(crate::config::CloudProvider::GoogleDrive)
             .expect("Google Drive test client");
-        GoogleDriveCloudHome::new(
-            "folder123".to_string(),
-            config,
+        let session = OAuthSession::new(
             OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
@@ -1577,7 +1570,10 @@ mod tests {
             },
             StoreKeys::bind("test".to_string()),
             Arc::new(crate::clock::SystemClock),
-        )
+            config,
+            "Google Drive",
+        );
+        GoogleDriveCloudHome::new("folder123".to_string(), session)
     }
 
     #[derive(Clone, Debug)]
@@ -1818,16 +1814,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for FailingMultipartBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for FailingMultipartBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if !self.emitted {
                 self.emitted = true;
                 return Ok(vec![7; GDRIVE_CHUNK_SIZE]);
             }
-            Err(crate::local_blob::PlaintextChunkError::Local(
+            Err(crate::storage::local_file::PlaintextChunkError::Local(
                 "injected Drive body failure".to_string(),
             ))
         }
@@ -1838,11 +1834,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for EarlyEofMultipartBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for EarlyEofMultipartBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if self.emitted {
                 return Ok(Vec::new());
             }
@@ -1857,11 +1853,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::local_blob::PlaintextChunkReader for PausedMultipartBodyReader {
+    impl crate::storage::local_file::PlaintextChunkReader for PausedMultipartBodyReader {
         async fn next_chunk(
             &mut self,
             _max: usize,
-        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+        ) -> Result<Vec<u8>, crate::storage::local_file::PlaintextChunkError> {
             if !self.emitted {
                 self.emitted = true;
                 return Ok(vec![7; GDRIVE_CHUNK_SIZE]);
@@ -2135,10 +2131,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn absent_mutable_multipart_body_failure_cancels_the_create_session() {
         let (home, requests, deletes, server) = mutable_create_test_home().await;
-        let reader =
-            crate::local_blob::PlaintextReader::from_test_reader(FailingMultipartBodyReader {
-                emitted: false,
-            });
+        let reader = crate::storage::local_file::PlaintextReader::from_test_reader(
+            FailingMultipartBodyReader { emitted: false },
+        );
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
@@ -2168,10 +2163,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn absent_mutable_multipart_early_eof_cancels_the_create_session() {
         let (home, _requests, deletes, server) = mutable_create_test_home().await;
-        let reader =
-            crate::local_blob::PlaintextReader::from_test_reader(EarlyEofMultipartBodyReader {
-                emitted: false,
-            });
+        let reader = crate::storage::local_file::PlaintextReader::from_test_reader(
+            EarlyEofMultipartBodyReader { emitted: false },
+        );
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
@@ -2190,10 +2184,9 @@ mod tests {
             StatusCode::from_u16(499).expect("valid Drive cancellation status"),
         )
         .await;
-        let reader =
-            crate::local_blob::PlaintextReader::from_test_reader(FailingMultipartBodyReader {
-                emitted: false,
-            });
+        let reader = crate::storage::local_file::PlaintextReader::from_test_reader(
+            FailingMultipartBodyReader { emitted: false },
+        );
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
@@ -2214,11 +2207,12 @@ mod tests {
     async fn canceling_absent_mutable_multipart_cancels_the_create_session() {
         let (home, _requests, deletes, server) = mutable_create_test_home().await;
         let waiting = Arc::new(tokio::sync::Notify::new());
-        let reader =
-            crate::local_blob::PlaintextReader::from_test_reader(PausedMultipartBodyReader {
+        let reader = crate::storage::local_file::PlaintextReader::from_test_reader(
+            PausedMultipartBodyReader {
                 emitted: false,
                 waiting: waiting.clone(),
-            });
+            },
+        );
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
         let write = tokio::spawn(async move {
             home.write("mutable/copy", body, &super::super::no_progress())

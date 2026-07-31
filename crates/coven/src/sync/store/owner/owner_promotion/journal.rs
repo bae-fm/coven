@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::database::StoreDatabase;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::StoreMembershipRoleGrant;
 use crate::protocol::store_commit::{
@@ -867,34 +866,6 @@ impl OwnerPromotionJournalPredecessor {
             remote_objects,
         })
     }
-}
-
-pub(super) async fn advance_owner_promotion_journal(
-    database: &StoreDatabase,
-    previous: OwnerPromotionJournalPredecessor,
-    next: OwnerPromotionJournal,
-) -> Result<(OwnerPromotionJournalPredecessor, OwnerPromotionJournalState), OwnerPromotionError> {
-    let remote_objects = match &next.state {
-        OwnerPromotionJournalState::MergeHeadPrepared {
-            wrapped_key,
-            transition,
-            publication,
-            candidate,
-            ..
-        } => {
-            candidate.merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
-        }
-        _ => Vec::new(),
-    };
-    let transition = previous.transition_to(&next, remote_objects)?;
-    let (successor, state) = next.into_predecessor()?;
-    database
-        .advance_owner_promotion_journal(transition)
-        .await
-        .map_err(|error| {
-            OwnerPromotionError::Protocol(format!("advance exact Owner-promotion journal: {error}"))
-        })?;
-    Ok((successor, state))
 }
 
 pub(crate) struct OwnerPromotionJournalTransition {
