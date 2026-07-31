@@ -447,6 +447,27 @@ struct CloudKitStagingCleanup {
 }
 
 impl CloudKitStagingCleanup {
+    async fn begin(
+        ops: Arc<dyn CloudKitOps>,
+        scope: CloudKitScope,
+    ) -> Result<Arc<Self>, CloudHomeError> {
+        tokio::task::spawn_blocking(move || {
+            let batch = ops.begin_atomic_create(&scope)?;
+            Ok(Arc::new(Self {
+                ops,
+                scope,
+                batch,
+                armed: std::sync::atomic::AtomicBool::new(true),
+            }))
+        })
+        .await
+        .map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "CloudKit atomic-create staging task failed: {error}"
+            ))
+        })?
+    }
+
     fn disarm(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -480,27 +501,6 @@ impl Drop for CloudKitStagingCleanup {
             std::process::abort();
         }
     }
-}
-
-async fn begin_atomic_create(
-    ops: Arc<dyn CloudKitOps>,
-    scope: CloudKitScope,
-) -> Result<Arc<CloudKitStagingCleanup>, CloudHomeError> {
-    tokio::task::spawn_blocking(move || {
-        let batch = ops.begin_atomic_create(&scope)?;
-        Ok(Arc::new(CloudKitStagingCleanup {
-            ops,
-            scope,
-            batch,
-            armed: std::sync::atomic::AtomicBool::new(true),
-        }))
-    })
-    .await
-    .map_err(|error| {
-        CloudHomeError::Transport(format!(
-            "CloudKit atomic-create staging task failed: {error}"
-        ))
-    })?
 }
 
 async fn stage_atomic_create_record(
@@ -1442,7 +1442,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
             ))
         })?;
         let part_count = total_len.div_ceil(CHUNK_SIZE);
-        let staging = begin_atomic_create(self.ops.clone(), self.scope.clone()).await?;
+        let staging = CloudKitStagingCleanup::begin(self.ops.clone(), self.scope.clone()).await?;
         let mut requested_keys = Vec::with_capacity(part_count + 1);
         let mut written_len = 0usize;
         for index in 0..part_count {
@@ -3272,7 +3272,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_an_uncommitted_staging_batch_discards_host_local_payloads() {
         let (_home, ops) = make_cloud_home_with_ops();
-        let staging = begin_atomic_create(ops.clone(), CloudKitScope::Private)
+        let staging = CloudKitStagingCleanup::begin(ops.clone(), CloudKitScope::Private)
             .await
             .unwrap();
         stage_atomic_create_record(
@@ -3301,7 +3301,7 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let ops = Arc::new(MockCloudKitOps::new());
-                let staging = begin_atomic_create(ops.clone(), CloudKitScope::Private)
+                let staging = CloudKitStagingCleanup::begin(ops.clone(), CloudKitScope::Private)
                     .await
                     .unwrap();
                 stage_atomic_create_record(
