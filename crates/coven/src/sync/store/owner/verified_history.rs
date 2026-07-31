@@ -610,7 +610,36 @@ impl<'a> MergeHistoryVerifier<'a> {
         latest: StoreAck,
         registration: &StoreDeviceRegistration,
     ) -> Result<BTreeMap<u64, (StoreAckRef, StoreAck)>, RegistrationLoadError> {
-        load_acknowledgement_proof_chain(self, latest_ref, latest, registration).await
+        let mut chain = BTreeMap::new();
+        let mut current_ref = latest_ref;
+        let mut current = latest;
+        loop {
+            if chain
+                .insert(current_ref.sequence, (current_ref.clone(), current.clone()))
+                .is_some()
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "Store acknowledgement proof chain repeats a sequence".to_string(),
+                ));
+            }
+            let Some((predecessor_ref, predecessor)) = self
+                .load_store_ack_predecessor(&current_ref, &current, registration)
+                .await
+                .map_err(RegistrationLoadError::Object)?
+            else {
+                break;
+            };
+            current_ref = predecessor_ref;
+            current = predecessor.value;
+        }
+        if chain.first_key_value().map(|(sequence, _)| *sequence) != Some(1)
+            || chain.last_key_value().map(|(sequence, _)| *sequence) != Some(chain.len() as u64)
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement proof chain is not contiguous from sequence one".to_string(),
+            ));
+        }
+        Ok(chain)
     }
 
     pub(crate) async fn verify_canonical_owner_registration(

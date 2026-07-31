@@ -103,53 +103,6 @@ pub(crate) async fn validate_commit_acknowledgement(
     Ok(Some((reference.clone(), ack)))
 }
 
-pub(crate) async fn load_acknowledgement_proof_chain(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    latest_ref: super::store_commit::StoreAckRef,
-    latest: super::store_commit::StoreAck,
-    registration: &StoreDeviceRegistration,
-) -> Result<
-    BTreeMap<
-        u64,
-        (
-            super::store_commit::StoreAckRef,
-            super::store_commit::StoreAck,
-        ),
-    >,
-    RegistrationLoadError,
-> {
-    let mut chain = BTreeMap::new();
-    let mut current_ref = latest_ref;
-    let mut current = latest;
-    loop {
-        if chain
-            .insert(current_ref.sequence, (current_ref.clone(), current.clone()))
-            .is_some()
-        {
-            return Err(RegistrationLoadError::Invalid(
-                "Store acknowledgement proof chain repeats a sequence".to_string(),
-            ));
-        }
-        let Some((predecessor_ref, predecessor)) = history_verifier
-            .load_store_ack_predecessor(&current_ref, &current, registration)
-            .await
-            .map_err(RegistrationLoadError::Object)?
-        else {
-            break;
-        };
-        current_ref = predecessor_ref;
-        current = predecessor.value;
-    }
-    if chain.first_key_value().map(|(sequence, _)| *sequence) != Some(1)
-        || chain.last_key_value().map(|(sequence, _)| *sequence) != Some(chain.len() as u64)
-    {
-        return Err(RegistrationLoadError::Invalid(
-            "Store acknowledgement proof chain is not contiguous from sequence one".to_string(),
-        ));
-    }
-    Ok(chain)
-}
-
 async fn validate_commit_reclaim_authorization(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
