@@ -58,6 +58,10 @@ struct StagedBlob {
     published: Option<crate::local_blob::PublishedAtomicFile>,
 }
 
+struct StagedBlobBatch {
+    blobs: Vec<StagedBlob>,
+}
+
 impl StagedBlob {
     async fn stage<E>(store_dir: &StoreDir, blob: NewBlob) -> Result<Self, HostWriteError<E>> {
         let destination = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
@@ -121,6 +125,82 @@ impl StagedBlob {
     fn commit(mut self) {
         assert!(self.staged.is_none(), "committed blob remains staged");
         assert!(self.published.take().is_some(), "blob was not published");
+    }
+}
+
+impl StagedBlobBatch {
+    async fn stage<E>(
+        store_dir: &StoreDir,
+        blobs: Vec<NewBlob>,
+    ) -> Result<Self, HostWriteError<E>> {
+        let mut staged = Vec::new();
+        for blob in blobs {
+            match StagedBlob::stage(store_dir, blob).await {
+                Ok(blob) => staged.push(blob),
+                Err(error) => {
+                    return Err(Self { blobs: staged }
+                        .discard_after_stage_failure(error)
+                        .await);
+                }
+            }
+        }
+        Ok(Self { blobs: staged })
+    }
+
+    async fn discard_after_stage_failure<E>(
+        self,
+        operation: HostWriteError<E>,
+    ) -> HostWriteError<E> {
+        let mut failures = Vec::new();
+        for blob in self.blobs {
+            let identity = format!("{}/{}", blob.namespace, blob.id);
+            if let Err(error) = blob.discard().await {
+                failures.push(format!("{identity}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            operation
+        } else {
+            HostWriteError::BlobCleanupFailed {
+                operation: Box::new(operation),
+                cleanup: failures.join("; "),
+            }
+        }
+    }
+
+    fn publish<E>(
+        &mut self,
+        mut validate: impl FnMut(&str, &str) -> Result<(), HostWriteError<E>>,
+    ) -> Result<(), HostWriteError<E>> {
+        for blob in &mut self.blobs {
+            validate(&blob.namespace, &blob.id)?;
+            blob.publish().map_err(HostWriteError::Blob)?;
+        }
+        Ok(())
+    }
+
+    fn commit(self) {
+        for blob in self.blobs {
+            blob.commit();
+        }
+    }
+
+    fn rollback<E>(self, write: HostWriteError<E>) -> HostWriteError<E> {
+        let mut failures = Vec::new();
+        for blob in self.blobs.into_iter().rev() {
+            let identity = format!("{}/{}", blob.namespace, blob.id);
+            if let Err(error) = blob.rollback() {
+                failures.push(format!("{identity}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            write
+        } else {
+            HostWriteError::WriteRollbackFailed {
+                write: Box::new(write),
+                rollback: failures.join("; "),
+            }
+        }
     }
 }
 
@@ -209,7 +289,7 @@ impl StoreDatabase {
         E: Send + 'static,
     {
         let HostWriteOperation { batch, sql } = operation;
-        let staged = stage_blobs(&store_dir, batch.new_blobs).await?;
+        let staged = StagedBlobBatch::stage(&store_dir, batch.new_blobs).await?;
         let tables = self.synced_tables.to_vec();
         let gates = self.gates.clone();
         let blob_decls = self.blob_decls.clone();
@@ -254,16 +334,12 @@ impl StoreDatabase {
                             })
                             .collect::<Result<Vec<_>, _>>()?;
 
-                        for blob in &mut staged {
-                            match blob_decls.row_for_blob_in_namespace(
-                                transaction,
-                                &blob.namespace,
-                                &blob.id,
-                            ) {
+                        staged.publish(|namespace, id| {
+                            match blob_decls.row_for_blob_in_namespace(transaction, namespace, id) {
                                 Ok(Some(_)) => {
                                     return Err(HostWriteError::BlobAlreadyReferenced {
-                                        namespace: blob.namespace.clone(),
-                                        id: blob.id.clone(),
+                                        namespace: namespace.to_string(),
+                                        id: id.to_string(),
                                     });
                                 }
                                 Ok(None) => {}
@@ -277,18 +353,18 @@ impl StoreDatabase {
                                          SELECT 1 FROM store_write_blob_leases \
                                          WHERE namespace = ?1 AND blob_id = ?2\
                                      )",
-                                    (&blob.namespace, &blob.id),
+                                    (namespace, id),
                                     |row| row.get::<_, bool>(0),
                                 )
                                 .map_err(DbError::from)?;
                             if leased {
                                 return Err(HostWriteError::BlobOwnedByPendingWrite {
-                                    namespace: blob.namespace.clone(),
-                                    id: blob.id.clone(),
+                                    namespace: namespace.to_string(),
+                                    id: id.to_string(),
                                 });
                             }
-                            blob.publish().map_err(HostWriteError::Blob)?;
-                        }
+                            Ok(())
+                        })?;
 
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             sql(SqlContext::new(transaction, stamper, &tables, &gates))
@@ -326,28 +402,10 @@ impl StoreDatabase {
 
                 match result {
                     Ok(receipt) => {
-                        for blob in staged {
-                            blob.commit();
-                        }
+                        staged.commit();
                         Ok(Ok(receipt))
                     }
-                    Err(error) => {
-                        let mut rollback_failures = Vec::new();
-                        for blob in staged.into_iter().rev() {
-                            let identity = format!("{}/{}", blob.namespace, blob.id);
-                            if let Err(rollback) = blob.rollback() {
-                                rollback_failures.push(format!("{identity}: {rollback}"));
-                            }
-                        }
-                        if rollback_failures.is_empty() {
-                            Ok(Err(error))
-                        } else {
-                            Ok(Err(HostWriteError::WriteRollbackFailed {
-                                write: Box::new(error),
-                                rollback: rollback_failures.join("; "),
-                            }))
-                        }
-                    }
+                    Err(error) => Ok(Err(staged.rollback(error))),
                 }
             })
             .await;
@@ -366,38 +424,4 @@ impl StoreDatabase {
         }
         Ok(receipt)
     }
-}
-
-async fn stage_blobs<E>(
-    store_dir: &StoreDir,
-    blobs: Vec<NewBlob>,
-) -> Result<Vec<StagedBlob>, HostWriteError<E>> {
-    let mut staged = Vec::new();
-    for blob in blobs {
-        match StagedBlob::stage(store_dir, blob).await {
-            Ok(blob) => staged.push(blob),
-            Err(error) => {
-                let mut failures = Vec::new();
-                for blob in staged {
-                    let identity = format!("{}/{}", blob.namespace, blob.id);
-                    if let Err(error) = blob.discard().await {
-                        failures.push(format!("{identity}: {error}"));
-                    }
-                }
-                let cleanup = if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(failures.join("; "))
-                };
-                return match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
-                        operation: Box::new(error),
-                        cleanup,
-                    }),
-                };
-            }
-        }
-    }
-    Ok(staged)
 }
