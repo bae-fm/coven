@@ -433,7 +433,15 @@ async fn verify_epoch_close_outcome(
     // finalizes the close and carries the outcome; every later control in the same
     // epoch (a re-add, a further add) inherits the already-settled epoch. Dispatch
     // on the retained predecessor's kind, not on the origin alone.
-    let epoch_predecessor = retained_predecessor(database, root, control).await?;
+    let epoch_predecessor = match control.value.previous_control_hash() {
+        None => None,
+        Some(_) => {
+            let coord = reopen_predecessor_coord(control)?;
+            database
+                .verified_circle_activation(root.clone(), control.value.circle_id, coord)
+                .await?
+        }
+    };
     let predecessor_is_close = epoch_predecessor.as_ref().is_some_and(|predecessor| {
         matches!(
             predecessor.control.value.state(),
@@ -698,26 +706,6 @@ fn reopen_predecessor_coord(
                 "Circle successor predecessor is absent from its covered control heads".to_string(),
             )
         })
-}
-
-/// The active successor's exact predecessor as a retained activation, or `None`
-/// when the control opens its own stream (founder seq 1) or the predecessor is
-/// not retained. Its kind distinguishes the two active successors of a closed
-/// epoch — the finalize (predecessor is the `EpochClose`, carries the outcome)
-/// from every later in-epoch control (predecessor is already active, inherits the
-/// settled epoch) — and rejects a founder-origin successor of an epoch close.
-async fn retained_predecessor(
-    database: &StoreDatabase,
-    root: &StoreRootRef,
-    control: &PreparedCircleControl,
-) -> Result<Option<VerifiedCircleReference>, CircleOperationError> {
-    if control.value.previous_control_hash().is_none() {
-        return Ok(None);
-    }
-    let coord = reopen_predecessor_coord(control)?;
-    Ok(database
-        .verified_circle_activation(root.clone(), control.value.circle_id, coord)
-        .await?)
 }
 
 /// Verify an `EpochClose → ActiveEpoch` reopen. The reopen is valid only when the
