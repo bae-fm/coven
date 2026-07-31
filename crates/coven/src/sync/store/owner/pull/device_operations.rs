@@ -42,17 +42,19 @@ fn resolve_loaded_device_state(
     Ok(state)
 }
 
-async fn resolve_device_state(
-    resolver: &DeviceStateResolver<'_>,
-    reference: &StoreDeviceStateRef,
-) -> Result<ResolvedStoreDeviceState, RegistrationLoadError> {
-    match resolver {
-        DeviceStateResolver::Database(database) => database
-            .resolved_store_device_state(reference)
-            .await
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string())),
-        DeviceStateResolver::Loaded { genesis, states } => {
-            resolve_loaded_device_state(reference, genesis, states)
+impl DeviceStateResolver<'_> {
+    async fn resolve(
+        &self,
+        reference: &StoreDeviceStateRef,
+    ) -> Result<ResolvedStoreDeviceState, RegistrationLoadError> {
+        match self {
+            DeviceStateResolver::Database(database) => database
+                .resolved_store_device_state(reference)
+                .await
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string())),
+            DeviceStateResolver::Loaded { genesis, states } => {
+                resolve_loaded_device_state(reference, genesis, states)
+            }
         }
     }
 }
@@ -104,7 +106,9 @@ async fn verify_merge_device_exclusion_proof(
     cutoff: &StoreHistoryCut,
 ) -> Result<(), RegistrationLoadError> {
     let root = commit_verifier.root().clone();
-    let frozen = resolve_device_state(resolver, &proposal.object.value.frozen_device_state).await?;
+    let frozen = resolver
+        .resolve(&proposal.object.value.frozen_device_state)
+        .await?;
     if !device_state_has_active_registration(&frozen, &proposal.object.value.target) {
         return Err(RegistrationLoadError::Invalid(
             "device exclusion proposal frozen state does not contain its active target".to_string(),
@@ -156,7 +160,7 @@ async fn verify_merge_device_exclusion_proof(
                     .to_string(),
             ));
         }
-        let ack_state = resolve_device_state(resolver, &ack.device_state).await?;
+        let ack_state = resolver.resolve(&ack.device_state).await?;
         if !device_state_has_pending_proposal(&ack_state, &proposal.reference) {
             return Err(RegistrationLoadError::Invalid(
                 "device exclusion proof acknowledgement does not observe the pending proposal"
