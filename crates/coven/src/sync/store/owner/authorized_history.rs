@@ -742,20 +742,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .verify_refs(pull::commit_predecessor_references(commit))
             .await
             .map_err(|error| error.to_string())?;
-        let history = self.history_verifier.history();
-        let states = history
-            .commits
-            .iter()
-            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let predecessor_state =
-            pull::verified_merge_predecessor_state(&history.genesis, &states, commit)
-                .map_err(|error| error.to_string())?;
-        let verified_membership_activations = verified_merge_membership_prefix(
-            &history.commits,
-            pull::commit_predecessor_references(commit),
-        )
-        .map_err(|error| error.to_string())?;
+        let predecessor_state = self
+            .history_verifier
+            .verified_predecessor_state(commit)
+            .map_err(|error| error.to_string())?;
+        let verified_membership_activations = self
+            .history_verifier
+            .verified_membership_prefix(pull::commit_predecessor_references(commit))
+            .map_err(|error| error.to_string())?;
         let pending_resolution = self
             .history_verifier
             .verify_resolution_activation_acceptance(commit)
@@ -1214,13 +1208,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
         let retained_refs = self.database.retained_merge_materialization_refs().await?;
         self.history_verifier.verify_refs(retained_refs).await?;
-        let retained_commit_proofs = self
-            .history_verifier
-            .history()
-            .commits
-            .iter()
-            .map(|(reference, verified)| (reference.clone(), verified.verified.clone()))
-            .collect();
+        let retained_commit_proofs = self.history_verifier.retained_commit_proofs();
         let retained = self
             .database
             .retained_merge_replay_inputs_with_verified_commits(
@@ -1283,27 +1271,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Option<pull::VerifiedPullCandidate> {
-        self.history_verifier
-            .history()
-            .commits
-            .get(reference)
-            .map(|commit| pull::VerifiedPullCandidate {
-                verified: commit.verified.clone(),
-                predecessor_membership: commit.predecessor_membership.clone(),
-                registrations: commit.registrations.clone(),
-                operations: commit.operations.clone(),
-                membership_control: commit
-                    .membership_control
-                    .as_ref()
-                    .map(|control| control.activations.clone()),
-            })
+        self.history_verifier.verified_pull_candidate(reference)
     }
 
     pub(super) fn verified_pull_membership_prefix(
         &self,
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, pull::StorePullError> {
-        verified_merge_membership_prefix(&self.history_verifier.history().commits, predecessors)
+        self.history_verifier
+            .verified_membership_prefix(predecessors)
     }
 
     pub(super) async fn load_pull_store_package(
@@ -2718,7 +2694,8 @@ impl AuthorizedStoreHistory<'_> {
         predecessors: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, pull::StorePullError> {
         self.history_verifier.verify_refs(references).await?;
-        verified_merge_membership_prefix(&self.history_verifier.history().commits, predecessors)
+        self.history_verifier
+            .verified_membership_prefix(predecessors)
     }
 
     pub(super) async fn load_founder_registration_for_test(

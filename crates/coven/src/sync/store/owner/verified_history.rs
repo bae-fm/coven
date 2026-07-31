@@ -806,7 +806,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<bool, StorePullError> {
         self.verify_refs([expected.clone()]).await?;
         let mut state = self
-            .history()
+            .history
             .commits
             .get(expected)
             .ok_or_else(|| {
@@ -861,12 +861,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             self.verify_refs(next.values().cloned()).await?;
             let next_state = if next.is_empty() {
-                self.history().genesis.clone()
+                self.history.genesis.clone()
             } else {
                 ResolvedStoreDeviceState::merge(
                     next.values()
                         .map(|reference| {
-                            self.history()
+                            self.history
                                 .commits
                                 .get(reference)
                                 .map(|commit| commit.state_after.clone())
@@ -889,7 +889,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 && registrations.len() == registration_count;
             if stable {
                 let accepted_closure =
-                    verified_merge_commit_closure(&self.history().commits, next.values().cloned())?;
+                    verified_merge_commit_closure(&self.history.commits, next.values().cloned())?;
                 return Ok(accepted_closure.contains(expected));
             }
             let state_fingerprint = ObjectHash::digest(
@@ -2070,8 +2070,66 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.remember(commit)
     }
 
-    pub(crate) fn history(&self) -> &VerifiedMergeHistory {
-        &self.history
+    pub(super) fn verified_predecessor_state(
+        &self,
+        commit: &StoreBatchCommit,
+    ) -> Result<ResolvedStoreDeviceState, StorePullError> {
+        let states = self
+            .history
+            .commits
+            .iter()
+            .map(|(reference, verified)| (reference.clone(), verified.state_after.clone()))
+            .collect::<BTreeMap<_, _>>();
+        verified_merge_predecessor_state(&self.history.genesis, &states, commit)
+    }
+
+    pub(super) fn verified_membership_prefix(
+        &self,
+        predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
+    ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
+        verified_merge_membership_prefix(&self.history.commits, predecessors)
+    }
+
+    pub(super) fn retained_commit_proofs(
+        &self,
+    ) -> BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit> {
+        self.history
+            .commits
+            .iter()
+            .map(|(reference, verified)| (reference.clone(), verified.verified.clone()))
+            .collect()
+    }
+
+    pub(super) fn verified_pull_candidate(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<pull::VerifiedPullCandidate> {
+        self.history
+            .commits
+            .get(reference)
+            .map(|commit| pull::VerifiedPullCandidate {
+                verified: commit.verified.clone(),
+                predecessor_membership: commit.predecessor_membership.clone(),
+                registrations: commit.registrations.clone(),
+                operations: commit.operations.clone(),
+                membership_control: commit
+                    .membership_control
+                    .as_ref()
+                    .map(|control| control.activations.clone()),
+            })
+    }
+
+    pub(super) fn verifies_membership_head_activation(
+        &self,
+        reference: &protocol_membership::MembershipHeadRef,
+        head: &protocol_membership::AuthorHead,
+        activation: &StoreBatchCommitRef,
+    ) -> bool {
+        self.history
+            .commits
+            .get(activation)
+            .and_then(|commit| commit.membership_control.as_ref())
+            .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
     }
 
     pub(crate) async fn read_protocol_object(

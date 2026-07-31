@@ -330,14 +330,7 @@ pub(crate) async fn verify_merge_membership_head_activation(
         .verify_refs([activation.clone()])
         .await
         .map_err(|error| error.to_string())?;
-    let verified_control = history_verifier
-        .history()
-        .commits
-        .get(activation)
-        .and_then(|commit| commit.membership_control.as_ref());
-    if !verified_control
-        .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
-    {
+    if !history_verifier.verifies_membership_head_activation(reference, head, activation) {
         return Err(
             "membership head activation differs from its verified Merge membership control"
                 .to_string(),
