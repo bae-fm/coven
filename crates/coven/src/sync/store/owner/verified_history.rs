@@ -2185,6 +2185,53 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
+    pub(crate) async fn validate_commit_acknowledgement(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+    ) -> Result<Option<(StoreAckRef, StoreAck)>, RegistrationLoadError> {
+        let Some(reference) = commit.acknowledgement() else {
+            return Ok(None);
+        };
+        let ack = self
+            .load_store_ack(reference, activating_author)
+            .await
+            .map_err(RegistrationLoadError::Object)?
+            .value;
+        let predecessor_cut = commit
+            .order
+            .predecessor_cut()
+            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+        if ack.registration != commit.author_registration
+            || ack.store_cut != predecessor_cut
+            || ack.device_state != commit.device_state
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement differs from its activating commit predecessor".to_string(),
+            ));
+        }
+        if let Some(snapshot) = &ack.snapshot {
+            let snapshot_author = self
+                .load_registration(&snapshot.author_registration)
+                .await
+                .map_err(RegistrationLoadError::Object)?;
+            let (_, metadata) = self
+                .load_store_snapshot(
+                    &snapshot.author_registration,
+                    &snapshot_author.value,
+                    &snapshot.snapshot,
+                )
+                .await
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            if !ack.store_cut.frontier().covers(&metadata.coverage) {
+                return Err(RegistrationLoadError::Invalid(
+                    "Store acknowledgement does not cover its exact snapshot".to_string(),
+                ));
+            }
+        }
+        Ok(Some((reference.clone(), ack)))
+    }
+
     pub(crate) async fn load_store_snapshot(
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
@@ -3277,7 +3324,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
                 RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
             })?;
-            let acknowledgement = Box::pin(validate_commit_acknowledgement(self, &commit, &author))
+            let acknowledgement = self
+                .validate_commit_acknowledgement(&commit, &author)
                 .await
                 .map_err(|error| match error {
                     RegistrationLoadError::Object(error) => StorePullError::Object(error),

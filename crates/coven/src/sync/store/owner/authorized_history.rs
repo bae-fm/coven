@@ -4,9 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::authorized_store::LocalStoreDevice;
 use super::history::{abandonment, OwnerPromotionHistory, ReclaimHistory, RestoreHistory};
 use super::pull;
-use super::verified_history::registration::{
-    validate_commit_acknowledgement, RegistrationLoadError,
-};
+use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
@@ -1483,13 +1481,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Option<crate::protocol::store_commit::RetainedVerifiedActivatedAck>,
         pull::StorePullError,
     > {
-        let acknowledgement =
-            validate_commit_acknowledgement(&self.history_verifier, commit, author)
-                .await
-                .map_err(|error| match error {
-                    RegistrationLoadError::Object(error) => pull::StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => pull::StorePullError::Database(error),
-                })?;
+        let acknowledgement = self
+            .history_verifier
+            .validate_commit_acknowledgement(commit, author)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => pull::StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => pull::StorePullError::Database(error),
+            })?;
         match acknowledgement {
             Some((reference, value)) => self
                 .history_verifier

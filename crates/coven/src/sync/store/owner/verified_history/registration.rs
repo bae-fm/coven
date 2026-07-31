@@ -52,57 +52,6 @@ pub(crate) async fn load_device_join_cleanup_activation(
     })
 }
 
-pub(crate) async fn validate_commit_acknowledgement(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    commit: &StoreBatchCommit,
-    activating_author: &StoreDeviceRegistration,
-) -> Result<
-    Option<(
-        super::store_commit::StoreAckRef,
-        super::store_commit::StoreAck,
-    )>,
-    RegistrationLoadError,
-> {
-    let Some(reference) = commit.acknowledgement() else {
-        return Ok(None);
-    };
-    let ack = Box::pin(history_verifier.load_store_ack(reference, activating_author))
-        .await
-        .map_err(RegistrationLoadError::Object)?
-        .value;
-    let predecessor_cut = commit
-        .order
-        .predecessor_cut()
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    if ack.registration != commit.author_registration
-        || ack.store_cut != predecessor_cut
-        || ack.device_state != commit.device_state
-    {
-        return Err(RegistrationLoadError::Invalid(
-            "Store acknowledgement differs from its activating commit predecessor".to_string(),
-        ));
-    }
-    if let Some(snapshot) = &ack.snapshot {
-        let snapshot_author = history_verifier
-            .load_registration(&snapshot.author_registration)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-        let (_, metadata) = Box::pin(history_verifier.load_store_snapshot(
-            &snapshot.author_registration,
-            &snapshot_author.value,
-            &snapshot.snapshot,
-        ))
-        .await
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-        if !ack.store_cut.frontier().covers(&metadata.coverage) {
-            return Err(RegistrationLoadError::Invalid(
-                "Store acknowledgement does not cover its exact snapshot".to_string(),
-            ));
-        }
-    }
-    Ok(Some((reference.clone(), ack)))
-}
-
 async fn validate_commit_reclaim_authorization(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
@@ -362,12 +311,9 @@ pub(crate) async fn load_commit_registrations(
         ));
     }
     if commit.acknowledgement().is_some() {
-        Box::pin(validate_commit_acknowledgement(
-            history_verifier,
-            commit,
-            activating_author,
-        ))
-        .await?;
+        history_verifier
+            .validate_commit_acknowledgement(commit, activating_author)
+            .await?;
     }
     if let Some(reference) = commit.reclaim_authorization() {
         Box::pin(validate_commit_reclaim_authorization(
