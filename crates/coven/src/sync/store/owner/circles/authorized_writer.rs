@@ -1,5 +1,5 @@
 use super::commands::{
-    ensure_not_deleted, CircleAddMemberRequest, CircleCancelEpochCloseRequest, CircleDeleteRequest,
+    CircleAddMemberRequest, CircleCancelEpochCloseRequest, CircleDeleteRequest,
     CircleOperationRequest, CircleRemoveMemberRequest, CircleRenameRequest,
     CircleResolveControlRequest, CircleResolveLosingBranch,
 };
@@ -125,6 +125,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.writer.circle_history()
     }
 
+    /// A deleted Circle is terminal: every lifecycle command refuses it with a
+    /// typed reason rather than a generic missing-authoring-state error.
+    async fn ensure_not_deleted(&self, circle_id: CircleId) -> Result<(), CircleOperationError> {
+        if self.database.circle_is_deleted(circle_id).await? {
+            return Err(CircleOperationError::Deleted { circle_id });
+        }
+        Ok(())
+    }
+
     async fn current_authoring_context(
         &mut self,
         circle_id: CircleId,
@@ -136,7 +145,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         ),
         CircleOperationError,
     > {
-        ensure_not_deleted(&self.database, circle_id).await?;
+        self.ensure_not_deleted(circle_id).await?;
         let identity_pubkey = keys::public_key_hex(self.identity);
         let (current, activation_commit_ref) = self
             .database
@@ -299,7 +308,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
         chosen: crate::protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
-        ensure_not_deleted(&self.database, circle_id).await?;
+        self.ensure_not_deleted(circle_id).await?;
         let branches = self
             .database
             .circle_control_conflict_branches(circle_id)
@@ -373,7 +382,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         &mut self,
         circle_id: CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
-        ensure_not_deleted(&self.database, circle_id).await?;
+        self.ensure_not_deleted(circle_id).await?;
         let identity_pubkey = keys::public_key_hex(self.identity);
         let mut journal = self
             .database

@@ -1,7 +1,6 @@
 use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
-use crate::database::StoreDatabase;
 use crate::keys;
 use crate::protocol::circle::{
     circle_epoch_close_response_semantic_prefix, CircleCloseParticipant, CircleCloseSettlement,
@@ -37,18 +36,6 @@ impl<'store> StoreCircleCommands<'store> {
             blob_path_scheme,
         }
     }
-}
-
-/// A deleted Circle is terminal: every lifecycle command refuses it with a
-/// typed reason rather than a generic missing-authoring-state error.
-pub(super) async fn ensure_not_deleted(
-    database: &StoreDatabase,
-    circle_id: CircleId,
-) -> Result<(), CircleOperationError> {
-    if database.circle_is_deleted(circle_id).await? {
-        return Err(CircleOperationError::Deleted { circle_id });
-    }
-    Ok(())
 }
 
 impl StoreCircleCommands<'_> {
