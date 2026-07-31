@@ -27,16 +27,6 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
     }
 }
 
-fn predecessor_provider_admin_state(
-    predecessor: &MembershipChain,
-) -> Option<&super::provider::ProviderAdminState> {
-    let crate::protocol::membership::MembershipStatus::Resolved(resolved) = predecessor.status()
-    else {
-        return None;
-    };
-    Some(resolved.provider_admin.combined_state())
-}
-
 pub(crate) fn predecessor_verifies_owner(
     predecessor: &MembershipChain,
     membership: &StoreMembershipStateRef,
@@ -54,31 +44,6 @@ pub(crate) fn predecessor_verifies_owner(
     )
     .is_ok_and(|expected| membership == &expected)
         && predecessor.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
-}
-
-pub(crate) fn predecessor_verifies_provider_administrator(
-    predecessor: &MembershipChain,
-    grant_id: &super::provider::ProviderAdminGrantId,
-    executor: &StoreDeviceRegistrationRef,
-    expected: &super::provider::ProviderAdminGrantRecord,
-) -> bool {
-    let Some(state) = predecessor_provider_admin_state(predecessor) else {
-        return false;
-    };
-    state.authorizes(grant_id, executor)
-        && state
-            .records()
-            .get(grant_id)
-            .is_some_and(|record| record == expected)
-}
-
-fn predecessor_verifies_provider_administrator_grant(
-    predecessor: &MembershipChain,
-    grant_id: &super::provider::ProviderAdminGrantId,
-    executor: &StoreDeviceRegistrationRef,
-) -> bool {
-    predecessor_provider_admin_state(predecessor)
-        .is_some_and(|state| state.authorizes(grant_id, executor))
 }
 
 pub(crate) struct LoadedDeviceJoinCleanupActivation {

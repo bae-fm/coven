@@ -271,7 +271,10 @@ pub(crate) fn validate_commit_join_cleanup_receipts(
         ));
     }
     for loaded in &join_evidence.cleanup_receipts {
-        if !predecessor_contains_join_outcome(accepted, &loaded.receipt.cancellation)? {
+        if !accepted
+            .contains_join_outcome(&loaded.receipt.cancellation)
+            .map_err(registration_attempt_error)?
+        {
             return Err(RegistrationLoadError::Invalid(
                 "device join cleanup receipt outcome is absent from its verified predecessor history"
                     .to_string(),
@@ -322,7 +325,10 @@ pub(crate) async fn validate_commit_join_outcomes(
     }
     let mut verified = BTreeMap::new();
     for outcome_ref in commit.device_join_outcomes() {
-        if !predecessor_contains_join_attempt(accepted, outcome_ref.attempt())? {
+        if !accepted
+            .contains_join_attempt(outcome_ref.attempt())
+            .map_err(registration_attempt_error)?
+        {
             return Err(RegistrationLoadError::Invalid(
                 "device join outcome names an attempt absent from its predecessor history"
                     .to_string(),
@@ -599,20 +605,6 @@ pub(crate) async fn registration_activation(
     }
 }
 
-fn predecessor_contains_join_attempt(
-    accepted: VerifiedMergePredecessorHistory<'_>,
-    expected: &super::store_commit::DeviceJoinAttemptRef,
-) -> Result<bool, RegistrationLoadError> {
-    accepted
-        .find(|_, commit| {
-                commit.device_join_attempt_decisions().iter().any(|decision| {
-                    matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
-                })
-        })
-        .map(|found| found.is_some())
-        .map_err(registration_attempt_error)
-}
-
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) async fn predecessor_commit_matching(
@@ -643,19 +635,4 @@ pub(crate) async fn predecessor_commit_matching(
         pending.extend(commit.value().order.dependencies.values().cloned());
     }
     Ok(None)
-}
-
-fn predecessor_contains_join_outcome(
-    accepted: VerifiedMergePredecessorHistory<'_>,
-    expected: &super::store_commit::DeviceJoinOutcomeRef,
-) -> Result<bool, RegistrationLoadError> {
-    accepted
-        .find(|_, commit| {
-            commit
-                .device_join_outcomes()
-                .binary_search(expected)
-                .is_ok()
-        })
-        .map(|found| found.is_some())
-        .map_err(registration_attempt_error)
 }

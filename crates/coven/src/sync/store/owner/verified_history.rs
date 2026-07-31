@@ -138,17 +138,34 @@ pub(crate) fn verify_merge_owner(
         && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
 }
 
-pub(crate) fn verify_merge_provider_administrator(
-    chain: &MembershipChain,
-    grant_id: &crate::protocol::provider::ProviderAdminGrantId,
+fn predecessor_provider_admin_state(
+    predecessor: &MembershipChain,
+) -> Option<&provider::ProviderAdminState> {
+    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
+        return None;
+    };
+    Some(resolved.provider_admin.combined_state())
+}
+
+fn predecessor_verifies_provider_administrator(
+    predecessor: &MembershipChain,
+    grant_id: &provider::ProviderAdminGrantId,
     executor: &StoreDeviceRegistrationRef,
-    expected: &crate::protocol::provider::ProviderAdminGrantRecord,
+    expected: &provider::ProviderAdminGrantRecord,
 ) -> bool {
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
+    let Some(state) = predecessor_provider_admin_state(predecessor) else {
         return false;
     };
-    let state = resolved.provider_admin.combined_state();
     state.authorizes(grant_id, executor) && state.records().get(grant_id) == Some(expected)
+}
+
+fn predecessor_verifies_provider_administrator_grant(
+    predecessor: &MembershipChain,
+    grant_id: &provider::ProviderAdminGrantId,
+    executor: &StoreDeviceRegistrationRef,
+) -> bool {
+    predecessor_provider_admin_state(predecessor)
+        .is_some_and(|state| state.authorizes(grant_id, executor))
 }
 
 pub(crate) struct VerifiedMergeHistoryCommit {
@@ -179,7 +196,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         Self { commits, frontier }
     }
 
-    pub(crate) fn find(
+    fn find(
         &self,
         mut matches: impl FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool,
     ) -> Result<Option<&'a VerifiedMergeHistoryCommit>, StorePullError> {
@@ -200,6 +217,31 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             pending.extend(commit_predecessor_references(verified.verified.value()));
         }
         Ok(None)
+    }
+
+    fn contains_join_attempt(
+        &self,
+        expected: &DeviceJoinAttemptRef,
+    ) -> Result<bool, StorePullError> {
+        self.find(|_, commit| {
+            commit.device_join_attempt_decisions().iter().any(|decision| {
+                matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
+            })
+        })
+        .map(|found| found.is_some())
+    }
+
+    fn contains_join_outcome(
+        &self,
+        expected: &DeviceJoinOutcomeRef,
+    ) -> Result<bool, StorePullError> {
+        self.find(|_, commit| {
+            commit
+                .device_join_outcomes()
+                .binary_search(expected)
+                .is_ok()
+        })
+        .map(|found| found.is_some())
     }
 }
 
@@ -227,7 +269,7 @@ fn verify_commit_join_evidence<'a>(
                             .to_string(),
                     )
                 })?;
-            if !verify_merge_provider_administrator(
+            if !predecessor_verifies_provider_administrator(
                 &verified.predecessor_membership,
                 &access.grant.administrator_grant,
                 &verified.verified.value().author_registration,
@@ -776,7 +818,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
-        if !verify_merge_provider_administrator(
+        if !predecessor_verifies_provider_administrator(
             &membership,
             &access.grant.administrator_grant,
             &activation.value().author_registration,
@@ -967,7 +1009,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .verify_device_join_attempt_evidence(loaded.attempt)
             .await?;
         let expected = &attempt.value.provider_approval.request.offer.provider_admin;
-        if !verify_merge_provider_administrator(
+        if !predecessor_verifies_provider_administrator(
             &membership,
             &loaded.receipt.provider_admin_grant,
             &loaded.receipt.executor,
@@ -2231,7 +2273,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .to_string(),
                 )
             })?;
-        if !verify_merge_provider_administrator(
+        if !predecessor_verifies_provider_administrator(
             &verified.predecessor_membership,
             &access.grant.administrator_grant,
             &verified.verified.value().author_registration,
