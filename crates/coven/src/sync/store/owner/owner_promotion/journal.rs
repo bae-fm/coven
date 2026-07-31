@@ -175,74 +175,6 @@ fn nonactivation_matches_request(
     })
 }
 
-fn request_has_closed_shape(
-    promotion_id: OwnerPromotionId,
-    target: &StoreDeviceRegistrationRef,
-    request: &OwnerPromotionRequest,
-) -> bool {
-    request.version == crate::protocol::store_commit::STORE_PROTOCOL_VERSION
-        && request.promotion_id == promotion_id
-        && request.member_registration == *target
-        && !request.member_pubkey.is_empty()
-        && request.intended_owner_grant
-            == crate::protocol::store_commit::derive_owner_promotion_grant(
-                request.store_root_hash,
-                request.promotion_id,
-                &request.member_pubkey,
-            )
-        && request.finalization.seq != 0
-}
-
-fn acceptance_has_closed_shape(
-    promotion_id: OwnerPromotionId,
-    target: &StoreDeviceRegistrationRef,
-    acceptance: &OwnerPromotionAcceptance,
-) -> bool {
-    let request = acceptance.request.as_ref();
-    if !request_has_closed_shape(promotion_id, target, request)
-        || !matches!(
-            acceptance.anchors.recovery(),
-            GrantStreamAnchor::OwnerRecovery { .. }
-        )
-    {
-        return false;
-    }
-    let GrantStreamAnchor::StoreMembership { first_slot } = &acceptance.anchors.membership else {
-        return false;
-    };
-    let GrantStreamAnchor::OwnerRecovery {
-        first_slot: recovery_slot,
-    } = &acceptance.anchors.recovery
-    else {
-        return false;
-    };
-    let membership_stream = StreamActivation::grant_authorized_stream_id(
-        request.store_root_hash,
-        &request.member_registration,
-        &request.intended_owner_grant,
-        StreamAnchorDomain::StoreMembership,
-    );
-    first_slot.logical_key()
-        == format!(
-            "{}.json",
-            membership_head_slot_prefix(
-                &request.member_pubkey,
-                &request.intended_owner_grant,
-                membership_stream,
-                1,
-            )
-        )
-        && recovery_slot.logical_key()
-            == format!(
-                "{}.json",
-                owner_recovery_semantic_prefix(
-                    &request.member_pubkey,
-                    request.intended_owner_grant.clone(),
-                    1,
-                )
-            )
-}
-
 fn wrapped_key_matches_acceptance(
     wrapped_key: &PreparedWrappedStoreKey,
     acceptance: &OwnerPromotionAcceptance,
@@ -434,6 +366,67 @@ fn receipt_matches_merge_preparation(
 }
 
 impl OwnerPromotionJournal {
+    fn request_has_closed_shape(&self, request: &OwnerPromotionRequest) -> bool {
+        request.version == crate::protocol::store_commit::STORE_PROTOCOL_VERSION
+            && request.promotion_id == self.promotion_id
+            && request.member_registration == self.target
+            && !request.member_pubkey.is_empty()
+            && request.intended_owner_grant
+                == crate::protocol::store_commit::derive_owner_promotion_grant(
+                    request.store_root_hash,
+                    request.promotion_id,
+                    &request.member_pubkey,
+                )
+            && request.finalization.seq != 0
+    }
+
+    fn acceptance_has_closed_shape(&self, acceptance: &OwnerPromotionAcceptance) -> bool {
+        let request = acceptance.request.as_ref();
+        if !self.request_has_closed_shape(request)
+            || !matches!(
+                acceptance.anchors.recovery(),
+                GrantStreamAnchor::OwnerRecovery { .. }
+            )
+        {
+            return false;
+        }
+        let GrantStreamAnchor::StoreMembership { first_slot } = &acceptance.anchors.membership
+        else {
+            return false;
+        };
+        let GrantStreamAnchor::OwnerRecovery {
+            first_slot: recovery_slot,
+        } = &acceptance.anchors.recovery
+        else {
+            return false;
+        };
+        let membership_stream = StreamActivation::grant_authorized_stream_id(
+            request.store_root_hash,
+            &request.member_registration,
+            &request.intended_owner_grant,
+            StreamAnchorDomain::StoreMembership,
+        );
+        first_slot.logical_key()
+            == format!(
+                "{}.json",
+                membership_head_slot_prefix(
+                    &request.member_pubkey,
+                    &request.intended_owner_grant,
+                    membership_stream,
+                    1,
+                )
+            )
+            && recovery_slot.logical_key()
+                == format!(
+                    "{}.json",
+                    owner_recovery_semantic_prefix(
+                        &request.member_pubkey,
+                        request.intended_owner_grant.clone(),
+                        1,
+                    )
+                )
+    }
+
     pub(crate) fn promotion_id(&self) -> OwnerPromotionId {
         self.promotion_id
     }
@@ -492,25 +485,24 @@ impl OwnerPromotionJournal {
         let valid = match &self.state {
             OwnerPromotionJournalState::Allocated => true,
             OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
-                request_has_closed_shape(self.promotion_id, &self.target, request)
+                self.request_has_closed_shape(request)
                     && prepared_candidate_is_exact_request(candidate, request)
             }
             OwnerPromotionJournalState::AwaitingAcceptance {
                 request,
                 activation,
             } => {
-                request_has_closed_shape(self.promotion_id, &self.target, request)
-                    && activation.commit.coord.validate().is_ok()
+                self.request_has_closed_shape(request) && activation.commit.coord.validate().is_ok()
             }
             OwnerPromotionJournalState::AcceptanceReady { acceptance } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
+                self.acceptance_has_closed_shape(acceptance)
             }
             OwnerPromotionJournalState::MergeMembershipPrepared {
                 acceptance,
                 wrapped_key,
                 transition,
             } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
+                self.acceptance_has_closed_shape(acceptance)
                     && wrapped_key_matches_acceptance(wrapped_key, acceptance)
                     && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
             }
@@ -521,7 +513,7 @@ impl OwnerPromotionJournal {
                 publication,
                 candidate,
             } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
+                self.acceptance_has_closed_shape(acceptance)
                     && wrapped_key_matches_acceptance(wrapped_key, acceptance)
                     && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
                     && merge_candidate_matches_finalization(candidate, transition, acceptance)
@@ -542,7 +534,7 @@ impl OwnerPromotionJournal {
                 membership,
                 receipt,
             } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
+                self.acceptance_has_closed_shape(acceptance)
                     && finalization_receipt_matches_acceptance(receipt, acceptance)
                     && finalization_receipt_matches_membership(receipt, membership)
             }
@@ -550,7 +542,7 @@ impl OwnerPromotionJournal {
                 request,
                 nonactivation,
             } => {
-                request_has_closed_shape(self.promotion_id, &self.target, request)
+                self.request_has_closed_shape(request)
                     && nonactivation_matches_request(nonactivation, request)
             }
             OwnerPromotionJournalState::Stale {
@@ -558,7 +550,7 @@ impl OwnerPromotionJournal {
                 reason,
                 evidence,
             } => {
-                acceptance_has_closed_shape(self.promotion_id, &self.target, acceptance)
+                self.acceptance_has_closed_shape(acceptance)
                     && match (reason, evidence.as_ref()) {
                         (
                             OwnerPromotionStaleReason::MergeFinalizationPointOccupied { winner },
