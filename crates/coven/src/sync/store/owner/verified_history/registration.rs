@@ -27,25 +27,6 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
     }
 }
 
-pub(crate) fn predecessor_verifies_owner(
-    predecessor: &MembershipChain,
-    membership: &StoreMembershipStateRef,
-    owner_pubkey: &str,
-    owner_grant: &crate::protocol::membership::MembershipGrantId,
-) -> bool {
-    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
-        return false;
-    };
-    StoreMembershipStateRef::from_parts(
-        predecessor.head_refs().to_vec(),
-        predecessor.resolution_refs().to_vec(),
-        membership.recovery().to_vec(),
-        resolved.state_hash,
-    )
-    .is_ok_and(|expected| membership == &expected)
-        && predecessor.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
-}
-
 pub(crate) struct LoadedDeviceJoinCleanupActivation {
     pub(crate) verified_commit: VerifiedStoreBatchCommit,
     pub(crate) receipts: Vec<LoadedCommitJoinCleanupReceipt>,

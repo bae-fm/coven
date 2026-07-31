@@ -119,23 +119,23 @@ pub(crate) fn verify_merge_membership_state_ref(
     Ok(())
 }
 
-pub(crate) fn verify_merge_owner(
+pub(crate) fn predecessor_verifies_owner(
+    predecessor: &MembershipChain,
     membership: &StoreMembershipStateRef,
-    chain: &MembershipChain,
     owner_pubkey: &str,
     owner_grant: &crate::protocol::membership::MembershipGrantId,
 ) -> bool {
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
+    let MembershipStatus::Resolved(resolved) = predecessor.status() else {
         return false;
     };
     StoreMembershipStateRef::from_parts(
-        chain.head_refs().to_vec(),
-        chain.resolution_refs().to_vec(),
+        predecessor.head_refs().to_vec(),
+        predecessor.resolution_refs().to_vec(),
         membership.recovery().to_vec(),
         resolved.state_hash,
     )
     .is_ok_and(|expected| membership == &expected)
-        && chain.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
+        && predecessor.active_owner_grant(owner_pubkey).as_ref() == Some(owner_grant)
 }
 
 fn predecessor_provider_admin_state(

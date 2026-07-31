@@ -109,9 +109,9 @@ pub(crate) async fn discover_merge_owner_recoveries(
             || reference.owner_grant != protocol.descriptor.founder_grant
             || reference.sequence != sequence
             || node.predecessor != predecessor
-            || !verify_merge_owner(
-                &node.membership,
+            || !predecessor_verifies_owner(
                 membership,
+                &node.membership,
                 &node.owner_pubkey,
                 &node.owner_grant,
             )
