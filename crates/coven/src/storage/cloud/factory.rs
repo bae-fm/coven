@@ -1,26 +1,20 @@
 use super::{cloudkit, CloudHome, CloudHomeError};
 
 #[cfg(feature = "oauth-providers")]
-fn require_oauth_token(
-    key_service: &crate::keys::StoreKeys,
-    provider_name: &str,
-) -> Result<String, CloudHomeError> {
-    match key_service.get_cloud_home_credentials().map_err(|error| {
-        CloudHomeError::Configuration(format!("{provider_name} credentials error: {error}"))
-    })? {
-        Some(crate::keys::CloudHomeCredentials::OAuth { token_json }) => Ok(token_json),
-        _ => Err(CloudHomeError::Configuration(format!(
-            "{provider_name} OAuth token not in keyring"
-        ))),
-    }
-}
-
-#[cfg(feature = "oauth-providers")]
 fn parse_oauth_tokens(
     key_service: &crate::keys::StoreKeys,
     provider_name: &str,
 ) -> Result<crate::oauth::OAuthTokens, CloudHomeError> {
-    let token_json = require_oauth_token(key_service, provider_name)?;
+    let token_json = match key_service.get_cloud_home_credentials().map_err(|error| {
+        CloudHomeError::Configuration(format!("{provider_name} credentials error: {error}"))
+    })? {
+        Some(crate::keys::CloudHomeCredentials::OAuth { token_json }) => token_json,
+        _ => {
+            return Err(CloudHomeError::Configuration(format!(
+                "{provider_name} OAuth token not in keyring"
+            )))
+        }
+    };
     serde_json::from_str(&token_json).map_err(|error| {
         CloudHomeError::Configuration(format!("invalid OAuth token JSON: {error}"))
     })
