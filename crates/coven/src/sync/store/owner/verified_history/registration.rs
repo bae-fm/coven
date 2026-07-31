@@ -412,27 +412,6 @@ pub(crate) fn device_state_has_active_registration(
         })
 }
 
-pub(crate) async fn verify_canonical_owner_registration(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    state: &ResolvedStoreDeviceState,
-    owner_pubkey: &str,
-    selected: &StoreDeviceRegistrationRef,
-) -> Result<(), StorePullError> {
-    let active = commit_verifier.load_active_registrations(state).await?;
-    let canonical = active
-        .values()
-        .filter(|(_, registration)| registration.author_pubkey == owner_pubkey)
-        .map(|(reference, _)| reference)
-        .min();
-    if canonical != Some(selected) {
-        return Err(StorePullError::Database(
-            "conflict-resolution acceptance does not use the canonical active Owner registration"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn device_state_has_pending_proposal(
     state: &ResolvedStoreDeviceState,
     proposal: &super::store_commit::StoreDeviceExclusionProposalRef,

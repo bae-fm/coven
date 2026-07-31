@@ -649,7 +649,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         owner_pubkey: &str,
         selected: &StoreDeviceRegistrationRef,
     ) -> Result<(), StorePullError> {
-        verify_canonical_owner_registration(&self.commit_verifier, state, owner_pubkey, selected)
+        self.commit_verifier
+            .verify_canonical_owner_registration(state, owner_pubkey, selected)
             .await
     }
 
@@ -1173,13 +1174,13 @@ async fn verify_merge_owner_conflict_acceptance_with_history(
                 .to_string(),
         ));
     }
-    verify_canonical_owner_registration(
-        commit_verifier,
-        &state,
-        resolver_pubkey,
-        &acceptance.owner_registration,
-    )
-    .await?;
+    commit_verifier
+        .verify_canonical_owner_registration(
+            &state,
+            resolver_pubkey,
+            &acceptance.owner_registration,
+        )
+        .await?;
     Ok(())
 }
 

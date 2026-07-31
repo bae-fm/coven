@@ -671,6 +671,27 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok(active)
     }
 
+    pub(crate) async fn verify_canonical_owner_registration(
+        &self,
+        state: &ResolvedStoreDeviceState,
+        owner_pubkey: &str,
+        selected: &StoreDeviceRegistrationRef,
+    ) -> Result<(), StorePullError> {
+        let active = self.load_active_registrations(state).await?;
+        let canonical = active
+            .values()
+            .filter(|(_, registration)| registration.author_pubkey == owner_pubkey)
+            .map(|(reference, _)| reference)
+            .min();
+        if canonical != Some(selected) {
+            return Err(StorePullError::Database(
+                "conflict-resolution acceptance does not use the canonical active Owner registration"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
