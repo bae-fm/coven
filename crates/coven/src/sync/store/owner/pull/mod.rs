@@ -15,15 +15,15 @@ use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     head_slot_prefix, CirclePackageRef, CommitFrontier, DeviceStreamAnchor, ObjectHash,
-    OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
-    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
-    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
-    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
-    StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceRegistration,
-    StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
-    StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
-    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    OwnerRecoveryCursor, OwnerRecoveryPosition, ResolvedStoreDeviceState,
+    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
+    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
+    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
+    StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
+    VerifiedStoreDeviceOperations,
 };
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;

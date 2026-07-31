@@ -1369,7 +1369,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )>,
         pull::StorePullError,
     > {
-        pull::discover_merge_owner_recoveries(&self.history_verifier, membership).await
+        self.history_verifier
+            .discover_owner_recoveries(membership)
+            .await
     }
 
     pub(super) async fn discover_pull_stream(

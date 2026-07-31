@@ -1,7 +1,7 @@
 use super::pull::*;
 use super::verified_history::{
-    load_membership_at_exact_heads_with_verified_activations, MergeHistoryVerifier,
-    VerifiedMergeConflictResolutionActivation, VerifiedMergeMembershipPrefix,
+    load_membership_at_exact_heads_with_verified_activations, predecessor_verifies_owner,
+    MergeHistoryVerifier, VerifiedMergeConflictResolutionActivation, VerifiedMergeMembershipPrefix,
 };
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::*;
@@ -535,6 +535,114 @@ impl<'a> StoreCommitVerifier<'a> {
         )
         .map(|activation| Some((grant_id.clone(), activation)))
         .map_err(|error| StorePullError::Database(error.to_string()))
+    }
+
+    pub(crate) async fn discover_owner_recoveries(
+        &self,
+        membership: &MembershipChain,
+    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+        let protocol = &self.verified_root.value;
+        if membership
+            .active_owner_grant(&protocol.descriptor.founder_pubkey)
+            .as_ref()
+            != Some(&protocol.descriptor.founder_grant)
+        {
+            return Ok(Vec::new());
+        }
+        let GrantStreamAnchor::OwnerRecovery { first_slot } = &protocol.descriptor.founder_recovery
+        else {
+            return Err(StorePullError::Database(
+                "Store founder recovery authority has no recovery stream".into(),
+            ));
+        };
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            ProtocolObjectDomain::OwnerRecoveryNode,
+        );
+        let mut slot = first_slot.clone();
+        let mut predecessor: Option<OwnerRecoveryNodeRef> = None;
+        let mut sequence = 1_u64;
+        let mut recovered = Vec::new();
+        loop {
+            let prefix = owner_recovery_semantic_prefix(
+                &protocol.descriptor.founder_pubkey,
+                protocol.descriptor.founder_grant.clone(),
+                sequence,
+            );
+            let (bytes, object) = match self
+                .storage
+                .read_protocol_slot(&context, &slot, &prefix)
+                .await
+            {
+                Ok(opened) => opened,
+                Err(StorageError::NotFound(_)) => break,
+                Err(error) => return Err(StoreObjectError::Storage(error).into()),
+            };
+            let unverified: OwnerRecoveryNode =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    StorePullError::Database(format!("Owner recovery node: {error}"))
+                })?;
+            let reference = OwnerRecoveryNodeRef {
+                owner_pubkey: unverified.owner_pubkey.clone(),
+                owner_grant: unverified.owner_grant.clone(),
+                sequence: unverified.sequence,
+                node_hash: unverified.node_hash(),
+                object,
+            };
+            let node = OwnerRecoveryNode::parse_at(&bytes, &self.root, &reference)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            if reference.owner_pubkey != protocol.descriptor.founder_pubkey
+                || reference.owner_grant != protocol.descriptor.founder_grant
+                || reference.sequence != sequence
+                || node.predecessor != predecessor
+                || !predecessor_verifies_owner(
+                    membership,
+                    &node.membership,
+                    &node.owner_pubkey,
+                    &node.owner_grant,
+                )
+            {
+                return Err(StorePullError::Database(
+                    "Owner recovery stream differs from its root-anchored authority".into(),
+                ));
+            }
+            let registration = self
+                .load_registration(&node.readiness.registration)
+                .await?
+                .value;
+            let initial_ack = self
+                .load_store_ack(&node.readiness.initial_ack, &registration)
+                .await?
+                .value;
+            let origin_matches = matches!(
+                &registration.origin,
+                StoreDeviceRegistrationOrigin::Recovery {
+                    recovery_id,
+                    recovery_slot,
+                    owner_grant,
+                } if *recovery_id == node.recovery_id
+                    && recovery_slot == reference.slot()
+                    && owner_grant == &node.owner_grant
+            );
+            if !origin_matches
+                || registration.author_pubkey != node.owner_pubkey
+                || initial_ack.sequence != 1
+                || initial_ack.successor.predecessor.is_some()
+                || initial_ack.store_cut != node.readiness.bootstrap_cut
+                || initial_ack.registration != node.readiness.registration
+            {
+                return Err(StorePullError::Database(
+                    "Owner recovery readiness differs from its registration graph".into(),
+                ));
+            }
+            recovered.push((node.readiness.registration.clone(), registration));
+            slot = node.next_slot.clone();
+            predecessor = Some(reference);
+            sequence = sequence.checked_add(1).ok_or_else(|| {
+                StorePullError::Database("Owner recovery sequence overflow".into())
+            })?;
+        }
+        Ok(recovered)
     }
 
     pub(crate) async fn load_active_registrations(

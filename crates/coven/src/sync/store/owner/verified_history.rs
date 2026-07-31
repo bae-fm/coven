@@ -653,6 +653,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
+    pub(crate) async fn discover_owner_recoveries(
+        &self,
+        membership: &MembershipChain,
+    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+        self.commit_verifier
+            .discover_owner_recoveries(membership)
+            .await
+    }
+
     pub(crate) async fn load_local_device_operations(
         &mut self,
         database: &StoreDatabase,
@@ -881,7 +890,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object);
         registrations.insert(founder_ref.device_id, (founder_ref, founder.value));
-        for recovered in discover_merge_owner_recoveries(self, membership).await? {
+        for recovered in self.discover_owner_recoveries(membership).await? {
             registrations.insert(recovered.0.device_id, recovered);
         }
         self.load_state_registrations(&state, &mut registrations)
