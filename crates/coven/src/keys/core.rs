@@ -332,6 +332,22 @@ pub trait DeviceIdentityCustody: Send + Sync {
     /// Protect and store `keypair`, replacing whatever is stored. Idempotent.
     fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError>;
 
+    /// Establish this Store's identity without replacing a different identity.
+    /// Repeating the same identity is idempotent.
+    fn establish(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
+        if let Some(existing) = self.unlock()? {
+            if existing.public_key() != keypair.public_key() {
+                return Err(KeyError::IdentityMismatch {
+                    existing_pubkey_hex: public_key_hex(&existing),
+                    imported_pubkey_hex: public_key_hex(keypair),
+                });
+            }
+        }
+        self.persist(keypair)?;
+        tracing::info!("Established this store's Ed25519 signing identity");
+        Ok(())
+    }
+
     /// Remove the stored identity. `Ok` when nothing was stored.
     fn forget(&self) -> Result<(), KeyError>;
 }

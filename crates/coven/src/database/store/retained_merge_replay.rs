@@ -98,6 +98,111 @@ impl RetainedMergeMaterializationCache {
         Ok(verified)
     }
 
+    pub(crate) fn replay_inputs_on(
+        &mut self,
+        conn: &Connection,
+        root: &crate::protocol::store_commit::StoreRootRef,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        self.replay_inputs_with_authorities_on(conn, root, RetainedCommitAuthorities::StoredBytes)
+    }
+
+    pub(crate) fn replay_inputs_with_verified_commits_on(
+        &mut self,
+        conn: &Connection,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        verified: &BTreeMap<
+            crate::protocol::store_commit::StoreBatchCommitRef,
+            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        >,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        self.replay_inputs_with_authorities_on(
+            conn,
+            root,
+            RetainedCommitAuthorities::Operation(verified),
+        )
+    }
+
+    fn replay_inputs_with_authorities_on(
+        &mut self,
+        conn: &Connection,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        authorities: RetainedCommitAuthorities<'_>,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT device_id, seq, commit_ref, input_hash
+                 FROM retained_merge_materializations
+                 ORDER BY device_id, seq",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+
+        let mut verified = BTreeMap::new();
+        let mut replay_inputs = Vec::with_capacity(rows.len());
+        for (stream_id, sequence, encoded_ref, encoded_input_hash) in rows {
+            let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
+            let commit_ref =
+                StoreDatabase::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+            let input_hash = encoded_input_hash.parse::<ObjectHash>().map_err(|error| {
+                DbError::Message(format!(
+                    "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
+                ))
+            })?;
+            let key = (stream_id.clone(), sequence);
+            let materialization = match self.verified.get(&key) {
+                Some(cached)
+                    if cached.commit_ref() == &commit_ref && cached.input_hash() == input_hash =>
+                {
+                    cached.clone()
+                }
+                _ => match &authorities {
+                    RetainedCommitAuthorities::StoredBytes => {
+                        StoreDatabase::load_retained_merge_materialization_on(
+                            conn,
+                            root,
+                            &stream_id,
+                            sequence,
+                            &commit_ref,
+                            &encoded_input_hash,
+                        )?
+                    }
+                    RetainedCommitAuthorities::Operation(operation_verified) => {
+                        let commit = operation_verified.get(&commit_ref).ok_or_else(|| {
+                            DbError::Message(format!(
+                                "retained Merge commit {commit_ref:?} is absent from the operation-verified history"
+                            ))
+                        })?;
+                        StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
+                            conn,
+                            root,
+                            &stream_id,
+                            sequence,
+                            &commit_ref,
+                            &encoded_input_hash,
+                            commit,
+                        )?
+                    }
+                },
+            };
+            verified.insert(key, materialization.clone());
+            replay_inputs.push(materialization);
+        }
+        self.verified = verified;
+        Ok(replay_inputs)
+    }
+
     pub(crate) fn verified_circle_activation_on(
         &self,
         conn: &Connection,
@@ -351,7 +456,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?;
+                cache.replay_inputs_on(conn, &root)?;
                 cache.circle_replay_epoch_index_on(conn)
             })
             .await
@@ -1988,116 +2093,6 @@ impl StoreDatabase {
             .collect()
     }
 
-    pub(crate) fn cached_retained_merge_replay_inputs_on(
-        conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        cache: &mut RetainedMergeMaterializationCache,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        Self::cached_retained_merge_replay_inputs_with_authorities_on(
-            conn,
-            root,
-            cache,
-            RetainedCommitAuthorities::StoredBytes,
-        )
-    }
-
-    pub(crate) fn cached_retained_merge_replay_inputs_with_verified_commits_on(
-        conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        cache: &mut RetainedMergeMaterializationCache,
-        verified: &BTreeMap<
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        >,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        Self::cached_retained_merge_replay_inputs_with_authorities_on(
-            conn,
-            root,
-            cache,
-            RetainedCommitAuthorities::Operation(verified),
-        )
-    }
-
-    fn cached_retained_merge_replay_inputs_with_authorities_on(
-        conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        cache: &mut RetainedMergeMaterializationCache,
-        authorities: RetainedCommitAuthorities<'_>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT device_id, seq, commit_ref, input_hash
-                 FROM retained_merge_materializations
-                 ORDER BY device_id, seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-
-        let mut verified = BTreeMap::new();
-        let mut replay_inputs = Vec::with_capacity(rows.len());
-        for (stream_id, sequence, encoded_ref, encoded_input_hash) in rows {
-            let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-            let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
-            let input_hash = encoded_input_hash.parse::<ObjectHash>().map_err(|error| {
-                DbError::Message(format!(
-                    "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
-                ))
-            })?;
-            let key = (stream_id.clone(), sequence);
-            let materialization = match cache.verified.get(&key) {
-                Some(cached)
-                    if cached.commit_ref() == &commit_ref && cached.input_hash() == input_hash =>
-                {
-                    cached.clone()
-                }
-                _ => match &authorities {
-                    RetainedCommitAuthorities::StoredBytes => {
-                        Self::load_retained_merge_materialization_on(
-                            conn,
-                            root,
-                            &stream_id,
-                            sequence,
-                            &commit_ref,
-                            &encoded_input_hash,
-                        )?
-                    }
-                    RetainedCommitAuthorities::Operation(verified) => {
-                        let commit = verified.get(&commit_ref).ok_or_else(|| {
-                            DbError::Message(format!(
-                                "retained Merge commit {commit_ref:?} is absent from the operation-verified history"
-                            ))
-                        })?;
-                        Self::load_retained_merge_materialization_with_verified_commit_on(
-                            conn,
-                            root,
-                            &stream_id,
-                            sequence,
-                            &commit_ref,
-                            &encoded_input_hash,
-                            commit,
-                        )?
-                    }
-                },
-            };
-            verified.insert(key, materialization.clone());
-            replay_inputs.push(materialization);
-        }
-        cache.verified = verified;
-        Ok(replay_inputs)
-    }
-
     pub(crate) fn replace_store_device_exclusion_freezes_from_replay_on(
         conn: &rusqlite::Transaction<'_>,
     ) -> Result<(), DbError> {
@@ -2424,11 +2419,7 @@ impl StoreDatabase {
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = Self::cached_retained_merge_replay_inputs_on(
-            conn,
-            root,
-            retained_merge_materializations,
-        )?;
+        let retained = retained_merge_materializations.replay_inputs_on(conn, root)?;
         let mut required = BTreeSet::new();
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(

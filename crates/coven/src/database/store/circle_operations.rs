@@ -606,7 +606,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut retained)?;
+                retained.replay_inputs_on(conn, &root)?;
                 let Some(activation) =
                     retained.verified_circle_activation_on(conn, circle_id, &expected_control)?
                 else {

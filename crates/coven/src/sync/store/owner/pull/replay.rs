@@ -263,11 +263,7 @@ pub(crate) fn replay_retained_merge_projection_on(
             )));
         }
     }
-    let retained = crate::database::StoreDatabase::cached_retained_merge_replay_inputs_on(
-        live,
-        root,
-        retained_merge_materializations,
-    )?;
+    let retained = retained_merge_materializations.replay_inputs_on(live, root)?;
     let circle_epochs = retained_merge_materializations.circle_replay_epoch_index_on(live)?;
     let active_references = retained
         .iter()

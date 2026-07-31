@@ -718,7 +718,7 @@ impl DeviceJoinClient {
         }
         on_status("Saving configuration...");
         self.custody.persist(&join.keyring)?;
-        crate::keys::import_identity(self.identity_custody.as_ref(), &signer.to_keypair_bytes())?;
+        self.identity_custody.establish(&signer)?;
         let store_keys = StoreKeys::new(self.code.store_id.clone());
         if let Some(credentials) = derive_credentials(&self.code.join_info) {
             store_keys.set_cloud_home_credentials(&credentials)?;
@@ -936,7 +936,7 @@ pub(crate) async fn bootstrap_and_save_store(
         // retry clears and re-establishes from the restore code the user still
         // holds. Inside the unit, so a later failure deletes the bootstrap
         // reader the same as any other.
-        crate::keys::import_identity(identity_custody, &context.keypair().to_keypair_bytes())?;
+        identity_custody.establish(context.keypair())?;
 
         // Create and save config — the last durable write and the
         // store's completion marker.

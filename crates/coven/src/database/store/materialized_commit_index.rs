@@ -35,7 +35,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)
+                cache.replay_inputs_on(conn, &root)
             })
             .await
     }
@@ -84,9 +84,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_with_verified_commits_on(
-                    conn, &root, &mut cache, &verified,
-                )
+                cache.replay_inputs_with_verified_commits_on(conn, &root, &verified)
             })
             .await
     }
@@ -104,7 +102,8 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?
+                cache
+                    .replay_inputs_on(conn, &root)?
                     .into_iter()
                     .find(|materialization| materialization.commit_ref() == &reference)
                     .ok_or_else(|| {
@@ -132,7 +131,7 @@ impl StoreDatabase {
                             "retained Merge materialization cache lock is poisoned".to_string(),
                         )
                     })?;
-                    Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?
+                    cache.replay_inputs_on(conn, &root)?
                 };
                 references
                     .iter()

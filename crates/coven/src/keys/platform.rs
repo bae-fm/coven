@@ -317,41 +317,12 @@ pub(crate) fn identity_public_key(
     Ok(custody.unlock()?.map(|kp| kp.public_key()))
 }
 
-/// Import an already-generated signing key (a restore code's `sk`) into
-/// `custody`. Same-pubkey re-import is idempotent; importing over a
-/// DIFFERENT already-established identity is refused with
-/// [`KeyError::IdentityMismatch`] naming both — silently swapping this
-/// store's identity would strand its already-signed membership entries.
-pub(crate) fn import_identity(
-    custody: &dyn DeviceIdentityCustody,
-    signing_key_bytes: &[u8],
-) -> Result<(), KeyError> {
-    let signing_key: [u8; SIGN_SECRETKEYBYTES] = signing_key_bytes.try_into().map_err(|_| {
-        KeyError::Crypto(format!(
-            "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
-            signing_key_bytes.len()
-        ))
-    })?;
-    let imported = UserKeypair::from_signing_key_bytes(&signing_key)?;
-
-    if let Some(existing) = custody.unlock()? {
-        if existing.public_key() != imported.public_key() {
-            return Err(KeyError::IdentityMismatch {
-                existing_pubkey_hex: public_key_hex(&existing),
-                imported_pubkey_hex: public_key_hex(&imported),
-            });
-        }
-    }
-    custody.persist(&imported)?;
-    info!("Imported this store's Ed25519 signing identity");
-    Ok(())
-}
-
 /// Mint a fresh identity for a join request that has not yet named a store:
 /// the joiner sends its public key before it learns which store the invite
 /// is for (`JoinRequestCode`), so this keypair is generated now and held
 /// under a pending slot keyed by its own public key. The join establishes it
-/// in the joined store's own identity custody (via [`import_identity`],
+/// in the joined store's own identity custody (via
+/// [`DeviceIdentityCustody::establish`],
 /// before the store's completion marker) and discards the pending slot only
 /// once the whole join succeeds; [`discard_pending_identity`] also removes it
 /// if the request is abandoned instead. Always the OS keyring: unlike an
@@ -831,15 +802,17 @@ mod tests {
     /// write) is idempotent — no error, and the identity reads back
     /// unchanged.
     #[test]
-    fn import_identity_same_pubkey_reimport_is_idempotent() {
+    fn establishing_the_same_identity_again_is_idempotent() {
         test_keyring::install();
         let custody = test_identity_custody("import-identity-idempotent-test");
 
         let keypair = UserKeypair::generate();
-        import_identity(custody.as_ref(), &keypair.to_keypair_bytes())
-            .expect("first import establishes the identity");
-        import_identity(custody.as_ref(), &keypair.to_keypair_bytes())
-            .expect("re-importing the same key is idempotent");
+        custody
+            .establish(&keypair)
+            .expect("first call establishes the identity");
+        custody
+            .establish(&keypair)
+            .expect("establishing the same key is idempotent");
 
         assert_eq!(
             require_identity(custody.as_ref())
@@ -853,17 +826,19 @@ mod tests {
     /// refused — silently swapping this store's identity would strand its
     /// already-signed membership entries.
     #[test]
-    fn import_identity_refuses_to_overwrite_a_different_identity() {
+    fn establishing_identity_refuses_to_overwrite_a_different_identity() {
         test_keyring::install();
         let custody = test_identity_custody("import-identity-mismatch-test");
 
         let established = UserKeypair::generate();
-        import_identity(custody.as_ref(), &established.to_keypair_bytes())
+        custody
+            .establish(&established)
             .expect("establish the first identity");
 
         let different = UserKeypair::generate();
-        let error = import_identity(custody.as_ref(), &different.to_keypair_bytes())
-            .expect_err("importing a different identity must be refused");
+        let error = custody
+            .establish(&different)
+            .expect_err("establishing a different identity must be refused");
         match error {
             KeyError::IdentityMismatch {
                 existing_pubkey_hex,
@@ -885,7 +860,7 @@ mod tests {
     }
 
     /// A pending identity minted for a join request establishes into a store's
-    /// identity custody via `import_identity` while the pending slot still
+    /// identity custody via `DeviceIdentityCustody::establish` while the pending slot still
     /// serves it — the split the join relies on: establish before the
     /// completion marker, discard the slot only once the whole join succeeds.
     /// Re-establishing from the still-present slot is idempotent (the torn-
@@ -897,7 +872,8 @@ mod tests {
         let request_pubkey = public_key_hex(&pending);
         let custody = test_identity_custody("pending-identity-establish-test");
 
-        import_identity(custody.as_ref(), &pending.to_keypair_bytes())
+        custody
+            .establish(&pending)
             .expect("establish the pending identity in store custody");
         assert_eq!(
             require_identity(custody.as_ref())
@@ -910,7 +886,8 @@ mod tests {
         // (whose wipe removed the store custody) re-establishes from it.
         let still_pending =
             peek_pending_identity(&request_pubkey).expect("the pending slot is not yet consumed");
-        import_identity(custody.as_ref(), &still_pending.to_keypair_bytes())
+        custody
+            .establish(&still_pending)
             .expect("re-establishing the same identity is idempotent");
 
         discard_pending_identity(&request_pubkey).expect("discard the consumed slot");
@@ -961,14 +938,16 @@ mod tests {
 
         let custody_a = test_identity_custody("two-concurrent-joins-store-a");
         let custody_b = test_identity_custody("two-concurrent-joins-store-b");
-        import_identity(custody_a.as_ref(), &pending_a.to_keypair_bytes())
+        custody_a
+            .establish(&pending_a)
             .expect("establish a into store a");
 
         assert!(
             require_identity(custody_b.as_ref()).is_err(),
             "store b must not see store a's established identity",
         );
-        import_identity(custody_b.as_ref(), &pending_b.to_keypair_bytes())
+        custody_b
+            .establish(&pending_b)
             .expect("establish b into store b");
         assert_ne!(
             require_identity(custody_a.as_ref())
