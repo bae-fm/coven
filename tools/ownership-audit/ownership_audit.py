@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import bisect
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -22,6 +25,9 @@ INDEX_PATH = ROOT / "target" / "ownership-audit" / "index.json"
 GRAPH_PATH = ROOT / "target" / "ownership-audit" / "graph.html"
 ANALYZER_LOG_PATH = ROOT / "target" / "ownership-audit" / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
+CACHE_DIR = INDEX_PATH.parent / "cache"
+CACHE_SCHEMA = 1
+CACHE_CHECKPOINT_INTERVAL = 100
 
 NODE_PATTERN = re.compile(r"^(?P<indent> *)(?P<kind>[A-Z_]+)@(?P<start>\d+)\.\.(?P<end>\d+)")
 STATEFUL_TYPE_PATTERNS = {
@@ -139,6 +145,9 @@ class SourceFile:
     data: bytes
     line_starts: list[int]
     nodes: list[SyntaxNode]
+    call_nodes_by_line: dict[int, list[tuple[int, SyntaxNode]]] = field(
+        default_factory=dict
+    )
 
     def position(self, offset: int) -> dict[str, int]:
         line = bisect.bisect_right(self.line_starts, offset) - 1
@@ -241,6 +250,211 @@ def cargo_metadata(root: Path = ROOT) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+def analyzer_identity() -> str:
+    commands = (
+        rust_analyzer_command("--version"),
+        ["rustup", "run", ANALYZER_TOOLCHAIN, "rustc", "--version", "--verbose"],
+    )
+    output = []
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=rust_analyzer_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"tool identity command failed: {' '.join(command)}\n{result.stderr}"
+            )
+        output.append(result.stdout.strip())
+    return "\n".join(output)
+
+
+def workspace_cache_inputs(metadata: dict[str, Any]) -> list[Path]:
+    paths = {
+        path.resolve()
+        for package in metadata["packages"]
+        for path in Path(package["manifest_path"]).resolve().parent.glob("**/*.rs")
+    }
+    paths.update(
+        Path(package["manifest_path"]).resolve()
+        for package in metadata["packages"]
+    )
+    paths.update(
+        path.resolve()
+        for name in (
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            ".cargo/config",
+            ".cargo/config.toml",
+        )
+        if (path := ROOT / name).is_file()
+    )
+    return sorted(paths)
+
+
+def hash_cache_inputs(
+    paths: Iterable[Path],
+    metadata: dict[str, Any],
+    tool_identity: str,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"ownership-audit-cache-v{CACHE_SCHEMA}\0".encode())
+    digest.update(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    )
+    digest.update(b"\0")
+    digest.update(tool_identity.encode())
+    for path in paths:
+        relative = path.relative_to(ROOT)
+        digest.update(b"\0path\0")
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0content\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def workspace_cache_fingerprint(
+    metadata: dict[str, Any],
+    tool_identity: str | None = None,
+) -> str:
+    return hash_cache_inputs(
+        workspace_cache_inputs(metadata),
+        metadata,
+        analyzer_identity() if tool_identity is None else tool_identity,
+    )
+
+
+def index_cache_fingerprint(workspace_fingerprint: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"ownership-audit-index-v{CACHE_SCHEMA}\0".encode())
+    digest.update(workspace_fingerprint.encode())
+    digest.update(b"\0tool\0")
+    digest.update(Path(__file__).read_bytes())
+    return digest.hexdigest()
+
+
+def view_cache_fingerprint(workspace_fingerprint: str, view: SemanticView) -> str:
+    digest = hashlib.sha256()
+    digest.update(workspace_fingerprint.encode())
+    digest.update(b"\0")
+    digest.update(
+        json.dumps(
+            view.configuration(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    return digest.hexdigest()
+
+
+def write_json_atomic(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        dir=path.parent,
+        prefix=f"{path.stem}.",
+        suffix=path.suffix,
+        delete=False,
+    ) as temporary:
+        json.dump(value, temporary, indent=2, sort_keys=True)
+        temporary.write("\n")
+        temporary_path = Path(temporary.name)
+    os.replace(temporary_path, path)
+
+
+def semantic_view_cache_path(view: SemanticView) -> Path:
+    return CACHE_DIR / f"call-hierarchy-{view.name}.sqlite3"
+
+
+def open_semantic_view_cache(
+    view: SemanticView,
+    fingerprint: str,
+) -> sqlite3.Connection:
+    path = semantic_view_cache_path(view)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=30)
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS entries (symbol TEXT PRIMARY KEY, calls TEXT)"
+    )
+    metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+    expected = {
+        "schema": str(CACHE_SCHEMA),
+        "fingerprint": fingerprint,
+    }
+    if metadata != expected:
+        connection.execute("DELETE FROM entries")
+        connection.execute("DELETE FROM metadata")
+        connection.executemany(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            expected.items(),
+        )
+        connection.commit()
+    return connection
+
+
+def read_semantic_view_cache(
+    view: SemanticView,
+    fingerprint: str,
+) -> dict[str, Any]:
+    connection = open_semantic_view_cache(view, fingerprint)
+    try:
+        return {
+            symbol: {"calls": json.loads(calls) if calls is not None else None}
+            for symbol, calls in connection.execute(
+                "SELECT symbol, calls FROM entries"
+            )
+        }
+    finally:
+        connection.close()
+
+
+def write_semantic_view_cache(
+    view: SemanticView,
+    fingerprint: str,
+    entries: dict[str, Any],
+) -> None:
+    if not entries:
+        return
+    connection = open_semantic_view_cache(view, fingerprint)
+    try:
+        connection.executemany(
+            "INSERT OR REPLACE INTO entries (symbol, calls) VALUES (?, ?)",
+            (
+                (
+                    symbol,
+                    json.dumps(entry["calls"], separators=(",", ":"))
+                    if entry["calls"] is not None
+                    else None,
+                )
+                for symbol, entry in entries.items()
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def read_cached_index(fingerprint: str) -> dict[str, Any] | None:
+    if not INDEX_PATH.exists():
+        return None
+    index = json.loads(INDEX_PATH.read_text())
+    cache = index.get("cache")
+    if not isinstance(cache, dict):
+        return None
+    if cache.get("schema") != CACHE_SCHEMA or cache.get("fingerprint") != fingerprint:
+        return None
+    return index
+
+
 def run_parse(source: str) -> str:
     result = subprocess.run(
         rust_analyzer_command("parse"),
@@ -287,7 +501,23 @@ def parse_source(path: Path, source: str | None = None) -> SourceFile:
     data = source.encode()
     line_starts = [0]
     line_starts.extend(match.end() for match in re.finditer(b"\n", data))
-    return SourceFile(path, source, data, line_starts, parse_nodes(run_parse(source)))
+    nodes = parse_nodes(run_parse(source))
+    call_nodes_by_line: dict[int, list[tuple[int, SyntaxNode]]] = {}
+    for index, node in enumerate(nodes):
+        if node.kind not in CALL_NODE_KINDS:
+            continue
+        start_line = bisect.bisect_right(line_starts, node.start) - 1
+        end_line = bisect.bisect_right(line_starts, node.end) - 1
+        for line in range(start_line, end_line + 1):
+            call_nodes_by_line.setdefault(line, []).append((index, node))
+    return SourceFile(
+        path,
+        source,
+        data,
+        line_starts,
+        nodes,
+        call_nodes_by_line,
+    )
 
 
 def direct_child(source_file: SourceFile, index: int, kind: str) -> SyntaxNode | None:
@@ -2431,13 +2661,13 @@ def source_call_site(
     if source_file is None:
         return {"expression": "", "arguments": []}
     start = source_file.offset(range_value["start"])
+    line = range_value["start"]["line"]
     containing_calls = [
         (index, node)
-        for index, node in enumerate(source_file.nodes)
-        if node.kind in CALL_NODE_KINDS and node.start <= start <= node.end
+        for index, node in source_file.call_nodes_by_line.get(line, [])
+        if node.start <= start <= node.end
     ]
     if not containing_calls:
-        line = range_value["start"]["line"]
         begin = source_file.line_starts[line]
         end = (
             source_file.line_starts[line + 1]
@@ -2806,8 +3036,142 @@ def build_reach_through_reports(
     }
 
 
-def build_index() -> dict[str, Any]:
-    discovery = discover_workspace_sources()
+def collect_semantic_view_calls(
+    view: SemanticView,
+    named: list[dict[str, Any]],
+    source_files: dict[Path, SourceFile],
+    workspace_fingerprint: str,
+) -> dict[str, Any]:
+    fingerprint = view_cache_fingerprint(workspace_fingerprint, view)
+    entries = read_semantic_view_cache(view, fingerprint)
+    missing = [record for record in named if record["symbol"] not in entries]
+    if not missing:
+        print(
+            f"reused {view.name} call hierarchy for {len(named)} callables",
+            flush=True,
+        )
+        return entries
+
+    print(
+        f"indexing {view.name} call hierarchy for {len(missing)} uncached "
+        f"of {len(named)} callables",
+        flush=True,
+    )
+    analyzer = RustAnalyzer(ROOT, view)
+    analyzer.initialize()
+    queried = 0
+    pending: dict[str, Any] = {}
+    try:
+        analyzer.wait_until_ready()
+        opened_paths: set[Path] = set()
+        for record in missing:
+            path = (ROOT / record["path"]).resolve()
+            if path not in opened_paths:
+                analyzer.open_document(path, source_files[path].source)
+                opened_paths.add(path)
+            entry = {
+                "calls": analyzer.outgoing(path, record["name_range"]["start"])
+            }
+            entries[record["symbol"]] = entry
+            pending[record["symbol"]] = entry
+            queried += 1
+            if queried % CACHE_CHECKPOINT_INTERVAL == 0:
+                write_semantic_view_cache(view, fingerprint, pending)
+                pending.clear()
+            if queried % 250 == 0:
+                print(
+                    f"indexed {view.name} call hierarchy for "
+                    f"{queried}/{len(missing)} uncached callables",
+                    flush=True,
+                )
+    finally:
+        try:
+            write_semantic_view_cache(view, fingerprint, pending)
+        finally:
+            analyzer.close()
+    return entries
+
+
+def attach_semantic_view_calls(
+    view: SemanticView,
+    named: list[dict[str, Any]],
+    entries: dict[str, Any],
+    records: list[dict[str, Any]],
+    records_by_path: dict[Path, list[dict[str, Any]]],
+    source_files: dict[Path, SourceFile],
+    matched_sites: dict[str, list[dict[str, Any]]],
+) -> None:
+    for record in named:
+        path = (ROOT / record["path"]).resolve()
+        entry = entries.get(record["symbol"])
+        if not isinstance(entry, dict) or "calls" not in entry:
+            raise RuntimeError(
+                f"semantic view {view.name} omitted {record['symbol']}"
+            )
+        calls = entry["calls"]
+        status = "unavailable" if calls is None else "resolved"
+        record.setdefault("call_hierarchy_views", {})[view.name] = status
+        if calls is None:
+            continue
+        if not isinstance(calls, list):
+            raise RuntimeError(
+                f"invalid calls for {record['symbol']} in {view.name} cache"
+            )
+        for call in calls:
+            target_item = call["to"]
+            target = internal_symbol(records_by_path, target_item)
+            for range_value in call.get("fromRanges", []):
+                source_record = record_containing_position(
+                    records_by_path[path],
+                    range_value["start"],
+                )
+                if source_record is None:
+                    raise RuntimeError(
+                        f"semantic call site lies outside a callable: "
+                        f"{record['path']}:{range_value['start']}"
+                    )
+                site = {
+                    "range": range_value,
+                    "views": [view.name],
+                    **source_call_site(source_files, path, range_value),
+                }
+                resolved_target = target or macro_generated_target(
+                    records,
+                    target_item,
+                    site,
+                )
+                if resolved_target is None:
+                    resolved_target = (
+                        f"external::{target_item.get('detail', '')}::"
+                        f"{target_item.get('name', '<unknown>')}"
+                    )
+                matched_sites[source_record["symbol"]].append(
+                    {
+                        "position": range_value["start"],
+                        "view": view.name,
+                        "target": resolved_target,
+                    }
+                )
+                append_semantic_edge(source_record, resolved_target, site)
+
+
+def build_index(
+    metadata: dict[str, Any] | None = None,
+    workspace_fingerprint: str | None = None,
+    index_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    metadata = cargo_metadata() if metadata is None else metadata
+    workspace_fingerprint = (
+        workspace_cache_fingerprint(metadata)
+        if workspace_fingerprint is None
+        else workspace_fingerprint
+    )
+    index_fingerprint = (
+        index_cache_fingerprint(workspace_fingerprint)
+        if index_fingerprint is None
+        else index_fingerprint
+    )
+    discovery = discover_workspace_sources(metadata)
     source_files: dict[Path, SourceFile] = {}
     records: list[dict[str, Any]] = []
     for path in discovery.reachable:
@@ -2841,78 +3205,31 @@ def build_index() -> dict[str, Any]:
         if record["kind"] not in {"closure", "async-block"}
         and "macro_origin" not in record
     ]
-    for view in SEMANTIC_VIEWS:
-        analyzer = RustAnalyzer(ROOT, view)
-        analyzer.initialize()
-        try:
-            analyzer.wait_until_ready()
-            print(
-                f"indexing {view.name} call hierarchy for {len(named)} callables",
-                flush=True,
+    with ThreadPoolExecutor(max_workers=len(SEMANTIC_VIEWS)) as executor:
+        futures = {
+            view: executor.submit(
+                collect_semantic_view_calls,
+                view,
+                named,
+                source_files,
+                workspace_fingerprint,
             )
-            opened_paths: set[Path] = set()
-            for number, record in enumerate(named, start=1):
-                path = (ROOT / record["path"]).resolve()
-                if path not in opened_paths:
-                    analyzer.open_document(path, source_files[path].source)
-                    opened_paths.add(path)
-                calls = analyzer.outgoing(path, record["name_range"]["start"])
-                if calls is None:
-                    status = "unavailable"
-                else:
-                    status = "resolved"
-                record.setdefault("call_hierarchy_views", {})[view.name] = status
-                if calls is None:
-                    continue
-                for call in calls:
-                    target_item = call["to"]
-                    target = internal_symbol(records_by_path, target_item)
-                    for range_value in call.get("fromRanges", []):
-                        source_record = record_containing_position(
-                            records_by_path[path],
-                            range_value["start"],
-                        )
-                        if source_record is None:
-                            raise RuntimeError(
-                                f"semantic call site lies outside a callable: "
-                                f"{record['path']}:{range_value['start']}"
-                            )
-                        site = {
-                            "range": range_value,
-                            "views": [view.name],
-                            **source_call_site(
-                                source_files, path, range_value
-                            ),
-                        }
-                        resolved_target = target or macro_generated_target(
-                            records,
-                            target_item,
-                            site,
-                        )
-                        if resolved_target is None:
-                            resolved_target = (
-                                f"external::{target_item.get('detail', '')}::"
-                                f"{target_item.get('name', '<unknown>')}"
-                            )
-                        matched_sites[source_record["symbol"]].append(
-                            {
-                                "position": range_value["start"],
-                                "view": view.name,
-                                "target": resolved_target,
-                            }
-                        )
-                        append_semantic_edge(
-                            source_record,
-                            resolved_target,
-                            site,
-                        )
-                if number % 250 == 0:
-                    print(
-                        f"indexed {view.name} call hierarchy for "
-                        f"{number}/{len(named)} callables"
-                    )
-        finally:
-            analyzer.close()
+            for view in SEMANTIC_VIEWS
+        }
+        view_entries = {
+            view: futures[view].result()
+            for view in SEMANTIC_VIEWS
+        }
+    for view in SEMANTIC_VIEWS:
+        attach_semantic_view_calls(
+            view,
+            named,
+            view_entries[view],
+            records,
+            records_by_path,
+            source_files,
+            matched_sites,
+        )
 
     for record in records:
         if "macro_origin" in record:
@@ -3102,6 +3419,10 @@ def build_index() -> dict[str, Any]:
     )
     return {
         "schema": 1,
+        "cache": {
+            "schema": CACHE_SCHEMA,
+            "fingerprint": index_fingerprint,
+        },
         "root": str(ROOT),
         "semantic_views": [
             {
@@ -3129,18 +3450,7 @@ def build_index() -> dict[str, Any]:
 
 
 def write_index(index: dict[str, Any]) -> None:
-    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        dir=INDEX_PATH.parent,
-        prefix="index.",
-        suffix=".json",
-        delete=False,
-    ) as temporary:
-        json.dump(index, temporary, indent=2, sort_keys=True)
-        temporary.write("\n")
-        temporary_path = Path(temporary.name)
-    os.replace(temporary_path, INDEX_PATH)
+    write_json_atomic(INDEX_PATH, index)
 
 
 def read_index() -> dict[str, Any]:
@@ -4618,12 +4928,20 @@ def print_record(record: dict[str, Any]) -> None:
 
 
 def command_inventory(_: argparse.Namespace) -> None:
-    index = build_index()
-    write_index(index)
+    metadata = cargo_metadata()
+    workspace_fingerprint = workspace_cache_fingerprint(metadata)
+    index_fingerprint = index_cache_fingerprint(workspace_fingerprint)
+    index = read_cached_index(index_fingerprint)
+    if index is None:
+        index = build_index(metadata, workspace_fingerprint, index_fingerprint)
+        write_index(index)
+        disposition = "wrote"
+    else:
+        disposition = "reused"
     counts: dict[str, int] = {}
     for record in index["callables"]:
         counts[record["kind"]] = counts.get(record["kind"], 0) + 1
-    print(f"wrote {INDEX_PATH}")
+    print(f"{disposition} {INDEX_PATH}")
     print(json.dumps(counts, indent=2, sort_keys=True))
 
 

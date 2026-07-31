@@ -314,6 +314,24 @@ impl Store {
         ]
         self.assertEqual(len(macro_calls), 1)
 
+    def test_source_call_site_uses_the_enclosing_call_on_its_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.rs"
+            source_file = ownership_audit.parse_source(
+                path,
+                "fn run() {\n    outer(inner());\n    elsewhere();\n}\n",
+            )
+            site = ownership_audit.source_call_site(
+                {path.resolve(): source_file},
+                path.resolve(),
+                {
+                    "start": {"line": 1, "character": 10},
+                    "end": {"line": 1, "character": 15},
+                },
+            )
+        self.assertEqual(site["callee_text"], "inner")
+        self.assertEqual(site["expression"], "inner()")
+
     def test_item_macro_expansion_callables_are_attributed_to_invocation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -579,6 +597,123 @@ status = "verified"
                 self.assertEqual(ownership_audit.read_decisions(), {})
             finally:
                 ownership_audit.DECISIONS_PATH = original_path
+
+
+class SemanticCacheTests(unittest.TestCase):
+    def test_input_hash_changes_with_source_metadata_and_tool_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.rs"
+            source.write_text("fn first() {}")
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = ownership_audit.hash_cache_inputs(
+                    [source], {"packages": []}, "rust-analyzer 1"
+                )
+                source.write_text("fn second() {}")
+                changed_source = ownership_audit.hash_cache_inputs(
+                    [source], {"packages": []}, "rust-analyzer 1"
+                )
+                changed_metadata = ownership_audit.hash_cache_inputs(
+                    [source], {"packages": [{"name": "sample"}]}, "rust-analyzer 1"
+                )
+                changed_tool = ownership_audit.hash_cache_inputs(
+                    [source], {"packages": []}, "rust-analyzer 2"
+                )
+            finally:
+                ownership_audit.ROOT = original_root
+        self.assertNotEqual(baseline, changed_source)
+        self.assertNotEqual(changed_source, changed_metadata)
+        self.assertNotEqual(changed_source, changed_tool)
+
+    def test_semantic_view_cache_rejects_another_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_cache_dir = ownership_audit.CACHE_DIR
+            ownership_audit.CACHE_DIR = Path(directory)
+            view = ownership_audit.SEMANTIC_VIEWS[0]
+            try:
+                ownership_audit.write_semantic_view_cache(
+                    view,
+                    "first",
+                    {"sample::run": {"calls": []}},
+                )
+                self.assertEqual(
+                    ownership_audit.read_semantic_view_cache(view, "first"),
+                    {"sample::run": {"calls": []}},
+                )
+                self.assertEqual(
+                    ownership_audit.read_semantic_view_cache(view, "second"),
+                    {},
+                )
+            finally:
+                ownership_audit.CACHE_DIR = original_cache_dir
+
+    def test_semantic_view_collection_queries_only_uncached_callables(self):
+        class FakeAnalyzer:
+            queried = []
+
+            def __init__(self, root, view):
+                pass
+
+            def initialize(self):
+                pass
+
+            def wait_until_ready(self):
+                pass
+
+            def open_document(self, path, source):
+                pass
+
+            def outgoing(self, path, position):
+                self.queried.append(position)
+                return []
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = (root / "sample.rs").resolve()
+            source_file = ownership_audit.SourceFile(path, "", b"", [0], [])
+            named = [
+                {
+                    "symbol": "sample::cached",
+                    "path": "sample.rs",
+                    "name_range": {"start": {"line": 1, "character": 0}},
+                },
+                {
+                    "symbol": "sample::missing",
+                    "path": "sample.rs",
+                    "name_range": {"start": {"line": 2, "character": 0}},
+                },
+            ]
+            original_root = ownership_audit.ROOT
+            original_cache_dir = ownership_audit.CACHE_DIR
+            original_analyzer = ownership_audit.RustAnalyzer
+            ownership_audit.ROOT = root
+            ownership_audit.CACHE_DIR = root / "cache"
+            ownership_audit.RustAnalyzer = FakeAnalyzer
+            view = ownership_audit.SEMANTIC_VIEWS[0]
+            fingerprint = ownership_audit.view_cache_fingerprint("workspace", view)
+            try:
+                ownership_audit.write_semantic_view_cache(
+                    view,
+                    fingerprint,
+                    {"sample::cached": {"calls": None}},
+                )
+                entries = ownership_audit.collect_semantic_view_calls(
+                    view,
+                    named,
+                    {path: source_file},
+                    "workspace",
+                )
+            finally:
+                ownership_audit.RustAnalyzer = original_analyzer
+                ownership_audit.CACHE_DIR = original_cache_dir
+                ownership_audit.ROOT = original_root
+        self.assertEqual(FakeAnalyzer.queried, [{"line": 2, "character": 0}])
+        self.assertEqual(set(entries), {"sample::cached", "sample::missing"})
 
 
 class SemanticIndexTests(unittest.TestCase):
