@@ -651,7 +651,7 @@ impl Store {
     }
 }
 
-pub(super) struct AuthorizedDeviceExclusion<'operation, 'storage> {
+pub(crate) struct AuthorizedDeviceExclusion<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,

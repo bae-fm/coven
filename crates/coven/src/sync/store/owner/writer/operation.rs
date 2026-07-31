@@ -1,40 +1,14 @@
 use super::*;
 
-mod abandonment;
-mod acknowledgements;
-mod blob_lifecycle;
-pub(crate) mod blob_preparation;
-mod membership_mutation;
-pub(crate) mod operations;
-mod preparation;
-mod publication;
-pub(crate) mod reclaim;
-pub(crate) mod snapshot;
-mod store_pull;
-
-#[derive(Clone, Copy)]
-pub(super) struct SnapshotHistoryConstruction;
-
-impl SnapshotHistoryConstruction {
-    fn authorize_history(self) -> super::history::HistoryConstructionAuthority {
-        super::history::HistoryConstructionAuthority::snapshot(self)
-    }
-}
-
-pub(crate) use acknowledgements::StoreAckError;
-pub(super) use membership_mutation::{
-    validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
-    PreparedMembershipTransition,
-};
 pub(super) struct LocalStoreWriter<'store> {
-    identity: &'store UserKeypair,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: UserKeypair,
+    pub(super) identity: &'store UserKeypair,
+    pub(super) registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    pub(super) registration: crate::protocol::store_commit::StoreDeviceRegistration,
+    pub(super) device_signer: UserKeypair,
 }
 
 impl<'store> LocalStoreWriter<'store> {
-    pub(super) fn from_verified_parts(
+    fn from_verified_parts(
         identity: &'store UserKeypair,
         registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: crate::protocol::store_commit::StoreDeviceRegistration,
@@ -50,14 +24,14 @@ impl<'store> LocalStoreWriter<'store> {
 }
 
 pub(crate) struct AuthorizedWriterOperation<'storage> {
-    database: StoreDatabase,
+    pub(super) database: StoreDatabase,
     history: AuthorizedStoreHistory<'storage>,
-    storage: &'storage Arc<dyn SyncStorage>,
-    membership: crate::protocol::membership::MembershipChain,
-    writer: LocalStoreWriter<'storage>,
+    pub(super) storage: &'storage Arc<dyn SyncStorage>,
+    pub(super) membership: crate::protocol::membership::MembershipChain,
+    pub(super) writer: LocalStoreWriter<'storage>,
 }
 
-pub(super) struct MergeConflictResolutionCommitPlan {
+pub(crate) struct MergeConflictResolutionCommitPlan {
     authorship: crate::database::store::OwnStreamAuthorship,
     root: crate::protocol::store_commit::StoreRootRef,
     registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -219,18 +193,26 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         history: AuthorizedStoreHistory<'storage>,
         storage: &'storage Arc<dyn SyncStorage>,
         membership: crate::protocol::membership::MembershipChain,
-        writer: LocalStoreWriter<'storage>,
+        identity: &'storage UserKeypair,
+        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: crate::protocol::store_commit::StoreDeviceRegistration,
+        device_signer: UserKeypair,
     ) -> Self {
         Self {
             database,
             history,
             storage,
             membership,
-            writer,
+            writer: LocalStoreWriter::from_verified_parts(
+                identity,
+                registration_ref,
+                registration,
+                device_signer,
+            ),
         }
     }
 
-    fn store_root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+    pub(crate) fn store_root(&self) -> &crate::protocol::store_commit::StoreRootRef {
         self.history.root()
     }
 
@@ -271,7 +253,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn open_keyring_or_for_membership(
+    pub(crate) async fn open_keyring_or_for_membership(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
         initial: &crate::encryption::EncryptionService,
@@ -281,7 +263,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn prepare_wrapped_key(
+    pub(crate) async fn prepare_wrapped_key(
         &self,
         recipient: &str,
         value: crate::protocol::wrapped_store_key::WrappedStoreKey,
@@ -292,7 +274,178 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.prepare_wrapped_key(recipient, value).await
     }
 
-    fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
+    pub(super) async fn verify_membership_publication_author(
+        &self,
+        publication: &PreparedMembershipPublication,
+    ) -> Result<
+        crate::protocol::store_commit::StoreDeviceRegistration,
+        crate::sync::store::membership::InviteError,
+    > {
+        let author = self
+            .history
+            .load_registration(&publication.head.body.author_registration)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?
+            .value;
+        if !publication.head.verify(&author) {
+            return Err(
+                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                    "prepared membership head has an invalid certified-device signature"
+                        .to_string(),
+                ),
+            );
+        }
+        Ok(author)
+    }
+
+    pub(super) async fn blocked_candidate_nonactivation(
+        &mut self,
+        candidate: &crate::database::BlockedMergeCandidate,
+    ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+    {
+        let verified = self
+            .history
+            .authenticate_blocked_candidate(candidate)
+            .await?;
+        self.history
+            .excluded_candidate_nonactivation(
+                &verified,
+                &candidate.head.value,
+                &candidate.head.object,
+            )
+            .await
+    }
+
+    pub(super) async fn cleanup_merge_candidate_history(
+        &mut self,
+        write_id: crate::WriteId,
+    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+        self.history.cleanup_merge_candidate(write_id).await
+    }
+
+    pub(super) async fn select_acknowledgement_snapshot(
+        &mut self,
+        frontier: &crate::protocol::store_commit::CommitFrontier,
+        device_state: &crate::protocol::store_commit::StoreDeviceStateRef,
+    ) -> Result<
+        Option<crate::protocol::store_commit::StoreSnapshotLocator>,
+        acknowledgements::StoreAckError,
+    > {
+        self.history
+            .select_acknowledgement_snapshot(frontier, device_state)
+            .await
+    }
+
+    pub(super) async fn stage_verified_blob_plaintext(
+        &self,
+        authority: &crate::blob::RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, crate::blob::cache::BlobCacheError> {
+        self.history
+            .stage_verified_blob_plaintext(authority, stored, destination)
+            .await
+    }
+
+    pub(super) async fn authorize_retained_outbound(
+        &self,
+        order: &crate::protocol::store_commit::StoreCommitOrder,
+        membership_heads: &[crate::protocol::membership::MembershipHeadRef],
+        registration: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<super::verified_history::MergeOutboundAuthorization, super::pull::StorePullError>
+    {
+        self.history
+            .authorize_retained_outbound(order, membership_heads, registration)
+            .await
+    }
+
+    pub(super) async fn prepare_merge_history_successor(
+        &self,
+        commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        membership: &crate::protocol::membership::MembershipChain,
+        recovery_author: Option<&crate::protocol::store_commit::StoreDeviceRegistrationRef>,
+        state_after: crate::protocol::store_commit::ResolvedStoreDeviceState,
+        evidence: super::verified_history::MergeHistorySuccessorEvidence,
+    ) -> Result<super::verified_history::PreparedMergeHistorySuccessor, super::pull::StorePullError>
+    {
+        self.history
+            .prepare_merge_history_successor(
+                commit,
+                membership,
+                recovery_author,
+                state_after,
+                evidence,
+            )
+            .await
+    }
+
+    pub(super) async fn observe_occupied_merge_head(
+        &mut self,
+        expected: &crate::protocol::store_commit::StoreDeviceHead,
+        expected_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<super::history::abandonment::VerifiedMergeWinner, StoreError> {
+        self.history
+            .observe_occupied_merge_head(expected, expected_commit, slot, semantic_prefix)
+            .await
+    }
+
+    pub(super) async fn prepare_merge_snapshot_history_summary(
+        &self,
+        coverage: &crate::protocol::store_commit::CommitFrontier,
+        membership: &crate::protocol::membership::MembershipChain,
+        state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
+        author_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        author: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<
+        crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        super::pull::StorePullError,
+    > {
+        self.history
+            .prepare_merge_snapshot_history_summary(coverage, membership, state, author_ref, author)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn load_own_snapshot_for_test(
+        &mut self,
+        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<crate::protocol::store_commit::SnapshotMeta, snapshot::SnapshotError> {
+        self.history
+            .load_store_snapshot(
+                &self.writer.registration_ref,
+                &self.writer.registration,
+                reference,
+            )
+            .await
+            .map(|(_, meta)| meta)
+            .map_err(snapshot::SnapshotError::StoreObject)
+    }
+
+    pub(crate) async fn pull(
+        &mut self,
+        store_dir: &StoreDir,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+    ) -> Result<crate::sync::store::StorePullResult, SyncCycleFailure> {
+        let identity = self.writer.identity;
+        let membership = self.membership.clone();
+        let execution = self
+            .history
+            .pull(store_dir, &membership, Some(identity), routing_encryption)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+        self.membership = execution.membership;
+        Ok(execution.result)
+    }
+
+    pub(crate) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
+        Ok(false)
+    }
+
+    pub(super) fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
         if self.membership.is_owner_now(author_pubkey) {
             Ok(())
         } else {
@@ -301,7 +454,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(test)]
-    pub(super) fn sign_device_head_for_test(
+    pub(crate) fn sign_device_head_for_test(
         &self,
         commit: crate::protocol::store_commit::StoreBatchCommitRef,
         history_summary: crate::protocol::store_commit::ObjectHash,
@@ -319,7 +472,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(test)]
-    pub(super) fn resign_snapshot_meta_for_test(
+    pub(crate) fn resign_snapshot_meta_for_test(
         &self,
         meta: crate::protocol::store_commit::SnapshotMeta,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, StoreError> {
@@ -348,7 +501,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(test)]
-    pub(super) fn parse_snapshot_meta_for_test(
+    pub(crate) fn parse_snapshot_meta_for_test(
         &self,
         bytes: &[u8],
         reference: &crate::protocol::store_commit::StoreSnapshotRef,
@@ -363,17 +516,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(test)]
-    pub(super) fn local_registration_ref_for_test(
+    pub(crate) fn local_registration_ref_for_test(
         &self,
     ) -> crate::protocol::store_commit::StoreDeviceRegistrationRef {
         self.writer.registration_ref.clone()
     }
 
-    fn reclaim_history(&mut self) -> super::history::ReclaimHistory<'_, 'storage> {
+    pub(super) fn reclaim_history(&mut self) -> super::history::ReclaimHistory<'_, 'storage> {
         self.history.reclaim()
     }
 
-    pub(super) fn owner_promotion(
+    pub(crate) fn owner_promotion(
         &mut self,
     ) -> super::owner_promotion::AuthorizedOwnerPromotion<'_, 'storage> {
         let database = self.database.clone();
@@ -395,7 +548,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         )
     }
 
-    pub(super) fn owner_promotion_history(
+    pub(crate) fn owner_promotion_history(
         &mut self,
     ) -> super::history::OwnerPromotionHistory<'_, 'storage> {
         self.history.owner_promotion()
@@ -748,23 +901,23 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         )
     }
 
-    pub(super) fn circle_history(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {
+    pub(crate) fn circle_history(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {
         self.history.circles()
     }
 
-    pub(super) fn device_join_history(
+    pub(crate) fn device_join_history(
         &mut self,
     ) -> super::device_join::history::DeviceJoinHistory<'_, 'storage> {
         self.history.device_join()
     }
 
-    pub(super) fn device_exclusion_history(
+    pub(crate) fn device_exclusion_history(
         &mut self,
     ) -> super::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
         self.history.device_exclusion()
     }
 
-    pub(super) fn device_exclusion(
+    pub(crate) fn device_exclusion(
         &mut self,
     ) -> super::device_exclusion::AuthorizedDeviceExclusion<'_, 'storage> {
         let database = self.database.clone();
@@ -772,13 +925,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         super::device_exclusion::AuthorizedDeviceExclusion::new(self, database, storage)
     }
 
-    pub(super) fn circle_bootstrap_verifier(
+    pub(crate) fn circle_bootstrap_verifier(
         &self,
     ) -> super::circle_bootstrap::CircleBootstrapVerifier {
         super::circle_bootstrap::CircleBootstrapVerifier::new(self.storage.clone())
     }
 
-    pub(super) fn join_operation(&mut self) -> super::device_join::AuthorizedJoin<'_, 'storage> {
+    pub(crate) fn join_operation(&mut self) -> super::device_join::AuthorizedJoin<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
         let root = self.store_root().clone();
@@ -804,7 +957,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         )
     }
 
-    pub(super) fn provider_administrator_join(
+    pub(crate) fn provider_administrator_join(
         &mut self,
     ) -> Result<
         super::device_join::AuthorizedProviderAdministratorJoin<'_, 'storage>,
@@ -813,7 +966,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.join_operation().into_provider_administrator()
     }
 
-    pub(super) async fn prepare_membership_transition(
+    pub(crate) async fn prepare_membership_transition(
         &mut self,
         membership: &crate::protocol::membership::MembershipChain,
         entry: crate::protocol::membership::MembershipEntry,
@@ -823,7 +976,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn finish_membership_transition(
+    pub(crate) async fn finish_membership_transition(
         &mut self,
         transition: PreparedMembershipTransition,
         activation: crate::protocol::membership::MembershipHeadActivation,
@@ -833,7 +986,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn publish_membership_authority(
+    pub(crate) async fn publish_membership_authority(
         &mut self,
         transition: &PreparedMembershipTransition,
         wraps: &[crate::protocol::wrapped_store_key::PreparedWrappedStoreKey],
@@ -843,7 +996,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn publish_membership_activation(
+    pub(crate) async fn publish_membership_activation(
         &mut self,
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
@@ -858,7 +1011,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    async fn reject_excluded_merge_candidate(
+    pub(super) async fn reject_excluded_merge_candidate(
         &self,
         candidate: &crate::protocol::store_commit::StoreBatchCommitRef,
         author: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -940,7 +1093,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         ))
     }
 
-    fn membership_authority(
+    pub(super) fn membership_authority(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
     ) -> Result<crate::protocol::store_commit::StoreOperationMembershipAuthority, StoreError> {
@@ -953,7 +1106,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor })
     }
 
-    pub(super) async fn prepare_conflict_resolution_plan(
+    pub(crate) async fn prepare_conflict_resolution_plan(
         &mut self,
         candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
     ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
@@ -1421,7 +1574,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         })
     }
 
-    async fn finish_nonactivating_acknowledgement(
+    pub(super) async fn finish_nonactivating_acknowledgement(
         &self,
         acknowledgement: crate::protocol::store_commit::StoreAckRef,
     ) -> Result<(), StoreError> {
@@ -1512,7 +1665,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self.writer.registration.device_id
     }
 
-    pub(super) fn announcement_stream_id(&self) -> crate::protocol::membership::AuthorStreamId {
+    pub(crate) fn announcement_stream_id(&self) -> crate::protocol::membership::AuthorStreamId {
         crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
             self.store_root().store_root_hash,
             &self.writer.registration_ref,
@@ -1582,7 +1735,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.reclaim().run().await
     }
 
-    fn reclaim(&mut self) -> reclaim::AuthorizedReclaim<'_, 'storage> {
+    pub(super) fn reclaim(&mut self) -> reclaim::AuthorizedReclaim<'_, 'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
         let root = self.store_root().clone();

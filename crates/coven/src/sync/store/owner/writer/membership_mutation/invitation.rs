@@ -98,16 +98,8 @@ async fn execute_invite_mutation(
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let author = operation
-        .history
-        .load_registration(&plan.publication.head.body.author_registration)
-        .await
-        .map_err(|error| InviteError::Crypto(error.to_string()))?
-        .value;
-    if !plan.publication.head.verify(&author) {
-        return Err(InviteError::InvalidDurableMutation(
-            "prepared membership head has an invalid certified-device signature".to_string(),
-        ));
-    }
+        .verify_membership_publication_author(&plan.publication)
+        .await?;
     let wrapped = plan.wrapped_key.validate()?;
     let authority_matches = matches!(
         &plan.publication.entry.change,

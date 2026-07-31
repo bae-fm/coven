@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 
-pub(super) struct CircleBootstrapVerifier {
+pub(crate) struct CircleBootstrapVerifier {
     storage: Arc<dyn SyncStorage>,
 }
 

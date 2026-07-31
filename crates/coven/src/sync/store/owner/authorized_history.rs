@@ -127,18 +127,26 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         ))
     }
 
-    pub(super) fn bind_writer(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn authorize_writer(
         self,
         storage: &'storage Arc<dyn SyncStorage>,
         membership: crate::protocol::membership::MembershipChain,
-        writer: super::writer::LocalStoreWriter<'storage>,
+        identity: &'storage UserKeypair,
+        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: crate::protocol::store_commit::StoreDeviceRegistration,
+        device_signer: UserKeypair,
     ) -> super::writer::AuthorizedWriterOperation<'storage> {
-        super::writer::AuthorizedWriterOperation::from_parts(
-            self.database.clone(),
+        let database = self.database.clone();
+        super::writer::authorize(
+            database,
             self,
             storage,
             membership,
-            writer,
+            identity,
+            registration_ref,
+            registration,
+            device_signer,
         )
     }
 

@@ -248,7 +248,6 @@ impl AuthorizedWriterOperation<'_> {
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let snapshot = self
-            .history
             .select_acknowledgement_snapshot(&frontier, &device_state)
             .await?;
         let exclusions = crate::protocol::store_commit::StoreAckExclusionState {

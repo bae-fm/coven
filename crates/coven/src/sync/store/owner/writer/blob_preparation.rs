@@ -479,7 +479,6 @@ impl AuthorizedWriterOperation<'_> {
             .join("outbound-blobs")
             .join(format!(".plaintext-{destination_locator}"));
         let staged = self
-            .history
             .stage_verified_blob_plaintext(&authority, &previous.stored, &destination)
             .await
             .map_err(|error| match error {

@@ -151,18 +151,8 @@ impl AuthorizedWriterOperation<'_> {
                     return Ok(MergeCandidateAbandonment::NotRequired);
                 }
                 if let Some(candidate) = database.blocked_merge_candidate(write_id.clone()).await? {
-                    let verified = self
-                        .history
-                        .authenticate_blocked_candidate(&candidate)
-                        .await?;
-                    if let Some(nonactivation) = self
-                        .history
-                        .excluded_candidate_nonactivation(
-                            &verified,
-                            &candidate.head.value,
-                            &candidate.head.object,
-                        )
-                        .await?
+                    if let Some(nonactivation) =
+                        self.blocked_candidate_nonactivation(&candidate).await?
                     {
                         database
                             .begin_blocked_merge_candidate_nonactivation(
@@ -191,29 +181,11 @@ impl AuthorizedWriterOperation<'_> {
                             "prepared Merge abandonment has no exact candidates".to_string(),
                         )
                     })?;
-                let verified_candidate = self
-                    .history
-                    .authenticate_blocked_candidate(&candidates.candidate)
-                    .await?;
                 let candidate = self
-                    .history
-                    .excluded_candidate_nonactivation(
-                        &verified_candidate,
-                        &candidates.candidate.head.value,
-                        &candidates.candidate.head.object,
-                    )
-                    .await?;
-                let verified_authority = self
-                    .history
-                    .authenticate_blocked_candidate(&candidates.authority)
+                    .blocked_candidate_nonactivation(&candidates.candidate)
                     .await?;
                 let authority = self
-                    .history
-                    .excluded_candidate_nonactivation(
-                        &verified_authority,
-                        &candidates.authority.head.value,
-                        &candidates.authority.head.object,
-                    )
+                    .blocked_candidate_nonactivation(&candidates.authority)
                     .await?;
                 match (candidate, authority) {
                     (Some(candidate), Some(authority)) => {
@@ -306,6 +278,6 @@ impl AuthorizedWriterOperation<'_> {
         &mut self,
         write_id: crate::WriteId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.history.cleanup_merge_candidate(write_id).await
+        self.cleanup_merge_candidate_history(write_id).await
     }
 }

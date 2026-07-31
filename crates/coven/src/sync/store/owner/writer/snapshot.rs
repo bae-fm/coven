@@ -262,7 +262,6 @@ impl super::AuthorizedWriterOperation<'_> {
             devices,
         };
         let history_summary = self
-            .history
             .prepare_merge_snapshot_history_summary(
                 &coverage,
                 membership,
@@ -688,19 +687,6 @@ impl super::AuthorizedWriterOperation<'_> {}
 
 #[cfg(test)]
 impl super::AuthorizedWriterOperation<'_> {
-    async fn load_own_snapshot_for_test(
-        &mut self,
-        reference: &StoreSnapshotRef,
-    ) -> Result<SnapshotMeta, SnapshotError> {
-        let registration_ref = self.writer.registration_ref.clone();
-        let registration = self.writer.registration.clone();
-        self.history
-            .load_store_snapshot(&registration_ref, &registration, reference)
-            .await
-            .map(|(_, meta)| meta)
-            .map_err(SnapshotError::StoreObject)
-    }
-
     fn verify_own_snapshot_bytes_for_test(
         &self,
         reference: &StoreSnapshotRef,

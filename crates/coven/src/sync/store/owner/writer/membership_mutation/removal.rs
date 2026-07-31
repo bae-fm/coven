@@ -321,16 +321,8 @@ async fn execute_revoke_mutation(
     }
     let publication = plan.publication.publication().clone();
     let author = operation
-        .history
-        .load_registration(&publication.head.body.author_registration)
-        .await
-        .map_err(|error| InviteError::Crypto(error.to_string()))?
-        .value;
-    if !publication.head.verify(&author) {
-        return Err(InviteError::InvalidDurableMutation(
-            "prepared membership head has an invalid certified-device signature".to_string(),
-        ));
-    }
+        .verify_membership_publication_author(&publication)
+        .await?;
     let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
         .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?;
     let remaining = validated_chain.current_members();

@@ -361,13 +361,14 @@ impl<'storage> AuthorizedStore<'storage> {
             .registration
             .device_signer(identity)
             .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
-        let writer = super::writer::LocalStoreWriter::from_verified_parts(
+        Ok(history.authorize_writer(
+            storage,
+            membership,
             identity,
             local_device.registration_ref,
             local_device.registration,
             device_signer,
-        );
-        Ok(history.bind_writer(storage, membership, writer))
+        ))
     }
 }
 

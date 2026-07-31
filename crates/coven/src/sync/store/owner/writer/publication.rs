@@ -108,7 +108,6 @@ async fn drain_prepared_store_writes(
                     return Err(StoreObjectError::from(error).into());
                 }
                 let observation = operation
-                    .history
                     .observe_occupied_merge_head(
                         head,
                         commit,
@@ -176,7 +175,6 @@ async fn drain_prepared_store_writes(
                 return Ok::<bool, StoreError>(false);
             }
             let observation = operation
-                .history
                 .observe_occupied_merge_head(head, commit, batch.head.object.slot(), &head_prefix)
                 .await?;
             if observation.winner() != head

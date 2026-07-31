@@ -76,7 +76,6 @@ pub(super) async fn prepare_store_write(
             dependencies,
         };
         let authorization = operation
-            .history
             .authorize_retained_outbound(&order, membership.head_refs(), &registration_ref)
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -238,7 +237,6 @@ pub(super) async fn prepare_store_write(
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let commit_ref = commit.reference().clone();
         let successor = operation
-            .history
             .prepare_merge_history_successor(
                 &commit,
                 &authorization.membership,

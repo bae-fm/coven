@@ -10,7 +10,7 @@ mod request;
 pub(crate) use error::OwnerPromotionError;
 pub(crate) use journal::{OwnerPromotionJournal, OwnerPromotionJournalTransition};
 
-pub(super) struct AuthorizedOwnerPromotion<'operation, 'storage> {
+pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,

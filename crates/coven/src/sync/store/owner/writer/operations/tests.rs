@@ -65,7 +65,7 @@ async fn prepare_merge_conflict_resolution_commit(
     storage: &Arc<CloudSyncStorage>,
     keypair: &UserKeypair,
     candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
-) -> Result<super::super::MergeConflictResolutionCommitPlan, StoreError> {
+) -> Result<super::super::operation::MergeConflictResolutionCommitPlan, StoreError> {
     let store =
         crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), keypair.clone())
             .await?;
