@@ -59,44 +59,6 @@ impl DeviceStateResolver<'_> {
     }
 }
 
-async fn predecessor_acknowledgement_activation(
-    commit_verifier: &mut StoreCommitVerifier<'_>,
-    order: &super::store_commit::StoreCommitOrder,
-    expected: &super::store_commit::StoreAckRef,
-    ack: &super::store_commit::StoreAck,
-) -> Result<bool, RegistrationLoadError> {
-    let mut pending = order
-        .predecessor
-        .iter()
-        .chain(order.dependencies.values())
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut visited = BTreeSet::new();
-    while let Some(reference) = pending.pop() {
-        if !visited.insert(reference.clone()) {
-            continue;
-        }
-        let commit = commit_verifier
-            .load_ref(&reference)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-        if commit.value().acknowledgement() == Some(expected) {
-            let predecessor_cut = commit
-                .value()
-                .order
-                .predecessor_cut()
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-            return Ok(commit.value().author_registration == expected.registration
-                && ack.registration == expected.registration
-                && ack.store_cut == predecessor_cut
-                && ack.device_state == commit.value().device_state);
-        }
-        pending.extend(commit.value().order.predecessor.iter().cloned());
-        pending.extend(commit.value().order.dependencies.values().cloned());
-    }
-    Ok(false)
-}
-
 async fn verify_merge_device_exclusion_proof(
     resolver: &DeviceStateResolver<'_>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
@@ -152,8 +114,10 @@ async fn verify_merge_device_exclusion_proof(
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
-        if !predecessor_acknowledgement_activation(commit_verifier, &commit.order, reference, &ack)
-            .await?
+        if !commit_verifier
+            .predecessor_activates_acknowledgement(&commit.order, reference, &ack)
+            .await
+            .map_err(registration_attempt_error)?
         {
             return Err(RegistrationLoadError::Invalid(
                 "device exclusion proof acknowledgement is not activated in the outcome predecessor"

@@ -28,7 +28,7 @@ use crate::sync::store::{
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
     ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod membership;
 pub(crate) use membership::StoreMembershipObjectVerifier;
@@ -1035,6 +1035,41 @@ impl<'a> StoreCommitVerifier<'a> {
             },
         )
         .await
+    }
+
+    pub(crate) async fn predecessor_activates_acknowledgement(
+        &mut self,
+        order: &StoreCommitOrder,
+        expected: &StoreAckRef,
+        ack: &StoreAck,
+    ) -> Result<bool, StorePullError> {
+        let mut pending = order
+            .predecessor
+            .iter()
+            .chain(order.dependencies.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !visited.insert(reference.clone()) {
+                continue;
+            }
+            let commit = self.load_ref(&reference).await?;
+            if commit.value().acknowledgement() == Some(expected) {
+                let predecessor_cut = commit
+                    .value()
+                    .order
+                    .predecessor_cut()
+                    .map_err(|error| StorePullError::Database(error.to_string()))?;
+                return Ok(commit.value().author_registration == expected.registration
+                    && ack.registration == expected.registration
+                    && ack.store_cut == predecessor_cut
+                    && ack.device_state == commit.value().device_state);
+            }
+            pending.extend(commit.value().order.predecessor.iter().cloned());
+            pending.extend(commit.value().order.dependencies.values().cloned());
+        }
+        Ok(false)
     }
 
     pub(crate) async fn load_store_snapshot(
