@@ -36,7 +36,7 @@ pub(crate) struct VerifiedMergeWinner {
 }
 
 impl VerifiedMergeWinner {
-    pub(super) fn from_verified_parts(
+    pub(crate) fn from_verified_parts(
         store_root_hash: ObjectHash,
         expected_slot: crate::storage::cloud::ObjectSlot,
         expected: StoreDeviceHead,

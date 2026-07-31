@@ -2,6 +2,7 @@ use super::*;
 use crate::database::BlockedWriteDiscard;
 use crate::protocol::store_commit::StoreRootRef;
 
+mod authorized_history;
 mod authorized_store;
 mod circle_bootstrap;
 mod circles;
@@ -11,7 +12,7 @@ pub(super) mod history;
 mod host_write;
 mod keyring;
 pub(super) mod owner_promotion;
-pub(crate) use history::pull;
+pub(crate) mod pull;
 mod registration;
 mod registration_outbox;
 mod restore;
@@ -20,9 +21,9 @@ mod verified_history;
 pub(super) mod writer;
 
 use super::prepare_registration_object;
+use authorized_history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
-use history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use host_write::HostWriteBlobStaging;
 pub(crate) use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
