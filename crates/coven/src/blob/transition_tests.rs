@@ -2918,6 +2918,88 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     );
 }
 
+/// A database failure after materialization removes every file created by the
+/// operation. The root remains Remote and the cloud blob remains authoritative.
+#[tokio::test]
+async fn make_local_commit_failure_removes_materialized_files() {
+    let db = open_test_db_with_blob(photo_decl());
+    let storage = create_store(&db, UserKeypair::generate()).await;
+    let hlc = Hlc::new(
+        "A".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+    );
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"materialized-before-commit-failure".to_vec();
+
+    seed_remote_release(
+        &storage,
+        &db,
+        &lib,
+        &hlc,
+        None,
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+    db.call(|connection| {
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_make_local_gate_update
+                 BEFORE UPDATE OF shared ON notes
+                 WHEN NEW.id = 'n1' AND NEW.shared = 0
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced make_local commit failure');
+                 END;",
+            )
+            .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("install make_local commit failure");
+
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+
+    let error = make_local(
+        &db,
+        storage.storage.clone(),
+        &lib,
+        None,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("the gate update fails after materialization");
+
+    assert!(
+        matches!(error, crate::blob::transition::MakeLocalError::Db(_)),
+        "the database failure surfaces: {error:?}",
+    );
+    assert!(!dest_path.exists(), "the materialized file is rolled back");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the root stays Remote");
+    assert!(
+        external_blob(&db, "note_photos", "photoaaa")
+            .await
+            .is_none(),
+        "no external ownership is registered",
+    );
+    assert!(pending_deletes(&db).await.is_empty(), "no delete is queued");
+    storage
+        .verify_blob_object(
+            photo_ref(&db, "photoaaa")
+                .await
+                .stored()
+                .expect("Remote photo has exact storage"),
+        )
+        .await
+        .expect("the cloud blob remains intact");
+}
+
 /// A non-UTF-8 destination path aborts make_local before the cloud delete: the path
 /// conversion fails loud (`NonUtf8Dest`) rather than lossily rewriting the dest,
 /// registering a wrong external ref, and tombstoning the cloud copy. The release

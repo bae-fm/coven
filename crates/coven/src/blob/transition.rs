@@ -366,6 +366,79 @@ pub(crate) enum PostUpload {
 // make_local — foreground operation with a cancel signal
 // ===========================================================================
 
+/// Local files and database records produced by one make-local attempt before
+/// its atomic database commit. Until that commit succeeds, every file created by
+/// the attempt remains a rollback obligation owned by this value.
+struct MakeLocalMaterialization<'operation> {
+    database: &'operation StoreDatabase,
+    root_table: &'operation str,
+    root_id: &'operation str,
+    gate_column: String,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
+    records: Vec<crate::database::MaterializedLocalBlob>,
+    created_files: Vec<PathBuf>,
+}
+
+impl<'operation> MakeLocalMaterialization<'operation> {
+    fn new(
+        database: &'operation StoreDatabase,
+        root_table: &'operation str,
+        root_id: &'operation str,
+        gate_column: String,
+        routing_encryption: Option<crate::encryption::EncryptionService>,
+    ) -> Self {
+        Self {
+            database,
+            root_table,
+            root_id,
+            gate_column,
+            routing_encryption,
+            records: Vec::new(),
+            created_files: Vec::new(),
+        }
+    }
+
+    fn record_created_file(&mut self, path: PathBuf) {
+        self.created_files.push(path);
+    }
+
+    fn record_blob(&mut self, record: crate::database::MaterializedLocalBlob) {
+        self.records.push(record);
+    }
+
+    async fn abort(self, cause: MakeLocalError) -> MakeLocalError {
+        for path in self.created_files {
+            if let Err(detail) = crate::local_blob::remove_file(&path).await {
+                return MakeLocalError::Cleanup {
+                    path: path.display().to_string(),
+                    detail,
+                };
+            }
+        }
+        cause
+    }
+
+    async fn commit(self) -> Result<(), MakeLocalError> {
+        let stamp = self.database.stamp();
+        let records = self.records.clone();
+        match self
+            .database
+            .commit_make_local(
+                self.root_table,
+                self.root_id,
+                &self.gate_column,
+                stamp,
+                self.routing_encryption.clone(),
+                records,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.abort(MakeLocalError::Db(error)).await),
+        }
+    }
+}
+
 /// One blob materialized back to a local file by
 /// [`ConnectedBlobTransitions::make_local`], carrying what the single commit needs.
 /// `dest` is present for a user-provided blob whose local home is the user's path;
@@ -465,33 +538,34 @@ impl ConnectedBlobTransitions {
         }
 
         // Any error after the first local copy is written must roll those files back, so
-        // an aborted make_local leaves no partial materialization behind. `written`
-        // tracks what to remove; the loop's result drives the cleanup-or-commit
-        // decision.
-        let mut written: Vec<PathBuf> = Vec::new();
-        let materialized = match self
-            .materialize_blobs(root_table, root_id, &refs, dest, cancel, &mut written)
+        // an aborted make_local leaves no partial materialization behind. The retained
+        // materialization owns that cleanup obligation until the database commit succeeds.
+        let mut materialization = MakeLocalMaterialization::new(
+            db,
+            root_table,
+            root_id,
+            gate_col,
+            self.routing_encryption.clone(),
+        );
+        if let Err(error) = self
+            .materialize_blobs(
+                root_table,
+                root_id,
+                &refs,
+                dest,
+                cancel,
+                &mut materialization,
+            )
             .await
         {
-            Ok(m) => m,
-            Err(e) => return Err(roll_back(&written, e).await),
-        };
+            return Err(materialization.abort(error).await);
+        }
 
-        let stamp = db.stamp();
-        let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
         // The single atomic commit: flip false + register external refs (user-provided
         // only) + enqueue the cloud deletes, together. The destructive cloud delete is
         // durable inside this commit, so a crash right after can never leave the root
         // Local with the cloud blobs un-tombstoned.
-        db.commit_make_local(
-            &root_table_owned,
-            &root_id_owned,
-            &gate_col,
-            stamp,
-            self.routing_encryption.clone(),
-            materialized,
-        )
-        .await?;
+        materialization.commit().await?;
 
         if let Some(obs) = self.observer.as_deref() {
             obs.on_root_made_local(root_table, root_id).await;
@@ -508,10 +582,9 @@ impl ConnectedBlobTransitions {
         refs: &[RowBlobRef],
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
-        written: &mut Vec<PathBuf>,
-    ) -> Result<Vec<crate::database::MaterializedLocalBlob>, MakeLocalError> {
+        materialization: &mut MakeLocalMaterialization<'_>,
+    ) -> Result<(), MakeLocalError> {
         let total = refs.len() as u64;
-        let mut materialized = Vec::new();
 
         for (i, reference) in refs.iter().enumerate() {
             if *cancel.borrow() {
@@ -556,6 +629,7 @@ impl ConnectedBlobTransitions {
                             path: dest_path.display().to_string(),
                             detail: detail.to_string(),
                         })?;
+                    materialization.record_created_file(dest_path.clone());
                     verify_durable(&dest_path, reference.plaintext_size())
                         .await
                         .map_err(|detail| MakeLocalError::Write {
@@ -563,7 +637,6 @@ impl ConnectedBlobTransitions {
                             path: dest_path.display().to_string(),
                             detail,
                         })?;
-                    written.push(dest_path.clone());
                     crate::database::MaterializedLocalBlob {
                         remote: reference.clone(),
                         stored,
@@ -586,7 +659,7 @@ impl ConnectedBlobTransitions {
                         .await
                         .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
                     match staged.commit_new().await {
-                        Ok(()) => written.push(store_path.clone()),
+                        Ok(()) => materialization.record_created_file(store_path.clone()),
                         Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
                             let (size, hash) = crate::local_blob::exact_file_facts(&store_path)
                                 .await
@@ -629,7 +702,7 @@ impl ConnectedBlobTransitions {
                     }
                 }
             };
-            materialized.push(record);
+            materialization.record_blob(record);
 
             if let Some(obs) = self.observer.as_deref() {
                 obs.on_blob_materialize_progress(
@@ -646,7 +719,7 @@ impl ConnectedBlobTransitions {
         if *cancel.borrow() {
             return Err(MakeLocalError::Cancelled);
         }
-        Ok(materialized)
+        Ok(())
     }
 }
 
@@ -677,21 +750,4 @@ async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| format!("blob path has no parent dir: {}", dest.display()))?;
     crate::local_blob::create_dir_all(parent).await
-}
-
-/// Roll back the partial local copies an aborted make_local wrote, then return the
-/// error to surface. Returns the original `abort_err` when the rollback succeeds; if
-/// the rollback itself fails to remove a leftover it returns THAT instead — the
-/// more urgent signal, since that leftover is a readable copy of a still-Remote
-/// blob (a retry re-materializes over it).
-async fn roll_back(written: &[PathBuf], abort_err: MakeLocalError) -> MakeLocalError {
-    for path in written {
-        if let Err(detail) = crate::local_blob::remove_file(path).await {
-            return MakeLocalError::Cleanup {
-                path: path.display().to_string(),
-                detail,
-            };
-        }
-    }
-    abort_err
 }
