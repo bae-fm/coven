@@ -1945,6 +1945,165 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
+    async fn validate_commit_join_abandonments(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+        predecessor: Option<&MembershipChain>,
+    ) -> Result<(), RegistrationLoadError> {
+        let predecessor = predecessor.ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "device join abandonment activation has no exact predecessor authority".to_string(),
+            )
+        })?;
+        if !predecessor.is_owner_now(&activating_author.author_pubkey) {
+            return Err(RegistrationLoadError::Invalid(
+                "device join abandonment activation author is not an active Owner".to_string(),
+            ));
+        }
+        for reference in commit
+            .device_join_attempt_decisions()
+            .iter()
+            .filter_map(|decision| match decision {
+                DeviceJoinAttemptDecisionRef::Attempt(_) => None,
+                DeviceJoinAttemptDecisionRef::Abandoned(reference) => Some(reference),
+            })
+        {
+            let context = ProtocolObjectContext::signed_plaintext(
+                self.root().store_root_hash,
+                ProtocolObjectDomain::DeviceJoinAbandonment,
+            );
+            let semantic_prefix =
+                store_commit::device_join_abandonment_semantic_prefix(reference.attempt_id);
+            let bytes = self
+                .read_protocol_object(&context, &reference.object, &semantic_prefix)
+                .await
+                .map_err(RegistrationLoadError::Object)?;
+            let abandonment: device_join::DeviceJoinAbandonmentObject =
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            if abandonment.store_root_hash != self.root().store_root_hash
+                || abandonment.owner_registration != commit.author_registration
+                || abandonment.attempt_slot != *reference.object.slot()
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join abandonment differs from its activating commit".to_string(),
+                ));
+            }
+            reference
+                .verify(&abandonment, activating_author)
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn load_commit_join_cleanup_receipts(
+        &self,
+        commit: &StoreBatchCommit,
+        activating_author: &StoreDeviceRegistration,
+    ) -> Result<Vec<LoadedCommitJoinCleanupReceipt>, RegistrationLoadError> {
+        let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
+        for reference in commit.device_join_cleanup_receipts() {
+            let context = ProtocolObjectContext::signed_plaintext(
+                self.root().store_root_hash,
+                ProtocolObjectDomain::DeviceJoinCleanupReceipt,
+            );
+            let semantic_prefix =
+                store_commit::device_join_cleanup_receipt_semantic_prefix(reference.attempt_id);
+            let bytes = self
+                .read_protocol_object(&context, &reference.object, &semantic_prefix)
+                .await
+                .map_err(RegistrationLoadError::Object)?;
+            let receipt: device_join::DeviceJoinCleanupReceiptObject =
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            if receipt.executor != commit.author_registration
+                || receipt.membership != commit.membership_state
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join cleanup receipt differs from its activating predecessor"
+                        .to_string(),
+                ));
+            }
+            let attempt_ref = receipt.cancellation.attempt();
+            let (attempt, owner) = self
+                .load_device_join_attempt_and_owner(attempt_ref)
+                .await
+                .map_err(RegistrationLoadError::Object)?;
+            let attempt = self
+                .validate_device_join_attempt_evidence(attempt, &owner.value)
+                .await
+                .map_err(registration_attempt_error)?;
+            let expected_administrator = &attempt
+                .attempt
+                .value
+                .provider_approval
+                .request
+                .offer
+                .provider_admin;
+            if activating_author.provider != expected_administrator.provider
+                || attempt
+                    .attempt
+                    .value
+                    .provider_approval
+                    .request
+                    .offer
+                    .provider
+                    != self.verified_root().descriptor.provider
+            {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join cleanup executor differs from its exact provider authority"
+                        .to_string(),
+                ));
+            }
+            reference
+                .verify(&receipt, activating_author)
+                .and_then(|_| receipt.verify(&attempt.attempt.value, activating_author))
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            match &receipt.administrator_terminal {
+                device_join::ProviderAdminJoinTerminal::Completed(_) => {}
+                device_join::ProviderAdminJoinTerminal::Cancelled(closure) => {
+                    let administrator = self
+                        .load_registration(&closure.administrator_registration)
+                        .await
+                        .map_err(RegistrationLoadError::Object)?
+                        .value;
+                    closure
+                        .verify(&administrator)
+                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                }
+                device_join::ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
+                    let executor = self
+                        .load_registration(&revocation.executor)
+                        .await
+                        .map_err(RegistrationLoadError::Object)?
+                        .value;
+                    revocation
+                        .verify(&executor)
+                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                }
+            }
+            match &receipt.joiner_terminal {
+                device_join::JoinerJoinTerminal::Ready(_) => {}
+                device_join::JoinerJoinTerminal::Cancelled(closure) => closure
+                    .verify()
+                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?,
+                device_join::JoinerJoinTerminal::WriteRevoked(revocation) => {
+                    let executor = self
+                        .load_registration(&revocation.executor)
+                        .await
+                        .map_err(RegistrationLoadError::Object)?
+                        .value;
+                    revocation
+                        .verify(&executor)
+                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                }
+            }
+            receipts.push(LoadedCommitJoinCleanupReceipt { receipt, attempt });
+        }
+        Ok(receipts)
+    }
+
     pub(crate) async fn load_device_join_outcome(
         &self,
         reference: &DeviceJoinOutcomeRef,

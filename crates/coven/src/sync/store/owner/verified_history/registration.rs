@@ -1,15 +1,10 @@
 use super::join_validation::*;
 use super::*;
-use std::future::Future;
-use std::pin::Pin;
 
 pub(crate) enum RegistrationLoadError {
     Object(StoreObjectError),
     Invalid(String),
 }
-
-pub(crate) type RegistrationLoadFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, RegistrationLoadError>> + Send + 'a>>;
 
 pub(crate) struct VerifiedCommitJoinOutcome {
     pub(crate) attempt: DeviceJoinAttempt,
@@ -44,16 +39,13 @@ pub(crate) async fn load_device_join_cleanup_activation(
             "device join cleanup activation does not contain its exact sole receipt".to_string(),
         ));
     }
-    let receipts = load_commit_join_cleanup_receipts(
-        history_verifier,
-        verified_commit.value(),
-        verified_commit.author(),
-    )
-    .await
-    .map_err(|error| match error {
-        RegistrationLoadError::Object(error) => StorePullError::Object(error),
-        RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-    })?;
+    let receipts = history_verifier
+        .load_commit_join_cleanup_receipts(verified_commit.value(), verified_commit.author())
+        .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })?;
     Ok(LoadedDeviceJoinCleanupActivation {
         verified_commit,
         receipts,
@@ -411,8 +403,6 @@ pub(crate) async fn load_commit_registrations(
     accepted: VerifiedMergePredecessorHistory<'_>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
-    let storage = history_verifier.storage();
-    let root = history_verifier.root();
     if join_evidence.commit != *commit {
         return Err(RegistrationLoadError::Invalid(
             "verified device-join evidence belongs to another Store commit".to_string(),
@@ -473,14 +463,9 @@ pub(crate) async fn load_commit_registrations(
         .iter()
         .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Abandoned(_)));
     if has_join_abandonment {
-        Box::pin(validate_commit_join_abandonments(
-            storage,
-            root,
-            commit,
-            activating_author,
-            predecessor,
-        ))
-        .await?;
+        history_verifier
+            .validate_commit_join_abandonments(commit, activating_author, predecessor)
+            .await?;
     }
     if !commit.device_join_cleanup_receipts().is_empty() {
         validate_commit_join_cleanup_receipts(
