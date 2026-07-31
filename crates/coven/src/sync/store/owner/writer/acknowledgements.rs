@@ -1,13 +1,8 @@
 use super::snapshot;
 use super::*;
-use crate::database::StoreDatabase;
-use crate::protocol::store_commit::{
-    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreHistoryCut,
-    StoreRootRef, SuccessorLink,
-};
+use crate::protocol::store_commit::{ack_slot_prefix, DeviceStreamAnchor, StoreAck, SuccessorLink};
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::sync::store::operations;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
@@ -27,163 +22,6 @@ impl From<crate::database::DbError> for StoreAckError {
     fn from(error: crate::database::DbError) -> Self {
         Self::Database(error.into_message())
     }
-}
-
-struct ResolvedStoreAckPlan {
-    root: StoreRootRef,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: UserKeypair,
-    device_id: String,
-    history_cut: StoreHistoryCut,
-    device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-    snapshot: Option<crate::protocol::store_commit::StoreSnapshotLocator>,
-    exclusions: StoreAckExclusionState,
-    last_sync: String,
-}
-
-async fn stage_resolved_store_ack(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    plan: ResolvedStoreAckPlan,
-) -> Result<StoreAck, StoreAckError> {
-    if database.oldest_outbound_store_ack().await?.is_some() {
-        return Err(StoreAckError::InvalidOutbound(
-            "a prior acknowledgement remains queued".to_string(),
-        ));
-    }
-    let previous = database.latest_local_store_ack().await?;
-    let (sequence, predecessor, current_slot) = match previous {
-        Some(previous) => (
-            previous.reference.sequence.checked_add(1).ok_or_else(|| {
-                StoreAckError::InvalidOutbound(
-                    "Store acknowledgement sequence overflow".to_string(),
-                )
-            })?,
-            Some(previous.reference.object),
-            previous.successor_slot,
-        ),
-        None => (
-            1,
-            None,
-            acknowledgement_first_slot(&plan.registration)?.clone(),
-        ),
-    };
-    let context = ProtocolObjectContext::signed_plaintext(
-        plan.root.store_root_hash,
-        ProtocolObjectDomain::StoreAck,
-    );
-    let semantic_prefix = ack_slot_prefix(&plan.device_id, sequence);
-    let next_slot = storage
-        .allocate_protocol_slot(
-            &context,
-            &ack_slot_prefix(
-                &plan.device_id,
-                sequence.checked_add(1).ok_or_else(|| {
-                    StoreAckError::InvalidOutbound(
-                        "Store acknowledgement sequence overflow".to_string(),
-                    )
-                })?,
-            ),
-            ".json",
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    let activation = plan
-        .registration
-        .store_acknowledgement_activation(&plan.registration_ref)
-        .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
-        .activation_id();
-    let acknowledgement = StoreAck::signed(
-        plan.root.store_root_hash,
-        plan.registration_ref,
-        sequence,
-        plan.history_cut,
-        plan.device_state,
-        plan.snapshot,
-        plan.exclusions,
-        plan.last_sync,
-        SuccessorLink {
-            activation,
-            predecessor,
-            next_slot,
-        },
-        &plan.device_signer,
-    )
-    .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
-    let prepared = storage
-        .prepare_protocol_object(
-            &context,
-            current_slot,
-            &semantic_prefix,
-            acknowledgement.to_bytes(),
-        )
-        .map_err(StoreObjectError::from)?;
-    database
-        .stage_store_ack(acknowledgement.clone(), prepared)
-        .await?;
-    Ok(acknowledgement)
-}
-
-async fn publish_acknowledgement_object(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    device_id: &str,
-    outbound: &crate::database::OutboundStoreAck,
-    candidate: &operations::PreparedStoreOperationCommit,
-) -> Result<bool, StoreAckError> {
-    let context = ProtocolObjectContext::signed_plaintext(
-        outbound.ack.value.store_root_hash,
-        ProtocolObjectDomain::StoreAck,
-    );
-    if let Err(error) = storage.create_protocol_object(&outbound.ack.prepared).await {
-        if !matches!(error, crate::storage::StorageError::SlotCollision(_)) {
-            return Err(StoreObjectError::from(error).into());
-        }
-        let semantic_prefix = ack_slot_prefix(device_id, outbound.reference.sequence);
-        let (winner_bytes, winner_prepared) = storage
-            .read_prepared_protocol_slot(
-                &context,
-                outbound.reference.object.slot(),
-                &semantic_prefix,
-            )
-            .await
-            .map_err(StoreObjectError::from)?;
-        database
-            .adopt_outbound_store_ack_slot_winner(
-                outbound.reference.clone(),
-                winner_bytes,
-                winner_prepared,
-            )
-            .await?;
-        return Ok(false);
-    }
-    let opened = storage
-        .read_protocol_object(
-            &context,
-            &outbound.reference.object,
-            &ack_slot_prefix(device_id, outbound.reference.sequence),
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    if opened != outbound.ack.bytes {
-        return Err(StoreAckError::InvalidOutbound(
-            "Store acknowledgement exact readback differs from prepared bytes".to_string(),
-        ));
-    }
-    let acknowledgement_remote = candidate
-        .acknowledgement_remote_objects(&outbound.ack)?
-        .into_iter()
-        .find(|remote| remote.object() == &outbound.reference.object)
-        .ok_or_else(|| {
-            StoreAckError::InvalidOutbound(
-                "prepared activation does not own its acknowledgement object".to_string(),
-            )
-        })?;
-    database
-        .mark_remote_object_uploaded(acknowledgement_remote)
-        .await?;
-    Ok(true)
 }
 
 fn acknowledgement_first_slot(
@@ -253,23 +91,79 @@ impl AuthorizedWriterOperation<'_> {
         let exclusions = crate::protocol::store_commit::StoreAckExclusionState {
             proposal_freezes: self.database.store_device_exclusion_freezes().await?,
         };
-        stage_resolved_store_ack(
-            &self.database,
-            self.storage.as_ref(),
-            ResolvedStoreAckPlan {
-                root,
-                registration_ref,
-                registration,
-                device_signer,
-                device_id,
-                history_cut,
-                device_state,
-                snapshot,
-                exclusions,
-                last_sync: sync_time,
+        if self.database.oldest_outbound_store_ack().await?.is_some() {
+            return Err(StoreAckError::InvalidOutbound(
+                "a prior acknowledgement remains queued".to_string(),
+            ));
+        }
+        let previous = self.database.latest_local_store_ack().await?;
+        let (sequence, predecessor, current_slot) = match previous {
+            Some(previous) => (
+                previous.reference.sequence.checked_add(1).ok_or_else(|| {
+                    StoreAckError::InvalidOutbound(
+                        "Store acknowledgement sequence overflow".to_string(),
+                    )
+                })?,
+                Some(previous.reference.object),
+                previous.successor_slot,
+            ),
+            None => (1, None, acknowledgement_first_slot(&registration)?.clone()),
+        };
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
+        let semantic_prefix = ack_slot_prefix(&device_id, sequence);
+        let next_slot = self
+            .storage
+            .allocate_protocol_slot(
+                &context,
+                &ack_slot_prefix(
+                    &device_id,
+                    sequence.checked_add(1).ok_or_else(|| {
+                        StoreAckError::InvalidOutbound(
+                            "Store acknowledgement sequence overflow".to_string(),
+                        )
+                    })?,
+                ),
+                ".json",
+            )
+            .await
+            .map_err(StoreObjectError::from)?;
+        let activation = registration
+            .store_acknowledgement_activation(&registration_ref)
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
+            .activation_id();
+        let acknowledgement = StoreAck::signed(
+            root.store_root_hash,
+            registration_ref,
+            sequence,
+            history_cut,
+            device_state,
+            snapshot,
+            exclusions,
+            sync_time,
+            SuccessorLink {
+                activation,
+                predecessor,
+                next_slot,
             },
+            &device_signer,
         )
-        .await
+        .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+        let prepared = self
+            .storage
+            .prepare_protocol_object(
+                &context,
+                current_slot,
+                &semantic_prefix,
+                acknowledgement.to_bytes(),
+            )
+            .map_err(StoreObjectError::from)?;
+        self.database
+            .stage_store_ack(acknowledgement.clone(), prepared)
+            .await?;
+        Ok(acknowledgement)
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {
@@ -326,17 +220,63 @@ impl AuthorizedWriterOperation<'_> {
                     continue;
                 }
             };
-            if !publish_acknowledgement_object(
-                &self.database,
-                self.storage.as_ref(),
-                &device_id,
-                &outbound,
-                &candidate,
-            )
-            .await?
+            let context = ProtocolObjectContext::signed_plaintext(
+                outbound.ack.value.store_root_hash,
+                ProtocolObjectDomain::StoreAck,
+            );
+            if let Err(error) = self
+                .storage
+                .create_protocol_object(&outbound.ack.prepared)
+                .await
             {
+                if !matches!(error, crate::storage::StorageError::SlotCollision(_)) {
+                    return Err(StoreObjectError::from(error).into());
+                }
+                let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);
+                let (winner_bytes, winner_prepared) = self
+                    .storage
+                    .read_prepared_protocol_slot(
+                        &context,
+                        outbound.reference.object.slot(),
+                        &semantic_prefix,
+                    )
+                    .await
+                    .map_err(StoreObjectError::from)?;
+                self.database
+                    .adopt_outbound_store_ack_slot_winner(
+                        outbound.reference.clone(),
+                        winner_bytes,
+                        winner_prepared,
+                    )
+                    .await?;
                 continue;
             }
+            let opened = self
+                .storage
+                .read_protocol_object(
+                    &context,
+                    &outbound.reference.object,
+                    &ack_slot_prefix(&device_id, outbound.reference.sequence),
+                )
+                .await
+                .map_err(StoreObjectError::from)?;
+            if opened != outbound.ack.bytes {
+                return Err(StoreAckError::InvalidOutbound(
+                    "Store acknowledgement exact readback differs from prepared bytes".to_string(),
+                ));
+            }
+            let acknowledgement_remote = candidate
+                .acknowledgement_remote_objects(&outbound.ack)?
+                .into_iter()
+                .find(|remote| remote.object() == &outbound.reference.object)
+                .ok_or_else(|| {
+                    StoreAckError::InvalidOutbound(
+                        "prepared activation does not own its acknowledgement object".to_string(),
+                    )
+                })?;
+            self.database
+                .mark_remote_object_uploaded(acknowledgement_remote)
+                .await?;
             self.circles()
                 .acknowledgements()
                 .publish_objects(&outbound, &candidate)
