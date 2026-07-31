@@ -97,6 +97,68 @@ impl RetainedMergeMaterializationCache {
         }
         Ok(verified)
     }
+
+    pub(crate) fn verified_circle_activation_on(
+        &self,
+        conn: &Connection,
+        circle_id: crate::protocol::circle::CircleId,
+        control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<Option<crate::sync::VerifiedCircleReference>, DbError> {
+        let Some(activation_commit) =
+            StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, control)?
+        else {
+            return Ok(None);
+        };
+        self.verified_by_ref(&activation_commit)?
+            .circle_activation(circle_id, control)
+            .map(Some)
+    }
+
+    pub(crate) fn circle_replay_epoch_index_on(
+        &self,
+        conn: &Connection,
+    ) -> Result<CircleReplayEpochIndex, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT circle_id, control_coord
+                 FROM circle_control_activations
+                 ORDER BY circle_id, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut index = CircleReplayEpochIndex {
+            control_epochs: BTreeMap::new(),
+            cutoffs: BTreeMap::new(),
+        };
+        for (encoded_circle_id, encoded_control) in rows {
+            let circle_id = encoded_circle_id.parse().map_err(|error| {
+                DbError::Message(format!(
+                    "parse Circle replay index id {encoded_circle_id}: {error}"
+                ))
+            })?;
+            let control = serde_json::from_str(&encoded_control).map_err(|error| {
+                DbError::Message(format!(
+                    "parse Circle replay index control for {circle_id}: {error}"
+                ))
+            })?;
+            let activation = self
+                .verified_circle_activation_on(conn, circle_id, &control)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle replay index activation for {circle_id} disappeared"
+                    ))
+                })?;
+            index.record_control(circle_id, &activation.control)?;
+        }
+        Ok(index)
+    }
 }
 
 pub(crate) struct CircleReplayEpochIndex {
@@ -290,7 +352,7 @@ impl StoreDatabase {
                     )
                 })?;
                 Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut cache)?;
-                Self::circle_replay_epoch_index_with_verified_materializations_on(conn, &cache)
+                cache.circle_replay_epoch_index_on(conn)
             })
             .await
     }
@@ -660,53 +722,6 @@ impl StoreDatabase {
             bootstraps.push((activation_commit, bootstrap));
         }
         Ok(bootstraps)
-    }
-
-    pub(crate) fn circle_replay_epoch_index_with_verified_materializations_on(
-        conn: &Connection,
-        retained: &RetainedMergeMaterializationCache,
-    ) -> Result<CircleReplayEpochIndex, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT circle_id, control_coord
-                 FROM circle_control_activations
-                 ORDER BY circle_id, control_coord",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-        let mut index = CircleReplayEpochIndex {
-            control_epochs: BTreeMap::new(),
-            cutoffs: BTreeMap::new(),
-        };
-        for (encoded_circle_id, encoded_control) in rows {
-            let circle_id = encoded_circle_id.parse().map_err(|error| {
-                DbError::Message(format!(
-                    "parse Circle replay index id {encoded_circle_id}: {error}"
-                ))
-            })?;
-            let control = serde_json::from_str(&encoded_control).map_err(|error| {
-                DbError::Message(format!(
-                    "parse Circle replay index control for {circle_id}: {error}"
-                ))
-            })?;
-            let activation = Self::verified_circle_activation_from_cache_on(
-                conn, retained, circle_id, &control,
-            )?
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "Circle replay index activation for {circle_id} disappeared"
-                ))
-            })?;
-            index.record_control(circle_id, &activation.control)?;
-        }
-        Ok(index)
     }
 
     fn canonical_retained_merge_packages(

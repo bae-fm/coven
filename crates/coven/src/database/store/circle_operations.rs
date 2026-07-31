@@ -607,12 +607,8 @@ impl StoreDatabase {
                     )
                 })?;
                 Self::cached_retained_merge_replay_inputs_on(conn, &root, &mut retained)?;
-                let Some(activation) = Self::verified_circle_activation_from_cache_on(
-                    conn,
-                    &retained,
-                    circle_id,
-                    &expected_control,
-                )?
+                let Some(activation) =
+                    retained.verified_circle_activation_on(conn, circle_id, &expected_control)?
                 else {
                     return Ok(None);
                 };
@@ -917,11 +913,7 @@ impl StoreDatabase {
                 root,
                 &activation_commit,
             )?;
-            let reference = Self::verified_circle_activation_from_materialization(
-                &materialization,
-                circle_id,
-                coord,
-            )?;
+            let reference = materialization.circle_activation(circle_id, coord)?;
             retained.push((coord.clone(), reference.control));
         }
         let mut head: Option<crate::protocol::circle::CircleControlCoord> = None;
@@ -1068,49 +1060,7 @@ impl StoreDatabase {
         };
         let retained =
             Self::load_retained_merge_materialization_by_ref_on(conn, root, &activation_commit)?;
-        Self::verified_circle_activation_from_materialization(&retained, circle_id, control)
-            .map(Some)
-    }
-
-    pub(crate) fn verified_circle_activation_from_cache_on(
-        conn: &Connection,
-        retained: &RetainedMergeMaterializationCache,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::VerifiedCircleReference>, DbError> {
-        let Some(activation_commit) =
-            Self::circle_activation_commit_ref_on(conn, circle_id, control)?
-        else {
-            return Ok(None);
-        };
-        let retained = retained.verified_by_ref(&activation_commit)?;
-        Self::verified_circle_activation_from_materialization(retained, circle_id, control)
-            .map(Some)
-    }
-
-    fn verified_circle_activation_from_materialization(
-        retained: &OwnedVerifiedMergeMaterialization,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::VerifiedCircleReference, DbError> {
-        let mut matches = retained
-            .circle_activations()
-            .circles()
-            .iter()
-            .filter(|activation| {
-                activation.circle_id == circle_id && activation.control.coord == *control
-            });
-        let activation = matches.next().cloned().ok_or_else(|| {
-            DbError::Message(format!(
-                "Circle {circle_id} retained activation omits control {control:?}"
-            ))
-        })?;
-        if matches.next().is_some() {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} retained activation duplicates control {control:?}"
-            )));
-        }
-        Ok(activation)
+        retained.circle_activation(circle_id, control).map(Some)
     }
 
     pub(crate) async fn verified_circle_control_covers(

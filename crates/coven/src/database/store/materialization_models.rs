@@ -357,6 +357,31 @@ impl OwnedVerifiedMergeMaterialization {
         &self.circle_activations
     }
 
+    pub(crate) fn circle_activation(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<crate::sync::VerifiedCircleReference, DbError> {
+        let mut matches = self
+            .circle_activations
+            .circles()
+            .iter()
+            .filter(|activation| {
+                activation.circle_id == circle_id && activation.control.coord == *control
+            });
+        let activation = matches.next().cloned().ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} retained activation omits control {control:?}"
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} retained activation duplicates control {control:?}"
+            )));
+        }
+        Ok(activation)
+    }
+
     pub(crate) fn activation_head(&self) -> &StoreDeviceHead {
         &self.activation_head
     }

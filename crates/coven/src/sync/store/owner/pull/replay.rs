@@ -268,10 +268,7 @@ pub(crate) fn replay_retained_merge_projection_on(
         root,
         retained_merge_materializations,
     )?;
-    let circle_epochs = crate::database::StoreDatabase::circle_replay_epoch_index_with_verified_materializations_on(
-        live,
-        retained_merge_materializations,
-    )?;
+    let circle_epochs = retained_merge_materializations.circle_replay_epoch_index_on(live)?;
     let active_references = retained
         .iter()
         .filter(|materialization| {
