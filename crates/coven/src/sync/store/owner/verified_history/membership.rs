@@ -70,6 +70,43 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         self.commit_verifier().load_registration(reference).await
     }
 
+    async fn validate_provider_admin_records(
+        &self,
+        entries: &[MembershipEntry],
+    ) -> Result<(), AnchoredChainError> {
+        for entry in entries {
+            let Some(crate::protocol::provider::ProviderAdminMembershipChange {
+                change:
+                    crate::protocol::provider::ProviderAdminChange::Set {
+                        administrator,
+                        provider,
+                        capability,
+                        ..
+                    },
+                ..
+            }) = &entry.provider_admin
+            else {
+                continue;
+            };
+            let registration = self
+                .load_registration(administrator)
+                .await
+                .map_err(map_membership_object_error)?;
+            if registration.value.store_root != *self.root()
+                || registration.value.provider != *provider
+            {
+                return Err(AnchoredChainError::LoadFailed(
+                    "provider administrator grant does not match its exact device registration"
+                        .to_string(),
+                ));
+            }
+            capability
+                .verify(&self.verified_root().descriptor.provider, provider)
+                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn load_founder_registration(
         &self,
     ) -> Result<

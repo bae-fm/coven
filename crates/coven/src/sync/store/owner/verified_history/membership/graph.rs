@@ -460,11 +460,9 @@ fn load_exact_membership_graph<'a>(
             }
         }
         let entry_values = graph.entries.values().cloned().collect::<Vec<_>>();
-        Box::pin(validate_provider_admin_records(
-            activation_authority,
-            &entry_values,
-        ))
-        .await?;
+        activation_authority
+            .validate_provider_admin_records(&entry_values)
+            .await?;
         validate_owner_grant_records(activation_authority.verified_root(), &entry_values)?;
         Ok(graph)
     })
@@ -850,43 +848,6 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_impl(
         });
     }
     Ok(chain)
-}
-
-async fn validate_provider_admin_records(
-    authority: &MembershipActivationAuthority<'_, '_>,
-    entries: &[MembershipEntry],
-) -> Result<(), AnchoredChainError> {
-    for entry in entries {
-        let Some(crate::protocol::provider::ProviderAdminMembershipChange {
-            change:
-                crate::protocol::provider::ProviderAdminChange::Set {
-                    administrator,
-                    provider,
-                    capability,
-                    ..
-                },
-            ..
-        }) = &entry.provider_admin
-        else {
-            continue;
-        };
-        let registration = authority
-            .load_registration(administrator)
-            .await
-            .map_err(map_membership_object_error)?;
-        if registration.value.store_root != *authority.root()
-            || registration.value.provider != *provider
-        {
-            return Err(AnchoredChainError::LoadFailed(
-                "provider administrator grant does not match its exact device registration"
-                    .to_string(),
-            ));
-        }
-        capability
-            .verify(&authority.verified_root().descriptor.provider, provider)
-            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
-    }
-    Ok(())
 }
 
 fn validate_owner_grant_records(
