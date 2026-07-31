@@ -21,7 +21,6 @@ pub use cloud::cloudkit::{
     CloudKitShareAcceptance, CloudKitSharePermission,
 };
 pub use cloud::s3::S3CloudHome;
-pub use cloud::setup::generate_restore_code;
 #[cfg(any(test, feature = "test-utils"))]
 pub use cloud::test_utils::InMemoryCloudHome;
 

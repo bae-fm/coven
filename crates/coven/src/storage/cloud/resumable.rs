@@ -26,47 +26,56 @@ fn cancellation_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-async fn cancel_upload_session(
-    client: reqwest::Client,
-    session_url: String,
-    key: String,
-    cancellation_succeeded: CancellationSucceeded,
-) -> Result<(), CloudHomeError> {
-    let response = client.delete(&session_url).send().await.map_err(|error| {
-        CloudHomeError::Transport(format!(
-            "cancel upload session {key} at {session_url}: {error}"
-        ))
-    })?;
-    let status = response.status();
-    if cancellation_succeeded(status) {
-        return Ok(());
-    }
-    let body = super::http::body_text(response).await;
-    Err(CloudHomeError::Transport(format!(
-        "cancel upload session {key} at {session_url} (HTTP {status}): {body}"
-    )))
-}
-
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
 pub(super) type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
 
 pub(super) type CancellationSucceeded = fn(StatusCode) -> bool;
 
+#[derive(Clone)]
+struct ResumableSession {
+    client: reqwest::Client,
+    url: String,
+    key: String,
+    cancellation_succeeded: CancellationSucceeded,
+}
+
+impl ResumableSession {
+    async fn cancel(&self) -> Result<(), CloudHomeError> {
+        let response = self
+            .client
+            .delete(&self.url)
+            .send()
+            .await
+            .map_err(|error| {
+                CloudHomeError::Transport(format!(
+                    "cancel upload session {} at {}: {error}",
+                    self.key, self.url
+                ))
+            })?;
+        let status = response.status();
+        if (self.cancellation_succeeded)(status) {
+            return Ok(());
+        }
+        let body = super::http::body_text(response).await;
+        Err(CloudHomeError::Transport(format!(
+            "cancel upload session {} at {} (HTTP {status}): {body}",
+            self.key, self.url
+        )))
+    }
+}
+
 /// A [`PartSink`](super::PartSink) over a resumable upload session: each part is a
 /// `Content-Range` PUT to the pre-authenticated `session_url` (no bearer token),
 /// the last of which commits the file. `finish` is a no-op.
 pub(super) struct RangePutUploader {
-    client: reqwest::Client,
-    session_url: String,
+    session: ResumableSession,
     /// The accepted non-final status (Drive `308`, OneDrive `202`).
     intermediate_status: u16,
     total: u64,
     part_size: usize,
     /// The blob key, for error messages.
-    key: String,
     classify: ClassifyWrite,
-    cancellation_succeeded: CancellationSucceeded,
     completed: bool,
 }
 
@@ -82,14 +91,16 @@ impl RangePutUploader {
         cancellation_succeeded: CancellationSucceeded,
     ) -> Self {
         RangePutUploader {
-            client,
-            session_url,
+            session: ResumableSession {
+                client,
+                url: session_url,
+                key,
+                cancellation_succeeded,
+            },
             intermediate_status,
             total,
             part_size,
-            key,
             classify,
-            cancellation_succeeded,
             completed: false,
         }
     }
@@ -127,8 +138,9 @@ impl RangePutUploader {
     ) -> Result<Option<reqwest::Response>, CloudHomeError> {
         let end = offset + part.len() as u64 - 1;
         let response = match self
+            .session
             .client
-            .put(&self.session_url)
+            .put(&self.session.url)
             .header("Content-Length", part.len())
             .header(
                 "Content-Range",
@@ -140,8 +152,10 @@ impl RangePutUploader {
         {
             Ok(response) => response,
             Err(error) => {
-                let operation =
-                    CloudHomeError::Transport(format!("upload chunk {}: {error}", self.key));
+                let operation = CloudHomeError::Transport(format!(
+                    "upload chunk {}: {error}",
+                    self.session.key
+                ));
                 let cleanup = self.abort().await;
                 return Err(combine_cleanup_failure(operation, cleanup));
             }
@@ -164,13 +178,7 @@ impl RangePutUploader {
         if self.completed {
             return Ok(());
         }
-        cancel_upload_session(
-            self.client.clone(),
-            self.session_url.clone(),
-            self.key.clone(),
-            self.cancellation_succeeded,
-        )
-        .await?;
+        self.session.cancel().await?;
         self.completed = true;
         Ok(())
     }
@@ -185,16 +193,12 @@ impl Drop for RangePutUploader {
         if self.completed {
             return;
         }
-        let client = self.client.clone();
-        let session_url = self.session_url.clone();
-        let key = self.key.clone();
-        let cancellation_key = key.clone();
-        let cancellation_url = session_url.clone();
-        let cancellation_succeeded = self.cancellation_succeeded;
+        let session = self.session.clone();
+        let cancellation_key = session.key.clone();
+        let cancellation_url = session.url.clone();
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         cancellation_runtime().spawn(async move {
-            let result =
-                cancel_upload_session(client, session_url, key, cancellation_succeeded).await;
+            let result = session.cancel().await;
             if result_tx.send(result).is_err() {
                 std::process::abort();
             }

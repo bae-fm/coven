@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::config::{Config, HomeStorage};
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
 use crate::keys::{
-    DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
-    UserKeypair,
+    CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
+    MasterKeyError, StoreKeys, UserKeypair,
 };
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::storage::{BlobChunking, CloudCipher, CloudSyncStorage};
@@ -163,11 +163,14 @@ impl StoreSecurity {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         blob_chunking: BlobChunking,
     ) -> Result<CloudSyncStorage, crate::storage::cloud::setup::StorageSetupError> {
+        let cipher = match cipher {
+            Some(cipher) => cipher,
+            None => self.cloud_cipher(config)?,
+        };
         crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             config,
             &self.keys,
             &self.oauth_clients,
-            self.master_keys.as_ref(),
             self.identity.as_ref(),
             cipher,
             clock,
@@ -184,14 +187,31 @@ impl StoreSecurity {
         cipher: Option<CloudCipher>,
         blob_chunking: BlobChunking,
     ) -> Result<CloudSyncStorage, crate::storage::cloud::setup::StorageSetupError> {
+        let cipher = match cipher {
+            Some(cipher) => cipher,
+            None => self.cloud_cipher(config)?,
+        };
         crate::storage::cloud::setup::create_sync_storage_with_home(
             config,
-            self.master_keys.as_ref(),
             self.identity.as_ref(),
             home,
             cipher,
             blob_chunking,
         )
+    }
+
+    fn cloud_cipher(
+        &self,
+        config: &Config,
+    ) -> Result<CloudCipher, crate::storage::cloud::setup::StorageSetupError> {
+        if config.cloud_home.storage.is_browsable() {
+            return Ok(CloudCipher::Plaintext);
+        }
+        let keyring = self
+            .master_keys
+            .unlock()?
+            .ok_or(crate::storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
+        Ok(CloudCipher::Encrypted(keyring.into()))
     }
 
     pub(crate) fn generate_restore_code(
@@ -202,14 +222,137 @@ impl StoreSecurity {
         membership_floor: crate::joining::MembershipFloor,
         authority: crate::restoration::RestoreAuthority,
     ) -> Result<String, crate::storage::cloud::setup::SetupError> {
-        crate::storage::cloud::setup::generate_restore_code(
-            config,
-            &self.keys,
-            self.master_keys.as_ref(),
+        use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
+        use crate::storage::cloud::CloudHomeJoinInfo;
+
+        let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
+            crate::storage::cloud::setup::SetupError(
+                "No cloud provider configured. Set up sync first.".to_string(),
+            )
+        })?;
+        let encryption_key = if config.cloud_home.storage.is_opaque() {
+            Some(
+                self.master_keys
+                    .unlock()
+                    .map_err(|error| {
+                        crate::storage::cloud::setup::SetupError(format!(
+                            "Failed to read master key: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "No encryption key found".to_string(),
+                        )
+                    })?
+                    .to_serialized(),
+            )
+        } else {
+            None
+        };
+
+        let provider = match cloud_provider {
+            crate::config::CloudProvider::S3 => {
+                let credentials = self
+                    .keys
+                    .get_cloud_home_credentials()
+                    .map_err(|error| {
+                        crate::storage::cloud::setup::SetupError(format!(
+                            "Failed to read cloud credentials: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "No S3 credentials found in keyring".to_string(),
+                        )
+                    })?;
+                let (access_key, secret_key) = match credentials {
+                    CloudHomeCredentials::S3 {
+                        access_key,
+                        secret_key,
+                    } => (access_key, secret_key),
+                    _ => {
+                        return Err(crate::storage::cloud::setup::SetupError(
+                            "Expected S3 credentials but found different type".to_string(),
+                        ))
+                    }
+                };
+                CloudHomeJoinInfo::S3 {
+                    bucket: config.cloud_home.s3_bucket.clone().ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "S3 bucket not configured".to_string(),
+                        )
+                    })?,
+                    region: config.cloud_home.s3_region.clone().ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "S3 region not configured".to_string(),
+                        )
+                    })?,
+                    endpoint: config.cloud_home.s3_endpoint.clone(),
+                    key_prefix: config.cloud_home.s3_key_prefix.clone(),
+                    access_key,
+                    secret_key,
+                }
+            }
+            crate::config::CloudProvider::CloudKit => {
+                if config.cloud_home.cloudkit_owner_name.is_some()
+                    || config.cloud_home.cloudkit_zone_name.is_some()
+                {
+                    return Err(crate::storage::cloud::setup::SetupError(
+                        "This store was joined through a CloudKit share; only the store's owner can create a restore code.".to_string(),
+                    ));
+                }
+                CloudHomeJoinInfo::CloudKit
+            }
+            crate::config::CloudProvider::GoogleDrive => CloudHomeJoinInfo::GoogleDrive {
+                folder_id: config
+                    .cloud_home
+                    .google_drive_folder_id
+                    .clone()
+                    .ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "Google Drive folder ID not configured".to_string(),
+                        )
+                    })?,
+            },
+            crate::config::CloudProvider::Dropbox => {
+                CloudHomeJoinInfo::Dropbox {
+                    folder_path: config.cloud_home.dropbox_folder_path.clone().ok_or_else(
+                        || {
+                            crate::storage::cloud::setup::SetupError(
+                                "Dropbox folder path not configured".to_string(),
+                            )
+                        },
+                    )?,
+                }
+            }
+            crate::config::CloudProvider::OneDrive => CloudHomeJoinInfo::OneDrive {
+                drive_id: config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
+                    crate::storage::cloud::setup::SetupError(
+                        "OneDrive drive ID not configured".to_string(),
+                    )
+                })?,
+                folder_id: config
+                    .cloud_home
+                    .onedrive_folder_id
+                    .clone()
+                    .ok_or_else(|| {
+                        crate::storage::cloud::setup::SetupError(
+                            "OneDrive folder ID not configured".to_string(),
+                        )
+                    })?,
+            },
+        };
+
+        Ok(encode_restore_code(&RestoreCode {
+            v: RESTORE_CODE_VERSION,
+            sid: config.store_id.clone(),
+            ek: encryption_key,
+            name: config.store_name.clone(),
+            provider,
             store_root,
             founder_pubkey,
             membership_floor,
             authority,
-        )
+        }))
     }
 }

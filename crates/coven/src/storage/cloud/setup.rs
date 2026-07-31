@@ -9,19 +9,15 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
-use crate::keys::{CloudHomeCredentials, DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
-#[cfg(feature = "oauth-providers")]
-use crate::oauth::OAuthTokens;
+use crate::keys::{DeviceIdentityCustody, StoreKeys};
 use crate::storage::BlobChunking;
 use crate::storage::BlobPathScheme;
 use crate::storage::CloudCipher;
 use std::sync::Arc;
 
 #[cfg(feature = "oauth-providers")]
-fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<(), SetupError> {
-    key_service
-        .set_cloud_home_oauth_tokens(tokens)
-        .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))
+fn oauth_token_save_error(error: crate::keys::KeyError) -> SetupError {
+    SetupError(format!("Failed to save OAuth token: {error}"))
 }
 
 /// Google Drive OAuth sign-in: authorize, find/create the store folder, save
@@ -114,7 +110,9 @@ pub(crate) async fn sign_in_google_drive(
             .to_string()
     };
 
-    save_oauth_tokens(key_service, &tokens)?;
+    key_service
+        .set_cloud_home_oauth_tokens(&tokens)
+        .map_err(oauth_token_save_error)?;
 
     info!("Authorized Google Drive; folder ready");
     Ok(folder_id)
@@ -164,7 +162,9 @@ pub(crate) async fn sign_in_dropbox(
         }
     }
 
-    save_oauth_tokens(key_service, &tokens)?;
+    key_service
+        .set_cloud_home_oauth_tokens(&tokens)
+        .map_err(oauth_token_save_error)?;
 
     info!("Authorized Dropbox; folder ready");
     Ok(folder_path)
@@ -244,145 +244,12 @@ pub(crate) async fn sign_in_onedrive(
         .ok_or_else(|| SetupError("Folder response missing 'id' field".to_string()))?
         .to_string();
 
-    save_oauth_tokens(key_service, &tokens)?;
+    key_service
+        .set_cloud_home_oauth_tokens(&tokens)
+        .map_err(oauth_token_save_error)?;
 
     info!("Authorized OneDrive; folder ready");
     Ok((drive_id, folder_id))
-}
-
-/// Build a RestoreCode from config and custody, then encode it.
-///
-/// `membership_floor` is the exact policy-shaped membership state at mint
-/// time. The caller fetches it because this function never touches the network.
-pub fn generate_restore_code(
-    config: &Config,
-    key_service: &StoreKeys,
-    custody: &dyn MasterKeyCustody,
-    store_root: crate::protocol::store_commit::StoreRootRef,
-    founder_pubkey: String,
-    membership_floor: crate::joining::MembershipFloor,
-    authority: crate::restoration::RestoreAuthority,
-) -> Result<String, SetupError> {
-    use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
-    use crate::storage::cloud::CloudHomeJoinInfo;
-
-    let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
-        SetupError("No cloud provider configured. Set up sync first.".to_string())
-    })?;
-
-    // An opaque home carries its store key in the restore code so a second
-    // device can read the bucket; a browsable home has no key (`ek` is omitted),
-    // and the restorer rebuilds the browsable (plaintext, readable) home from its
-    // absence.
-    let ek = if config.cloud_home.storage.is_opaque() {
-        Some(
-            custody
-                .unlock()
-                .map_err(|e| SetupError(format!("Failed to read master key: {e}")))?
-                .ok_or_else(|| SetupError("No encryption key found".to_string()))?
-                .to_serialized(),
-        )
-    } else {
-        None
-    };
-
-    let provider = match cloud_provider {
-        CloudProvider::S3 => {
-            let creds = key_service
-                .get_cloud_home_credentials()
-                .map_err(|e| SetupError(format!("Failed to read cloud credentials: {e}")))?
-                .ok_or_else(|| SetupError("No S3 credentials found in keyring".to_string()))?;
-            let (access_key, secret_key) = match creds {
-                CloudHomeCredentials::S3 {
-                    access_key,
-                    secret_key,
-                } => (access_key, secret_key),
-                _ => {
-                    return Err(SetupError(
-                        "Expected S3 credentials but found different type".to_string(),
-                    ))
-                }
-            };
-            let bucket = config
-                .cloud_home
-                .s3_bucket
-                .clone()
-                .ok_or_else(|| SetupError("S3 bucket not configured".to_string()))?;
-            let region = config
-                .cloud_home
-                .s3_region
-                .clone()
-                .ok_or_else(|| SetupError("S3 region not configured".to_string()))?;
-            CloudHomeJoinInfo::S3 {
-                bucket,
-                region,
-                endpoint: config.cloud_home.s3_endpoint.clone(),
-                key_prefix: config.cloud_home.s3_key_prefix.clone(),
-                access_key,
-                secret_key,
-            }
-        }
-        CloudProvider::CloudKit => {
-            // A device that joined via a CloudKit share has these set
-            // (`build_config`'s `CloudKitShare` arm); restore recovers your
-            // own zone, never one shared to you — the same line
-            // `decode_restore_code` already draws by rejecting
-            // `CloudHomeJoinInfo::CloudKitShare`. Only a truly private config
-            // (neither set) may emit `CloudHomeJoinInfo::CloudKit`.
-            if config.cloud_home.cloudkit_owner_name.is_some()
-                || config.cloud_home.cloudkit_zone_name.is_some()
-            {
-                return Err(SetupError(
-                    "This store was joined through a CloudKit share; only the store's owner can create a restore code.".to_string(),
-                ));
-            }
-            CloudHomeJoinInfo::CloudKit
-        }
-        CloudProvider::GoogleDrive => CloudHomeJoinInfo::GoogleDrive {
-            folder_id: config
-                .cloud_home
-                .google_drive_folder_id
-                .clone()
-                .ok_or_else(|| SetupError("Google Drive folder ID not configured".to_string()))?,
-        },
-        CloudProvider::Dropbox => CloudHomeJoinInfo::Dropbox {
-            folder_path: config
-                .cloud_home
-                .dropbox_folder_path
-                .clone()
-                .ok_or_else(|| SetupError("Dropbox folder path not configured".to_string()))?,
-        },
-        CloudProvider::OneDrive => {
-            let drive_id = config
-                .cloud_home
-                .onedrive_drive_id
-                .clone()
-                .ok_or_else(|| SetupError("OneDrive drive ID not configured".to_string()))?;
-            let folder_id = config
-                .cloud_home
-                .onedrive_folder_id
-                .clone()
-                .ok_or_else(|| SetupError("OneDrive folder ID not configured".to_string()))?;
-            CloudHomeJoinInfo::OneDrive {
-                drive_id,
-                folder_id,
-            }
-        }
-    };
-
-    let code = RestoreCode {
-        v: RESTORE_CODE_VERSION,
-        sid: config.store_id.clone(),
-        ek,
-        name: config.store_name.clone(),
-        provider,
-        store_root,
-        founder_pubkey,
-        membership_floor,
-        authority,
-    };
-
-    Ok(encode_restore_code(&code))
 }
 
 /// Why building the sync storage from config failed. Each arm preserves the
@@ -473,41 +340,20 @@ fn exact_slot_capabilities_supported(
     }
 }
 
-/// Build the [`CloudCipher`] a store's config selects: an opaque home seals
-/// every object under the keyring's store key; a browsable home
-/// (`cloud_home.storage == Browsable`) stores objects in the clear.
-///
-/// A browsable home has no store key, so it never reads the keyring — the
-/// absence of a key there is expected, not an error.
-pub(crate) fn build_cloud_cipher(
-    config: &Config,
-    custody: &dyn MasterKeyCustody,
-) -> Result<CloudCipher, StorageSetupError> {
-    if config.cloud_home.storage.is_browsable() {
-        return Ok(CloudCipher::Plaintext);
-    }
-    let keyring = custody
-        .unlock()?
-        .ok_or(StorageSetupError::NoEncryptionKey)?;
-    Ok(CloudCipher::Encrypted(keyring.into()))
-}
-
 /// Create sync storage from config and credentials.
 ///
 /// This is a lighter version of `sync::cycle::init_sync_over_storage` that only
 /// creates the storage client without starting a sync session or extracting raw
 /// DB handles. Used by membership management which only needs storage access.
 ///
-/// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
-/// storage share one instance for in-place key rotation); when `None` it is
-/// built from config via [`build_cloud_cipher`].
+/// `cipher` is built by the store's security owner so the sync loop and storage
+/// share one instance for in-place key rotation.
 pub(crate) async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
     oauth_clients: &crate::oauth::OAuthClients,
-    custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
-    cipher: Option<CloudCipher>,
+    cipher: CloudCipher,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
     blob_chunking: BlobChunking,
@@ -523,7 +369,6 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     .await?;
     create_sync_storage_with_home(
         config,
-        custody,
         identity_custody,
         Arc::from(cloud_home),
         cipher,
@@ -533,21 +378,16 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
 
 /// Create sync storage over an already-built [`CloudHome`](super::CloudHome).
 /// Unlike [`create_sync_storage_with_cloudkit`], this needs no store-scoped
-/// cloud credentials (the home is already built) — only custody, for the
-/// `cipher = None` fallback's master-key read.
+/// cloud credentials or master-key custody (the home and cipher are already
+/// built by their owners).
 pub(crate) fn create_sync_storage_with_home(
     config: &Config,
-    custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
     home: Arc<dyn super::CloudHome>,
-    cipher: Option<CloudCipher>,
+    cipher: CloudCipher,
     blob_chunking: BlobChunking,
 ) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
     require_exact_slot_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
-    let cipher = match cipher {
-        Some(c) => c,
-        None => build_cloud_cipher(config, custody)?,
-    };
 
     // This store's signing identity, used to sign the control objects the
     // storage writes (its head, the min_schema floor) so a reader can attribute
@@ -685,6 +525,23 @@ mod tests {
         config
     }
 
+    fn store_security(
+        config: &Config,
+        keys: StoreKeys,
+        master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
+    ) -> crate::store_security::StoreSecurity {
+        let identity = crate::identity_custody::IdentityCustody::InMemory(
+            crate::keys::UserKeypair::generate(),
+        )
+        .resolve(&config.store_id, &config.store_dir);
+        crate::store_security::StoreSecurity::new(
+            keys,
+            master_keys,
+            identity,
+            crate::oauth::OAuthClients::empty(),
+        )
+    }
+
     #[test]
     fn exact_slot_admission_is_universal_and_uses_local_s3_assertions() {
         let mut config = Config::with_defaults(
@@ -769,16 +626,16 @@ mod tests {
         let custody =
             crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate())
                 .resolve(&config.store_id, &config.store_dir);
-        let encoded = generate_restore_code(
-            &config,
-            &key_service,
-            custody.as_ref(),
-            store_root(),
-            hex::encode([7u8; 32]),
-            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
-            restore_authority(),
-        )
-        .expect("generate restore code");
+        let security = store_security(&config, key_service, custody);
+        let encoded = security
+            .generate_restore_code(
+                &config,
+                store_root(),
+                hex::encode([7u8; 32]),
+                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                restore_authority(),
+            )
+            .expect("generate restore code");
         let decoded = decode_restore_code(&encoded).expect("decode restore code");
         let provider_wire = serde_json::to_string(&decoded.provider).expect("serialize provider");
 
@@ -805,16 +662,16 @@ mod tests {
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
-        let err = generate_restore_code(
-            &config,
-            &key_service,
-            custody.as_ref(),
-            store_root(),
-            hex::encode([7u8; 32]),
-            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
-            restore_authority(),
-        )
-        .expect_err("a share-joined CloudKit config must not generate a restore code");
+        let security = store_security(&config, key_service, custody);
+        let err = security
+            .generate_restore_code(
+                &config,
+                store_root(),
+                hex::encode([7u8; 32]),
+                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                restore_authority(),
+            )
+            .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
         assert!(
             message.contains("share"),
@@ -832,16 +689,16 @@ mod tests {
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
-        let code = generate_restore_code(
-            &config,
-            &key_service,
-            custody.as_ref(),
-            store_root(),
-            hex::encode([7u8; 32]),
-            crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
-            restore_authority(),
-        )
-        .expect("a private CloudKit config generates a restore code");
+        let security = store_security(&config, key_service, custody);
+        let code = security
+            .generate_restore_code(
+                &config,
+                store_root(),
+                hex::encode([7u8; 32]),
+                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                restore_authority(),
+            )
+            .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
         assert!(
             matches!(decoded.provider, CloudHomeJoinInfo::CloudKit),
