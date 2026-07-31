@@ -893,50 +893,37 @@ pub(super) fn activated_merge_membership_remote_objects(
     super::remote_object::RemoteObjectRecordError,
 > {
     let mut remotes = vec![
-        activate_merge_membership_authority(
-            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
-                family,
-                objects.entry().clone(),
-                entry_bytes.canonical,
-                entry_bytes.stored,
-                commit_ref.clone(),
-            )?,
-            commit_ref,
-        )?,
-        activate_merge_membership_authority(
-            super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
-                family,
-                objects.head().clone(),
-                head_bytes.canonical,
-                head_bytes.stored,
-                commit_ref.clone(),
-            )?,
-            commit_ref,
-        )?,
+        super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+            family,
+            objects.entry().clone(),
+            entry_bytes.canonical,
+            entry_bytes.stored,
+            commit_ref.clone(),
+        )?
+        .into_observed_activated(commit_ref)?,
+        super::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+            family,
+            objects.head().clone(),
+            head_bytes.canonical,
+            head_bytes.stored,
+            commit_ref.clone(),
+        )?
+        .into_observed_activated(commit_ref)?,
     ];
     if let Some(resolution) = objects.resolution() {
         let bytes = resolution_bytes
             .ok_or(super::remote_object::RemoteObjectRecordError::StoredReferenceMismatch)?;
-        remotes.push(activate_merge_membership_authority(
+        remotes.push(
             super::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 resolution.clone(),
                 bytes.canonical,
                 bytes.stored,
                 commit_ref.clone(),
-            )?,
-            commit_ref,
-        )?);
+            )?
+            .into_observed_activated(commit_ref)?,
+        );
     } else if resolution_bytes.is_some() {
         return Err(super::remote_object::RemoteObjectRecordError::StoredReferenceMismatch);
     }
     Ok(remotes)
-}
-
-fn activate_merge_membership_authority(
-    mut remote: super::remote_object::RemoteObjectRecord,
-    commit_ref: &StoreBatchCommitRef,
-) -> Result<super::remote_object::RemoteObjectRecord, super::remote_object::RemoteObjectRecordError>
-{
-    remote.mark_uploaded_verified()?;
-    remote.into_activated(commit_ref)
 }
