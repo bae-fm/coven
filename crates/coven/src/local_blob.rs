@@ -258,13 +258,48 @@ impl AtomicStagedFile {
         }
     }
 
-    pub(crate) async fn commit(mut self) -> Result<(), String> {
-        let mut staged = self.take_stage();
-        staged.close();
-        let result = commit_staged_file(&staged.path, &self.destination, |path| {
+    pub(crate) async fn commit(self) -> Result<(), String> {
+        self.commit_with_sync(|path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }
         })
+        .await
+    }
+
+    async fn commit_with_sync<F, Fut>(mut self, sync_committed_parent: F) -> Result<(), String>
+    where
+        F: FnOnce(&Path) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let mut staged = self.take_stage();
+        staged.close();
+        let result = async {
+            tokio::fs::rename(&staged.path, &self.destination)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "rename verified blob {} -> {}: {error}",
+                        staged.path.display(),
+                        self.destination.display()
+                    )
+                })?;
+            if let Err(operation) = sync_committed_parent(&self.destination).await {
+                tokio::fs::rename(&self.destination, &staged.path)
+                    .await
+                    .map_err(|rollback| {
+                        format!(
+                            "{operation}; rollback rename {} -> {} failed: {rollback}",
+                            self.destination.display(),
+                            staged.path.display()
+                        )
+                    })?;
+                sync_parent_dir(&staged.path).await.map_err(|rollback| {
+                    format!("{operation}; rollback directory sync failed: {rollback}")
+                })?;
+                return Err(operation);
+            }
+            Ok(())
+        }
         .await;
         match result {
             Ok(()) => {
@@ -379,42 +414,6 @@ impl AtomicStagedFile {
     fn take_stage(&mut self) -> AtomicTempFile {
         self.staged.take().expect("atomic stage is unpublished")
     }
-}
-
-async fn commit_staged_file<F, Fut>(
-    staged: &Path,
-    destination: &Path,
-    sync_committed_parent: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
-{
-    tokio::fs::rename(staged, destination)
-        .await
-        .map_err(|error| {
-            format!(
-                "rename verified blob {} -> {}: {error}",
-                staged.display(),
-                destination.display()
-            )
-        })?;
-    if let Err(operation) = sync_committed_parent(destination).await {
-        tokio::fs::rename(destination, staged)
-            .await
-            .map_err(|rollback| {
-                format!(
-                    "{operation}; rollback rename {} -> {} failed: {rollback}",
-                    destination.display(),
-                    staged.display()
-                )
-            })?;
-        sync_parent_dir(staged).await.map_err(|rollback| {
-            format!("{operation}; rollback directory sync failed: {rollback}")
-        })?;
-        return Err(operation);
-    }
-    Ok(())
 }
 
 async fn rollback_new_destination(
@@ -1351,20 +1350,14 @@ mod tests {
             .write_bytes(b"verified")
             .await
             .expect("write staged file");
-        let staged_path = staged.path().to_path_buf();
-
-        let error = commit_staged_file(&staged_path, &destination, |_| async {
-            Err("injected directory sync failure".to_string())
-        })
-        .await
-        .expect_err("directory sync failure must reject publication");
+        let error = staged
+            .commit_with_sync(|_| async { Err("injected directory sync failure".to_string()) })
+            .await
+            .expect_err("directory sync failure must reject publication");
 
         assert_eq!(error, "injected directory sync failure");
         assert!(!destination.exists());
-        assert_eq!(
-            read(&staged_path).await.expect("read restored stage"),
-            b"verified"
-        );
+        assert!(temp_entries(tmp.path()).await.is_empty());
     }
 
     #[tokio::test]
