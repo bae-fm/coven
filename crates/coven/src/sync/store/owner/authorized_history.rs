@@ -280,6 +280,24 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         pull::execute(self, store_dir, membership, identity, routing_encryption).await
     }
 
+    pub(super) async fn bind_pull_package_materializer(
+        &self,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> Result<
+        super::pull_package_materializer::PullPackageMaterializer<'storage>,
+        crate::database::DbError,
+    > {
+        let schema = std::sync::Arc::new(self.database.table_schema_for_apply().await?);
+        Ok(
+            super::pull_package_materializer::PullPackageMaterializer::new(
+                self.database.clone(),
+                self.blob_source.clone(),
+                store_dir.clone(),
+                schema,
+            ),
+        )
+    }
+
     pub(super) fn circles(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {
         super::circles::VerifiedCircleHistory::new(self)
     }
@@ -732,24 +750,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.blob_source
             .verify_plaintext(store_dir, authority, stored, retain)
             .await
-    }
-
-    pub(super) async fn verify_blob_plaintext_with_protection(
-        &self,
-        store_dir: &crate::store_dir::StoreDir,
-        stored: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
-        retain: bool,
-    ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
-        self.blob_source
-            .verify_plaintext_with_protection(store_dir, stored, protection, retain)
-            .await
-    }
-
-    pub(super) fn store_blob_protection(
-        &self,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
-        self.blob_source.store_protection()
     }
 
     #[cfg(test)]
@@ -1215,10 +1215,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.database.schema_version()
     }
 
-    pub(super) fn pull_blob_declarations(&self) -> std::sync::Arc<crate::blob::decl::BlobDecls> {
-        self.database.blob_decls()
-    }
-
     pub(super) fn pull_receive_wall_ms(&self) -> u64 {
         self.database.receive_wall_ms()
     }
@@ -1254,12 +1250,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(super) async fn pull_table_schema(
-        &self,
-    ) -> Result<crate::sync::conflict::TableSchema, crate::database::DbError> {
-        self.database.table_schema_for_apply().await
-    }
-
     pub(super) async fn pull_snapshot_coverage(
         &self,
     ) -> Result<CommitFrontier, crate::database::DbError> {
@@ -1271,13 +1261,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<Vec<crate::protocol::store_commit::StoreDeviceProposalAck>, crate::database::DbError>
     {
         self.database.store_device_exclusion_freezes().await
-    }
-
-    pub(super) async fn finish_pull_blob_cleanup(
-        &self,
-        store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<bool, crate::database::DbError> {
-        self.database.drain_local_blob_cleanup(store_dir).await
     }
 
     pub(super) async fn record_pull_circle_close_exclusions(

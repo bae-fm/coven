@@ -1,13 +1,10 @@
 /// Membership and blob helpers shared by Store pull and bootstrap.
 use tracing::{debug, warn};
 
-use crate::blob::decl::BlobDecls;
-use crate::blob::CacheFill;
 use crate::changeset::RowChange;
 use crate::sync::conflict::TableSchema;
 use crate::sync::hlc::Timestamp;
 use crate::sync::store::blob::BlobDownloadFailureCause;
-use crate::sync::store::owner::BlobDownload;
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
 /// as an HLC [`Timestamp`]. A row whose `_updated_at` fails to parse is logged
@@ -83,7 +80,7 @@ pub(crate) struct BlobDownloadFailure {
 pub struct BlobDownloadFailures(Vec<BlobDownloadFailure>);
 
 impl BlobDownloadFailures {
-    pub(super) fn new(failures: Vec<BlobDownloadFailure>) -> Self {
+    pub(crate) fn new(failures: Vec<BlobDownloadFailure>) -> Self {
         Self(failures)
     }
 
@@ -120,64 +117,6 @@ impl std::error::Error for BlobDownloadFailures {
             _ => None,
         })
     }
-}
-
-/// The `CacheEager` blobs the `changes` reference, derived per row from the
-/// declarations. The cache fill a pulling device fetches into its cache before
-/// applying the rows — fill-based, regardless of provenance. The incoming row's
-/// declared plaintext size rides with each blob because incremental pull downloads
-/// before applying that row to the DB. When an UPDATE changes the blob id but not
-/// its size, SQLite omits the unchanged size column, so the old blob ref is kept
-/// as the pre-apply DB lookup key for that unchanged size.
-pub(super) fn cache_eager_blobs(
-    blob_decls: &BlobDecls,
-    changes: &[RowChange],
-    package: &crate::protocol::audience_package::AudiencePackage,
-) -> Result<Vec<BlobDownload>, String> {
-    let authority = crate::blob::RowBlobAuthority::Remote(package.audience().clone());
-    let mut downloads = Vec::new();
-    for change in changes {
-        if change.op == crate::changeset::ChangeOp::Delete {
-            continue;
-        }
-        let Some(blob) = blob_decls
-            .ref_from_change(change)
-            .map_err(|error| error.to_string())?
-        else {
-            continue;
-        };
-        if blob.fill != CacheFill::CacheEager {
-            continue;
-        }
-        let row_id = change.pk().ok_or_else(|| {
-            format!(
-                "blob-bearing incoming row {:?} has no primary key",
-                change.table
-            )
-        })?;
-        let matches = package
-            .blob_bindings()
-            .iter()
-            .filter(|binding| {
-                binding.table() == change.table
-                    && binding.row_id() == row_id
-                    && binding.blob().locator().namespace() == blob.namespace
-                    && binding.blob().locator().blob_id() == blob.id
-            })
-            .collect::<Vec<_>>();
-        let [binding] = matches.as_slice() else {
-            return Err(format!(
-                "incoming eager blob row {:?}/{row_id:?} has {} exact locator bindings",
-                change.table,
-                matches.len()
-            ));
-        };
-        downloads.push(BlobDownload {
-            authority: authority.clone(),
-            stored: binding.blob().clone(),
-        });
-    }
-    Ok(downloads)
 }
 
 #[derive(Debug)]

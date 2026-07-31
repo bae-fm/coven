@@ -13,6 +13,7 @@ mod host_write;
 mod keyring;
 pub(super) mod owner_promotion;
 pub(crate) mod pull;
+mod pull_package_materializer;
 mod registration;
 mod registration_outbox;
 mod restore;

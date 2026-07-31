@@ -1,44 +1,45 @@
 //! Causal discovery and atomic materialization for immutable Store commits.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
 use super::*;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
 use crate::store_dir::StoreDir;
-use crate::sync::conflict::TableSchema;
+use std::collections::BTreeMap;
 
 pub(super) struct AuthorizedPull<'operation, 'storage> {
     history: &'operation mut super::AuthorizedStoreHistory<'storage>,
-    store_dir: &'operation StoreDir,
+    packages: super::super::pull_package_materializer::PullPackageMaterializer<'storage>,
     membership: &'operation MembershipChain,
     identity: Option<&'operation UserKeypair>,
     routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
 }
 
 impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
-    pub(super) fn new(
+    pub(super) async fn load(
         history: &'operation mut super::AuthorizedStoreHistory<'storage>,
         store_dir: &'operation StoreDir,
         membership: &'operation MembershipChain,
         identity: Option<&'operation UserKeypair>,
         routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, StorePullError> {
+        let packages = history
+            .bind_pull_package_materializer(store_dir)
+            .await
+            .map_err(|error| {
+                StorePullError::Database(format!("load pull package materializer: {error}"))
+            })?;
+        Ok(Self {
             history,
-            store_dir,
+            packages,
             membership,
             identity,
             routing_encryption,
-        }
+        })
     }
 
     pub(super) async fn execute(&mut self) -> Result<StorePullExecution, StorePullError> {
         let retained = self.history.prepare_pull_retained_history().await?;
-        let store_dir = self.store_dir;
         let membership = self.membership;
-        let identity = self.identity;
         let routing_encryption = self.routing_encryption;
         let store_root_hash = self.history.root().store_root_hash;
         membership
@@ -271,10 +272,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let loaded_predecessor_memberships = LoadedMergePredecessorMemberships {
             by_commit: loaded_predecessor_memberships,
         };
-        let schema: Arc<TableSchema> =
-            Arc::new(self.history.pull_table_schema().await.map_err(|error| {
-                StorePullError::Database(format!("load synced table schema: {error}"))
-            })?);
         let coverage = self
             .history
             .pull_snapshot_coverage()
@@ -350,13 +347,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                                 "ready Merge candidate disappeared before apply".to_string(),
                             )
                         })?;
-                        match Box::pin(apply_candidate(
-                            self.history,
-                            store_dir,
-                            schema.clone(),
+                        match Box::pin(self.apply_candidate(
                             &candidate,
                             &loaded_predecessor_memberships,
-                            identity,
                             &mut latest_membership,
                             routing_key.as_ref(),
                         ))
@@ -404,13 +397,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             (left.coordinate.device_id(), left.coordinate.seq())
                 .cmp(&(right.coordinate.device_id(), right.coordinate.seq()))
         });
-        let local_blob_cleanup_pending = self
-            .history
-            .finish_pull_blob_cleanup(store_dir)
-            .await
-            .map_err(|error| {
-                StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
-            })?;
+        let local_blob_cleanup_pending = self.packages.finish_cleanup().await.map_err(|error| {
+            StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
+        })?;
         Ok(StorePullExecution {
             result: StorePullResult {
                 changesets_applied,
@@ -424,5 +413,366 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             },
             membership: latest_membership,
         })
+    }
+
+    async fn apply_candidate(
+        &mut self,
+        merge_candidate: &MergeCandidate,
+        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+        latest_membership: &mut MembershipChain,
+        routing_key: Option<&super::circle::RowRoutingKey>,
+    ) -> Result<ApplyOutcome, StorePullError> {
+        let root = self.history.root().clone();
+        let candidate = &merge_candidate.candidate;
+        let commit = candidate.commit();
+        let commit_ref = candidate.commit_ref();
+        let author = candidate.author();
+        let device_operations = merge_candidate.device_operations.clone();
+        if !commit.device_exclusion_proposals().is_empty()
+            || !commit.device_exclusion_outcomes().is_empty()
+        {
+            let (state_ref, _) = self
+                .history
+                .pull_device_state_for_order(&commit.order)
+                .await?;
+            if state_ref != commit.device_state {
+                return Err(StorePullError::Database(
+                    "Merge exclusion commit differs from its materialized predecessor device state"
+                        .to_string(),
+                ));
+            }
+        }
+        let membership_objects = self
+            .history
+            .verified_pull_membership_objects(commit_ref, commit)
+            .await?;
+        let (local_store_membership, membership_after_candidate) = self
+            .local_store_membership_after_candidate(
+                latest_membership,
+                &root,
+                &merge_candidate.predecessor_membership,
+                membership_objects.as_ref(),
+            )?;
+        let verified_prefix = VerifiedStreamActivationPrefix::empty();
+        let circle_activations = if commit.control().is_some() {
+            merge_candidate.membership_control.clone().ok_or_else(|| {
+                super::super::circles::CirclePackageReadError::Invalid(
+                    "Merge membership control is absent from its operation-verified history"
+                        .to_string(),
+                )
+            })
+        } else {
+            self.history
+                .circles()
+                .activations()
+                .load_payload(
+                    &candidate.verified,
+                    self.identity
+                        .filter(|_| local_store_membership.allows_circle_access()),
+                    routing_key,
+                    &verified_prefix,
+                    &merge_candidate.membership_prefix,
+                )
+                .await
+                .map_err(|error| {
+                    super::super::circles::CirclePackageReadError::Invalid(error.to_string())
+                })
+        };
+        let verified_circle_activations = match circle_activations {
+            Ok(activations) => activations,
+            Err(super::super::circles::CirclePackageReadError::Database(error)) => {
+                return Err(error.into())
+            }
+            Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
+                return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                    error,
+                )))
+            }
+        };
+        // An excluded device that cannot yet read its successor bootstrap records the
+        // exclusion now — detection is derived from the verified outcome, not the
+        // bootstrap — and holds the successor. Its position advances only once a later
+        // pull reads the bootstrap and reseeds; publication stays gated meanwhile.
+        if !verified_circle_activations
+            .bootstrap_pending_exclusions()
+            .is_empty()
+        {
+            let pending = verified_circle_activations
+                .bootstrap_pending_exclusions()
+                .to_vec();
+            self.history
+                .record_pull_circle_close_exclusions(pending)
+                .await?;
+            return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                "excluded device awaiting its successor bootstrap to reset".to_string(),
+            )));
+        }
+        let circle_packages = match self
+            .history
+            .circles()
+            .packages()
+            .load_applicable(
+                &candidate.verified,
+                verified_circle_activations.circles(),
+                author,
+                local_store_membership,
+            )
+            .await
+        {
+            Ok(packages) => packages,
+            Err(super::super::circles::CirclePackageReadError::Database(error)) => {
+                return Err(error.into())
+            }
+            Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
+                return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                    error,
+                )))
+            }
+        };
+        let mut packages =
+            Vec::with_capacity(usize::from(candidate.package.is_some()) + circle_packages.len());
+        if let Some(bytes) = candidate.package.as_ref() {
+            let package = match candidate.parse_store_package(bytes) {
+                Ok(package) => package,
+                Err(error) => {
+                    return Ok(ApplyOutcome::Held(
+                        HeldStorePositionReason::InvalidChangeset(error),
+                    ))
+                }
+            };
+            let protection = self.packages.store_blob_protection()?;
+            match self.packages.prepare(package, protection).await? {
+                Ok(package) => packages.push(package),
+                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+            }
+        }
+        for loaded in &circle_packages {
+            let package = match candidate.parse_circle_package(loaded) {
+                Ok(package) => package,
+                Err(error) => {
+                    return Ok(ApplyOutcome::Held(
+                        HeldStorePositionReason::InvalidChangeset(error),
+                    ))
+                }
+            };
+            match self
+                .packages
+                .prepare(package, loaded.blob_protection.clone())
+                .await?
+            {
+                Ok(package) => packages.push(package),
+                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+            }
+        }
+        let outcome = Box::pin(self.commit_candidate(
+            merge_candidate,
+            packages,
+            device_operations,
+            verified_circle_activations,
+            membership_objects,
+            loaded_predecessor_memberships,
+            local_store_membership,
+            routing_key,
+        ))
+        .await?;
+        if matches!(outcome, ApplyOutcome::Applied(_)) {
+            *latest_membership = membership_after_candidate;
+        }
+        #[cfg(test)]
+        if matches!(outcome, ApplyOutcome::Applied(_)) {
+            self.history
+                .reach_pull_after_remote_commit_test_point(
+                    commit_stream_id(&commit_ref.coord),
+                    commit.seq(),
+                )
+                .await;
+        }
+        Ok(outcome)
+    }
+
+    fn local_store_membership_after_candidate(
+        &self,
+        latest: &MembershipChain,
+        root: &StoreRootRef,
+        predecessor: &MembershipChain,
+        membership_objects: Option<&VerifiedMergeMembershipClosure>,
+    ) -> Result<(LocalStoreMembership, MembershipChain), StorePullError> {
+        let candidate = if let Some(membership_objects) = membership_objects {
+            let proof = &membership_objects.proof;
+            let mut successor = predecessor.clone();
+            match (&proof.resolution, &proof.resolution_value) {
+                (Some(reference), Some(value)) => successor
+                    .apply_resolutions(root.store_root_hash, &[(reference.clone(), value.clone())])
+                    .map_err(|error| StorePullError::Database(error.to_string()))?,
+                (None, None) => {}
+                _ => {
+                    return Err(StorePullError::Database(
+                        "verified Merge membership proof has incomplete resolution evidence"
+                            .to_string(),
+                    ))
+                }
+            }
+            successor
+                .add_entry(proof.entry_value.clone())
+                .and_then(|()| successor.activate_head_ref(proof.head.clone()))
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+            successor
+        } else {
+            predecessor.clone()
+        };
+        let candidate_state = LocalStoreMembership::from_membership(&candidate, self.identity)
+            .map_err(StorePullMembershipError::State)
+            .map_err(StorePullError::Membership)?;
+        if candidate.causally_includes(latest) {
+            return Ok((candidate_state, candidate));
+        }
+        if latest.causally_includes(&candidate) {
+            let latest_state = LocalStoreMembership::from_membership(latest, self.identity)
+                .map_err(StorePullMembershipError::State)
+                .map_err(StorePullError::Membership);
+            return Ok((
+                historical_local_store_membership(latest_state?, candidate_state),
+                latest.clone(),
+            ));
+        }
+        Err(StorePullError::Membership(
+            StorePullMembershipError::Message(
+                "latest Store membership and exact candidate membership are causally incomparable"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    async fn commit_candidate(
+        &mut self,
+        merge_candidate: &MergeCandidate,
+        packages: Vec<PreparedMergeMaterializationPackage>,
+        device_operations: VerifiedStoreDeviceOperations,
+        verified_circle_activations: VerifiedCircleActivations,
+        membership: Option<VerifiedMergeMembershipClosure>,
+        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+        local_store_membership: LocalStoreMembership,
+        routing_key: Option<&super::circle::RowRoutingKey>,
+    ) -> Result<ApplyOutcome, StorePullError> {
+        let root = self.history.root().clone();
+        let candidate = &merge_candidate.candidate;
+        let commit = candidate.commit();
+        let commit_ref = candidate.commit_ref();
+        let author = candidate.author();
+        let predecessor_membership = &merge_candidate.predecessor_membership;
+        let (_, predecessor_state) = self
+            .history
+            .pull_device_state_for_order(&commit.order)
+            .await?;
+        verify_merge_membership_state_ref(
+            &commit.membership_state,
+            predecessor_membership,
+            &predecessor_state,
+        )?;
+        let (authorized_predecessor, recovery_author) =
+            predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let owner_recovery = self
+            .history
+            .verify_pull_owner_recovery_activation(commit)
+            .await?;
+        let state_after = device_operations
+            .apply_to(authorized_predecessor.clone(), &commit.device_state)
+            .and_then(|state| {
+                apply_verified_device_lifecycle(
+                    state,
+                    commit,
+                    &candidate.registrations,
+                    recovery_author.as_ref(),
+                    owner_recovery,
+                )
+            })
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let retained_acknowledgement = self
+            .history
+            .retain_pull_acknowledgement(commit_ref, commit, author)
+            .await?;
+        let registrations = commit
+            .device_registrations()
+            .iter()
+            .zip(&candidate.registrations)
+            .map(|(activation, (value, _))| RetainedVerifiedRegistration {
+                reference: activation.registration.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        let prepared_history = self
+            .history
+            .prepare_merge_history_successor(
+                &candidate.verified,
+                predecessor_membership,
+                recovery_author.as_ref(),
+                state_after.clone(),
+                MergeHistorySuccessorEvidence {
+                    registrations,
+                    acknowledgement: retained_acknowledgement,
+                    membership_proof: membership.as_ref().map(|closure| closure.proof.clone()),
+                },
+            )
+            .await?;
+        let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
+            head_hash: merge_candidate.activation_head.head_hash(),
+            object: merge_candidate.activation_head_object.clone(),
+        };
+        prepared_history
+            .summary
+            .open(
+                commit,
+                commit_ref,
+                &merge_candidate.activation_head,
+                &activation_head_ref,
+                &state_after,
+            )
+            .map_err(|error| {
+                StorePullError::Database(format!("open prepared Merge history summary: {error}"))
+            })?;
+        self.history
+            .remember_pull_commit(candidate.verified.clone())?;
+        let retractions = Box::pin(self.history.verified_pull_terminal_retractions(
+            &merge_candidate.activation_head,
+            &merge_candidate.activation_head_object,
+            &candidate.verified,
+            &authorized_predecessor,
+            predecessor_membership,
+            &device_operations,
+            loaded_predecessor_memberships,
+        ))
+        .await?;
+        let receiver_wall_ms = self.history.pull_receive_wall_ms();
+        let materialization = PreparedMergeMaterialization {
+            root: root.clone(),
+            verified_commit: candidate.verified.clone(),
+            activation_head: merge_candidate.activation_head.clone(),
+            activation_head_object: merge_candidate.activation_head_object.clone(),
+            history_summary: prepared_history.summary,
+            membership_objects: membership.as_ref().map(|closure| closure.objects().clone()),
+            membership_remote_objects: membership
+                .map(VerifiedMergeMembershipClosure::into_remote_objects)
+                .unwrap_or_default(),
+            registrations: candidate.registrations.clone(),
+            package_application: (!packages.is_empty()).then_some(
+                crate::database::RetainedPackageApplication::Received { receiver_wall_ms },
+            ),
+            packages,
+            device_operations,
+            circle_activations: verified_circle_activations,
+        };
+        let outcome = self
+            .history
+            .commit_pull_materialization(
+                materialization,
+                retractions,
+                local_store_membership,
+                routing_key.cloned(),
+                receiver_wall_ms,
+            )
+            .await?;
+        self.history.resume_merge_retraction_cleanups().await?;
+        Ok(outcome)
     }
 }

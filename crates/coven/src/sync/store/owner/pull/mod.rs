@@ -39,7 +39,7 @@ use crate::sync::store::circle_controls::activation::{
 };
 use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
-use crate::sync::{gate, hlc, session};
+use crate::sync::{gate, hlc};
 
 mod device_lifecycle_state;
 mod device_operations;
@@ -105,7 +105,8 @@ pub(super) async fn execute(
     identity: Option<&UserKeypair>,
     routing_encryption: Option<&crate::encryption::EncryptionService>,
 ) -> Result<StorePullExecution, StorePullError> {
-    authorized::AuthorizedPull::new(history, store_dir, membership, identity, routing_encryption)
+    authorized::AuthorizedPull::load(history, store_dir, membership, identity, routing_encryption)
+        .await?
         .execute()
         .await
 }
