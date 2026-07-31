@@ -24,16 +24,11 @@ fn circle_routing_test_schema() -> (
 }
 
 async fn circle_blob_opening_error(
-    db: &Database,
-    storage: &dyn SyncStorage,
+    store: &crate::sync::store::Store,
     authority: &crate::blob::RowBlobAuthority,
     stored: &crate::blob::locator::StoredBlobRef,
-) -> crate::blob::cache::BlobCacheError {
-    let database = StoreDatabase::new(db);
-    let opening = crate::sync::store::blob::StoreBlobOpening::open(&database, storage)
-        .await
-        .expect("open Store blob authority");
-    match opening.protection(authority, stored).await {
+) -> String {
+    match store.blob_protection_for_test(authority, stored).await {
         Ok(_) => panic!("invalid Circle blob authority must fail"),
         Err(error) => error,
     }
@@ -1000,12 +995,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("read a blob through its retained founder control"),
         blob_bytes,
     );
-    let member_opening =
-        crate::sync::store::blob::StoreBlobOpening::open(&member_database, &store.storage)
-            .await
-            .expect("open member Store blob authority");
-    let protection = member_opening
-        .protection(
+    let protection = member_store
+        .blob_protection_for_test(
             historical_blob.authority(),
             historical_blob
                 .stored()
@@ -1526,12 +1517,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .roster
         .members()
         .contains_key(&remaining_member_pubkey));
-    let database = crate::database::StoreDatabase::new(&db);
-    let opening = crate::sync::store::blob::StoreBlobOpening::open(&database, &store.storage)
-        .await
-        .expect("open Store blob authority");
-    let historical_protection = opening
-        .protection(&historical_authority, &historical_stored)
+    let historical_protection = device
+        .blob_protection_for_test(&historical_authority, &historical_stored)
         .await
         .expect("resolve old-epoch blob protection through retained Circle authority");
     let crate::storage::BlobSpoolProtection::Opaque(historical_encryption) = historical_protection
@@ -1549,13 +1536,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             key_fingerprint: successor.control.value.key_fingerprint(),
         },
     );
-    let substitution_error = circle_blob_opening_error(
-        &db,
-        &store.storage,
-        &successor_substitution,
-        &historical_stored,
-    )
-    .await;
+    let substitution_error =
+        circle_blob_opening_error(&device, &successor_substitution, &historical_stored).await;
     assert!(
         substitution_error
             .to_string()
@@ -1572,7 +1554,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         },
     );
     let absent_error =
-        circle_blob_opening_error(&db, &store.storage, &absent_authority, &historical_stored).await;
+        circle_blob_opening_error(&device, &absent_authority, &historical_stored).await;
     assert!(
         absent_error
             .to_string()
@@ -1586,13 +1568,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             key_fingerprint: successor.control.value.key_fingerprint(),
         },
     );
-    let wrong_circle_error = circle_blob_opening_error(
-        &db,
-        &store.storage,
-        &wrong_circle_authority,
-        &historical_stored,
-    )
-    .await;
+    let wrong_circle_error =
+        circle_blob_opening_error(&device, &wrong_circle_authority, &historical_stored).await;
     assert!(
         wrong_circle_error
             .to_string()
@@ -1606,13 +1583,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             key_fingerprint: crate::KeyFingerprint::from_bytes([0x55; 32]),
         },
     );
-    let wrong_fingerprint_error = circle_blob_opening_error(
-        &db,
-        &store.storage,
-        &wrong_fingerprint_authority,
-        &historical_stored,
-    )
-    .await;
+    let wrong_fingerprint_error =
+        circle_blob_opening_error(&device, &wrong_fingerprint_authority, &historical_stored).await;
     assert!(
         wrong_fingerprint_error
             .to_string()

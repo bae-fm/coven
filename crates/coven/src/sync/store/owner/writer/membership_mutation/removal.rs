@@ -61,8 +61,7 @@ async fn build_revoke_mutation(
         return Err(InviteError::LastOwner);
     }
     let current_keyring = operation
-        .keyring_for_membership(chain)
-        .open_or(current_encryption)
+        .open_keyring_or_for_membership(chain, current_encryption)
         .await?;
     let new_keyring = current_keyring
         .with_appended_generation(
@@ -83,8 +82,7 @@ async fn build_revoke_mutation(
         let recipient_key = keys::ed25519_hex_to_x25519_public_key(&recipient)?;
         wraps.push(ReplacementWrappedKey {
             prepared: operation
-                .keyring_for_membership(chain)
-                .prepare(
+                .prepare_wrapped_key(
                     &recipient,
                     WrappedStoreKey::seal_keyring(
                         store_id,
@@ -921,7 +919,7 @@ async fn complete_already_removed_member(
     {
         return Err(InviteError::LastOwner);
     }
-    let keyring = operation.keyring_for_membership(chain).open().await?;
+    let keyring = operation.open_keyring_for_membership(chain).await?;
     revoke_provider_access(
         cloud_home,
         CloudAccessState::Absent {

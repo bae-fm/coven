@@ -103,26 +103,6 @@ use crate::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreDir,
 };
 
-/// Why materializing one exact Remote blob failed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BlobDownloadFailureCause {
-    Invalid(String),
-    Local(String),
-    Metadata(String),
-    Storage(StorageError),
-}
-
-impl std::fmt::Display for BlobDownloadFailureCause {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid(reason) => write!(formatter, "invalid blob: {reason}"),
-            Self::Local(reason) => write!(formatter, "local cache: {reason}"),
-            Self::Metadata(reason) => write!(formatter, "blob metadata: {reason}"),
-            Self::Storage(error) => write!(formatter, "provider: {error}"),
-        }
-    }
-}
-
 /// Closed cloud access for one exact Remote blob. Store code resolves the
 /// authority; the cache only reads bytes with the supplied protection.
 pub(crate) struct RemoteBlobAccess<'a> {
@@ -140,89 +120,6 @@ impl<'a> RemoteBlobAccess<'a> {
             protection,
         }
     }
-}
-
-/// Verify one exact cloud blob and optionally retain its plaintext in the
-/// device-local cache. Store code must resolve the blob's protection before
-/// calling this cache operation.
-pub(crate) async fn verify_blob_plaintext(
-    db: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    store_dir: &StoreDir,
-    stored: &crate::blob::locator::StoredBlobRef,
-    protection: crate::storage::BlobSpoolProtection,
-    retain: bool,
-) -> Result<(), BlobDownloadFailureCause> {
-    let namespace = stored.locator().namespace();
-    let id = stored.locator().blob_id();
-    let locator_hash = stored.locator().locator_hash();
-    crate::store_dir::validate_path_token(namespace)
-        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-    crate::store_dir::validate_path_token(id)
-        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-    let cache = store_dir
-        .cache_blob_path(namespace, locator_hash)
-        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-    let pinned = store_dir
-        .pinned_blob_path(namespace, locator_hash)
-        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-    let staged = storage
-        .stage_verified_blob_plaintext(stored, protection, &cache)
-        .await
-        .map_err(BlobDownloadFailureCause::Storage)?;
-    if !retain {
-        return Ok(());
-    }
-    if cached_exact_in_either_folder(
-        &cache,
-        &pinned,
-        stored.locator().plaintext_size(),
-        stored.locator().plaintext_hash(),
-    )
-    .await
-    .map_err(BlobDownloadFailureCause::Local)?
-    {
-        return Ok(());
-    }
-    match staged.commit_new().await {
-        Ok(()) => {}
-        Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
-            if !cached_exact_in_either_folder(
-                &cache,
-                &pinned,
-                stored.locator().plaintext_size(),
-                stored.locator().plaintext_hash(),
-            )
-            .await
-            .map_err(BlobDownloadFailureCause::Local)?
-            {
-                return Err(BlobDownloadFailureCause::Local(
-                    "occupied exact blob cache path differs from its locator".to_string(),
-                ));
-            }
-        }
-        Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
-    }
-    evict_to_budget(db, store_dir, namespace, Some(&cache))
-        .await
-        .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
-}
-
-async fn cached_exact_in_either_folder(
-    cache: &std::path::Path,
-    pinned: &std::path::Path,
-    expected_size: u64,
-    expected_hash: crate::protocol::store_commit::ObjectHash,
-) -> Result<bool, String> {
-    for path in [cache, pinned] {
-        if crate::local_blob::exists(path).await? {
-            let (size, hash) = crate::local_blob::exact_file_facts(path).await?;
-            if size == expected_size && hash == expected_hash {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 /// Prefix for the `protocol_state` keys holding each namespace's device-local cache-size

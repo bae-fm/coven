@@ -1336,6 +1336,18 @@ impl<'a> StoreCommitVerifier<'a> {
         &self.verified_root
     }
 
+    pub(crate) async fn read_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StoreObjectError> {
+        self.storage
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+            .map_err(StoreObjectError::from)
+    }
+
     pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
         self.storage
     }

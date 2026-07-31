@@ -294,7 +294,6 @@ pub(super) async fn apply_candidate(
     routing_key: Option<&super::circle::RowRoutingKey>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let database = history.database.clone();
-    let storage = history.history_verifier.storage();
     let root = history.root().clone();
     let db = &database;
     let candidate = &merge_candidate.candidate;
@@ -408,10 +407,10 @@ pub(super) async fn apply_candidate(
                 ))
             }
         };
-        let protection = storage.store_blob_protection()?;
+        let protection = history.store_blob_protection()?;
         match prepare_merge_candidate_package(
+            history,
             db,
-            storage,
             store_dir,
             schema.clone(),
             package,
@@ -433,8 +432,8 @@ pub(super) async fn apply_candidate(
             }
         };
         match prepare_merge_candidate_package(
+            history,
             db,
-            storage,
             store_dir,
             schema.clone(),
             package,
@@ -552,8 +551,8 @@ pub(crate) struct PreparedMergeMaterializationPackage {
 }
 
 async fn prepare_merge_candidate_package(
+    history: &super::super::AuthorizedStoreHistory<'_>,
     db: &StoreDatabase,
-    storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     package: AudiencePackage,
@@ -592,16 +591,34 @@ async fn prepare_merge_candidate_package(
             )))
         }
     };
-    if let Err(failures) = verify_package_blobs(
-        db,
-        storage,
-        store_dir,
-        package.blob_bindings(),
-        blob_protection,
-        &eager,
-    )
-    .await
-    {
+    let mut verified = Vec::new();
+    let mut failures = Vec::new();
+    for binding in package.blob_bindings() {
+        let stored = binding.blob();
+        if verified.iter().any(|candidate| candidate == stored) {
+            continue;
+        }
+        verified.push(stored.clone());
+        let locator = stored.locator();
+        let retain = eager.iter().any(|download| download.stored == *stored);
+        if let Err(cause) = history
+            .verify_blob_plaintext_with_protection(
+                store_dir,
+                stored,
+                blob_protection.clone(),
+                retain,
+            )
+            .await
+        {
+            failures.push(BlobDownloadFailure {
+                namespace: locator.namespace().to_string(),
+                id: locator.blob_id().to_string(),
+                cause,
+            });
+        }
+    }
+    if !failures.is_empty() {
+        let failures = BlobDownloadFailures::new(failures);
         if failures.has_transport_failure() {
             return Err(StorePullError::BlobDownloads(failures));
         }

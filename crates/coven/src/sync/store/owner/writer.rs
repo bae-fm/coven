@@ -238,15 +238,42 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
     }
 
-    fn keyring(&self) -> super::keyring::AuthorizedMembershipKeyring<'_, 'storage> {
-        self.history.keyring(self.writer.identity, &self.membership)
+    async fn open_keyring(
+        &self,
+    ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
+        self.history
+            .open_keyring(self.writer.identity, &self.membership)
+            .await
     }
 
-    fn keyring_for_membership<'operation>(
-        &'operation self,
-        membership: &'operation crate::protocol::membership::MembershipChain,
-    ) -> super::keyring::AuthorizedMembershipKeyring<'operation, 'storage> {
-        self.history.keyring(self.writer.identity, membership)
+    pub(super) async fn open_keyring_for_membership(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+    ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
+        self.history
+            .open_keyring(self.writer.identity, membership)
+            .await
+    }
+
+    pub(super) async fn open_keyring_or_for_membership(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+        initial: &crate::encryption::EncryptionService,
+    ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
+        self.history
+            .open_keyring_or(self.writer.identity, membership, initial)
+            .await
+    }
+
+    pub(super) async fn prepare_wrapped_key(
+        &self,
+        recipient: &str,
+        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
+    ) -> Result<
+        crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
+        crate::storage::StorageError,
+    > {
+        self.history.prepare_wrapped_key(recipient, value).await
     }
 
     fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
@@ -326,14 +353,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.writer.registration_ref.clone()
     }
 
-    fn blob_opening(&self) -> crate::sync::store::blob::StoreBlobOpening<'_> {
-        crate::sync::store::blob::StoreBlobOpening::from_authorized_parts(
-            self.database.clone(),
-            self.storage.as_ref(),
-            self.store_root().clone(),
-        )
-    }
-
     fn reclaim_history(&mut self) -> super::history::ReclaimHistory<'_, 'storage> {
         self.history.reclaim()
     }
@@ -358,13 +377,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             registration_ref,
             registration,
         )
-    }
-
-    pub(super) fn owner_promotion_keyring<'operation>(
-        &'operation self,
-        membership: &'operation crate::protocol::membership::MembershipChain,
-    ) -> super::keyring::AuthorizedMembershipKeyring<'operation, 'storage> {
-        self.keyring_for_membership(membership)
     }
 
     pub(super) fn owner_promotion_history(
@@ -406,7 +418,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Ok(());
             }
 
-            match self.keyring().open().await {
+            match self.open_keyring().await {
                 Ok(new_encryption) => {
                     let merged = live_keyring
                         .merged_with(&new_encryption)

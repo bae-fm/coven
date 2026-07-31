@@ -1,14 +1,12 @@
 /// Membership and blob helpers shared by Store pull and bootstrap.
 use tracing::{debug, warn};
 
-use crate::blob::cache::BlobDownloadFailureCause;
 use crate::blob::decl::BlobDecls;
 use crate::blob::CacheFill;
 use crate::changeset::RowChange;
-use crate::storage::SyncStorage;
-use crate::store_dir::StoreDir;
 use crate::sync::conflict::TableSchema;
 use crate::sync::hlc::Timestamp;
+use crate::sync::store::blob::BlobDownloadFailureCause;
 use crate::sync::store::owner::BlobDownload;
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
@@ -75,21 +73,21 @@ pub(super) fn advance_max_updated_at(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlobDownloadFailure {
-    pub namespace: String,
-    pub id: String,
-    pub cause: BlobDownloadFailureCause,
+pub(crate) struct BlobDownloadFailure {
+    pub(crate) namespace: String,
+    pub(crate) id: String,
+    pub(crate) cause: BlobDownloadFailureCause,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobDownloadFailures(Vec<BlobDownloadFailure>);
 
 impl BlobDownloadFailures {
-    pub fn failures(&self) -> &[BlobDownloadFailure] {
-        &self.0
+    pub(super) fn new(failures: Vec<BlobDownloadFailure>) -> Self {
+        Self(failures)
     }
 
-    pub fn has_transport_failure(&self) -> bool {
+    pub(crate) fn has_transport_failure(&self) -> bool {
         self.0.iter().any(|failure| {
             matches!(
                 &failure.cause,
@@ -180,50 +178,6 @@ pub(super) fn cache_eager_blobs(
         });
     }
     Ok(downloads)
-}
-
-pub(super) async fn verify_package_blobs(
-    db: &crate::database::StoreDatabase,
-    storage: &dyn SyncStorage,
-    store_dir: &StoreDir,
-    bindings: &[crate::protocol::audience_package::RowBlobLocatorBinding],
-    protection: crate::storage::BlobSpoolProtection,
-    eager: &[BlobDownload],
-) -> Result<(), BlobDownloadFailures> {
-    let mut verified = Vec::new();
-    let mut failures = Vec::new();
-    for binding in bindings {
-        let stored = binding.blob();
-        if verified.iter().any(|candidate| candidate == stored) {
-            continue;
-        }
-        verified.push(stored.clone());
-        let locator = stored.locator();
-        let namespace = locator.namespace();
-        let id = locator.blob_id();
-        let retain = eager.iter().any(|download| download.stored == *stored);
-        if let Err(cause) = crate::blob::cache::verify_blob_plaintext(
-            db,
-            storage,
-            store_dir,
-            stored,
-            protection.clone(),
-            retain,
-        )
-        .await
-        {
-            failures.push(BlobDownloadFailure {
-                namespace: namespace.to_string(),
-                id: id.to_string(),
-                cause,
-            });
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(BlobDownloadFailures(failures))
-    }
 }
 
 #[derive(Debug)]

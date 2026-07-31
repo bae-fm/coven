@@ -32,8 +32,7 @@ async fn prepare_promotion_wrap(
     let identity = operation.identity.clone();
     let authorized = operation
         .writer
-        .owner_promotion_keyring(membership)
-        .open_or(encryption)
+        .open_keyring_or_for_membership(membership, encryption)
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     let recipient_key = keys::ed25519_hex_to_x25519_public_key(recipient)
@@ -43,8 +42,7 @@ async fn prepare_promotion_wrap(
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     operation
         .writer
-        .owner_promotion_keyring(membership)
-        .prepare(recipient, value)
+        .prepare_wrapped_key(recipient, value)
         .await
         .map_err(OwnerPromotionError::from)
 }

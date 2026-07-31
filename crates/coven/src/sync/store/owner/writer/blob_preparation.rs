@@ -474,24 +474,21 @@ impl AuthorizedWriterOperation<'_> {
                 id: fact.blob.id.clone(),
             })?;
         let authority = crate::blob::RowBlobAuthority::Remote(previous.authority.clone());
-        let protection = self
-            .blob_opening()
-            .protection(&authority, &previous.stored)
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let destination = store_dir
             .storage_dir()
             .join("outbound-blobs")
             .join(format!(".plaintext-{destination_locator}"));
         let staged = self
-            .storage
-            .as_ref()
-            .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
+            .history
+            .stage_verified_blob_plaintext(&authority, &previous.stored, &destination)
             .await
-            .map_err(|source| StoreError::BlobStorage {
-                namespace: fact.blob.namespace.clone(),
-                id: fact.blob.id.clone(),
-                source,
+            .map_err(|error| match error {
+                crate::blob::cache::BlobCacheError::Storage(source) => StoreError::BlobStorage {
+                    namespace: fact.blob.namespace.clone(),
+                    id: fact.blob.id.clone(),
+                    source,
+                },
+                error => StoreError::InvalidOutbound(error.to_string()),
             })?;
         staged.commit().await.map_err(StoreError::InvalidOutbound)?;
         Ok(destination)

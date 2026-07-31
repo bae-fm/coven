@@ -2074,6 +2074,17 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self.history
     }
 
+    pub(crate) async fn read_protocol_object(
+        &self,
+        context: &crate::storage::ProtocolObjectContext,
+        object: &crate::storage::ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, crate::storage::StoreObjectError> {
+        self.commit_verifier
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
     pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
         self.commit_verifier.storage()
     }

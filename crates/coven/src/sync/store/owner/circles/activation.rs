@@ -53,6 +53,99 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     ) -> Self {
         Self { database, history }
     }
+
+    async fn load_access_pairs(
+        &self,
+        commit: &StoreBatchCommit,
+        circle_id: CircleId,
+        control: &PreparedCircleControl,
+        objects: &CircleActivationObjects,
+    ) -> Result<Vec<VerifiedAccessPair>, CircleOperationError> {
+        let family = commit.candidate_family();
+        let mut verified = Vec::with_capacity(objects.access.len());
+        for reference in &objects.access {
+            if reference.leaf.owner_pubkey != reference.envelope.owner_pubkey
+                || reference.leaf.recipient_slot != reference.envelope.recipient_slot
+                || reference.leaf.leaf_id != reference.envelope.leaf_id
+                || reference.leaf.leaf_hash != reference.envelope.leaf_hash
+                || reference.leaf.leaf_hash != reference.leaf.object.stored_hash()
+                || reference.envelope.control_hash != control.coord.control_hash()
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "paired Circle access references differ".to_string(),
+                ));
+            }
+            let envelope_prefix = circle_access_envelope_semantic_prefix(
+                circle_id,
+                family,
+                &reference.envelope.owner_pubkey,
+                &reference.envelope.recipient_slot,
+                reference.envelope.control_hash,
+            );
+            let envelope_bytes = self
+                .history
+                .read_protocol_object(
+                    &ProtocolObjectContext::store_encrypted(
+                        commit.store_root_hash,
+                        ProtocolObjectDomain::CircleAccessEnvelope,
+                    ),
+                    &reference.envelope.object,
+                    &envelope_prefix,
+                )
+                .await
+                .map_err(CircleOperationError::from)?;
+            let envelope: AccessEnvelope =
+                serde_json::from_slice(&envelope_bytes).map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "parse circle access envelope: {error}"
+                    ))
+                })?;
+            if envelope.candidate_family != family
+                || envelope.circle_id != circle_id
+                || envelope.owner_pubkey != reference.envelope.owner_pubkey
+                || envelope.recipient_slot != reference.envelope.recipient_slot
+                || envelope.control_hash != reference.envelope.control_hash
+                || envelope.leaf_id != reference.envelope.leaf_id
+                || envelope.leaf_hash != reference.envelope.leaf_hash
+                || !envelope.verify(control, family)
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "circle access envelope failed verification".to_string(),
+                ));
+            }
+            let leaf_prefix = circle_access_leaf_semantic_prefix(
+                circle_id,
+                family,
+                &reference.leaf.owner_pubkey,
+                reference.leaf.epoch_id,
+                &reference.leaf.recipient_slot,
+                reference.leaf.leaf_id,
+            );
+            let leaf_bytes = self
+                .history
+                .read_protocol_object(
+                    &ProtocolObjectContext::recipient_sealed(
+                        commit.store_root_hash,
+                        ProtocolObjectDomain::CircleAccessLeaf,
+                    ),
+                    &reference.leaf.object,
+                    &leaf_prefix,
+                )
+                .await
+                .map_err(CircleOperationError::from)?;
+            if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle access leaf bytes differ from the paired leaf hash".to_string(),
+                ));
+            }
+            verified.push(VerifiedAccessPair {
+                reference: reference.clone(),
+                envelope,
+                leaf_bytes,
+            });
+        }
+        Ok(verified)
+    }
 }
 
 /// The verified epoch-close settlement a successor activation carries: the exact
@@ -168,93 +261,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         )
         .await
     }
-}
-
-async fn load_verified_access_pairs(
-    storage: &dyn SyncStorage,
-    commit: &StoreBatchCommit,
-    circle_id: CircleId,
-    control: &PreparedCircleControl,
-    objects: &CircleActivationObjects,
-) -> Result<Vec<VerifiedAccessPair>, CircleOperationError> {
-    let family = commit.candidate_family();
-    let mut verified = Vec::with_capacity(objects.access.len());
-    for reference in &objects.access {
-        if reference.leaf.owner_pubkey != reference.envelope.owner_pubkey
-            || reference.leaf.recipient_slot != reference.envelope.recipient_slot
-            || reference.leaf.leaf_id != reference.envelope.leaf_id
-            || reference.leaf.leaf_hash != reference.envelope.leaf_hash
-            || reference.leaf.leaf_hash != reference.leaf.object.stored_hash()
-            || reference.envelope.control_hash != control.coord.control_hash()
-        {
-            return Err(CircleOperationError::InvalidState(
-                "paired Circle access references differ".to_string(),
-            ));
-        }
-        let envelope_prefix = circle_access_envelope_semantic_prefix(
-            circle_id,
-            family,
-            &reference.envelope.owner_pubkey,
-            &reference.envelope.recipient_slot,
-            reference.envelope.control_hash,
-        );
-        let envelope_bytes = read_exact_circle_object(
-            storage,
-            &ProtocolObjectContext::store_encrypted(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleAccessEnvelope,
-            ),
-            &reference.envelope.object,
-            &envelope_prefix,
-        )
-        .await?;
-        let envelope: AccessEnvelope =
-            serde_json::from_slice(&envelope_bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!("parse circle access envelope: {error}"))
-            })?;
-        if envelope.candidate_family != family
-            || envelope.circle_id != circle_id
-            || envelope.owner_pubkey != reference.envelope.owner_pubkey
-            || envelope.recipient_slot != reference.envelope.recipient_slot
-            || envelope.control_hash != reference.envelope.control_hash
-            || envelope.leaf_id != reference.envelope.leaf_id
-            || envelope.leaf_hash != reference.envelope.leaf_hash
-            || !envelope.verify(control, family)
-        {
-            return Err(CircleOperationError::InvalidState(
-                "circle access envelope failed verification".to_string(),
-            ));
-        }
-        let leaf_prefix = circle_access_leaf_semantic_prefix(
-            circle_id,
-            family,
-            &reference.leaf.owner_pubkey,
-            reference.leaf.epoch_id,
-            &reference.leaf.recipient_slot,
-            reference.leaf.leaf_id,
-        );
-        let leaf_bytes = read_exact_circle_object(
-            storage,
-            &ProtocolObjectContext::recipient_sealed(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleAccessLeaf,
-            ),
-            &reference.leaf.object,
-            &leaf_prefix,
-        )
-        .await?;
-        if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
-            return Err(CircleOperationError::InvalidState(
-                "Circle access leaf bytes differ from the paired leaf hash".to_string(),
-            ));
-        }
-        verified.push(VerifiedAccessPair {
-            reference: reference.clone(),
-            envelope,
-            leaf_bytes,
-        });
-    }
-    Ok(verified)
 }
 
 async fn verify_epoch_close(
@@ -1466,17 +1472,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<LocalCircleAccess, CircleOperationError> {
         let database = self.database;
+        let verified_access = self
+            .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
+            .await?;
         let history_verifier = &mut *self.history;
         let root = history_verifier.root().clone();
         let storage = history_verifier.storage();
-        let verified_access = load_verified_access_pairs(
-            storage,
-            commit,
-            reference.circle_id(),
-            control,
-            reference.objects(),
-        )
-        .await?;
         let checkpoint_members =
             Box::pin(verify_control_membership(history_verifier, control)).await?;
         let Some(resolved) = resolve_identity_access_leaf(
@@ -1585,13 +1586,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let database = self.database;
-        let history_verifier = &mut *self.history;
-        let root = history_verifier.root().clone();
-        let storage = history_verifier.storage();
+        let root = self.history.root().clone();
         let commit_ref = verified.reference();
         let commit = verified.value();
         let author = verified.author();
-        if history_verifier.root().store_root_hash != commit.store_root_hash
+        if self.history.root().store_root_hash != commit.store_root_hash
             || commit
                 .author_registration
                 .verify_registration(author)
@@ -1621,7 +1620,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 control: reference.control(),
             });
             let control_bytes = read_exact_circle_object(
-                storage,
+                self.history.storage(),
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
@@ -1668,7 +1667,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             });
             let head_object = reference.head_object();
             let bytes = read_exact_circle_object(
-                storage,
+                self.history.storage(),
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
@@ -1692,7 +1691,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             } = &head.control;
             let authority = resolve_circle_stream_authority(
                 database,
-                history_verifier,
+                &mut *self.history,
                 verified_prefix,
                 commit_ref,
                 commit,
@@ -1707,7 +1706,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             )
             .await?;
             verify_circle_head_chain(
-                storage,
+                self.history.storage(),
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
@@ -1748,7 +1747,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             }
             verify_covered_control_heads(
                 database,
-                history_verifier,
+                &mut *self.history,
                 verified_prefix,
                 commit_ref,
                 commit,
@@ -1764,16 +1763,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 objects,
                 &mut consumed_stream_activations,
             )?;
-            let verified_access = load_verified_access_pairs(
-                storage,
-                commit,
-                reference.circle_id(),
-                &control,
-                objects,
-            )
-            .await?;
+            let verified_access = self
+                .load_access_pairs(commit, reference.circle_id(), &control, objects)
+                .await?;
             let checkpoint_members = Box::pin(verify_control_membership_with_verified_activations(
-                history_verifier,
+                &*self.history,
                 &control,
                 verified_membership_prefix,
             ))
@@ -1832,7 +1826,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     );
                     let authority_roster = load_circle_authority_roster(
                         database,
-                        history_verifier,
+                        &mut *self.history,
                         verified_prefix,
                         commit,
                         reference.circle_id(),
@@ -1855,7 +1849,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     }
                     let roster_chain = load_circle_roster_chain(
                         database,
-                        history_verifier,
+                        &mut *self.history,
                         verified_prefix,
                         commit_ref,
                         commit,
@@ -1871,7 +1865,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
                     let close_outcome = verify_epoch_close(
                         database,
-                        storage,
+                        self.history.storage(),
                         &root,
                         commit,
                         &control,
@@ -1917,7 +1911,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     let metadata_state = control.value.metadata_state_ref();
                     let metadata = load_circle_metadata_state(
                         database,
-                        history_verifier,
+                        &mut *self.history,
                         verified_prefix,
                         commit,
                         reference.circle_id(),
@@ -1942,7 +1936,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         // error here — verification and blob checks fail as `InvalidState`.
                         match build_verified_leaf_bootstrap_image(
                             database,
-                            storage,
+                            self.history.storage(),
                             &root,
                             leaf,
                             &control,

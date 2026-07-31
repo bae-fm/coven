@@ -1399,41 +1399,16 @@ impl<'storage> RestoringStore<'storage> {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
-        let storage = self.storage;
-        let opening = crate::sync::store::blob::StoreBlobOpening::from_authorized_parts(
-            self.database.clone(),
-            storage,
-            self.root.clone(),
-        );
-        let protection = opening
-            .protection(&authority, &stored)
+        self.history
+            .verify_blob_plaintext(store_dir, &authority, &stored, true)
             .await
-            .map_err(|error| {
-                let cause =
-                    crate::blob::cache::BlobDownloadFailureCause::Metadata(error.to_string());
-                warn!(id, namespace, error = %cause, "cannot resolve exact blob opening authority");
+            .map_err(|cause| {
+                warn!(id, namespace, error = %cause, "failed to verify snapshot blob");
                 pull::BlobDownloadFailure {
                     namespace: namespace.to_string(),
                     id: id.to_string(),
                     cause,
                 }
-            })?;
-        crate::blob::cache::verify_blob_plaintext(
-            &self.database,
-            storage,
-            store_dir,
-            &stored,
-            protection,
-            true,
-        )
-        .await
-        .map_err(|cause| {
-            warn!(id, namespace, error = %cause, "failed to verify snapshot blob");
-            pull::BlobDownloadFailure {
-                namespace: namespace.to_string(),
-                id: id.to_string(),
-                cause,
-            }
-        })
+            })
     }
 }

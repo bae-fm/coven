@@ -12,6 +12,26 @@ use crate::store_dir::StoreDir;
 
 use crate::database::StoreDatabase;
 
+/// Why materializing one exact remote blob failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BlobDownloadFailureCause {
+    Invalid(String),
+    Local(String),
+    Metadata(String),
+    Storage(StorageError),
+}
+
+impl std::fmt::Display for BlobDownloadFailureCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(formatter, "invalid blob: {reason}"),
+            Self::Local(reason) => write!(formatter, "local cache: {reason}"),
+            Self::Metadata(reason) => write!(formatter, "blob metadata: {reason}"),
+            Self::Storage(error) => write!(formatter, "provider: {error}"),
+        }
+    }
+}
+
 enum BlobOpeningAuthority<'a> {
     Store,
     Circle {
@@ -19,75 +39,6 @@ enum BlobOpeningAuthority<'a> {
         control: &'a crate::protocol::circle::CircleControlCoord,
         key_fingerprint: KeyFingerprint,
     },
-}
-
-pub(crate) struct StoreBlobOpening<'a> {
-    database: StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    root: StoreRootRef,
-}
-
-impl<'a> StoreBlobOpening<'a> {
-    #[cfg(test)]
-    pub(crate) async fn open(
-        database: &'a StoreDatabase,
-        storage: &'a dyn SyncStorage,
-    ) -> Result<Self, BlobCacheError> {
-        let root = database
-            .local_store_root_ref()
-            .await
-            .map_err(BlobCacheError::Metadata)?
-            .ok_or(BlobCacheError::Metadata(
-                crate::database::DbError::StoreRootHashMissing,
-            ))?;
-        Ok(Self {
-            database: database.clone(),
-            storage,
-            root,
-        })
-    }
-
-    pub(super) fn from_authorized_parts(
-        database: StoreDatabase,
-        storage: &'a dyn SyncStorage,
-        root: StoreRootRef,
-    ) -> Self {
-        Self {
-            database,
-            storage,
-            root,
-        }
-    }
-
-    pub(crate) async fn protection(
-        &self,
-        authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<BlobSpoolProtection, BlobCacheError> {
-        match blob_opening_authority(authority, stored)? {
-            BlobOpeningAuthority::Store => self
-                .storage
-                .store_blob_protection()
-                .map_err(BlobCacheError::Storage),
-            BlobOpeningAuthority::Circle {
-                circle_id,
-                control,
-                key_fingerprint,
-            } => {
-                let encryption = self
-                    .database
-                    .circle_blob_opening_key(
-                        self.root.clone(),
-                        circle_id,
-                        control.clone(),
-                        key_fingerprint,
-                    )
-                    .await
-                    .map_err(BlobCacheError::Metadata)?;
-                Ok(BlobSpoolProtection::Opaque(encryption))
-            }
-        }
-    }
 }
 
 fn blob_opening_authority<'a>(
@@ -188,14 +139,206 @@ impl LocalStoreBlobAccess {
 }
 
 #[derive(Clone)]
-struct RemoteBlobSource {
-    database: StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+enum RemoteBlobStorage<'storage> {
+    Borrowed(&'storage dyn SyncStorage),
+    Shared(std::sync::Arc<dyn SyncStorage>),
 }
 
-impl RemoteBlobSource {
-    fn new(database: StoreDatabase, storage: std::sync::Arc<dyn SyncStorage>) -> Self {
-        Self { database, storage }
+impl RemoteBlobStorage<'_> {
+    fn as_ref(&self) -> &dyn SyncStorage {
+        match self {
+            Self::Borrowed(storage) => *storage,
+            Self::Shared(storage) => storage.as_ref(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum RemoteBlobRoot {
+    Current,
+    Exact(StoreRootRef),
+}
+
+#[derive(Clone)]
+pub(super) struct RemoteBlobSource<'storage> {
+    database: StoreDatabase,
+    storage: RemoteBlobStorage<'storage>,
+    root: RemoteBlobRoot,
+}
+
+impl RemoteBlobSource<'static> {
+    fn current(database: StoreDatabase, storage: std::sync::Arc<dyn SyncStorage>) -> Self {
+        Self {
+            database,
+            storage: RemoteBlobStorage::Shared(storage),
+            root: RemoteBlobRoot::Current,
+        }
+    }
+}
+
+impl<'storage> RemoteBlobSource<'storage> {
+    pub(super) fn authorized(
+        database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: StoreRootRef,
+    ) -> Self {
+        Self {
+            database,
+            storage: RemoteBlobStorage::Borrowed(storage),
+            root: RemoteBlobRoot::Exact(root),
+        }
+    }
+
+    async fn exact_root(&self) -> Result<StoreRootRef, BlobCacheError> {
+        match &self.root {
+            RemoteBlobRoot::Exact(root) => Ok(root.clone()),
+            RemoteBlobRoot::Current => self
+                .database
+                .local_store_root_ref()
+                .await
+                .map_err(BlobCacheError::Metadata)?
+                .ok_or(BlobCacheError::Metadata(
+                    crate::database::DbError::StoreRootHashMissing,
+                )),
+        }
+    }
+
+    async fn protection(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<BlobSpoolProtection, BlobCacheError> {
+        match blob_opening_authority(authority, stored)? {
+            BlobOpeningAuthority::Store => self
+                .storage
+                .as_ref()
+                .store_blob_protection()
+                .map_err(BlobCacheError::Storage),
+            BlobOpeningAuthority::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } => {
+                let encryption = self
+                    .database
+                    .circle_blob_opening_key(
+                        self.exact_root().await?,
+                        circle_id,
+                        control.clone(),
+                        key_fingerprint,
+                    )
+                    .await
+                    .map_err(BlobCacheError::Metadata)?;
+                Ok(BlobSpoolProtection::Opaque(encryption))
+            }
+        }
+    }
+
+    pub(super) fn store_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
+        self.storage.as_ref().store_blob_protection()
+    }
+
+    pub(super) async fn stage_verified_plaintext(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, BlobCacheError> {
+        let protection = self.protection(authority, stored).await?;
+        self.storage
+            .as_ref()
+            .stage_verified_blob_plaintext(stored, protection, destination)
+            .await
+            .map_err(BlobCacheError::Storage)
+    }
+
+    pub(super) async fn verify_plaintext(
+        &self,
+        store_dir: &StoreDir,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        retain: bool,
+    ) -> Result<(), BlobDownloadFailureCause> {
+        let protection = self
+            .protection(authority, stored)
+            .await
+            .map_err(|error| BlobDownloadFailureCause::Metadata(error.to_string()))?;
+        self.verify_plaintext_with_protection(store_dir, stored, protection, retain)
+            .await
+    }
+
+    pub(super) async fn verify_plaintext_with_protection(
+        &self,
+        store_dir: &StoreDir,
+        stored: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
+        retain: bool,
+    ) -> Result<(), BlobDownloadFailureCause> {
+        let namespace = stored.locator().namespace();
+        let id = stored.locator().blob_id();
+        let locator_hash = stored.locator().locator_hash();
+        crate::store_dir::validate_path_token(namespace)
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        crate::store_dir::validate_path_token(id)
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let cache = store_dir
+            .cache_blob_path(namespace, locator_hash)
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let pinned = store_dir
+            .pinned_blob_path(namespace, locator_hash)
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let staged = self
+            .storage
+            .as_ref()
+            .stage_verified_blob_plaintext(stored, protection, &cache)
+            .await
+            .map_err(BlobDownloadFailureCause::Storage)?;
+        if !retain {
+            return Ok(());
+        }
+        if cached_exact_in_either_folder(
+            &cache,
+            &pinned,
+            stored.locator().plaintext_size(),
+            stored.locator().plaintext_hash(),
+        )
+        .await
+        .map_err(BlobDownloadFailureCause::Local)?
+        {
+            return Ok(());
+        }
+        match staged.commit_new().await {
+            Ok(()) => {}
+            Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
+                if !cached_exact_in_either_folder(
+                    &cache,
+                    &pinned,
+                    stored.locator().plaintext_size(),
+                    stored.locator().plaintext_hash(),
+                )
+                .await
+                .map_err(BlobDownloadFailureCause::Local)?
+                {
+                    return Err(BlobDownloadFailureCause::Local(
+                        "occupied exact blob cache path differs from its locator".to_string(),
+                    ));
+                }
+            }
+            Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
+        }
+        StoreBlobCache::new(self.database.clone(), store_dir.clone())
+            .enforce_budget(namespace, Some(&cache))
+            .await
+            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn protection_for_test(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<BlobSpoolProtection, BlobCacheError> {
+        self.protection(authority, stored).await
     }
 
     async fn access(
@@ -207,20 +350,7 @@ impl RemoteBlobSource {
             .ok_or_else(|| BlobCacheError::LocalityUnresolved {
                 id: reference.blob().id.clone(),
             })?;
-        let root = self
-            .database
-            .local_store_root_ref()
-            .await
-            .map_err(BlobCacheError::Metadata)?
-            .ok_or(BlobCacheError::Metadata(
-                crate::database::DbError::StoreRootHashMissing,
-            ))?;
-        let opening = StoreBlobOpening::from_authorized_parts(
-            self.database.clone(),
-            self.storage.as_ref(),
-            root,
-        );
-        let protection = opening.protection(reference.authority(), stored).await?;
+        let protection = self.protection(reference.authority(), stored).await?;
         Ok(ExactRemoteBlobAccess::new(
             self.storage.as_ref(),
             protection,
@@ -228,9 +358,26 @@ impl RemoteBlobSource {
     }
 }
 
+async fn cached_exact_in_either_folder(
+    cache: &std::path::Path,
+    pinned: &std::path::Path,
+    expected_size: u64,
+    expected_hash: crate::protocol::store_commit::ObjectHash,
+) -> Result<bool, String> {
+    for path in [cache, pinned] {
+        if crate::local_blob::exists(path).await? {
+            let (size, hash) = crate::local_blob::exact_file_facts(path).await?;
+            if size == expected_size && hash == expected_hash {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) struct RemoteStoreBlobAccess {
     local: LocalStoreBlobAccess,
-    remote: RemoteBlobSource,
+    remote: RemoteBlobSource<'static>,
     store_dir: StoreDir,
 }
 
@@ -240,7 +387,7 @@ impl RemoteStoreBlobAccess {
         storage: std::sync::Arc<dyn SyncStorage>,
     ) -> Self {
         Self {
-            remote: RemoteBlobSource::new(local.database.clone(), storage),
+            remote: RemoteBlobSource::current(local.database.clone(), storage),
             store_dir: local.store_dir.clone(),
             local,
         }
@@ -412,5 +559,14 @@ impl StoreBlobCache {
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         crate::blob::cache::drop_cached_blob(&self.database, &self.store_dir, blob).await
+    }
+
+    pub(crate) async fn enforce_budget(
+        &self,
+        namespace: &str,
+        protect: Option<&std::path::Path>,
+    ) -> Result<(), BlobCacheError> {
+        crate::blob::cache::evict_to_budget(&self.database, &self.store_dir, namespace, protect)
+            .await
     }
 }

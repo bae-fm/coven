@@ -126,31 +126,6 @@ impl Store {
         )
     }
 
-    pub(crate) async fn open_invitation_keyring(
-        bootstrap_storage: &dyn SyncStorage,
-        keypair: &UserKeypair,
-        invitation: &crate::joining::InviteCode,
-    ) -> Result<crate::encryption::EncryptionService, membership::InviteError> {
-        let recipient = hex::encode(keypair.public_key());
-        if invitation.wrapped_key.recipient_pubkey != recipient {
-            return Err(membership::InviteError::Crypto(
-                "invite wrapped-key ref names another recipient".to_string(),
-            ));
-        }
-        crate::protocol::membership::validate_membership_floor(&invitation.membership_floor.0)
-            .map_err(membership::InviteError::Crypto)?;
-        let mut history =
-            history::InvitationHistory::open(bootstrap_storage, keypair, &invitation.store_root)
-                .await?;
-        let chain = history
-            .load_membership(&invitation.membership_floor.0, &invitation.owner_pubkey)
-            .await?;
-        history
-            .keyring(&chain)
-            .open_containing(&invitation.wrapped_key)
-            .await
-    }
-
     pub(crate) async fn create(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
@@ -611,8 +586,7 @@ impl Store {
     ) -> Result<crate::protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
         let authorization = self.authorize().await.map_err(|error| error.to_string())?;
         authorization
-            .keyring(authorization.membership())
-            .prepare(recipient, value)
+            .prepare_wrapped_key_for_test(recipient, value)
             .await
             .map_err(|error| error.to_string())
     }
@@ -623,8 +597,21 @@ impl Store {
     ) -> Result<crate::encryption::EncryptionService, String> {
         let authorization = self.authorize().await.map_err(|error| error.to_string())?;
         authorization
-            .keyring(authorization.membership())
-            .open()
+            .open_membership_keyring_for_test()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn blob_protection_for_test(
+        &self,
+        authority: &crate::blob::RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<crate::storage::BlobSpoolProtection, String> {
+        self.authorize_history()
+            .await
+            .map_err(|error| error.to_string())?
+            .blob_protection_for_test(authority, stored)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1534,20 +1521,33 @@ impl<'storage> AuthorizedStore<'storage> {
     }
 
     #[cfg(test)]
-    fn keyring<'operation>(
-        &'operation self,
-        membership: &'operation crate::protocol::membership::MembershipChain,
-    ) -> keyring::AuthorizedMembershipKeyring<'operation, 'storage> {
-        self.history.keyring(self.identity, membership)
-    }
-
-    #[cfg(test)]
     fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
         &mut self.history
     }
 
     pub(super) fn membership(&self) -> &crate::protocol::membership::MembershipChain {
         &self.membership
+    }
+
+    #[cfg(test)]
+    async fn prepare_wrapped_key_for_test(
+        &self,
+        recipient: &str,
+        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
+    ) -> Result<
+        crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
+        crate::storage::StorageError,
+    > {
+        self.history.prepare_wrapped_key(recipient, value).await
+    }
+
+    #[cfg(test)]
+    async fn open_membership_keyring_for_test(
+        &self,
+    ) -> Result<crate::encryption::EncryptionService, membership::InviteError> {
+        self.history
+            .open_keyring(self.identity, &self.membership)
+            .await
     }
 
     fn resolved_membership(

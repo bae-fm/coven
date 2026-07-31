@@ -82,6 +82,7 @@ pub use owner::device_join::{
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
 #[cfg(test)]
 pub(crate) use owner::history::retained_membership_floor_is_included;
+pub(crate) use owner::history::InvitationHistory;
 pub(crate) use owner::operations::{
     CircleAckActivation, PreparedStoreOperationCommit, StoreMembershipJournalCompletion,
 };

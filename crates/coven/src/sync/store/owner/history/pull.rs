@@ -27,7 +27,6 @@ use crate::protocol::{causal_grants, circle, membership, remote_object, store_co
 use crate::storage::StoreObjectError;
 use crate::storage::{
     BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-    SyncStorage,
 };
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
@@ -85,7 +84,7 @@ pub(crate) use model::{
 };
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
-use support::{advance_max_updated_at, cache_eager_blobs, verify_package_blobs};
+use support::{advance_max_updated_at, cache_eager_blobs};
 pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};
 
 use super::verified_history::registration::*;

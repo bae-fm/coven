@@ -816,12 +816,7 @@ impl DeviceJoinClient {
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let cloud = self.build_cloud_home().await?;
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
-        let encryption = crate::sync::store::Store::open_invitation_keyring(
-            &bootstrap_storage,
-            signer,
-            &self.code,
-        )
-        .await?;
+        let encryption = self.code.open_keyring(&bootstrap_storage, signer).await?;
         cloud.clone().exact_slot_storage().ok_or_else(|| {
             BootstrapError::Provider("provider has no exact-slot adapter".to_string())
         })?;

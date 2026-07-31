@@ -39,8 +39,7 @@ async fn build_invite_mutation(
     }
     let invitee_x25519_pk = keys::ed25519_hex_to_x25519_public_key(invitee_ed25519_pubkey)?;
     let authorized_keyring = operation
-        .keyring_for_membership(chain)
-        .open_or(encryption)
+        .open_keyring_or_for_membership(chain, encryption)
         .await?;
     let signing_store_id = store_id.to_string();
     let signing_recipient = invitee_ed25519_pubkey.to_string();
@@ -59,8 +58,7 @@ async fn build_invite_mutation(
     .await
     .map_err(|error| InviteError::Crypto(format!("seal invited member Store key: {error}")))??;
     let wrapped_key = operation
-        .keyring_for_membership(chain)
-        .prepare(invitee_ed25519_pubkey, signed)
+        .prepare_wrapped_key(invitee_ed25519_pubkey, signed)
         .await?;
     let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
         &owner_keypair,
