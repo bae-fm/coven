@@ -129,15 +129,20 @@ impl OAuthSession {
             ))
         })?;
 
-        let new_tokens = oauth::refresh(&self.config, refresh_token, self.clock.as_ref())
-            .await
-            .map_err(|e| match e {
-                oauth::OAuthError::Reauthorize(detail) => CloudHomeError::Configuration(format!(
-                    "Your {} access was revoked or expired. Reconnect to keep syncing. ({detail})",
-                    self.provider_label,
-                )),
-                other => CloudHomeError::Transport(format!("OAuth refresh failed: {other}")),
-            })?;
+        let new_tokens = oauth::refresh(
+            &self.client,
+            &self.config,
+            refresh_token,
+            self.clock.as_ref(),
+        )
+        .await
+        .map_err(|e| match e {
+            oauth::OAuthError::Reauthorize(detail) => CloudHomeError::Configuration(format!(
+                "Your {} access was revoked or expired. Reconnect to keep syncing. ({detail})",
+                self.provider_label,
+            )),
+            other => CloudHomeError::Transport(format!("OAuth refresh failed: {other}")),
+        })?;
 
         self.key_service
             .set_cloud_home_oauth_tokens(&new_tokens)

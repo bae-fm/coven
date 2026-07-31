@@ -28,17 +28,16 @@ fn oauth_token_save_error(error: crate::keys::KeyError) -> SetupError {
 /// opens the system browser. Gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn sign_in_google_drive(
+    client: &reqwest::Client,
     oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
+    let tokens = crate::oauth::authorize(client, &oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Google Drive authorization failed: {e}")))?;
-
-    let client = reqwest::Client::new();
 
     // Create or find the folder
     let folder_name = format!("your-app - {store_name}");
@@ -124,17 +123,16 @@ pub(crate) async fn sign_in_google_drive(
 /// Uses the localhost-callback flow; gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn sign_in_dropbox(
+    client: &reqwest::Client,
     oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
+    let tokens = crate::oauth::authorize(client, &oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Dropbox authorization failed: {e}")))?;
-
-    let client = reqwest::Client::new();
 
     let folder_path = format!("/Apps/your-app/{store_name}");
 
@@ -177,16 +175,15 @@ pub(crate) async fn sign_in_dropbox(
 /// Uses the localhost-callback flow; gated on `oauth-providers`.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn sign_in_onedrive(
+    client: &reqwest::Client,
     oauth_config: crate::oauth::OAuthConfig,
     key_service: &StoreKeys,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(String, String), SetupError> {
-    let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
+    let tokens = crate::oauth::authorize(client, &oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("OneDrive authorization failed: {e}")))?;
-
-    let client = reqwest::Client::new();
 
     // Get the user's default drive
     let drive_resp = client

@@ -54,6 +54,8 @@ pub struct OAuthClientCreds {
 pub struct OAuthClients {
     #[cfg(feature = "oauth-providers")]
     credentials: HashMap<crate::config::CloudProvider, OAuthClientCreds>,
+    #[cfg(feature = "oauth-providers")]
+    client: reqwest::Client,
 }
 
 /// An OAuth client set is missing a provider or names a provider that does not
@@ -78,7 +80,10 @@ impl OAuthClients {
                 (*provider).clone(),
             ));
         }
-        Ok(Self { credentials })
+        Ok(Self {
+            credentials,
+            client: reqwest::Client::new(),
+        })
     }
 
     /// No OAuth providers configured. Suitable for apps using only S3,
@@ -87,6 +92,8 @@ impl OAuthClients {
         Self {
             #[cfg(feature = "oauth-providers")]
             credentials: HashMap::new(),
+            #[cfg(feature = "oauth-providers")]
+            client: reqwest::Client::new(),
         }
     }
 
@@ -308,11 +315,11 @@ fn oauth_callback_html(title: &str, message: &str) -> String {
 
 #[cfg(feature = "oauth-providers")]
 async fn post_token_request(
+    client: &reqwest::Client,
     config: &OAuthConfig,
     params: Vec<(&str, String)>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
-    let client = reqwest::Client::new();
     let resp = client
         .post(&config.token_url)
         .form(&params)
@@ -456,6 +463,7 @@ fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> 
 /// `open`.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn authorize(
+    client: &reqwest::Client,
     config: &OAuthConfig,
     cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
@@ -581,11 +589,12 @@ pub(crate) async fn authorize(
     info!("Received authorization code, exchanging for tokens");
 
     // Exchange the code for tokens
-    exchange_code(config, &code, &verifier, &redirect_uri, clock).await
+    exchange_code(client, config, &code, &verifier, &redirect_uri, clock).await
 }
 
 #[cfg(feature = "oauth-providers")]
 async fn exchange_code(
+    client: &reqwest::Client,
     config: &OAuthConfig,
     code: &str,
     verifier: &str,
@@ -603,13 +612,14 @@ async fn exchange_code(
         params.push(("client_secret", secret.clone()));
     }
 
-    post_token_request(config, params, clock).await
+    post_token_request(client, config, params, clock).await
 }
 
 /// Verify the callback state from an [`AuthorizeRequest`] and exchange its code
 /// for tokens.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn exchange_authorize_request(
+    client: &reqwest::Client,
     config: &OAuthConfig,
     code: &str,
     callback_state: Option<&str>,
@@ -618,12 +628,13 @@ pub(crate) async fn exchange_authorize_request(
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
     request.verify_callback_state(callback_state)?;
-    exchange_code(config, code, &request.verifier, redirect_uri, clock).await
+    exchange_code(client, config, code, &request.verifier, redirect_uri, clock).await
 }
 
 /// Refresh an expired access token using a refresh token.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn refresh(
+    client: &reqwest::Client,
     config: &OAuthConfig,
     refresh_token: &str,
     clock: &dyn crate::clock::Clock,
@@ -637,7 +648,7 @@ pub(crate) async fn refresh(
         params.push(("client_secret", secret.clone()));
     }
 
-    let mut tokens = post_token_request(config, params, clock).await?;
+    let mut tokens = post_token_request(client, config, params, clock).await?;
     // Provider didn't return a new refresh token (common — many providers
     // only rotate it on the initial exchange). Reuse the existing one so the
     // session can refresh again next cycle.
@@ -657,7 +668,7 @@ impl OAuthClients {
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn crate::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
-        authorize(&self.config_for(provider)?, cancel, clock).await
+        authorize(&self.client, &self.config_for(provider)?, cancel, clock).await
     }
 
     /// Build an authorization request for a host-managed redirect flow.
@@ -680,6 +691,7 @@ impl OAuthClients {
         clock: &dyn crate::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
         exchange_authorize_request(
+            &self.client,
             &self.config_for(provider)?,
             code,
             callback_state,
@@ -703,6 +715,7 @@ impl OAuthClients {
             .config_for(crate::config::CloudProvider::GoogleDrive)
             .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
         crate::storage::cloud::setup::sign_in_google_drive(
+            &self.client,
             config,
             key_service,
             store_name,
@@ -725,6 +738,7 @@ impl OAuthClients {
             .config_for(crate::config::CloudProvider::Dropbox)
             .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
         crate::storage::cloud::setup::sign_in_dropbox(
+            &self.client,
             config,
             key_service,
             store_name,
@@ -745,7 +759,14 @@ impl OAuthClients {
         let config = self
             .config_for(crate::config::CloudProvider::OneDrive)
             .map_err(|error| crate::storage::cloud::setup::SetupError(error.to_string()))?;
-        crate::storage::cloud::setup::sign_in_onedrive(config, key_service, cancel, clock).await
+        crate::storage::cloud::setup::sign_in_onedrive(
+            &self.client,
+            config,
+            key_service,
+            cancel,
+            clock,
+        )
+        .await
     }
 }
 
@@ -984,8 +1005,10 @@ mod tests {
         let config = oauth_config("http://127.0.0.1:9/token".to_string());
         let request = build_authorize_url(&config, "http://localhost/callback")
             .expect("build authorize request");
+        let client = reqwest::Client::new();
 
         let result = exchange_authorize_request(
+            &client,
             &config,
             "auth-code",
             Some("wrong-state"),
@@ -1009,8 +1032,10 @@ mod tests {
         )
         .await;
         let config = oauth_config(token_url);
+        let client = reqwest::Client::new();
 
         let tokens = exchange_code(
+            &client,
             &config,
             "auth-code",
             "pkce-verifier",
@@ -1050,10 +1075,16 @@ mod tests {
         let (token_url, request_body, server) =
             serve_token_response(r#"{"access_token":"refreshed-access","expires_in":3600}"#).await;
         let config = oauth_config(token_url);
+        let client = reqwest::Client::new();
 
-        let tokens = refresh(&config, "existing-refresh", &crate::clock::SystemClock)
-            .await
-            .expect("refresh");
+        let tokens = refresh(
+            &client,
+            &config,
+            "existing-refresh",
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("refresh");
 
         let body = request_body.await.expect("request body");
         server.await.expect("token server");
@@ -1160,8 +1191,10 @@ mod tests {
         let (token_url, _request_body, server) =
             serve_token_response(r#"{"access_token":"access-token-that-must-not-be-logged""#).await;
         let config = oauth_config(token_url);
+        let client = reqwest::Client::new();
 
         let result = exchange_code(
+            &client,
             &config,
             "auth-code",
             "pkce-verifier",
