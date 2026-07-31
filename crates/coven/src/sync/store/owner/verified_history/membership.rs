@@ -502,15 +502,6 @@ pub(super) async fn load_exact_anchored_chain_with_history(
     }
 }
 
-pub(super) async fn load_exact_membership_head_with_history(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    reference: &MembershipHeadRef,
-) -> Result<AuthorHead, AnchoredChainError> {
-    MembershipActivationAuthority::History(history_verifier)
-        .load_exact_membership_head(reference)
-        .await
-}
-
 pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
     history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     exact_heads: &[MembershipHeadRef],

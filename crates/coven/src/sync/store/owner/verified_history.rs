@@ -1786,7 +1786,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         reference: &protocol_membership::MembershipHeadRef,
     ) -> Result<protocol_membership::AuthorHead, crate::sync::store::membership::AnchoredChainError>
     {
-        membership::load_exact_membership_head_with_history(self, reference).await
+        self.commit_verifier
+            .membership_objects()
+            .load_head(reference)
+            .await
+            .map(|loaded| loaded.value)
+            .map_err(membership::map_membership_object_error)
     }
 
     pub(crate) async fn project_membership_to_verified_prefix(
