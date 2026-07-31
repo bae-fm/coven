@@ -496,6 +496,47 @@ impl<'a> StoreCommitVerifier<'a> {
         })
     }
 
+    pub(crate) async fn verify_owner_recovery_activation(
+        &self,
+        commit: &StoreBatchCommit,
+    ) -> Result<
+        Option<(
+            crate::protocol::membership::MembershipGrantId,
+            OwnerRecoveryActivationId,
+        )>,
+        StorePullError,
+    > {
+        let mut recoveries = commit.stream_activations().iter().filter_map(|activation| {
+            let StreamActivation::GrantAuthorized {
+                author_registration,
+                grant_id,
+                anchor: anchor @ GrantStreamAnchor::OwnerRecovery { .. },
+                ..
+            } = activation
+            else {
+                return None;
+            };
+            Some((author_registration, grant_id, anchor))
+        });
+        let Some((registration_ref, grant_id, anchor)) = recoveries.next() else {
+            return Ok(None);
+        };
+        if recoveries.next().is_some() {
+            return Err(StorePullError::Database(
+                "Store commit activates more than one Owner recovery stream".to_string(),
+            ));
+        }
+        let registration = self.load_registration(registration_ref).await?;
+        OwnerRecoveryActivationId::derive(
+            &self.root,
+            &registration.value.author_pubkey,
+            grant_id,
+            anchor,
+        )
+        .map(|activation| Some((grant_id.clone(), activation)))
+        .map_err(|error| StorePullError::Database(error.to_string()))
+    }
+
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {

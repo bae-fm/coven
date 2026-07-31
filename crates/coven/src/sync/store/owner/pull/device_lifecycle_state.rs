@@ -119,47 +119,6 @@ pub(crate) fn predecessor_with_recovery_author(
     Ok((predecessor, None))
 }
 
-pub(crate) async fn verify_commit_owner_recovery_activation(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    commit: &StoreBatchCommit,
-) -> Result<
-    Option<(
-        super::membership::MembershipGrantId,
-        super::store_commit::OwnerRecoveryActivationId,
-    )>,
-    StorePullError,
-> {
-    let mut recoveries = commit.stream_activations().iter().filter_map(|activation| {
-        let super::store_commit::StreamActivation::GrantAuthorized {
-            author_registration,
-            grant_id,
-            anchor: anchor @ super::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
-            ..
-        } = activation
-        else {
-            return None;
-        };
-        Some((author_registration, grant_id, anchor))
-    });
-    let Some((registration_ref, grant_id, anchor)) = recoveries.next() else {
-        return Ok(None);
-    };
-    if recoveries.next().is_some() {
-        return Err(StorePullError::Database(
-            "Store commit activates more than one Owner recovery stream".to_string(),
-        ));
-    }
-    let registration = commit_verifier.load_registration(registration_ref).await?;
-    super::store_commit::OwnerRecoveryActivationId::derive(
-        commit_verifier.root(),
-        &registration.value.author_pubkey,
-        grant_id,
-        anchor,
-    )
-    .map(|activation| Some((grant_id.clone(), activation)))
-    .map_err(|error| StorePullError::Database(error.to_string()))
-}
-
 pub(crate) fn apply_verified_device_lifecycle(
     mut state: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,

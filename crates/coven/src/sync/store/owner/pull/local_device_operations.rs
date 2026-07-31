@@ -53,11 +53,9 @@ pub(crate) async fn derive_local_post_device_state(
     let (authorized_predecessor, recovery_author) =
         predecessor_with_recovery_author(predecessor_state, commit, registrations)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-        commit_verifier,
-        commit,
-    ))
-    .await?;
+    let owner_recovery = commit_verifier
+        .verify_owner_recovery_activation(commit)
+        .await?;
     device_operations
         .apply_to(authorized_predecessor, &commit.device_state)
         .and_then(|state| {

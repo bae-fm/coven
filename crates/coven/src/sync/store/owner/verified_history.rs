@@ -567,7 +567,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         )>,
         StorePullError,
     > {
-        verify_commit_owner_recovery_activation(&self.commit_verifier, commit).await
+        self.commit_verifier
+            .verify_owner_recovery_activation(commit)
+            .await
     }
 
     pub(crate) async fn retain_acknowledgement(
@@ -3289,11 +3291,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                 } else {
                     None
                 };
-            let owner_recovery = Box::pin(verify_commit_owner_recovery_activation(
-                &self.commit_verifier,
-                &commit,
-            ))
-            .await?;
+            let owner_recovery = self
+                .commit_verifier
+                .verify_owner_recovery_activation(&commit)
+                .await?;
             let state = operations
                 .apply_to(authorized_predecessor, &commit.device_state)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
