@@ -690,42 +690,6 @@ async fn execute_revoke_mutation(
     }
 }
 
-async fn complete_already_removed_member(
-    operation: &crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    cloud_home: &dyn CloudHome,
-    chain: &MembershipChain,
-    revokee_pubkey: &str,
-) -> Result<EncryptionService, InviteError> {
-    if !chain
-        .current_members()
-        .into_iter()
-        .any(|(_, role)| role == MemberRole::Owner)
-    {
-        return Err(InviteError::LastOwner);
-    }
-    let keyring = operation.open_keyring_for_membership(chain).await?;
-    match cloud_home
-        .set_access(CloudAccessState::Absent {
-            member_pubkey: revokee_pubkey.to_string(),
-            provider_account_email: None,
-        })
-        .await?
-    {
-        CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => {}
-        CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
-            tracing::info!(
-                "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
-            );
-        }
-        CloudAccessOutcome::Present(_) => {
-            return Err(InviteError::Crypto(
-                "provider returned present outcome for absent access request".to_string(),
-            ));
-        }
-    }
-    Ok(keyring)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn revoke_member_durable(
     operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
@@ -769,13 +733,35 @@ pub(crate) async fn revoke_member_durable(
                 )
             });
             if !is_current && was_removed {
-                return complete_already_removed_member(
-                    operation,
-                    cloud_home,
-                    chain,
-                    revokee_pubkey,
-                )
-                .await;
+                if !chain
+                    .current_members()
+                    .into_iter()
+                    .any(|(_, role)| role == MemberRole::Owner)
+                {
+                    return Err(InviteError::LastOwner);
+                }
+                let keyring = operation.open_keyring_for_membership(chain).await?;
+                match cloud_home
+                    .set_access(CloudAccessState::Absent {
+                        member_pubkey: revokee_pubkey.to_string(),
+                        provider_account_email: None,
+                    })
+                    .await?
+                {
+                    CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => {}
+                    CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
+                        tracing::info!(
+                            "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
+                        );
+                    }
+                    CloudAccessOutcome::Present(_) => {
+                        return Err(InviteError::Crypto(
+                            "provider returned present outcome for absent access request"
+                                .to_string(),
+                        ));
+                    }
+                }
+                return Ok(keyring);
             }
             let stream_id = operation.select_membership_author_stream(chain).await?;
             let plan = Box::pin(build_revoke_mutation(
