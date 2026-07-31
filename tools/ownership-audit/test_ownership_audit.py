@@ -56,6 +56,20 @@ impl Store {
         )
         self.assertEqual(transform["return_type"], "u64")
 
+    def test_callable_signature_excludes_leading_comments_and_attributes(self):
+        records = self.inventory(
+            """
+/// Explain the operation.
+#[cfg(test)]
+pub(crate) async fn load(value: u64) -> u64 { value }
+"""
+        )
+
+        self.assertEqual(
+            records[0]["signature"],
+            "pub(crate) async fn load(value: u64) -> u64",
+        )
+
     def test_inventory_marks_receiver_constructors(self):
         records = self.inventory(
             """

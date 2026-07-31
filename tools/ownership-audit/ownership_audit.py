@@ -916,7 +916,15 @@ def signature_for(source_file: SourceFile, index: int) -> str:
     node = source_file.nodes[index]
     block = direct_child(source_file, index, "BLOCK_EXPR")
     end = block.start if block is not None else node.end
-    return re.sub(r"\s+", " ", source_file.slice(node.start, end)).strip()
+    start = next(
+        (
+            source_file.nodes[child].start
+            for child in node.children
+            if source_file.nodes[child].kind not in {"COMMENT", "WHITESPACE", "ATTR"}
+        ),
+        node.start,
+    )
+    return re.sub(r"\s+", " ", source_file.slice(start, end)).strip()
 
 
 def body_for(source_file: SourceFile, index: int) -> str:
