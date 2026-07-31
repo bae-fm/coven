@@ -1244,7 +1244,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         plan: &operations::StoreOperationCommitPlan,
         batch: operations::StoreOperationBatch,
     ) -> Result<operations::PreparedStoreOperationCommit, StoreError> {
-        let database = self.database.clone();
         let storage = self.storage.as_ref();
         let acknowledgement_evidence = match &batch {
             operations::StoreOperationBatch::Acknowledgement {
@@ -1279,13 +1278,41 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             ),
             _ => None,
         };
-        let (common, verified_commit) = operations::prepare_store_operation_candidate_common(
-            &database,
-            storage,
-            plan.common(),
-            batch,
-        )
-        .await?;
+        let (commit, registration_activation) =
+            plan.sign_batch(self.database.new_store_write_id(), batch)?;
+        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            plan.root().store_root_hash,
+            crate::storage::ProtocolObjectDomain::StoreCommit,
+        );
+        let stream_id = plan.coord().stream_id.to_string();
+        let prefix = crate::protocol::store_commit::commit_semantic_prefix(
+            commit.candidate_family(),
+            &stream_id,
+            commit.seq(),
+            commit.commit_hash(),
+        );
+        let slot = storage
+            .allocate_protocol_slot(&context, &prefix, ".json")
+            .await
+            .map_err(crate::storage::StoreObjectError::from)?;
+        let prepared = storage
+            .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
+            .map_err(crate::storage::StoreObjectError::from)?;
+        let verified_commit =
+            crate::protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+                &commit.to_bytes(),
+                plan.root().store_root_hash,
+                plan.coord().clone(),
+                prepared.reference().clone(),
+                plan.registration(),
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let common = operations::PreparedStoreOperationCommon {
+            reference: verified_commit.reference().clone(),
+            commit,
+            prepared,
+            registration_activation,
+        };
         let acknowledgement = match acknowledgement_evidence {
             Some((reference, value)) => Some(
                 self.history

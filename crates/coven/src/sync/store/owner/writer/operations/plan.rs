@@ -123,6 +123,240 @@ impl StoreOperationPlanCommon {
         }
         Ok(())
     }
+
+    fn sign_batch(
+        &self,
+        write_id: crate::WriteId,
+        batch: StoreOperationBatch,
+    ) -> Result<(StoreBatchCommit, Option<DeviceJoinRegistrationActivation>), StoreError> {
+        let registration_activation = match &batch {
+            StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
+            _ => None,
+        };
+        let commit = match batch {
+            StoreOperationBatch::Acknowledgement {
+                reference: acknowledgement,
+                value: _,
+                circle_acknowledgements,
+            } => StoreBatchCommit::signed_operations(
+                self.root.store_root_hash,
+                write_id,
+                self.coord.clone(),
+                self.registration_ref.clone(),
+                &self.registration,
+                self.order.clone(),
+                self.membership_state.clone(),
+                self.device_state.clone(),
+                self.membership_authority.clone(),
+                StoreCommitOperationsInput {
+                    acknowledgement: Some(acknowledgement),
+                    circle_acknowledgements: circle_acknowledgements
+                        .iter()
+                        .map(|circle| circle.reference.clone())
+                        .collect(),
+                    control: None,
+                    device_join_attempt_decisions: Vec::new(),
+                    device_join_outcomes: Vec::new(),
+                    device_join_cleanup_receipts: Vec::new(),
+                    provider_access_grants: Vec::new(),
+                    device_registrations: Vec::new(),
+                    device_exclusion_proposals: Vec::new(),
+                    device_exclusion_outcomes: Vec::new(),
+                    stream_activations: Vec::new(),
+                    circle_controls: Vec::new(),
+                    store_package: None,
+                    circle_packages: &[],
+                },
+                &self.device_signer,
+            ),
+            StoreOperationBatch::ProviderAccessGrant(grant) => {
+                StoreBatchCommit::signed_with_provider_access(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    vec![grant],
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::Attempt(attempt) => StoreBatchCommit::signed_with_join_attempts(
+                self.root.store_root_hash,
+                write_id,
+                self.coord.clone(),
+                self.registration_ref.clone(),
+                &self.registration,
+                self.order.clone(),
+                self.membership_state.clone(),
+                self.device_state.clone(),
+                self.membership_authority.clone(),
+                vec![attempt],
+                &self.device_signer,
+            ),
+            StoreOperationBatch::Abandonment(abandonment) => {
+                StoreBatchCommit::signed_with_join_abandonments(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    vec![abandonment],
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::Outcome {
+                outcome,
+                registration,
+            } => StoreBatchCommit::signed_with_join_outcomes(
+                self.root.store_root_hash,
+                write_id,
+                self.coord.clone(),
+                self.registration_ref.clone(),
+                &self.registration,
+                self.order.clone(),
+                self.membership_state.clone(),
+                self.device_state.clone(),
+                self.membership_authority.clone(),
+                vec![outcome],
+                registration
+                    .into_iter()
+                    .map(|activation| activation.reference.clone())
+                    .collect(),
+                &self.device_signer,
+            ),
+            StoreOperationBatch::CleanupReceipt(receipt) => {
+                StoreBatchCommit::signed_with_join_cleanup_receipts(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    vec![receipt],
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::DeviceExclusionProposal(proposal) => {
+                StoreBatchCommit::signed_with_device_exclusions(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    vec![proposal.reference().clone()],
+                    Vec::new(),
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::DeviceExclusionOutcome(outcome) => {
+                StoreBatchCommit::signed_with_device_exclusions(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    Vec::new(),
+                    vec![outcome.wire_reference()],
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::ReclaimAuthorization(authorization) => {
+                StoreBatchCommit::signed_reclaim_authorization(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    *authorization,
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::ReclaimReceipt(receipt) => {
+                StoreBatchCommit::signed_reclaim_receipt(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    *receipt,
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::OwnerPromotionRequest(request) => {
+                StoreBatchCommit::signed_with_owner_promotion_request(
+                    self.root.store_root_hash,
+                    write_id,
+                    self.coord.clone(),
+                    self.registration_ref.clone(),
+                    &self.registration,
+                    self.order.clone(),
+                    self.membership_state.clone(),
+                    self.device_state.clone(),
+                    self.membership_authority.clone(),
+                    request,
+                    &self.device_signer,
+                )
+            }
+            StoreOperationBatch::MergeMembershipActivation {
+                transition,
+                stream_activations,
+            } => StoreBatchCommit::signed_operations(
+                self.root.store_root_hash,
+                write_id,
+                self.coord.clone(),
+                self.registration_ref.clone(),
+                &self.registration,
+                self.order.clone(),
+                self.membership_state.clone(),
+                self.device_state.clone(),
+                self.membership_authority.clone(),
+                StoreCommitOperationsInput {
+                    acknowledgement: None,
+                    circle_acknowledgements: Vec::new(),
+                    control: Some(StoreControl { transition }),
+                    device_join_attempt_decisions: Vec::new(),
+                    device_join_outcomes: Vec::new(),
+                    device_join_cleanup_receipts: Vec::new(),
+                    provider_access_grants: Vec::new(),
+                    device_registrations: Vec::new(),
+                    device_exclusion_proposals: Vec::new(),
+                    device_exclusion_outcomes: Vec::new(),
+                    stream_activations,
+                    circle_controls: Vec::new(),
+                    store_package: None,
+                    circle_packages: &[],
+                },
+                &self.device_signer,
+            ),
+        }
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        Ok((commit, registration_activation))
+    }
 }
 
 impl StoreOperationCommitPlan {
@@ -148,6 +382,14 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn predecessor_state(&self) -> &super::store_commit::ResolvedStoreDeviceState {
         &self.predecessor_state
+    }
+
+    pub(crate) fn sign_batch(
+        &self,
+        write_id: crate::WriteId,
+        batch: StoreOperationBatch,
+    ) -> Result<(StoreBatchCommit, Option<DeviceJoinRegistrationActivation>), StoreError> {
+        self.common.sign_batch(write_id, batch)
     }
 }
 
@@ -210,6 +452,10 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
         &self.registration
+    }
+
+    pub(crate) fn coord(&self) -> &StoreCommitCoord {
+        &self.coord
     }
 
     pub(crate) fn device_signer(&self) -> &UserKeypair {
