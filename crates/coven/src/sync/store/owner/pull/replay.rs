@@ -208,32 +208,62 @@ pub(crate) fn replay_retained_merge_projection_on(
                     Ok(PreparedMergeMaterializationPackage { package, changeset })
                 })
                 .collect::<Result<Vec<_>, DbError>>()?;
-            let membership_remote_objects =
-                if let Some(objects) = materialization.membership_objects() {
-                    let family = materialization.commit().candidate_family();
-                    let owner = materialization.commit_ref();
-                    let entry_bytes =
-                        retained_membership_bytes_on(live, &objects.entry().object, "entry")?;
-                    let head_bytes =
-                        retained_membership_bytes_on(live, &objects.head().object, "head")?;
-                    let resolution_bytes = objects
-                        .resolution()
-                        .map(|resolution| {
-                            retained_membership_bytes_on(live, &resolution.object, "resolution")
-                        })
-                        .transpose()?;
-                    super::materialization::activated_merge_membership_remote_objects(
-                        family,
-                        objects,
-                        entry_bytes,
-                        head_bytes,
-                        resolution_bytes,
-                        owner,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                } else {
-                    Vec::new()
+            let membership_remote_objects = if let Some(objects) =
+                materialization.membership_objects()
+            {
+                let retained_membership_bytes = |object: &ExactObjectRef,
+                                                 kind: &str|
+                 -> Result<
+                    super::materialization::MembershipAuthorityBytes,
+                    DbError,
+                > {
+                    let object_id = super::remote_object::remote_object_id(object);
+                    let remote = crate::database::load_remote_object_on(live, object_id)
+                                .map_err(|error| {
+                                    DbError::Message(format!(
+                                        "load retained Merge membership {kind} {object_id} for replay: {error}"
+                                    ))
+                                })?;
+                    if remote.object() != object {
+                        return Err(DbError::Message(format!(
+                                    "retained Merge membership {kind} {object_id} has different exact object"
+                                )));
+                    }
+                    let stored = remote
+                                .bytes()
+                                .stored()
+                                .inline_bytes()
+                                .ok_or_else(|| {
+                                    DbError::Message(format!(
+                                        "retained Merge membership {kind} {object_id} has no inline stored bytes"
+                                    ))
+                                })?
+                                .to_vec();
+                    Ok(super::materialization::MembershipAuthorityBytes::new(
+                        remote.bytes().canonical_semantic_bytes().to_vec(),
+                        stored,
+                    ))
                 };
+                let family = materialization.commit().candidate_family();
+                let owner = materialization.commit_ref();
+                let entry_bytes = retained_membership_bytes(&objects.entry().object, "entry")?;
+                let head_bytes = retained_membership_bytes(&objects.head().object, "head")?;
+                let resolution_bytes = objects
+                    .resolution()
+                    .map(|resolution| retained_membership_bytes(&resolution.object, "resolution"))
+                    .transpose()?;
+                super::materialization::activated_merge_membership_remote_objects(
+                    family,
+                    objects,
+                    entry_bytes,
+                    head_bytes,
+                    resolution_bytes,
+                    owner,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?
+            } else {
+                Vec::new()
+            };
             let replay_materialization = PreparedMergeMaterialization {
                 root: materialization.root().clone(),
                 verified_commit: materialization.verified_commit().clone(),
@@ -529,38 +559,6 @@ pub(super) fn install_circle_bootstrap_remote_objects_on(
         .map_err(DbError::from)?;
     }
     Ok(())
-}
-
-fn retained_membership_bytes_on(
-    live: &rusqlite::Transaction<'_>,
-    object: &ExactObjectRef,
-    kind: &str,
-) -> Result<super::materialization::MembershipAuthorityBytes, DbError> {
-    let object_id = super::remote_object::remote_object_id(object);
-    let remote = crate::database::load_remote_object_on(live, object_id).map_err(|error| {
-        DbError::Message(format!(
-            "load retained Merge membership {kind} {object_id} for replay: {error}"
-        ))
-    })?;
-    if remote.object() != object {
-        return Err(DbError::Message(format!(
-            "retained Merge membership {kind} {object_id} has different exact object"
-        )));
-    }
-    let stored = remote
-        .bytes()
-        .stored()
-        .inline_bytes()
-        .ok_or_else(|| {
-            DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} has no inline stored bytes"
-            ))
-        })?
-        .to_vec();
-    Ok(super::materialization::MembershipAuthorityBytes::new(
-        remote.bytes().canonical_semantic_bytes().to_vec(),
-        stored,
-    ))
 }
 
 fn replay_dependency_is_settled(
