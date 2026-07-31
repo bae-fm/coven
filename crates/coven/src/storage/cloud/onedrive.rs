@@ -17,9 +17,9 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::resumable::{RangePutSink, RangePutUploader};
 use super::{
-    combine_cleanup_failure, require_logical_slot, sharing, BlobBody, BoxPartSink,
-    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, RevokeOutcome,
+    UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -191,7 +191,7 @@ impl OneDriveCloudHome {
     }
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "OneDrive")?;
+        slot.require_logical_key_for("OneDrive")?;
         let response = self
             .session
             .api_call(|token| {
@@ -332,7 +332,7 @@ impl OneDriveCloudHome {
         mut body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "OneDrive")?;
+        slot.require_logical_key_for("OneDrive")?;
         let full_logical_key = slot.logical_key();
         let upload_url = self
             .create_upload_session(
@@ -428,7 +428,7 @@ impl OneDriveCloudHome {
     }
 
     async fn delete_at_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "OneDrive")?;
+        slot.require_logical_key_for("OneDrive")?;
         match self.verify_slot(slot).await {
             Ok(()) => {}
             Err(CloudHomeError::NotFound(_)) => return Ok(()),

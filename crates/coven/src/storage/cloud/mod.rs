@@ -163,6 +163,19 @@ impl ObjectSlot {
     pub fn physical(&self) -> &PhysicalObjectLocator {
         &self.physical
     }
+
+    /// Reject this slot when the provider requires the logical key to be the
+    /// physical object locator.
+    pub(crate) fn require_logical_key_for(&self, provider: &str) -> Result<(), CloudHomeError> {
+        self.validate()?;
+        if self.physical != PhysicalObjectLocator::LogicalKey {
+            return Err(CloudHomeError::Configuration(format!(
+                "{provider} slot for {} must use its logical key",
+                self.logical_key
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Opaque provider revision for an exact cloud object.
@@ -683,26 +696,6 @@ pub trait PartSink: Send {
 /// A boxed [`PartSink`] borrowing its home for `'a`.
 pub type BoxPartSink<'a> = Box<dyn PartSink + 'a>;
 
-/// Reject a slot that does not address its object by its own logical key.
-///
-/// A slot carrying the wrong locator was built wrong by this device, so the
-/// failure is a fault rather than a transient one: it is reported as
-/// [`CloudHomeError::Configuration`] so that retrying never re-runs the same
-/// deterministic rejection.
-pub(crate) fn require_logical_slot(
-    slot: &ObjectSlot,
-    provider: &str,
-) -> Result<(), CloudHomeError> {
-    slot.validate()?;
-    if slot.physical() != &PhysicalObjectLocator::LogicalKey {
-        return Err(CloudHomeError::Configuration(format!(
-            "{provider} slot for {} must use its logical key",
-            slot.logical_key()
-        )));
-    }
-    Ok(())
-}
-
 /// Report an operation's failure, folding in a second failure that happened
 /// while cleaning up after it. Both are kept: the cleanup failure is what left
 /// remote state behind, the operation failure is why cleanup ran at all.
@@ -991,6 +984,32 @@ mod object_slot_tests {
             r#"{"logical_key":"object","physical":{"kind":"opaque","value":""}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn logical_key_requirement_accepts_logical_slots() {
+        let slot = ObjectSlot::logical("protocol/object".to_string()).expect("valid slot");
+
+        slot.require_logical_key_for("S3")
+            .expect("logical slot must be accepted");
+    }
+
+    #[test]
+    fn logical_key_requirement_rejects_opaque_slots() {
+        let slot = ObjectSlot::opaque(
+            "protocol/object".to_string(),
+            "provider-object-id".to_string(),
+        )
+        .expect("valid slot");
+
+        let error = slot
+            .require_logical_key_for("S3")
+            .expect_err("opaque slot must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "configuration error: S3 slot for protocol/object must use its logical key"
+        );
     }
 }
 

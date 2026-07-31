@@ -17,9 +17,9 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    combine_cleanup_failure, range_header, require_logical_slot, BlobBody, CloudAccessOutcome,
-    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
-    MultipartUpload, ObjectSlot, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, range_header, BlobBody, CloudAccessOutcome, CloudAccessState,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, ObjectSlot,
+    RevokeOutcome, UploadProgress,
 };
 use runtime::S3Runtime;
 
@@ -611,7 +611,7 @@ impl S3CloudHome {
         body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "S3")?;
+        slot.require_logical_key_for("S3")?;
         self.append_create_only(slot.logical_key(), body, progress)
             .await
     }
@@ -621,7 +621,7 @@ impl S3CloudHome {
         slot: &ObjectSlot,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        require_logical_slot(slot, "S3")?;
+        slot.require_logical_key_for("S3")?;
         let full = self.full_key(slot.logical_key());
         let key = slot.logical_key().to_string();
         let client = self.client.clone();
@@ -1022,7 +1022,7 @@ impl ExactSlotStorage for S3CloudHome {
         S3CloudHome::create_at_slot(self, slot, body, progress).await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
-        require_logical_slot(slot, "S3")?;
+        slot.require_logical_key_for("S3")?;
         S3CloudHome::read(self, slot.logical_key()).await
     }
     async fn read_range_at(
@@ -1031,7 +1031,7 @@ impl ExactSlotStorage for S3CloudHome {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>, CloudHomeError> {
-        require_logical_slot(slot, "S3")?;
+        slot.require_logical_key_for("S3")?;
         S3CloudHome::read_range(self, slot.logical_key(), start, end).await
     }
     async fn read_at_to_file(
@@ -1042,7 +1042,7 @@ impl ExactSlotStorage for S3CloudHome {
         S3CloudHome::read_exact_to_file(self, slot, destination).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "S3")?;
+        slot.require_logical_key_for("S3")?;
         S3CloudHome::delete(self, slot.logical_key()).await
     }
 }

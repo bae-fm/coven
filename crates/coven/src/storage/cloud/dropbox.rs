@@ -18,9 +18,9 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    combine_cleanup_failure, require_logical_slot, BlobBody, BoxPartSink, CloudAccessOutcome,
-    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
-    PartSink, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink,
+    RevokeOutcome, UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -232,7 +232,7 @@ impl DropboxCloudHome {
         &self,
         slot: &ObjectSlot,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        require_logical_slot(slot, "Dropbox")?;
+        slot.require_logical_key_for("Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
         let path = Self::namespace_path(slot.logical_key());
@@ -281,7 +281,7 @@ impl DropboxCloudHome {
         slot: &ObjectSlot,
         metadata: &serde_json::Value,
     ) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "Dropbox")?;
+        slot.require_logical_key_for("Dropbox")?;
         let expected_path = Self::namespace_path(slot.logical_key());
         let matches = metadata[".tag"].as_str() == Some("file")
             && metadata["id"].as_str().is_some_and(|id| !id.is_empty())
@@ -296,7 +296,7 @@ impl DropboxCloudHome {
     }
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "Dropbox")?;
+        slot.require_logical_key_for("Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
         let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
@@ -1226,7 +1226,7 @@ impl ExactSlotStorage for DropboxCloudHome {
         mut body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        require_logical_slot(slot, "Dropbox")?;
+        slot.require_logical_key_for("Dropbox")?;
         let key = slot.logical_key();
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
