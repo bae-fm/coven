@@ -2815,15 +2815,63 @@ impl<'a> MergeHistoryVerifier<'a> {
         let acknowledgements = self
             .activated_snapshot_acknowledgements(&accepted_cut.0)
             .await?;
-        assemble_snapshot_stability(
-            &self.commit_verifier,
-            snapshot,
+        let mut retained_acknowledgements = BTreeMap::new();
+        for (device_id, (registration_ref, registration)) in &state.common.active_registrations {
+            let matching = acknowledgements
+                .iter()
+                .filter(|ack| {
+                    ack.value.registration == *registration_ref
+                        && ack.value.snapshot.as_ref().is_some_and(|acknowledged| {
+                            acknowledged.author_registration == snapshot.meta.author_registration
+                                && acknowledged.snapshot == snapshot.reference
+                        })
+                        && ack.value.device_state == snapshot.meta.state.devices
+                        && ack
+                            .value
+                            .store_cut
+                            .frontier()
+                            .covers(&snapshot.meta.coverage)
+                })
+                .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
+                .ok_or_else(|| StorePullError::SnapshotNotStable {
+                    member: registration.author_pubkey.clone(),
+                    device_id: device_id.to_string(),
+                })?;
+            retained_acknowledgements.insert(
+                *device_id,
+                store_commit::RetainedVerifiedActivatedAck {
+                    chain: matching.chain.clone(),
+                    activating_commit: matching.activating_commit.clone(),
+                    activating_commit_value: matching.activating_commit_value.clone(),
+                },
+            );
+        }
+        let founder = self.commit_verifier.load_founder_registration().await?;
+        let authority = retained_replay::RetainedReplaySnapshotAuthority {
+            store_root: self.root().clone(),
+            founder_registration: StoreDeviceRegistrationRef::from_registration(
+                &founder.value,
+                founder.object,
+            ),
+            snapshot: snapshot.reference.clone(),
+            metadata: snapshot.meta.clone(),
             snapshot_cut,
             accepted_cut,
-            state.common,
-            acknowledgements,
-        )
-        .await
+            device_state: state.common.device_state,
+            active_registrations: state
+                .common
+                .active_registrations
+                .into_iter()
+                .map(|(device_id, (reference, value))| {
+                    (
+                        device_id,
+                        store_commit::RetainedVerifiedRegistration { reference, value },
+                    )
+                })
+                .collect(),
+            acknowledgements: retained_acknowledgements,
+        };
+        VerifiedStoreSnapshotStability::from_authority(authority)
     }
 
     pub(crate) async fn verify_membership_grant_revocation_nonactivation(

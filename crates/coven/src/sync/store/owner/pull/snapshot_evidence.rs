@@ -6,6 +6,15 @@ pub(crate) struct VerifiedStoreSnapshotStability {
 }
 
 impl VerifiedStoreSnapshotStability {
+    pub(crate) fn from_authority(
+        authority: super::retained_replay::RetainedReplaySnapshotAuthority,
+    ) -> Result<Self, StorePullError> {
+        authority
+            .validate()
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        Ok(Self { authority })
+    }
+
     pub(crate) fn into_authority(self) -> super::retained_replay::RetainedReplaySnapshotAuthority {
         self.authority
     }
@@ -62,74 +71,4 @@ pub(crate) async fn load_active_history_registrations(
         );
     }
     Ok(active)
-}
-
-pub(crate) async fn assemble_snapshot_stability(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    snapshot: &crate::database::PublishedStoreSnapshot,
-    snapshot_cut: StoreHistoryCut,
-    accepted_cut: StoreHistoryCut,
-    snapshot_state: VerifiedSnapshotState,
-    accepted_acknowledgements: Vec<VerifiedActivatedStoreAck>,
-) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
-    let root = commit_verifier.root();
-    let mut acknowledgements = BTreeMap::new();
-    for (device_id, (registration_ref, registration)) in &snapshot_state.active_registrations {
-        let matching = accepted_acknowledgements
-            .iter()
-            .filter(|ack| {
-                ack.value.registration == *registration_ref
-                    && ack.value.snapshot.as_ref().is_some_and(|acknowledged| {
-                        acknowledged.author_registration == snapshot.meta.author_registration
-                            && acknowledged.snapshot == snapshot.reference
-                    })
-                    && ack.value.device_state == snapshot.meta.state.devices
-                    && ack
-                        .value
-                        .store_cut
-                        .frontier()
-                        .covers(&snapshot.meta.coverage)
-            })
-            .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
-            .ok_or_else(|| StorePullError::SnapshotNotStable {
-                member: registration.author_pubkey.clone(),
-                device_id: device_id.to_string(),
-            })?;
-        acknowledgements.insert(
-            *device_id,
-            super::store_commit::RetainedVerifiedActivatedAck {
-                chain: matching.chain.clone(),
-                activating_commit: matching.activating_commit.clone(),
-                activating_commit_value: matching.activating_commit_value.clone(),
-            },
-        );
-    }
-    let founder = commit_verifier.load_founder_registration().await?;
-    let authority = super::retained_replay::RetainedReplaySnapshotAuthority {
-        store_root: root.clone(),
-        founder_registration: StoreDeviceRegistrationRef::from_registration(
-            &founder.value,
-            founder.object,
-        ),
-        snapshot: snapshot.reference.clone(),
-        metadata: snapshot.meta.clone(),
-        snapshot_cut,
-        accepted_cut,
-        device_state: snapshot_state.device_state,
-        active_registrations: snapshot_state
-            .active_registrations
-            .into_iter()
-            .map(|(device_id, (reference, value))| {
-                (
-                    device_id,
-                    super::store_commit::RetainedVerifiedRegistration { reference, value },
-                )
-            })
-            .collect(),
-        acknowledgements,
-    };
-    authority
-        .validate()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    Ok(VerifiedStoreSnapshotStability { authority })
 }

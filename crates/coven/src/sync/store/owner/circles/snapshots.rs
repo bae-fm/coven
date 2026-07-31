@@ -247,7 +247,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     /// invisible. Each acknowledgement reference names the exact control that
     /// resolves its encryption key, so an acknowledgement sealed under a rotated
     /// epoch stays readable without probing unrelated controls. Mirrors the
-    /// Store-level `assemble_snapshot_stability`.
+    /// Store-level snapshot stability verification.
     pub(crate) async fn circle_snapshot_is_stable(
         &mut self,
         circle_id: CircleId,
