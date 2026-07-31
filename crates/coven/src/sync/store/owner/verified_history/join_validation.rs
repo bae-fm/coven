@@ -1,20 +1,6 @@
 use super::registration::*;
 use super::*;
 
-async fn load_commit_device_join_attempt_evidence(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    reference: &super::store_commit::DeviceJoinAttemptRef,
-) -> Result<LoadedDeviceJoinAttemptEvidence, RegistrationLoadError> {
-    let (attempt, owner) = history_verifier
-        .load_device_join_attempt_and_owner(reference)
-        .await
-        .map_err(RegistrationLoadError::Object)?;
-    history_verifier
-        .validate_device_join_attempt_evidence(attempt, &owner.value)
-        .await
-        .map_err(registration_attempt_error)
-}
-
 pub(crate) struct LoadedCommitJoinCleanupReceipt {
     pub(crate) receipt: super::device_join::DeviceJoinCleanupReceiptObject,
     pub(crate) attempt: LoadedDeviceJoinAttemptEvidence,
@@ -74,8 +60,14 @@ pub(crate) async fn load_commit_join_evidence(
         if attempts.contains_key(&reference) {
             continue;
         }
-        let evidence =
-            load_commit_device_join_attempt_evidence(history_verifier, &reference).await?;
+        let (attempt, owner) = history_verifier
+            .load_device_join_attempt_and_owner(&reference)
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        let evidence = history_verifier
+            .validate_device_join_attempt_evidence(attempt, &owner.value)
+            .await
+            .map_err(registration_attempt_error)?;
         attempts.insert(reference, evidence);
     }
     Ok(LoadedCommitJoinEvidence {
