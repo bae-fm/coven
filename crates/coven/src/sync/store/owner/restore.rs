@@ -1400,23 +1400,24 @@ impl<'storage> RestoringStore<'storage> {
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
         let storage = self.storage;
-        let protection = crate::sync::store::blob::opening_protection(
-            &self.database,
+        let opening = crate::sync::store::blob::StoreBlobOpening::from_authorized_parts(
+            self.database.clone(),
             storage,
-            &self.root,
-            &authority,
-            &stored,
-        )
-        .await
-        .map_err(|error| {
-            let cause = crate::blob::cache::BlobDownloadFailureCause::Metadata(error.to_string());
-            warn!(id, namespace, error = %cause, "cannot resolve exact blob opening authority");
-            pull::BlobDownloadFailure {
-                namespace: namespace.to_string(),
-                id: id.to_string(),
-                cause,
-            }
-        })?;
+            self.root.clone(),
+        );
+        let protection = opening
+            .protection(&authority, &stored)
+            .await
+            .map_err(|error| {
+                let cause =
+                    crate::blob::cache::BlobDownloadFailureCause::Metadata(error.to_string());
+                warn!(id, namespace, error = %cause, "cannot resolve exact blob opening authority");
+                pull::BlobDownloadFailure {
+                    namespace: namespace.to_string(),
+                    id: id.to_string(),
+                    cause,
+                }
+            })?;
         crate::blob::cache::verify_blob_plaintext(
             &self.database,
             storage,

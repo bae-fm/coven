@@ -21,7 +21,6 @@ enum BlobOpeningAuthority<'a> {
     },
 }
 
-#[doc(hidden)]
 pub(crate) struct StoreBlobOpening<'a> {
     database: StoreDatabase,
     storage: &'a dyn SyncStorage,
@@ -29,7 +28,6 @@ pub(crate) struct StoreBlobOpening<'a> {
 }
 
 impl<'a> StoreBlobOpening<'a> {
-    #[doc(hidden)]
     #[cfg(test)]
     pub(crate) async fn open(
         database: &'a StoreDatabase,
@@ -61,13 +59,34 @@ impl<'a> StoreBlobOpening<'a> {
         }
     }
 
-    #[doc(hidden)]
     pub(crate) async fn protection(
         &self,
         authority: &RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
-        opening_protection(&self.database, self.storage, &self.root, authority, stored).await
+        match blob_opening_authority(authority, stored)? {
+            BlobOpeningAuthority::Store => self
+                .storage
+                .store_blob_protection()
+                .map_err(BlobCacheError::Storage),
+            BlobOpeningAuthority::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } => {
+                let encryption = self
+                    .database
+                    .circle_blob_opening_key(
+                        self.root.clone(),
+                        circle_id,
+                        control.clone(),
+                        key_fingerprint,
+                    )
+                    .await
+                    .map_err(BlobCacheError::Metadata)?;
+                Ok(BlobSpoolProtection::Opaque(encryption))
+            }
+        }
     }
 }
 
@@ -196,14 +215,12 @@ impl RemoteBlobSource {
             .ok_or(BlobCacheError::Metadata(
                 crate::database::DbError::StoreRootHashMissing,
             ))?;
-        let protection = opening_protection(
-            &self.database,
+        let opening = StoreBlobOpening::from_authorized_parts(
+            self.database.clone(),
             self.storage.as_ref(),
-            &root,
-            reference.authority(),
-            stored,
-        )
-        .await?;
+            root,
+        );
+        let protection = opening.protection(reference.authority(), stored).await?;
         Ok(ExactRemoteBlobAccess::new(
             self.storage.as_ref(),
             protection,
@@ -395,30 +412,5 @@ impl StoreBlobCache {
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         crate::blob::cache::drop_cached_blob(&self.database, &self.store_dir, blob).await
-    }
-}
-
-pub(super) async fn opening_protection(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    authority: &RowBlobAuthority,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<BlobSpoolProtection, BlobCacheError> {
-    match blob_opening_authority(authority, stored)? {
-        BlobOpeningAuthority::Store => storage
-            .store_blob_protection()
-            .map_err(BlobCacheError::Storage),
-        BlobOpeningAuthority::Circle {
-            circle_id,
-            control,
-            key_fingerprint,
-        } => {
-            let encryption = database
-                .circle_blob_opening_key(root.clone(), circle_id, control.clone(), key_fingerprint)
-                .await
-                .map_err(BlobCacheError::Metadata)?;
-            Ok(BlobSpoolProtection::Opaque(encryption))
-        }
     }
 }
