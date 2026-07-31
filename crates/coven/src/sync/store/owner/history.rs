@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use super::authorized_store::LocalStoreDevice;
+
 pub(super) mod abandonment;
 mod owner_promotion;
 pub(crate) mod pull;
@@ -115,7 +117,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
         let local_device = match device_id {
             Some(device_id) => Some(
-                super::load_local_store_device(&self.database, self.root(), device_id)
+                LocalStoreDevice::load(&self.database, self.root(), device_id)
                     .await
                     .map_err(|error| {
                         SyncCycleFailure::operation("load local Store device authority", error)
@@ -123,13 +125,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             ),
             None => None,
         };
-        Ok(AuthorizedStore {
-            history: self,
+        Ok(AuthorizedStore::new(
+            self,
             storage,
             identity,
             local_device,
             membership,
-        })
+        ))
     }
 
     pub(super) fn bind_writer(

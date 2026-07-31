@@ -33,6 +33,22 @@ pub(super) struct LocalStoreWriter<'store> {
     device_signer: UserKeypair,
 }
 
+impl<'store> LocalStoreWriter<'store> {
+    pub(super) fn from_verified_parts(
+        identity: &'store UserKeypair,
+        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: crate::protocol::store_commit::StoreDeviceRegistration,
+        device_signer: UserKeypair,
+    ) -> Self {
+        Self {
+            identity,
+            registration_ref,
+            registration,
+            device_signer,
+        }
+    }
+}
+
 pub(crate) struct AuthorizedWriterOperation<'storage> {
     database: StoreDatabase,
     history: AuthorizedStoreHistory<'storage>,
@@ -1571,53 +1587,5 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .resume_circle_operations(routing_key.as_ref())
             .await
             .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
-    }
-}
-
-impl<'storage> AuthorizedStore<'storage> {
-    pub(super) async fn into_writer(
-        self,
-    ) -> Result<AuthorizedWriterOperation<'storage>, StoreRegistrationError> {
-        let AuthorizedStore {
-            history,
-            storage,
-            identity,
-            local_device,
-            membership,
-        } = self;
-        let local_device = local_device.ok_or(StoreError::MissingState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        })?;
-        if local_device.activation.is_none() {
-            return Err(StoreRegistrationError::ActivationRequired);
-        }
-        if &local_device.registration.store_root != history.root() {
-            return Err(StoreError::InvalidOutbound(
-                "local Store writer belongs to another Store root".to_string(),
-            )
-            .into());
-        }
-        let live_provider = storage
-            .as_ref()
-            .provider_binding()
-            .await
-            .map_err(crate::storage::StoreObjectError::from)
-            .map_err(StoreError::from)?;
-        if live_provider.device != local_device.registration.provider {
-            return Err(StoreRegistrationError::Invalid(
-                "live provider principal differs from the local registration".to_string(),
-            ));
-        }
-        let device_signer = local_device
-            .registration
-            .device_signer(identity)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let writer = LocalStoreWriter {
-            identity,
-            registration_ref: local_device.registration_ref,
-            registration: local_device.registration,
-            device_signer,
-        };
-        Ok(history.bind_writer(storage, membership, writer))
     }
 }

@@ -2,6 +2,7 @@ use super::*;
 use crate::database::BlockedWriteDiscard;
 use crate::protocol::store_commit::StoreRootRef;
 
+mod authorized_store;
 mod circle_bootstrap;
 mod circles;
 pub(super) mod device_exclusion;
@@ -19,6 +20,7 @@ mod verified_history;
 pub(super) mod writer;
 
 use super::prepare_registration_object;
+pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 use history::{AuthorizedStoreHistory, FounderStoreInitialization};
 pub(crate) use host_write::HostWriteBlobStaging;
@@ -57,20 +59,6 @@ pub(crate) enum StoreInitializationError {
     ProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
-}
-
-struct LocalStoreDevice {
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    activation: Option<crate::protocol::store_commit::StoreDeviceRegistrationActivation>,
-}
-
-pub(crate) struct AuthorizedStore<'a> {
-    history: AuthorizedStoreHistory<'a>,
-    storage: &'a Arc<dyn SyncStorage>,
-    identity: &'a UserKeypair,
-    local_device: Option<LocalStoreDevice>,
-    membership: crate::protocol::membership::MembershipChain,
 }
 
 struct BlobDownload {
@@ -521,17 +509,7 @@ impl Store {
                 error.to_string(),
             ))
         })?;
-        let founder_pubkey = authorization
-            .membership()
-            .founder_pubkey()
-            .map(str::to_string)
-            .ok_or(membership::MembershipOpsError::NoFounderChain)?;
-        let membership_floor = authorization.membership().head_refs().to_vec();
-        Ok(StoreRestoreMembership {
-            store_root: self.store_root().clone(),
-            founder_pubkey,
-            membership_floor: crate::joining::MembershipFloor(membership_floor),
-        })
+        authorization.restore_membership()
     }
 
     async fn authorize_history(&self) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
@@ -554,13 +532,7 @@ impl Store {
 
     #[cfg(test)]
     pub(super) async fn restoring_for_test(&self) -> Result<RestoringStore<'_>, SyncCycleFailure> {
-        let authorization = self.authorize().await?;
-        Ok(authorization.history.bind_restore(
-            authorization.storage.as_ref(),
-            authorization.membership,
-            authorization.identity.clone(),
-            std::path::PathBuf::new(),
-        ))
+        Ok(self.authorize().await?.bind_restore_for_test())
     }
 
     pub(crate) async fn authorize_writer(
@@ -824,21 +796,9 @@ impl Store {
             .authorize()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let author_registration = authorization
-            .local_device
-            .as_ref()
-            .ok_or_else(|| {
-                StoreError::InvalidOutbound(
-                    "retained outbound test Store has no local device".to_string(),
-                )
-            })?
-            .registration_ref
-            .clone();
         authorization
-            .history
-            .authorize_retained_outbound(order, candidate_membership_heads, &author_registration)
+            .authorize_retained_outbound_for_test(order, candidate_membership_heads)
             .await
-            .map_err(StoreError::from)
     }
 
     #[cfg(test)]
@@ -905,7 +865,7 @@ impl Store {
     ) -> Result<crate::protocol::membership::MembershipChain, StoreError> {
         self.authorize()
             .await
-            .map(|authorization| authorization.membership().clone())
+            .map(|authorization| authorization.membership_for_test())
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
@@ -1377,15 +1337,8 @@ impl Store {
             .authorize()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let membership = authorized.membership().clone();
         authorized
-            .history()
-            .prepare_merge_history_successor_for_test(
-                verified_commit,
-                &membership,
-                recovery_author,
-                evidence,
-            )
+            .prepare_merge_history_successor_for_test(verified_commit, recovery_author, evidence)
             .await
     }
 
@@ -1504,254 +1457,6 @@ impl Store {
             )
             .await
     }
-}
-
-impl<'storage> AuthorizedStore<'storage> {
-    fn circle_operation_discarder(&mut self) -> circles::CircleOperationDiscarder<'_, 'storage> {
-        self.history.circle_operation_discarder()
-    }
-
-    pub(super) async fn discard_circle_operation(
-        &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
-        self.circle_operation_discarder()
-            .discard(operation_id)
-            .await
-    }
-
-    #[cfg(test)]
-    fn history(&mut self) -> &mut AuthorizedStoreHistory<'storage> {
-        &mut self.history
-    }
-
-    pub(super) fn membership(&self) -> &crate::protocol::membership::MembershipChain {
-        &self.membership
-    }
-
-    #[cfg(test)]
-    async fn prepare_wrapped_key_for_test(
-        &self,
-        recipient: &str,
-        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<
-        crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::storage::StorageError,
-    > {
-        self.history.prepare_wrapped_key(recipient, value).await
-    }
-
-    #[cfg(test)]
-    async fn open_membership_keyring_for_test(
-        &self,
-    ) -> Result<crate::encryption::EncryptionService, membership::InviteError> {
-        self.history
-            .open_keyring(self.identity, &self.membership)
-            .await
-    }
-
-    fn resolved_membership(
-        &self,
-    ) -> Result<
-        &crate::protocol::membership::MembershipChain,
-        crate::sync::store::membership::MembershipOpsError,
-    > {
-        match self.membership.conflict() {
-            Some(conflict) => Err(
-                crate::sync::store::membership::MembershipOpsError::SemanticConflict(Box::new(
-                    conflict.clone(),
-                )),
-            ),
-            None => Ok(&self.membership),
-        }
-    }
-
-    fn members(
-        &self,
-        user_pubkey: Option<&[u8]>,
-    ) -> Result<
-        Vec<crate::protocol::membership::MemberInfo>,
-        crate::sync::store::membership::MembershipOpsError,
-    > {
-        Ok(member_info(
-            self.resolved_membership()?.current_members(),
-            user_pubkey,
-        ))
-    }
-
-    fn membership_conflict(
-        &self,
-        user_pubkey: Option<&[u8]>,
-    ) -> Option<crate::protocol::membership::MembershipConflictInfo> {
-        match self.membership.status() {
-            crate::protocol::membership::MembershipStatus::Resolved(_) => None,
-            crate::protocol::membership::MembershipStatus::Conflict(
-                crate::protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
-                    conflict_hash,
-                    member_pubkey,
-                    conflicting_grants,
-                    grants,
-                    ..
-                },
-            ) => Some(
-                crate::protocol::membership::MembershipConflictInfo::ConcurrentMemberAssignments {
-                    id: conflict_hash.to_string(),
-                    member_pubkey: member_pubkey.clone(),
-                    choices: conflicting_grants
-                        .iter()
-                        .map(|(selected_grant, selected_record)| {
-                            let selection = crate::protocol::membership::MembershipConflictSelection::MemberAssignment {
-                                grant: selected_grant.clone(),
-                            };
-                            let members = member_info(
-                                grants
-                                    .iter()
-                                    .filter_map(|(grant, state)| {
-                                        (!conflicting_grants.contains_key(grant))
-                                            .then(|| state.active())
-                                            .flatten()
-                                            .map(|record| {
-                                                (
-                                                    record.member_pubkey.clone(),
-                                                    record.role.role(),
-                                                )
-                                            })
-                                    })
-                                    .chain(std::iter::once((
-                                        selected_record.member_pubkey.clone(),
-                                        selected_record.role.role(),
-                                    )))
-                                    .collect(),
-                                user_pubkey,
-                            );
-                            crate::protocol::membership::MembershipConflictChoice::new(
-                                membership_conflict_choice_id(&selection),
-                                members,
-                                *conflict_hash,
-                                selection,
-                            )
-                        })
-                        .collect(),
-                },
-            ),
-            crate::protocol::membership::MembershipStatus::Conflict(
-                crate::protocol::membership::MembershipConflict::RevocationCycle {
-                    conflict_hash,
-                    maximal_valid_branches,
-                    ..
-                },
-            ) => Some(
-                crate::protocol::membership::MembershipConflictInfo::RevocationCycle {
-                    id: conflict_hash.to_string(),
-                    choices: maximal_valid_branches
-                        .iter()
-                        .map(|branch| {
-                            let selection = crate::protocol::membership::MembershipConflictSelection::RevocationBranch {
-                                heads: branch.heads.clone(),
-                            };
-                            let members = member_info(
-                                branch
-                                    .active_grants()
-                                    .map(|(_, record)| {
-                                        (record.member_pubkey.clone(), record.role.role())
-                                    })
-                                    .collect(),
-                                user_pubkey,
-                            );
-                            crate::protocol::membership::MembershipConflictChoice::new(
-                                membership_conflict_choice_id(&selection),
-                                members,
-                                *conflict_hash,
-                                selection,
-                            )
-                        })
-                        .collect(),
-                },
-            ),
-        }
-    }
-}
-
-fn membership_conflict_choice_id(
-    selection: &crate::protocol::membership::MembershipConflictSelection,
-) -> String {
-    let selection_bytes =
-        serde_json::to_vec(selection).expect("membership conflict selections always serialize");
-    let mut bytes = b"coven.membership-conflict-choice.v1\0".to_vec();
-    bytes.extend(selection_bytes);
-    crate::protocol::store_commit::ObjectHash::digest(&bytes).to_string()
-}
-
-fn member_info(
-    current: Vec<(String, crate::protocol::membership::MemberRole)>,
-    user_pubkey: Option<&[u8]>,
-) -> Vec<crate::protocol::membership::MemberInfo> {
-    let user_pubkey_hex = user_pubkey.map(hex::encode);
-    current
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>()
-        .into_iter()
-        .map(|(pubkey, role)| crate::protocol::membership::MemberInfo {
-            is_self: user_pubkey_hex.as_deref() == Some(&pubkey),
-            pubkey,
-            role,
-        })
-        .collect()
-}
-
-async fn load_local_store_device(
-    database: &StoreDatabase,
-    root: &StoreRootRef,
-    expected_device_id: &str,
-) -> Result<LocalStoreDevice, StoreError> {
-    let durable = database
-        .latest_local_store_device_registration()
-        .await?
-        .ok_or(StoreError::MissingState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        })?;
-    if durable.device_id.to_string() != expected_device_id {
-        return Err(StoreError::InvalidState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-            reason: "local registration belongs to another device".to_string(),
-        });
-    }
-    let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
-        &durable.registration_bytes,
-        root,
-        durable.device_id,
-    )
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    let registration_ref =
-        crate::protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
-            &registration,
-            durable.prepared.reference().clone(),
-        );
-    if registration_ref.registration_hash != durable.registration_hash {
-        return Err(StoreError::InvalidOutbound(
-            "local registration differs from its durable hash".to_string(),
-        ));
-    }
-    let activation = match durable.state {
-        crate::database::LocalDeviceRegistrationState::Activated { authority } => {
-            let activated = database
-                .activated_store_device_registration_with_authority(root, registration_ref.clone())
-                .await?;
-            if activated != (registration.clone(), authority.clone()) {
-                return Err(StoreError::InvalidOutbound(
-                    "local registration differs from its exact activation authority".to_string(),
-                ));
-            }
-            Some(authority)
-        }
-        crate::database::LocalDeviceRegistrationState::Prepared
-        | crate::database::LocalDeviceRegistrationState::Created => None,
-    };
-    Ok(LocalStoreDevice {
-        registration_ref,
-        registration,
-        activation,
-    })
 }
 
 #[cfg(test)]
