@@ -1,22 +1,18 @@
 //! Durable append-only Store device registration and recovery.
 
-#[cfg(test)]
-use crate::database::Database;
-use crate::keys::UserKeypair;
-
-use crate::database::StoreDatabase;
-use crate::protocol::store_commit::{
-    ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef,
-};
-use crate::storage::ProtocolObjectDomain;
 use crate::storage::StoreObjectError;
 
 #[cfg(test)]
+use crate::database::{Database, StoreDatabase};
+#[cfg(test)]
+use crate::keys::UserKeypair;
+#[cfg(test)]
 use crate::protocol::store_commit::{
     owner_recovery_semantic_prefix, ObjectHash, OwnerRecoveryPosition, StoreCommitCoord,
-    StoreDeviceRegistration,
+    StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
+#[cfg(test)]
+use crate::storage::ProtocolObjectDomain;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
@@ -32,118 +28,6 @@ pub enum StoreRegistrationError {
     ActivationRequired,
     #[error("Store device registration activation: {0}")]
     Outbound(#[from] crate::sync::store::StoreError),
-}
-
-pub(crate) async fn install_existing_founder_device(
-    database: &StoreDatabase,
-    commit_verifier: &super::StoreCommitVerifier<'_>,
-    signer: &UserKeypair,
-) -> Result<(), StoreRegistrationError> {
-    let storage = commit_verifier.storage();
-    let root = commit_verifier.root();
-    let founder = commit_verifier.load_founder_registration().await?;
-    if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
-        return Err(StoreRegistrationError::Invalid(
-            "Store founder registration belongs to another identity".to_string(),
-        ));
-    }
-    if founder.value.provider
-        != storage
-            .provider_binding()
-            .await
-            .map_err(StoreObjectError::from)?
-            .device
-    {
-        return Err(StoreRegistrationError::Invalid(
-            "Store founder registration belongs to another provider principal".to_string(),
-        ));
-    }
-    founder
-        .value
-        .device_signer(signer)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-
-    let registration_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceRegistration,
-    );
-    let registration_prefix = crate::protocol::store_commit::founder_registration_semantic_prefix(
-        match founder.value.origin {
-            StoreDeviceRegistrationOrigin::Founder { creation_id } => creation_id,
-            _ => {
-                return Err(StoreRegistrationError::Invalid(
-                    "Store founder registration has a non-founder origin".to_string(),
-                ))
-            }
-        },
-    );
-    let (registration_bytes, registration_prepared) = storage
-        .read_prepared_protocol_slot(
-            &registration_context,
-            founder.object.slot(),
-            &registration_prefix,
-        )
-        .await
-        .map_err(StoreObjectError::from)?;
-    if registration_bytes != founder.bytes || registration_prepared.reference() != &founder.object {
-        return Err(StoreRegistrationError::Invalid(
-            "prepared founder registration differs from its verified exact object".to_string(),
-        ));
-    }
-    let registration_ref =
-        StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-    let DeviceStreamAnchor::StoreAcknowledgements { first_slot } = &founder.value.acknowledgements
-    else {
-        return Err(StoreRegistrationError::Invalid(
-            "Store founder registration has no acknowledgement anchor".to_string(),
-        ));
-    };
-    let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreAck,
-    );
-    let ack_prefix = ack_slot_prefix(&founder.value.device_id.to_string(), 1);
-    let (ack_bytes, ack_prepared) = storage
-        .read_prepared_protocol_slot(&ack_context, first_slot, &ack_prefix)
-        .await
-        .map_err(StoreObjectError::from)?;
-    let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let ack_ref = StoreAckRef {
-        registration: registration_ref.clone(),
-        sequence: unverified_ack.sequence,
-        ack_hash: unverified_ack.ack_hash(),
-        object: ack_prepared.reference().clone(),
-    };
-    let ack = StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value)
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    if ack.registration != registration_ref {
-        return Err(StoreRegistrationError::Invalid(
-            "Store founder acknowledgement names another registration".to_string(),
-        ));
-    }
-    database
-        .install_existing_local_founder_device(
-            crate::database::ExactProtocolObject {
-                value: founder.value,
-                bytes: registration_bytes,
-                object: registration_prepared.reference().clone(),
-                prepared: registration_prepared,
-            },
-            ack_ref,
-            crate::database::ExactProtocolObject {
-                value: ack,
-                bytes: ack_bytes,
-                object: ack_prepared.reference().clone(),
-                prepared: ack_prepared,
-            },
-        )
-        .await
-        .map_err(database_error)
-}
-
-fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
-    StoreRegistrationError::Database(error.to_string())
 }
 
 #[cfg(test)]

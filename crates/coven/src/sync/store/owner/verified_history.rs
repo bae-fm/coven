@@ -1,5 +1,4 @@
 use super::*;
-use crate::keys::UserKeypair;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
 use crate::protocol::store_commit::{
@@ -684,19 +683,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             predecessor_state,
             registrations,
             device_operations,
-        )
-        .await
-    }
-
-    pub(crate) async fn install_existing_founder_device(
-        &self,
-        database: &StoreDatabase,
-        identity: &UserKeypair,
-    ) -> Result<(), super::registration::StoreRegistrationError> {
-        super::registration::install_existing_founder_device(
-            database,
-            &self.commit_verifier,
-            identity,
         )
         .await
     }
