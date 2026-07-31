@@ -21,7 +21,9 @@ use crate::protocol::store_commit::{
 use crate::protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
 };
-use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
 use crate::storage::{StoreObjectError, VerifiedObject};
 use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull::*;
@@ -36,6 +38,7 @@ use join_validation::*;
 use registration::*;
 
 pub(crate) async fn load_membership_at_exact_heads_with_verified_activations(
+    root: &super::super::protocol_root::VerifiedStoreRoot,
     commit_verifier: &StoreCommitVerifier<'_>,
     heads: &[protocol_membership::MembershipHeadRef],
     resolutions: &[protocol_membership::StoreMembershipConflictResolutionRef],
@@ -43,6 +46,7 @@ pub(crate) async fn load_membership_at_exact_heads_with_verified_activations(
     pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
 ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
     membership::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+        root,
         commit_verifier,
         heads,
         resolutions,
@@ -515,6 +519,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit: &StoreBatchCommit,
     ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
         verify_merge_resolution_activation_acceptance_with_history(
+            &self.root,
             &self.commit_verifier,
             commit,
             &self.history.genesis,
@@ -538,6 +543,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         String,
     > {
         verify_merge_membership_control_with_history(
+            self.root.reference(),
             &mut self.commit_verifier,
             commit_ref,
             commit,
@@ -672,6 +678,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         state: ResolvedStoreDeviceState,
     ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
         load_local_commit_device_operations(
+            self.root.reference(),
             database,
             &mut self.commit_verifier,
             verified_commit,
@@ -720,7 +727,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
     ) -> Result<Readiness, StorePullError> {
+        let root = self.root.reference().clone();
         readiness(
+            &root,
             database,
             self,
             coverage,
@@ -731,6 +740,178 @@ impl<'a> MergeHistoryVerifier<'a> {
             commit,
         )
         .await
+    }
+
+    pub(crate) async fn discover_merge_stream(
+        &mut self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+        inactive_accepted_cut: Option<&StoreHistoryCut>,
+    ) -> Result<MergeStreamDiscovery, StorePullError> {
+        let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits
+        else {
+            return Err(StorePullError::Database(format!(
+                "Store registration {} has no Merge announcement anchor",
+                registration.device_id
+            )));
+        };
+        let root = self.root.reference().clone();
+        let stream_id = store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            registration_ref,
+            store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
+        let maximum_sequence = inactive_accepted_cut.map(|cut| {
+            cut.0
+                .get(&stream_id)
+                .map_or(0, |reference| reference.coord.sequence())
+        });
+        let activation = registration
+            .store_announcement_activation(registration_ref)
+            .map_err(|error| StorePullError::Database(error.to_string()))?
+            .activation_id();
+        let context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let mut slot = first_slot.clone();
+        let mut predecessor = None;
+        let mut sequence = 1_u64;
+        let mut latest_head = None;
+        let mut commits = Vec::new();
+        let mut block = None;
+        let mut visited = BTreeSet::new();
+
+        loop {
+            if maximum_sequence.is_some_and(|maximum| sequence > maximum) {
+                break;
+            }
+            if !visited.insert(slot.clone()) {
+                return Err(StorePullError::Database(format!(
+                    "Store announcement stream {stream_id} repeats a reserved slot"
+                )));
+            }
+            let semantic_prefix =
+                store_commit::head_slot_prefix(&registration.device_id.to_string(), sequence);
+            let (bytes, object) = match self
+                .commit_verifier
+                .read_protocol_slot(&context, &slot, &semantic_prefix)
+                .await
+            {
+                Ok(opened) => opened,
+                Err(StorageError::NotFound(_)) => break,
+                Err(error) => return Err(StoreObjectError::Storage(error).into()),
+            };
+            let unverified: StoreDeviceHead = match serde_json::from_slice(&bytes) {
+                Ok(head) => head,
+                Err(error) => {
+                    block = Some(MergeStreamBlock::Unauthenticated(HeldStorePosition {
+                        coordinate: HeldStoreCoordinate::Head {
+                            device_id: stream_id.to_string(),
+                            seq: sequence,
+                            head_hash: ObjectHash::digest(&bytes),
+                        },
+                        reason: HeldStorePositionReason::InvalidObject(error.to_string()),
+                    }));
+                    break;
+                }
+            };
+            let authenticated = unverified.signature_is_valid_for(registration);
+            let coord_matches = unverified.commit.coord.stream_id == stream_id
+                && unverified.commit.coord.sequence == sequence;
+            if !coord_matches
+                || unverified.author_registration != *registration_ref
+                || unverified.successor.activation != activation
+                || unverified.successor.predecessor != predecessor
+            {
+                let position = HeldStorePosition {
+                    coordinate: HeldStoreCoordinate::Head {
+                        device_id: stream_id.to_string(),
+                        seq: sequence,
+                        head_hash: unverified.head_hash(),
+                    },
+                    reason: HeldStorePositionReason::WrongSlot(
+                        "Store head differs from its activated successor chain".to_string(),
+                    ),
+                };
+                block = Some(if authenticated {
+                    MergeStreamBlock::Authenticated(position)
+                } else {
+                    MergeStreamBlock::Unauthenticated(position)
+                });
+                break;
+            }
+            let head = match StoreDeviceHead::parse_at(
+                &bytes,
+                root.store_root_hash,
+                registration,
+                &unverified.commit,
+            ) {
+                Ok(head) => head,
+                Err(error) => {
+                    let position = HeldStorePosition {
+                        coordinate: HeldStoreCoordinate::Head {
+                            device_id: stream_id.to_string(),
+                            seq: sequence,
+                            head_hash: unverified.head_hash(),
+                        },
+                        reason: held_protocol_error(error),
+                    };
+                    block = Some(if authenticated {
+                        MergeStreamBlock::Authenticated(position)
+                    } else {
+                        MergeStreamBlock::Unauthenticated(position)
+                    });
+                    break;
+                }
+            };
+            let commit = match self.load_ref(&unverified.commit).await {
+                Ok(verified)
+                    if verified.value().author_registration == *registration_ref
+                        && verified.author() == registration =>
+                {
+                    verified.value().clone()
+                }
+                Ok(_) => {
+                    block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
+                        &unverified.commit,
+                        HeldStorePositionReason::Unauthorized,
+                    )));
+                    break;
+                }
+                Err(error) => {
+                    let reason = match error {
+                        StorePullError::Object(error) => held_object_error(error),
+                        error => HeldStorePositionReason::InvalidObject(error.to_string()),
+                    };
+                    block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
+                        &unverified.commit,
+                        reason,
+                    )));
+                    break;
+                }
+            };
+            let next_slot = head.successor.next_slot.clone();
+            let head_ref = StoreDeviceHeadRef {
+                head_hash: head.head_hash(),
+                object: object.clone(),
+            };
+            predecessor = Some(object);
+            sequence = sequence.checked_add(1).ok_or_else(|| {
+                StorePullError::Database(format!(
+                    "Store announcement stream {stream_id} sequence overflow"
+                ))
+            })?;
+            commits.push((head_ref, head.clone(), head.commit.clone(), commit));
+            latest_head = Some(head);
+            slot = next_slot;
+        }
+
+        Ok(MergeStreamDiscovery {
+            latest_head,
+            commits,
+            block,
+        })
     }
 
     pub(crate) async fn history_cut_covers(
@@ -755,7 +936,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         request: &store_commit::OwnerPromotionRequest,
     ) -> Result<VerifiedOwnerPromotionRequestActivation, StorePullError> {
-        let root = self.root().clone();
+        let root = self.root.reference().clone();
         let promoter = self
             .commit_verifier
             .load_registration(&request.promoter_registration)
@@ -763,9 +944,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         request
             .verify(&root, &promoter.value)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let discovered =
-            discover_merge_stream(self, &request.promoter_registration, &promoter.value, None)
-                .await?;
+        let discovered = self
+            .discover_merge_stream(&request.promoter_registration, &promoter.value, None)
+            .await?;
         let mut matches =
             discovered
                 .commits
@@ -802,6 +983,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let commit_verifier = &mut self.commit_verifier;
         let history = &self.history;
         verify_merge_owner_promotion_acceptance_with_history(
+            self.root.reference(),
             commit_verifier,
             acceptance,
             &history.commits,
@@ -822,6 +1004,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let commit_verifier = &mut self.commit_verifier;
         let history = &self.history;
         verify_merge_owner_promotion_acceptance_with_history(
+            self.root.reference(),
             commit_verifier,
             acceptance,
             &history.commits,
@@ -933,9 +1116,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                     },
                     None => None,
                 };
-                let discovered =
-                    discover_merge_stream(self, registration_ref, registration, inactive_cut)
-                        .await?;
+                let discovered = self
+                    .discover_merge_stream(registration_ref, registration, inactive_cut)
+                    .await?;
                 if matches!(discovered.block, Some(MergeStreamBlock::Authenticated(_))) {
                     return Err(StorePullError::Database(
                         "an authenticated Merge stream position cannot be verified".to_string(),
@@ -1229,12 +1412,13 @@ async fn verify_merge_owner_conflict_acceptance_with_history(
 }
 
 pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
+    root: &super::super::protocol_root::VerifiedStoreRoot,
     commit_verifier: &StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     genesis: &ResolvedStoreDeviceState,
     commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
-    let root = commit_verifier.root();
+    let root = root.reference();
     let Some(store_commit::StoreControl { transition }) = commit.control() else {
         return Ok(None);
     };
@@ -1305,6 +1489,7 @@ pub(crate) struct VerifiedMergeHistory {
 }
 
 pub(crate) struct MergeHistoryVerifier<'a> {
+    root: super::super::protocol_root::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }
@@ -1847,6 +2032,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         prefix: &VerifiedMergeMembershipPrefix,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         membership::project_anchored_chain_to_verified_store_prefix(
+            &self.root,
             &self.commit_verifier,
             candidate_heads,
             prefix,
@@ -1864,18 +2050,19 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(super) async fn from_commit_verifier(
         _authority: super::history::HistoryConstructionAuthority,
+        root: super::super::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
         let founder = commit_verifier.load_founder_registration().await?;
-        Self::from_commit_verifier_and_founder(commit_verifier, &founder)
+        Self::from_commit_verifier_and_founder(root, commit_verifier, &founder)
     }
 
     fn from_commit_verifier_and_founder(
+        root: super::super::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
         founder: &VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<Self, StorePullError> {
-        let root = commit_verifier.root();
-        let verified_root = commit_verifier.verified_root();
+        let verified_root = root.protocol();
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
         let founder_origin_matches = matches!(
@@ -1883,7 +2070,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             store_commit::StoreDeviceRegistrationOrigin::Founder { creation_id }
                 if creation_id == verified_root.descriptor.creation_id
         );
-        if founder.value.store_root != *root
+        if founder.value.store_root != *root.reference()
             || founder.value.author_pubkey != verified_root.descriptor.founder_pubkey
             || founder.value.provider != verified_root.descriptor.founder_provider_admin.provider
             || founder.object.slot() != &verified_root.descriptor.founder_registration
@@ -1895,7 +2082,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         let genesis = ResolvedStoreDeviceState::founder(
-            root,
+            root.reference(),
             founder_ref,
             &verified_root.descriptor.founder_pubkey,
             verified_root.descriptor.founder_grant.clone(),
@@ -1903,6 +2090,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         )
         .map_err(|error| StorePullError::Database(error.to_string()))?;
         Ok(Self {
+            root,
             commit_verifier,
             history: VerifiedMergeHistory {
                 genesis,
@@ -2033,19 +2221,20 @@ impl<'a> MergeHistoryVerifier<'a> {
             })
         {
             let context = ProtocolObjectContext::signed_plaintext(
-                self.root().store_root_hash,
+                self.root.reference().store_root_hash,
                 ProtocolObjectDomain::DeviceJoinAbandonment,
             );
             let semantic_prefix =
                 store_commit::device_join_abandonment_semantic_prefix(reference.attempt_id);
             let bytes = self
+                .commit_verifier
                 .read_protocol_object(&context, &reference.object, &semantic_prefix)
                 .await
                 .map_err(RegistrationLoadError::Object)?;
             let abandonment: device_join::DeviceJoinAbandonmentObject =
                 serde_json::from_slice(&bytes)
                     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-            if abandonment.store_root_hash != self.root().store_root_hash
+            if abandonment.store_root_hash != self.root.reference().store_root_hash
                 || abandonment.owner_registration != commit.author_registration
                 || abandonment.attempt_slot != *reference.object.slot()
             {
@@ -2068,12 +2257,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
         for reference in commit.device_join_cleanup_receipts() {
             let context = ProtocolObjectContext::signed_plaintext(
-                self.root().store_root_hash,
+                self.root.reference().store_root_hash,
                 ProtocolObjectDomain::DeviceJoinCleanupReceipt,
             );
             let semantic_prefix =
                 store_commit::device_join_cleanup_receipt_semantic_prefix(reference.attempt_id);
             let bytes = self
+                .commit_verifier
                 .read_protocol_object(&context, &reference.object, &semantic_prefix)
                 .await
                 .map_err(RegistrationLoadError::Object)?;
@@ -2112,7 +2302,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .request
                     .offer
                     .provider
-                    != self.verified_root().descriptor.provider
+                    != self.root.protocol().descriptor.provider
             {
                 return Err(RegistrationLoadError::Invalid(
                     "device join cleanup executor differs from its exact provider authority"
@@ -2441,33 +2631,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             .get(activation)
             .and_then(|commit| commit.membership_control.as_ref())
             .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
-    }
-
-    pub(crate) async fn read_protocol_object(
-        &self,
-        context: &crate::storage::ProtocolObjectContext,
-        object: &crate::storage::ExactObjectRef,
-        semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::storage::StoreObjectError> {
-        self.commit_verifier
-            .read_protocol_object(context, object, semantic_prefix)
-            .await
-    }
-
-    pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
-        self.commit_verifier.storage()
-    }
-
-    pub(crate) fn root(&self) -> &StoreRootRef {
-        self.commit_verifier.root()
-    }
-
-    pub(crate) fn verified_root(&self) -> &store_commit::StoreProtocolRoot {
-        self.commit_verifier.verified_root()
-    }
-
-    pub(crate) fn verified_root_object(&self) -> &VerifiedObject<store_commit::StoreProtocolRoot> {
-        self.commit_verifier.verified_root_object()
     }
 
     pub(crate) async fn load_verified_device_join_attempt(
@@ -2801,7 +2964,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             return Err(StorePullError::SnapshotAuthorNotOwner);
         }
         let canonical = compose_merge_snapshot_history_summary(
-            self.root(),
+            self.root.reference(),
             &snapshot.meta.coverage,
             &state.membership,
             &state.common.device_state,
@@ -2822,7 +2985,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         snapshot_frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
         state: &VerifiedMergeSnapshotState,
     ) -> Result<StoreHistoryCut, StorePullError> {
-        let root = self.root().clone();
+        let root = self.root.reference().clone();
         let mut accepted = snapshot_frontier.clone();
         for (registration_ref, registration) in state.common.active_registrations.values() {
             let stream_id = store_commit::StreamActivation::device_authorized_stream_id(
@@ -2830,8 +2993,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 registration_ref,
                 store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
-            let discovery =
-                discover_merge_stream(self, registration_ref, registration, None).await?;
+            let discovery = self
+                .discover_merge_stream(registration_ref, registration, None)
+                .await?;
             let Some((_, _, latest, _)) = discovery.commits.last() else {
                 if accepted.contains_key(&stream_id) {
                     return Err(StorePullError::Database(
@@ -2944,7 +3108,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         }
         let founder = self.commit_verifier.load_founder_registration().await?;
         let authority = retained_replay::RetainedReplaySnapshotAuthority {
-            store_root: self.root().clone(),
+            store_root: self.root.reference().clone(),
             founder_registration: StoreDeviceRegistrationRef::from_registration(
                 &founder.value,
                 founder.object,
@@ -2980,7 +3144,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         candidate_head: &StoreDeviceHead,
         candidate_head_object: &ExactObjectRef,
     ) -> Result<remote_object::VerifiedCandidateNonactivation, StorePullError> {
-        let root = self.root().clone();
+        let root = self.root.reference().clone();
         let head_prefix =
             store_commit::semantic_prefix_from_exact_object(&activation_head.object, ".json")
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -2989,7 +3153,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             ProtocolObjectDomain::StoreHead,
         );
         let head_bytes = self
-            .storage()
+            .commit_verifier
             .read_protocol_object(&context, &activation_head.object, &head_prefix)
             .await?;
         activation_head.object.verify(&head_bytes)?;
@@ -3561,7 +3725,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         tips: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<(), StorePullError> {
-        let root = self.root().clone();
+        let root = self.root.reference().clone();
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
         while let Some(reference) = pending.pop() {
@@ -3616,6 +3780,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             )?;
             let pending_resolution =
                 Box::pin(verify_merge_resolution_activation_acceptance_with_history(
+                    &self.root,
                     &self.commit_verifier,
                     &commit,
                     &self.history.genesis,
@@ -3674,6 +3839,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 states: &states,
             };
             let operations = Box::pin(load_commit_device_operations(
+                self.root.reference(),
                 Some(&resolver),
                 &mut self.commit_verifier,
                 &commit,
@@ -3822,17 +3988,57 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 }
 
+fn held_protocol_error(error: StoreProtocolError) -> HeldStorePositionReason {
+    match error {
+        StoreProtocolError::InvalidSignature => HeldStorePositionReason::InvalidSignature,
+        StoreProtocolError::RelocatedSlot { .. }
+        | StoreProtocolError::RelocatedPackage { .. }
+        | StoreProtocolError::StoreRootMismatch { .. }
+        | StoreProtocolError::StoreMismatch { .. }
+        | StoreProtocolError::FounderMismatch { .. } => {
+            HeldStorePositionReason::WrongSlot(error.to_string())
+        }
+        error => HeldStorePositionReason::InvalidObject(error.to_string()),
+    }
+}
+
 pub(super) async fn open_merge_history_verifier<'storage>(
     authority: super::history::HistoryConstructionAuthority,
     storage: &'storage dyn SyncStorage,
     root: &StoreRootRef,
 ) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
+    open_merge_history_verifier_with_root(authority, storage, root)
+        .await
+        .map(|(_, verifier)| verifier)
+}
+
+pub(super) async fn open_merge_history_verifier_with_root<'storage>(
+    authority: super::history::HistoryConstructionAuthority,
+    storage: &'storage dyn SyncStorage,
+    root: &StoreRootRef,
+) -> Result<
+    (
+        super::super::protocol_root::VerifiedStoreRoot,
+        MergeHistoryVerifier<'storage>,
+    ),
+    StorePullError,
+> {
     let verified_root =
         crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
             .await
             .map_err(|error| StorePullError::Database(error.to_string()))?;
+    let verified_root = super::super::protocol_root::VerifiedStoreRoot::from_verified_object(
+        root.clone(),
+        verified_root,
+    )
+    .map_err(|error| StorePullError::Database(error.to_string()))?;
     let commit_verifier =
-        StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-    MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier).await
+        StoreCommitVerifier::from_verified_root(authority, storage, verified_root.clone());
+    let verifier = MergeHistoryVerifier::from_commit_verifier(
+        authority,
+        verified_root.clone(),
+        commit_verifier,
+    )
+    .await?;
+    Ok((verified_root, verifier))
 }

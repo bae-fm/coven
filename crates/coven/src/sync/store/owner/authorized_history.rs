@@ -9,6 +9,8 @@ use super::verified_history::*;
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    root: super::super::protocol_root::VerifiedStoreRoot,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
     keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -17,12 +19,16 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
 impl<'storage> AuthorizedStoreHistory<'storage> {
     fn new(
         database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self {
             database,
+            storage,
+            root,
             history_verifier,
             blob_source,
             keyrings,
@@ -39,7 +45,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let identity_is_founder = self.verified_root_object().value.descriptor.founder_pubkey
+        let identity_is_founder = self.root.object().value.descriptor.founder_pubkey
             == crate::keys::public_key_hex(identity);
         if device_id.is_none() && !identity_is_founder {
             return Err(StoreInitializationError::ProtocolRoot(
@@ -70,8 +76,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 "initialized Store has no local device registration id".to_string(),
             )
         })?;
-        let store_root = self.root().clone();
-        let protocol_root = self.verified_root_object().clone();
+        let store_root = self.root.reference().clone();
+        let protocol_root = self.root.object().clone();
         let store = Store::new(
             database,
             Arc::clone(storage),
@@ -94,8 +100,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         };
         use crate::storage::ProtocolObjectDomain;
 
-        let storage = self.history_verifier.storage();
-        let root = self.history_verifier.root();
+        let storage = self.storage;
+        let root = self.root.reference();
         let founder = self.history_verifier.load_founder_registration().await?;
         if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
             return Err(super::registration::StoreRegistrationError::Invalid(
@@ -213,7 +219,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<AuthorizedStore<'storage>, SyncCycleFailure> {
         let owner = self
             .database
-            .validated_store_owner(self.root())
+            .validated_store_owner(self.root.reference())
             .await
             .map_err(|error| {
                 SyncCycleFailure::operation("validate Store owner authority", error)
@@ -224,7 +230,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
         let local_device = match device_id {
             Some(device_id) => Some(
-                LocalStoreDevice::load(&self.database, self.root(), device_id)
+                LocalStoreDevice::load(&self.database, self.root.reference(), device_id)
                     .await
                     .map_err(|error| {
                         SyncCycleFailure::operation("load local Store device authority", error)
@@ -312,6 +318,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::activation::CircleActivationVerifier<'_, 'storage> {
         super::circles::activation::CircleActivationVerifier::new(
             &self.database,
+            self.storage,
+            self.root.reference(),
             &mut self.history_verifier,
         )
     }
@@ -321,6 +329,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::packages::CirclePackageReader<'_, 'storage> {
         super::circles::packages::CirclePackageReader::new(
             &self.database,
+            self.storage,
+            self.root.reference(),
             &mut self.history_verifier,
         )
     }
@@ -330,7 +340,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
         super::circles::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
-            &self.history_verifier,
+            self.storage,
+            self.root.reference(),
         )
     }
 
@@ -340,6 +351,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
         super::circles::snapshots::CircleSnapshotReader::new(
             &self.database,
+            self.storage,
+            self.root.reference(),
             &mut self.history_verifier,
         )
     }
@@ -349,6 +362,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::device_join::history::DeviceJoinHistory<'_, 'storage> {
         super::device_join::history::DeviceJoinHistory::new(
             self.database.clone(),
+            self.storage,
+            &self.root,
             &mut self.history_verifier,
         )
     }
@@ -360,7 +375,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(super) fn reclaim(&mut self) -> ReclaimHistory<'_, 'storage> {
-        ReclaimHistory::new(self.database.clone(), &mut self.history_verifier)
+        ReclaimHistory::new(
+            self.database.clone(),
+            self.storage,
+            self.root.reference(),
+            &mut self.history_verifier,
+        )
     }
 
     pub(super) fn restore_history(&self) -> RestoreHistory<'_, 'storage> {
@@ -379,8 +399,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         target_path: std::path::PathBuf,
     ) -> super::RestoringStore<'storage> {
         let database = self.database.clone();
-        let root = self.root().clone();
-        let protocol = self.verified_root_object().value.clone();
+        let root = self.root.reference().clone();
+        let protocol = self.root.object().value.clone();
         super::RestoringStore::from_parts(
             self,
             database,
@@ -396,21 +416,39 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) fn from_pending_device_join(
         _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::new(database, history_verifier, blob_source, keyrings)
+        Self::new(
+            database,
+            storage,
+            root,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
     }
 
     pub(super) fn from_snapshot(
         _authority: super::writer::SnapshotHistoryConstruction,
         database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::new(database, history_verifier, blob_source, keyrings)
+        Self::new(
+            database,
+            storage,
+            root,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
     }
 }
 
@@ -504,12 +542,14 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
                 root.store_root_hash,
             ));
         }
-        let authority = HistoryConstructionAuthority(());
-        let commit_verifier =
-            StoreCommitVerifier::from_verified_root(authority, self.storage, &root, opened_root)
+        let verified_root =
+            protocol_root::VerifiedStoreRoot::from_verified_object(root.clone(), opened_root)
                 .map_err(|error| {
                     protocol_root::StoreProtocolRootError::Database(error.to_string())
                 })?;
+        let authority = HistoryConstructionAuthority(());
+        let commit_verifier =
+            StoreCommitVerifier::from_verified_root(authority, self.storage, verified_root.clone());
         self.storage
             .create_protocol_object(&self.graph.registration.prepared)
             .await
@@ -597,12 +637,13 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
             )
             .await
             .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
-        let history_verifier =
-            MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier)
-                .await
-                .map_err(|error| {
-                    protocol_root::StoreProtocolRootError::Database(error.to_string())
-                })?;
+        let history_verifier = MergeHistoryVerifier::from_commit_verifier(
+            authority,
+            verified_root.clone(),
+            commit_verifier,
+        )
+        .await
+        .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             self.database.clone(),
             self.storage,
@@ -611,6 +652,8 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
         let keyrings = super::keyring::StoreKeyrings::new(self.storage, root);
         Ok(AuthorizedStoreHistory::new(
             self.database.clone(),
+            self.storage,
+            verified_root,
             history_verifier,
             blob_source,
             keyrings,
@@ -718,12 +761,20 @@ pub(super) async fn authorized_history_from_verified_root<'storage>(
     root: &StoreRootRef,
     verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
 ) -> Result<AuthorizedStoreHistory<'storage>, pull::StorePullError> {
+    let verified_root = super::super::protocol_root::VerifiedStoreRoot::from_verified_object(
+        root.clone(),
+        verified_root,
+    )
+    .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
     let authority = HistoryConstructionAuthority(());
     let commit_verifier =
-        StoreCommitVerifier::from_verified_root(authority, storage, root, verified_root)
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-    let history_verifier =
-        MergeHistoryVerifier::from_commit_verifier(authority, commit_verifier).await?;
+        StoreCommitVerifier::from_verified_root(authority, storage, verified_root.clone());
+    let history_verifier = MergeHistoryVerifier::from_commit_verifier(
+        authority,
+        verified_root.clone(),
+        commit_verifier,
+    )
+    .await?;
     let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
         database.clone(),
         storage,
@@ -732,6 +783,8 @@ pub(super) async fn authorized_history_from_verified_root<'storage>(
     let keyrings = super::keyring::StoreKeyrings::new(storage, root.clone());
     Ok(AuthorizedStoreHistory::new(
         database,
+        storage,
+        verified_root,
         history_verifier,
         blob_source,
         keyrings,
@@ -795,13 +848,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(super) fn root(&self) -> &StoreRootRef {
-        self.history_verifier.root()
+        self.root.reference()
     }
 
     pub(super) fn verified_root_object(
         &self,
     ) -> &crate::storage::VerifiedObject<StoreProtocolRoot> {
-        self.history_verifier.verified_root_object()
+        self.root.object()
     }
 
     pub(super) async fn open_keyring(
@@ -881,7 +934,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<crate::sync::store::circle_controls::activation::VerifiedCircleActivations, String>
     {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         if verified_commit.store_root_hash() != root.store_root_hash {
             return Err(
                 "authenticated Merge membership control belongs to another Store root".into(),
@@ -1031,8 +1084,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .activated_store_device_registration_records()
             .await?;
-        let storage = self.history_verifier.storage();
-        let root = self.history_verifier.root().clone();
+        let storage = self.storage;
+        let root = self.root.reference().clone();
         let mut candidates = Vec::new();
         for (registration_ref, registration) in registrations {
             for snapshot in snapshot::load_store_snapshot_stream(
@@ -1113,9 +1166,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
         )
         .await?;
-        let root = self.history_verifier.root().clone();
-        let root_bytes = self.history_verifier.verified_root_object().bytes.clone();
-        let protocol_root = self.history_verifier.verified_root().clone();
+        let root = self.root.reference().clone();
+        let root_bytes = self.root.object().bytes.clone();
+        let protocol_root = self.root.protocol().clone();
         let founder = chain.founder_coord().ok_or_else(|| {
             crate::sync::store::membership::AnchoredChainError::LoadFailed(
                 "owner-anchored membership chain is empty".to_string(),
@@ -1346,7 +1399,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let retained = self
             .database
             .retained_merge_replay_inputs_with_verified_commits(
-                self.history_verifier.root().clone(),
+                self.root.reference().clone(),
                 retained_commit_proofs,
             )
             .await?;
@@ -1411,13 +1464,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         registration: &crate::protocol::store_commit::StoreDeviceRegistration,
         inactive_accepted_cut: Option<&crate::protocol::store_commit::StoreHistoryCut>,
     ) -> Result<pull::MergeStreamDiscovery, pull::StorePullError> {
-        pull::discover_merge_stream(
-            &mut self.history_verifier,
-            registration_ref,
-            registration,
-            inactive_accepted_cut,
-        )
-        .await
+        self.history_verifier
+            .discover_merge_stream(registration_ref, registration, inactive_accepted_cut)
+            .await
     }
 
     pub(super) async fn verify_pull_refs(
@@ -1555,7 +1604,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
         pull::StorePullError,
     > {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         let retained = self
             .database
             .retained_merge_replay_inputs(root.clone())
@@ -1772,7 +1821,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         write_id: crate::WriteId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         for verification in self
             .database
             .merge_candidate_terminal_verifications(root, write_id.clone())
@@ -1789,8 +1838,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .merge_candidate_cleanup_targets(write_id)
             .await?;
         for target in targets {
-            self.history_verifier
-                .storage()
+            self.storage
                 .delete_protocol_object(&target.object)
                 .await
                 .map_err(crate::storage::StoreObjectError::from)?;
@@ -1805,7 +1853,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         for verification in self
             .database
             .circle_operation_discard_terminal_verifications(root, operation_id)
@@ -1822,8 +1870,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .circle_operation_discard_cleanup_targets(operation_id)
             .await?;
         for target in targets {
-            self.history_verifier
-                .storage()
+            self.storage
                 .delete_protocol_object(&target.object)
                 .await
                 .map_err(crate::storage::StoreObjectError::from)?;
@@ -1838,7 +1885,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
         for candidate in self.database.pending_merge_retraction_cleanups().await? {
-            let root = self.history_verifier.root().clone();
+            let root = self.root.reference().clone();
             let verification = self
                 .database
                 .merge_retraction_cleanup_verification(root, candidate.clone())
@@ -1853,8 +1900,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .merge_retraction_cleanup_targets(candidate.clone())
                 .await?
             {
-                self.history_verifier
-                    .storage()
+                self.storage
                     .delete_protocol_object(&target.object)
                     .await
                     .map_err(crate::storage::StoreObjectError::from)?;
@@ -1883,7 +1929,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         write_id: crate::WriteId,
     ) -> Result<Option<abandonment::MergeCandidateAbandonment>, StoreError> {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         let database = self.database.clone();
         let db = &database;
         match database.merge_abandonment_state(&write_id).await? {
@@ -2017,7 +2063,7 @@ impl AuthorizedStoreHistory<'_> {
         expected_outcome: &crate::protocol::store_commit::DeviceJoinOutcomeRef,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<(), pull::StorePullError> {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         let crate::protocol::store_commit::StoreCommitCoord {
             stream_id,
             sequence,
@@ -2150,7 +2196,8 @@ impl AuthorizedStoreHistory<'_> {
         let checkpoints = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
-        retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await
+        self.retained_merge_device_state(&frontier, &checkpoints)
+            .await
     }
 
     pub(super) async fn authorize_retained_conflict_resolution(
@@ -2176,8 +2223,9 @@ impl AuthorizedStoreHistory<'_> {
         prefix
             .validate_complete_membership(&membership)
             .map_err(pull::StorePullError::Database)?;
-        let (device_state_ref, device_state) =
-            retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
+        let (device_state_ref, device_state) = self
+            .retained_merge_device_state(&frontier, &checkpoints)
+            .await?;
         if !super::verified_history::registration::device_state_has_active_registration(
             &device_state,
             author_registration,
@@ -2222,8 +2270,9 @@ impl AuthorizedStoreHistory<'_> {
         prefix
             .validate_complete_membership(&membership)
             .map_err(pull::StorePullError::Database)?;
-        let (device_state_ref, device_state) =
-            retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await?;
+        let (device_state_ref, device_state) = self
+            .retained_merge_device_state(&frontier, &checkpoints)
+            .await?;
         if !super::verified_history::registration::device_state_has_active_registration(
             &device_state,
             author_registration,
@@ -2252,6 +2301,39 @@ impl AuthorizedStoreHistory<'_> {
         })
     }
 
+    async fn retained_merge_device_state(
+        &self,
+        frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
+        checkpoints: &[OpenedRetainedMergeHistorySummary],
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
+        let state = if checkpoints.is_empty() {
+            let founder = self.history_verifier.load_founder_registration().await?;
+            let founder_ref = StoreDeviceRegistrationRef::from_registration(
+                &founder.value,
+                founder.object.clone(),
+            );
+            ResolvedStoreDeviceState::founder(
+                self.root.reference(),
+                founder_ref,
+                &self.root.protocol().descriptor.founder_pubkey,
+                self.root.protocol().descriptor.founder_grant.clone(),
+                &self.root.protocol().descriptor.founder_recovery,
+            )
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+        } else {
+            ResolvedStoreDeviceState::merge(
+                checkpoints
+                    .iter()
+                    .map(|checkpoint| checkpoint.post_state.clone()),
+            )
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+        };
+        let reference =
+            StoreDeviceStateRef::from_resolved(CommitFrontier(frontier.clone()), &state)
+                .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+        Ok((reference, state))
+    }
+
     pub(super) async fn prepare_merge_history_successor(
         &self,
         verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
@@ -2263,7 +2345,7 @@ impl AuthorizedStoreHistory<'_> {
         crate::sync::store::owner::verified_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        let root = self.history_verifier.root();
+        let root = self.root.reference();
         if verified_commit.store_root_hash() != root.store_root_hash {
             return Err(crate::sync::store::owner::pull::StorePullError::Database(
                 "authenticated Merge successor belongs to another Store root".to_string(),
@@ -2364,7 +2446,7 @@ impl AuthorizedStoreHistory<'_> {
         crate::sync::store::owner::pull::StorePullError,
     > {
         let frontier = &coverage.0;
-        let root = self.history_verifier.root();
+        let root = self.root.reference();
         let predecessors = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
@@ -2386,14 +2468,13 @@ impl AuthorizedStoreHistory<'_> {
         slot: &crate::storage::cloud::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<abandonment::VerifiedMergeWinner, StoreError> {
-        let store_root_hash = self.history_verifier.root().store_root_hash;
+        let store_root_hash = self.root.reference().store_root_hash;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             crate::storage::ProtocolObjectDomain::StoreHead,
         );
         let (winner_bytes, winner_prepared) = self
-            .history_verifier
-            .storage()
+            .storage
             .read_prepared_protocol_slot(&context, slot, semantic_prefix)
             .await
             .map_err(crate::storage::StoreObjectError::from)?;
@@ -2459,7 +2540,7 @@ impl AuthorizedStoreHistory<'_> {
         &self,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<OpenedRetainedMergeHistorySummary>, pull::StorePullError> {
-        let root = self.history_verifier.root();
+        let root = self.root.reference();
         let checkpoints = self
             .database
             .retained_merge_history_frontier(root.clone(), references)
@@ -2482,7 +2563,7 @@ impl AuthorizedStoreHistory<'_> {
         candidate_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_object: &crate::storage::ExactObjectRef,
     ) -> Result<abandonment::ExcludedCandidateHeadObservation, StoreError> {
-        let store_root_hash = self.history_verifier.root().store_root_hash;
+        let store_root_hash = self.root.reference().store_root_hash;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             crate::storage::ProtocolObjectDomain::StoreHead,
@@ -2492,8 +2573,7 @@ impl AuthorizedStoreHistory<'_> {
             candidate.commit.coord.sequence(),
         );
         match self
-            .history_verifier
-            .storage()
+            .storage
             .read_protocol_slot(&context, candidate_object.slot(), &prefix)
             .await
         {
@@ -2575,7 +2655,7 @@ impl AuthorizedStoreHistory<'_> {
         candidate_head_object: &crate::storage::ExactObjectRef,
     ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         let expected_stream =
             crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
@@ -2655,7 +2735,7 @@ impl AuthorizedStoreHistory<'_> {
     ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let candidate_ref = candidate.reference().clone();
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         let Some(locator) = self
             .database
             .author_exclusion_activation_for_candidate(
@@ -2705,7 +2785,7 @@ impl AuthorizedStoreHistory<'_> {
         let retained = self
             .database
             .retained_merge_materialization(
-                self.history_verifier.root().clone(),
+                self.root.reference().clone(),
                 locator.activation_commit().clone(),
             )
             .await?;
@@ -2812,12 +2892,7 @@ impl AuthorizedStoreHistory<'_> {
         reference: &crate::protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
         let opened = access
-            .open_package(
-                self.history_verifier.storage(),
-                commit,
-                reference,
-                commit.author(),
-            )
+            .open_package(self.storage, commit, reference, commit.author())
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(opened.object.value)
@@ -2952,38 +3027,6 @@ fn validate_retained_membership_floors(
     Ok(())
 }
 
-async fn retained_merge_device_state(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
-    checkpoints: &[OpenedRetainedMergeHistorySummary],
-) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
-    let root = history_verifier.root();
-    let root_value = history_verifier.verified_root();
-    let state = if checkpoints.is_empty() {
-        let founder = history_verifier.load_founder_registration().await?;
-        let founder_ref =
-            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
-        ResolvedStoreDeviceState::founder(
-            root,
-            founder_ref,
-            &root_value.descriptor.founder_pubkey,
-            root_value.descriptor.founder_grant.clone(),
-            &root_value.descriptor.founder_recovery,
-        )
-        .map_err(|error| pull::StorePullError::Database(error.to_string()))?
-    } else {
-        ResolvedStoreDeviceState::merge(
-            checkpoints
-                .iter()
-                .map(|checkpoint| checkpoint.post_state.clone()),
-        )
-        .map_err(|error| pull::StorePullError::Database(error.to_string()))?
-    };
-    let reference = StoreDeviceStateRef::from_resolved(CommitFrontier(frontier.clone()), &state)
-        .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-    Ok((reference, state))
-}
-
 impl AuthorizedStoreHistory<'_> {
     async fn apply_terminal_nonactivation(
         &mut self,
@@ -2995,7 +3038,7 @@ impl AuthorizedStoreHistory<'_> {
             | TerminalNonactivationCandidate::MergeRetraction { verification, .. } => verification,
         };
         let nonactivation = self.verify_terminal_nonactivation(verification).await?;
-        let root = self.history_verifier.root().clone();
+        let root = self.root.reference().clone();
         match candidate {
             TerminalNonactivationCandidate::StoreWrite { write_id, .. } => {
                 self.database

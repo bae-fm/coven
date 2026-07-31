@@ -20,17 +20,26 @@ pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
     history: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
     heads: &[MembershipHeadRef],
 ) {
-    let mut authority = MembershipActivationAuthority::History(history);
+    let mut authority = MembershipActivationAuthority::History {
+        root: history.root.clone(),
+        history,
+    };
     graph::assert_deep_valid_predecessor_path_is_iterative(&mut authority, heads).await;
 }
 
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
+    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    graph::project_anchored_chain_to_verified_store_prefix(commit_verifier, candidate_heads, prefix)
-        .await
+    graph::project_anchored_chain_to_verified_store_prefix(
+        root,
+        commit_verifier,
+        candidate_heads,
+        prefix,
+    )
+    .await
 }
 
 struct ExactMembershipStream {
@@ -40,10 +49,14 @@ struct ExactMembershipStream {
 }
 
 pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
-    History(
-        &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
-    ),
+    History {
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+    },
     VerifiedPrefix {
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
         activations:
             &'operation crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
@@ -53,7 +66,7 @@ pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     fn commit_verifier(&self) -> &crate::sync::store::owner::StoreCommitVerifier<'storage> {
         match self {
-            Self::History(history) => &history.commit_verifier,
+            Self::History { history, .. } => &history.commit_verifier,
             Self::VerifiedPrefix {
                 commit_verifier, ..
             } => commit_verifier,
@@ -117,11 +130,15 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     }
 
     fn root(&self) -> &StoreRootRef {
-        self.commit_verifier().root()
+        match self {
+            Self::History { root, .. } | Self::VerifiedPrefix { root, .. } => root.reference(),
+        }
     }
 
     fn verified_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
-        self.commit_verifier().verified_root()
+        match self {
+            Self::History { root, .. } | Self::VerifiedPrefix { root, .. } => root.protocol(),
+        }
     }
 
     async fn load_exact_membership_head(
@@ -237,7 +254,7 @@ async fn validate_membership_head_activation(
                     }
                     Ok(true)
                 }
-                MembershipActivationAuthority::History(history) => Box::pin(
+                MembershipActivationAuthority::History { history, .. } => Box::pin(
                     crate::sync::store::owner::pull::verify_merge_membership_head_activation(
                         history, reference, head, commit,
                     ),
@@ -386,9 +403,12 @@ pub(super) async fn load_exact_anchored_chain_with_history(
     cursors: &[MembershipHeadRef],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root = history_verifier.root().clone();
-    let root_value = history_verifier.verified_root().clone();
-    let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
+    let root = history_verifier.root.reference().clone();
+    let root_value = history_verifier.root.protocol().clone();
+    let mut activation_authority = MembershipActivationAuthority::History {
+        root: history_verifier.root.clone(),
+        history: history_verifier,
+    };
     if let Some(owner) = owner_pubkey {
         if root_value.descriptor.founder_pubkey != owner {
             return Err(AnchoredChainError::FounderMismatch {
@@ -507,10 +527,13 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let root = history_verifier.root().clone();
-    let root_value = history_verifier.verified_root().clone();
+    let root = history_verifier.root.reference().clone();
+    let root_value = history_verifier.root.protocol().clone();
     let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
-    let mut activation_authority = MembershipActivationAuthority::History(history_verifier);
+    let mut activation_authority = MembershipActivationAuthority::History {
+        root: history_verifier.root.clone(),
+        history: history_verifier,
+    };
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
         &root,
@@ -524,6 +547,7 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
 }
 
 pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
+    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     exact_heads: &[MembershipHeadRef],
     exact_resolutions: &[StoreMembershipConflictResolutionRef],
@@ -532,19 +556,16 @@ pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_ac
         &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
     >,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let owner_pubkey = commit_verifier
-        .verified_root()
-        .descriptor
-        .founder_pubkey
-        .clone();
+    let owner_pubkey = root.protocol().descriptor.founder_pubkey.clone();
     let mut activation_authority = MembershipActivationAuthority::VerifiedPrefix {
+        root: root.clone(),
         commit_verifier,
         activations: verified_activations,
     };
     Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
         &mut activation_authority,
-        commit_verifier.root(),
-        commit_verifier.verified_root(),
+        root.reference(),
+        root.protocol(),
         &owner_pubkey,
         exact_heads,
         exact_resolutions,

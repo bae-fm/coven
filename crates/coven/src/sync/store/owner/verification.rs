@@ -35,8 +35,7 @@ pub(crate) use membership::StoreMembershipObjectVerifier;
 
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
-    root: StoreRootRef,
-    verified_root: VerifiedObject<StoreProtocolRoot>,
+    root: super::super::protocol_root::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
 
@@ -71,6 +70,7 @@ impl<'a> StoreCommitVerifier<'a> {
         pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         load_membership_at_exact_heads_with_verified_activations(
+            &self.root,
             self,
             heads,
             resolutions,
@@ -83,25 +83,13 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(super) fn from_verified_root(
         _authority: super::history::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
-        root: &StoreRootRef,
-        verified_root: VerifiedObject<StoreProtocolRoot>,
-    ) -> Result<Self, StoreProtocolError> {
-        let verified_reference = StoreRootRef {
-            store_root_id: verified_root.value.descriptor.store_root_id(),
-            store_root_hash: verified_root.semantic_hash,
-            object: verified_root.object.clone(),
-        };
-        if &verified_reference != root {
-            return Err(StoreProtocolError::Malformed(
-                "verified Store root belongs to another exact reference".to_string(),
-            ));
-        }
-        Ok(Self {
+        root: super::super::protocol_root::VerifiedStoreRoot,
+    ) -> Self {
+        Self {
             storage,
-            root: root.clone(),
-            verified_root,
+            root,
             commits: BTreeMap::new(),
-        })
+        }
     }
 
     pub(crate) async fn exact_next_announcement_slot(
@@ -174,7 +162,7 @@ impl<'a> StoreCommitVerifier<'a> {
             });
         };
         let expected_stream = StreamActivation::device_authorized_stream_id(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             registration_ref,
             StreamAnchorDomain::StoreAnnouncements,
         );
@@ -188,7 +176,7 @@ impl<'a> StoreCommitVerifier<'a> {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
             .activation_id();
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
         let mut slot = first_slot.clone();
@@ -204,7 +192,7 @@ impl<'a> StoreCommitVerifier<'a> {
             let verify_bytes = bytes.clone();
             let expected_registration = registration_ref.clone();
             let expected_registration_value = registration.clone();
-            let store_root_hash = self.root.store_root_hash;
+            let store_root_hash = self.root.reference().store_root_hash;
             let expected_predecessor = predecessor
                 .as_ref()
                 .map(|reference| reference.object.clone());
@@ -267,7 +255,7 @@ impl<'a> StoreCommitVerifier<'a> {
         candidate_head_object: &ExactObjectRef,
     ) -> Result<crate::protocol::remote_object::VerifiedCandidateHead, StorePullError> {
         let storage = self.storage;
-        let root = self.root.clone();
+        let root = self.root.reference().clone();
         let candidate_ref = candidate.reference();
         let candidate_commit = candidate.value();
         let candidate_author = candidate.author();
@@ -463,7 +451,7 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
         let semantic_prefix = registration_slot_semantic_prefix(&reference.object)?;
@@ -472,9 +460,9 @@ impl<'a> StoreCommitVerifier<'a> {
             .read_protocol_object(&context, &reference.object, &semantic_prefix)
             .await?;
         let verify_bytes = bytes.clone();
-        let expected_root = self.root.clone();
+        let expected_root = self.root.reference().clone();
         let expected_reference = reference.clone();
-        let pinned_root = self.verified_root.value.clone();
+        let pinned_root = self.root.protocol().clone();
         let value = run_blocking_object_verification(
             &semantic_prefix,
             &reference.object,
@@ -528,7 +516,7 @@ impl<'a> StoreCommitVerifier<'a> {
         }
         let registration = self.load_registration(registration_ref).await?;
         OwnerRecoveryActivationId::derive(
-            &self.root,
+            self.root.reference(),
             &registration.value.author_pubkey,
             grant_id,
             anchor,
@@ -541,7 +529,7 @@ impl<'a> StoreCommitVerifier<'a> {
         &self,
         membership: &MembershipChain,
     ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
-        let protocol = &self.verified_root.value;
+        let protocol = &self.root.protocol();
         if membership
             .active_owner_grant(&protocol.descriptor.founder_pubkey)
             .as_ref()
@@ -556,7 +544,7 @@ impl<'a> StoreCommitVerifier<'a> {
             ));
         };
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
         let mut slot = first_slot.clone();
@@ -589,7 +577,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 node_hash: unverified.node_hash(),
                 object,
             };
-            let node = OwnerRecoveryNode::parse_at(&bytes, &self.root, &reference)
+            let node = OwnerRecoveryNode::parse_at(&bytes, self.root.reference(), &reference)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
             if reference.owner_pubkey != protocol.descriptor.founder_pubkey
                 || reference.owner_grant != protocol.descriptor.founder_grant
@@ -696,23 +684,23 @@ impl<'a> StoreCommitVerifier<'a> {
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
         let semantic_prefix =
-            founder_registration_semantic_prefix(self.verified_root.value.descriptor.creation_id);
+            founder_registration_semantic_prefix(self.root.protocol().descriptor.creation_id);
         let (bytes, object) = self
             .storage
             .read_protocol_slot(
                 &context,
-                &self.verified_root.value.descriptor.founder_registration,
+                &self.root.protocol().descriptor.founder_registration,
                 &semantic_prefix,
             )
             .await?;
         let verify_bytes = bytes.clone();
         let verify_object = object.clone();
-        let verify_root = self.root.clone();
-        let verify_root_value = self.verified_root.value.clone();
+        let verify_root = self.root.reference().clone();
+        let verify_root_value = self.root.protocol().clone();
         let (value, reference) = run_blocking_object_verification(
             &semantic_prefix,
             &object,
@@ -778,13 +766,13 @@ impl<'a> StoreCommitVerifier<'a> {
         StoreObjectError,
     > {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::ProviderAccessGrant,
         );
         let semantic_prefix = provider_access_grant_semantic_prefix(&reference.grant_id);
         let expected = reference.clone();
         let administrator = administrator.clone();
-        let store = self.verified_root.value.descriptor.provider.clone();
+        let store = self.root.protocol().descriptor.provider.clone();
         self.load_exact_object(
             &context,
             &reference.object,
@@ -844,7 +832,7 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &DeviceJoinAttemptRef,
     ) -> Result<(Vec<u8>, String), StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
         let semantic_prefix = device_join_attempt_semantic_prefix(reference.attempt_id);
@@ -885,7 +873,7 @@ impl<'a> StoreCommitVerifier<'a> {
         owner: &StoreDeviceRegistration,
     ) -> Result<VerifiedObject<DeviceJoinOutcome>, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
         let semantic_prefix = device_join_outcome_semantic_prefix(reference.attempt().attempt_id);
@@ -895,7 +883,7 @@ impl<'a> StoreCommitVerifier<'a> {
         };
         let expected = reference.clone();
         let expected_owner = owner.clone();
-        let expected_store_root_hash = self.root.store_root_hash;
+        let expected_store_root_hash = self.root.reference().store_root_hash;
         self.load_exact_object(
             &context,
             reference.object(),
@@ -926,7 +914,7 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &StoreDeviceExclusionProposalRef,
     ) -> Result<VerifiedDeviceExclusionProposal, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreDeviceExclusionProposal,
         );
         let semantic_prefix = device_exclusion_proposal_semantic_prefix(
@@ -935,7 +923,7 @@ impl<'a> StoreCommitVerifier<'a> {
             reference.proposal_hash,
         );
         let expected = reference.clone();
-        let expected_store_root_hash = self.root.store_root_hash;
+        let expected_store_root_hash = self.root.reference().store_root_hash;
         let opened = self
             .load_exact_object(
                 &context,
@@ -979,7 +967,7 @@ impl<'a> StoreCommitVerifier<'a> {
         proposal: &VerifiedDeviceExclusionProposal,
     ) -> Result<VerifiedDeviceExclusionOutcome, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreDeviceExclusionOutcome,
         );
         let semantic_prefix = device_exclusion_outcome_semantic_prefix(
@@ -1038,12 +1026,12 @@ impl<'a> StoreCommitVerifier<'a> {
         registration: &StoreDeviceRegistration,
     ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
         let semantic_prefix =
             ack_slot_prefix(&registration.device_id.to_string(), reference.sequence);
-        let expected_root = self.root.clone();
+        let expected_root = self.root.reference().clone();
         let expected = reference.clone();
         let expected_registration = registration.clone();
         self.load_exact_object(
@@ -1111,10 +1099,10 @@ impl<'a> StoreCommitVerifier<'a> {
             });
         }
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );
-        let expected_root = self.root.clone();
+        let expected_root = self.root.reference().clone();
         let expected_registration_ref = registration_ref.clone();
         let expected_registration = registration.clone();
         let expected_reference = reference.clone();
@@ -1156,7 +1144,7 @@ impl<'a> StoreCommitVerifier<'a> {
         attempt: VerifiedObject<DeviceJoinAttempt>,
         owner: &StoreDeviceRegistration,
     ) -> Result<LoadedDeviceJoinAttemptEvidence, StorePullError> {
-        if attempt.value.store_root != self.root.clone() {
+        if attempt.value.store_root != self.root.reference().clone() {
             return Err(StorePullError::Database(
                 "device join attempt names another Store root".to_string(),
             ));
@@ -1169,7 +1157,7 @@ impl<'a> StoreCommitVerifier<'a> {
         attempt
             .value
             .provider_approval
-            .verify(&self.verified_root, owner, &administrator)
+            .verify(self.root.object(), owner, &administrator)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
         Ok(LoadedDeviceJoinAttemptEvidence { attempt })
     }
@@ -1179,12 +1167,12 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &ReclaimAuthorizationRef,
     ) -> Result<VerifiedReclaimAuthorization, StoreObjectError> {
         let evidence_context = ProtocolObjectContext::store_encrypted(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreReclaimEvidence,
         );
         let evidence_prefix = reclaim_evidence_semantic_prefix(reference.evidence.evidence_hash);
         let expected_evidence = reference.evidence.clone();
-        let expected_store_root_hash = self.root.store_root_hash;
+        let expected_store_root_hash = self.root.reference().store_root_hash;
         let evidence = self
             .load_exact_object(
                 &evidence_context,
@@ -1200,14 +1188,14 @@ impl<'a> StoreCommitVerifier<'a> {
             )
             .await?;
         let authorization_context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreReclaimAuthorization,
         );
         let authorization_prefix =
             reclaim_authorization_semantic_prefix(reference.authorization_hash);
         let owner_pubkey = evidence.value.author_pubkey.clone();
         let expected_authorization = reference.clone();
-        let expected_store_root_hash = self.root.store_root_hash;
+        let expected_store_root_hash = self.root.reference().store_root_hash;
         let authorization = self
             .load_exact_object(
                 &authorization_context,
@@ -1244,7 +1232,7 @@ impl<'a> StoreCommitVerifier<'a> {
         self.load_reclaim_authorization(&reference.authorization)
             .await?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreReclaimReceipt,
         );
         let prefix = reclaim_receipt_semantic_prefix(reference.receipt_hash);
@@ -1262,7 +1250,10 @@ impl<'a> StoreCommitVerifier<'a> {
         let receipt = reference
             .verify(&unverified, &executor)
             .and_then(|()| {
-                verify_store_root(self.root.store_root_hash, unverified.store_root_hash)?;
+                verify_store_root(
+                    self.root.reference().store_root_hash,
+                    unverified.store_root_hash,
+                )?;
                 Ok(unverified)
             })
             .map_err(|source| StoreObjectError::InvalidObject {
@@ -1314,7 +1305,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     source: Box::new(StoreProtocolError::InvalidAckSequence(0)),
                 })?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
         let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), sequence);
@@ -1335,13 +1326,11 @@ impl<'a> StoreCommitVerifier<'a> {
             ack_hash,
             object: object.clone(),
         };
-        let value =
-            StoreAck::parse_at(&bytes, &self.root, &reference, registration).map_err(|source| {
-                StoreObjectError::InvalidObject {
-                    semantic_prefix,
-                    key: object.slot().logical_key().to_string(),
-                    source: Box::new(source),
-                }
+        let value = StoreAck::parse_at(&bytes, self.root.reference(), &reference, registration)
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix,
+                key: object.slot().logical_key().to_string(),
+                source: Box::new(source),
             })?;
         Ok(Some((
             reference.clone(),
@@ -1364,10 +1353,10 @@ impl<'a> StoreCommitVerifier<'a> {
             reference.sequence,
         );
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
-        let expected_root = self.root.clone();
+        let expected_root = self.root.reference().clone();
         let expected = reference.clone();
         self.load_exact_object(
             &context,
@@ -1388,13 +1377,13 @@ impl<'a> StoreCommitVerifier<'a> {
         let semantic_prefix =
             head_slot_prefix(&registration.device_id.to_string(), commit.coord.sequence());
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
         let expected = reference.clone();
         let expected_registration = registration.clone();
         let expected_commit = commit.clone();
-        let store_root_hash = self.root.store_root_hash;
+        let store_root_hash = self.root.reference().store_root_hash;
         self.load_exact_object(
             &context,
             &reference.object,
@@ -1501,7 +1490,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 source: Box::new(source),
             })?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.root.store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreCommit,
         );
         let bytes = self
@@ -1542,7 +1531,7 @@ impl<'a> StoreCommitVerifier<'a> {
         let author = self.load_registration(&author_reference).await?.value;
         let expected_reference = reference.clone();
         let expected_author = author.clone();
-        let store_root_hash = self.root.store_root_hash;
+        let store_root_hash = self.root.reference().store_root_hash;
         let verify_bytes = bytes;
         run_blocking_object_verification(
             &semantic_prefix,
@@ -1559,14 +1548,6 @@ impl<'a> StoreCommitVerifier<'a> {
         .await
     }
 
-    pub(crate) fn verified_root(&self) -> &StoreProtocolRoot {
-        &self.verified_root.value
-    }
-
-    pub(crate) fn verified_root_object(&self) -> &VerifiedObject<StoreProtocolRoot> {
-        &self.verified_root
-    }
-
     pub(crate) async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
@@ -1579,21 +1560,24 @@ impl<'a> StoreCommitVerifier<'a> {
             .map_err(StoreObjectError::from)
     }
 
-    pub(crate) fn storage(&self) -> &'a dyn SyncStorage {
+    pub(crate) async fn read_protocol_slot(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
         self.storage
-    }
-
-    pub(crate) fn root(&self) -> &StoreRootRef {
-        &self.root
+            .read_protocol_slot(context, slot, semantic_prefix)
+            .await
     }
 
     pub(crate) fn remember(
         &mut self,
         commit: VerifiedStoreBatchCommit,
     ) -> Result<(), StoreProtocolError> {
-        if commit.store_root_hash() != self.root.store_root_hash {
+        if commit.store_root_hash() != self.root.reference().store_root_hash {
             return Err(StoreProtocolError::StoreRootMismatch {
-                expected: self.root.store_root_hash,
+                expected: self.root.reference().store_root_hash,
                 actual: commit.store_root_hash(),
             });
         }

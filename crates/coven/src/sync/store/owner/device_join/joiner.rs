@@ -13,7 +13,7 @@ pub(crate) struct PendingDeviceJoinAuthority<'storage> {
 pub(crate) struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
     storage: &'storage dyn SyncStorage,
-    store_root: StoreRootRef,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
 
@@ -37,8 +37,8 @@ pub(crate) async fn observe_pending_device_join<'storage>(
     store_root: &StoreRootRef,
     attempt_id: DeviceJoinAttemptId,
 ) -> Result<PendingDeviceJoinObservation<'storage>, DeviceJoinError> {
-    let history_verifier =
-        crate::sync::store::owner::verified_history::open_merge_history_verifier(
+    let (root, history_verifier) =
+        crate::sync::store::owner::verified_history::open_merge_history_verifier_with_root(
             PendingDeviceJoinHistoryConstruction.authorize_history(),
             storage,
             store_root,
@@ -47,7 +47,7 @@ pub(crate) async fn observe_pending_device_join<'storage>(
     Ok(PendingDeviceJoinObservation {
         journal: PendingJoinJournal::new(pending, attempt_id),
         storage,
-        store_root: store_root.clone(),
+        root,
         history_verifier,
     })
 }
@@ -77,28 +77,25 @@ async fn joining_store_from_observation<'storage>(
     let PendingDeviceJoinObservation {
         journal,
         storage,
-        store_root,
+        root,
         history_verifier,
     } = observation;
     let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
         database.clone(),
         storage,
-        store_root.clone(),
+        root.reference().clone(),
     );
-    let keyrings = super::super::keyring::StoreKeyrings::new(storage, store_root);
+    let keyrings = super::super::keyring::StoreKeyrings::new(storage, root.reference().clone());
     let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
         PendingDeviceJoinHistoryConstruction,
         database,
+        storage,
+        root.clone(),
         history_verifier,
         blob_source,
         keyrings,
     );
-    let founder_pubkey = history
-        .verified_root_object()
-        .value
-        .descriptor
-        .founder_pubkey
-        .clone();
+    let founder_pubkey = root.protocol().descriptor.founder_pubkey.clone();
     let membership = history
         .load_and_install_owner_membership(&founder_pubkey)
         .await
@@ -341,8 +338,8 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     ) -> Result<(), DeviceJoinError> {
         if crate::keys::public_key_hex(identity) != offer.member_pubkey
             || self.storage.provider_binding().await?.store != offer.provider
-            || self.history_verifier.verified_root().descriptor.provider != offer.provider
-            || self.history_verifier.root() != &offer.store_root
+            || self.root.protocol().descriptor.provider != offer.provider
+            || self.root.reference() != &offer.store_root
         {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -406,15 +403,14 @@ impl PendingDeviceJoinObservation<'_> {
             return Ok(abandonment);
         }
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            self.history_verifier.root().store_root_hash,
+            self.root.reference().store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
         let prefix = crate::protocol::store_commit::device_join_abandonment_semantic_prefix(
             self.journal.attempt_id,
         );
         let bytes = self
-            .history_verifier
-            .storage()
+            .storage
             .read_protocol_object(&context, &abandonment.abandonment.object, &prefix)
             .await?;
         let object: DeviceJoinAbandonmentObject = serde_json::from_slice(&bytes)?;
@@ -488,7 +484,7 @@ impl PendingDeviceJoinObservation<'_> {
             DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::OfferReceived(durable))
                 if durable == offer =>
             {
-                let binding = self.history_verifier.storage().provider_binding().await?;
+                let binding = self.storage.provider_binding().await?;
                 if binding.store != offer.provider {
                     return Err(DeviceJoinError::OfferMismatch);
                 }
@@ -552,11 +548,7 @@ impl PendingDeviceJoinObservation<'_> {
             .load_registration(&approval.request.offer.provider_admin.administrator)
             .await?
             .value;
-        approval.verify(
-            self.history_verifier.verified_root_object(),
-            &owner,
-            &administrator,
-        )?;
+        approval.verify(self.root.object(), &owner, &administrator)?;
         self.history_verifier
             .verify_accepted_provider_access_activation(
                 &approval.access_grant,
@@ -564,7 +556,7 @@ impl PendingDeviceJoinObservation<'_> {
                 &administrator,
             )
             .await?;
-        let storage = self.history_verifier.storage();
+        let storage = self.storage;
         let live = storage.provider_binding().await?;
         if live.store != approval.request.offer.provider
             || live.device != approval.request.peer_provider
@@ -994,7 +986,7 @@ impl PendingDeviceJoinObservation<'_> {
             .value
             .expected_registration
             .device_signer(identity)?;
-        let peer_exact = self.history_verifier.storage().exact_slot_storage();
+        let peer_exact = self.storage.exact_slot_storage();
         let (registration, initial_ack, response, prior_state_hash, intent) = match &*current
             .progress
         {

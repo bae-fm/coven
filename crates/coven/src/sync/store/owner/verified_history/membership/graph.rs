@@ -406,11 +406,13 @@ fn project_membership_cut_to_store_prefix(
 }
 
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
+    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let mut authority = MembershipActivationAuthority::VerifiedPrefix {
+        root: root.clone(),
         commit_verifier,
         activations: prefix,
     };
@@ -689,7 +691,7 @@ fn load_layered_membership_chain<'a>(
                         ));
                     }
                 }
-                MembershipActivationAuthority::History(history) => {
+                MembershipActivationAuthority::History { history, .. } => {
                     Box::pin(history.verify_owner_conflict_acceptance(
                         &value.replacement_acceptance,
                         &value.resolver_pubkey,

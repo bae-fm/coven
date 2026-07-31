@@ -26,6 +26,8 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
 
 pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
     database: &'operation crate::database::StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    root: &'operation StoreRootRef,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
@@ -33,19 +35,18 @@ pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
 impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation crate::database::StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: &'operation StoreRootRef,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
     ) -> Self {
-        Self { database, history }
-    }
-
-    fn storage(&self) -> &dyn SyncStorage {
-        self.history.storage()
-    }
-
-    fn root(&self) -> &StoreRootRef {
-        self.history.root()
+        Self {
+            database,
+            storage,
+            root,
+            history,
+        }
     }
 }
 
@@ -607,8 +608,8 @@ impl CircleSnapshotReader<'_, '_> {
         )>,
         SnapshotError,
     > {
-        let storage = self.storage();
-        let root = self.root();
+        let storage = self.storage;
+        let root = self.root;
         if registration_ref.device_id != registration.device_id {
             return Err(SnapshotError::Parse(
                 "Circle snapshot registration reference names another device".to_string(),
@@ -716,7 +717,7 @@ impl CircleSnapshotReader<'_, '_> {
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
         use crate::database::StagedCircleDecision;
-        let root = self.root().clone();
+        let root = self.root.clone();
         // The stream-activation index the control-stream authority resolves against is
         // written by the pull, which has not run on a freshly restored device; seed it
         // from the retained materializations selection reads anyway.
@@ -835,7 +836,7 @@ impl CircleSnapshotReader<'_, '_> {
         head_commit: &crate::protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<super::activation::LocalCircleAccess, SnapshotError> {
         let commit_lookup = head_commit.clone();
-        let root = self.root().clone();
+        let root = self.root.clone();
         let owned = self
             .database
             .retained_merge_materialization_by_ref(root, commit_lookup)
@@ -855,16 +856,21 @@ impl CircleSnapshotReader<'_, '_> {
                  activation"
             ))
             })?;
-        super::activation::CircleActivationVerifier::new(self.database, self.history)
-            .resolve_local_access(
-                &commit,
-                &reference.reference,
-                &reference.control,
-                restorer_identity,
-                routing_key,
-            )
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
+        super::activation::CircleActivationVerifier::new(
+            self.database,
+            self.storage,
+            self.root,
+            self.history,
+        )
+        .resolve_local_access(
+            &commit,
+            &reference.reference,
+            &reference.control,
+            restorer_identity,
+            routing_key,
+        )
+        .await
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
     }
 }
 
@@ -923,7 +929,7 @@ impl CircleSnapshotReader<'_, '_> {
                 let covered = self
                     .database
                     .verified_circle_control_coord_covers(
-                        self.root().clone(),
+                        self.root.clone(),
                         circle_id,
                         head,
                         snapshot_control,
@@ -950,12 +956,12 @@ impl CircleSnapshotReader<'_, '_> {
             .expect("the selected standalone snapshot is one of the installable candidates");
         let author_device = selected.author_registration.device_id.to_string();
         let image_context = ProtocolObjectContext::circle(
-            self.root().store_root_hash,
+            self.root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotImage,
             encryption.clone(),
         );
         let image_bytes = self
-            .storage()
+            .storage
             .read_protocol_object(
                 &image_context,
                 &selected.bootstrap.image.object,

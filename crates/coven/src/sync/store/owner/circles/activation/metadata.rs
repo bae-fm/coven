@@ -27,7 +27,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit_ref: &StoreBatchCommitRef,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
     ) -> Result<CircleMetadata, CircleOperationError> {
-        let root = self.history.root().clone();
+        let root = self.root.clone();
         commit_ref
             .verify_commit(commit)
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -85,10 +85,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 head_encryption,
             );
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(&context, &object.object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -189,10 +189,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 exact_encryption,
             );
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(&exact_context, &object.object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != coord.metadata_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle metadata bytes differ from the signed coordinate".to_string(),

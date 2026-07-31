@@ -37,6 +37,8 @@ use crate::sync::store::circle_controls::activation::{
 
 pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    root: &'operation StoreRootRef,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
@@ -44,11 +46,18 @@ pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        root: &'operation StoreRootRef,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
     ) -> Self {
-        Self { database, history }
+        Self {
+            database,
+            storage,
+            root,
+            history,
+        }
     }
 
     async fn load_access_pairs(
@@ -80,7 +89,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 reference.envelope.control_hash,
             );
             let envelope_bytes = self
-                .history
+                .storage
                 .read_protocol_object(
                     &ProtocolObjectContext::store_encrypted(
                         commit.store_root_hash,
@@ -90,7 +99,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &envelope_prefix,
                 )
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             let envelope: AccessEnvelope =
                 serde_json::from_slice(&envelope_bytes).map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -119,7 +128,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 reference.leaf.leaf_id,
             );
             let leaf_bytes = self
-                .history
+                .storage
                 .read_protocol_object(
                     &ProtocolObjectContext::recipient_sealed(
                         commit.store_root_hash,
@@ -129,7 +138,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &leaf_prefix,
                 )
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle access leaf bytes differ from the paired leaf hash".to_string(),
@@ -353,7 +362,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
     ) -> Result<crate::protocol::circle::CircleEpochCloseIntent, CircleOperationError> {
-        let store_root_hash = self.history.root().store_root_hash;
+        let store_root_hash = self.root.store_root_hash;
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleOperationError::InvalidState(
                 "Circle epoch-close intent has no close control".to_string(),
@@ -370,7 +379,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             close.intent.intent_hash,
         );
         let bytes = self
-            .history
+            .storage
             .read_protocol_object(
                 &ProtocolObjectContext::circle(
                     store_root_hash,
@@ -381,7 +390,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &intent_prefix,
             )
             .await
-            .map_err(CircleOperationError::from)?;
+            .map_err(crate::storage::StoreObjectError::from)?;
         let intent: crate::protocol::circle::CircleEpochCloseIntent =
             serde_json::from_slice(&bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!(
@@ -426,11 +435,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             Some(_) => {
                 let coord = Self::reopen_predecessor_coord(control)?;
                 self.database
-                    .verified_circle_activation(
-                        self.history.root().clone(),
-                        control.value.circle_id,
-                        coord,
-                    )
+                    .verified_circle_activation(self.root.clone(), control.value.circle_id, coord)
                     .await?
             }
         };
@@ -510,7 +515,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let predecessor = self
             .database
             .verified_circle_activation(
-                self.history.root().clone(),
+                self.root.clone(),
                 control.value.circle_id,
                 close_control.clone(),
             )
@@ -547,7 +552,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             *close_id,
         );
         let outcome_bytes = self
-            .history
+            .storage
             .read_protocol_object(
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
@@ -557,7 +562,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &outcome_prefix,
             )
             .await
-            .map_err(CircleOperationError::from)?;
+            .map_err(crate::storage::StoreObjectError::from)?;
         let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
             crate::protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(
                 |error| {
@@ -599,7 +604,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 participant.registration.device_id,
             );
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(
                     &ProtocolObjectContext::store_encrypted(
                         commit.store_root_hash,
@@ -609,7 +614,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &prefix,
                 )
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             // Dispatch on the slot's actual settled arm, not the outcome's claim: the
             // outcome's declared settlement must equal the one derived here, which is
             // what refuses an outcome naming an exclusion for a slot holding a response.
@@ -742,7 +747,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let predecessor = self
             .database
             .verified_circle_activation(
-                self.history.root().clone(),
+                self.root.clone(),
                 control.value.circle_id,
                 close_coord.clone(),
             )
@@ -772,7 +777,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 close.close_id,
             );
         let cancellation_bytes = self
-            .history
+            .storage
             .read_protocol_object(
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
@@ -782,7 +787,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &cancellation_prefix,
             )
             .await
-            .map_err(CircleOperationError::from)?;
+            .map_err(crate::storage::StoreObjectError::from)?;
         let crate::protocol::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
             crate::protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes)
                 .map_err(|error| {
@@ -1042,10 +1047,10 @@ impl CircleActivationVerifier<'_, '_> {
                     )
                 })?;
             let predecessor_bytes = self
-                .history
+                .storage
                 .read_protocol_object(context, &predecessor_object, predecessor_prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             let predecessor = CircleHeadValue::parse(kind, &predecessor_bytes)?;
             let predecessor_position = predecessor.position()?;
             if predecessor.semantic_prefix(predecessor_object.clone()) != predecessor_prefix
@@ -1086,10 +1091,10 @@ impl CircleActivationVerifier<'_, '_> {
                 control: &reference.coord,
             });
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(&context, &reference.object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                 CircleOperationError::InvalidState(format!(
@@ -1147,7 +1152,7 @@ impl CircleActivationVerifier<'_, '_> {
         grant_id: &crate::protocol::membership::MembershipGrantId,
         expected_anchor: fn(CircleId, crate::storage::cloud::ObjectSlot) -> GrantStreamAnchor,
     ) -> Result<CircleStreamAuthority, CircleOperationError> {
-        let root = self.history.root().clone();
+        let root = self.root.clone();
         let current = commit
             .stream_activations()
             .iter()
@@ -1479,8 +1484,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
             .await?;
         let history_verifier = &mut *self.history;
-        let root = history_verifier.root().clone();
-        let storage = history_verifier.storage();
         let checkpoint_members =
             Box::pin(verify_control_membership(history_verifier, control)).await?;
         let Some(resolved) = resolve_identity_access_leaf(
@@ -1508,8 +1511,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             Some(bootstrap) => Some(
                 build_verified_leaf_bootstrap_image(
                     database,
-                    storage,
-                    &root,
+                    self.storage,
+                    self.root,
                     &resolved.prepared_leaf.value,
                     control,
                     bootstrap,
@@ -1588,11 +1591,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let database = self.database;
-        let root = self.history.root().clone();
+        let root = self.root.clone();
         let commit_ref = verified.reference();
         let commit = verified.value();
         let author = verified.author();
-        if self.history.root().store_root_hash != commit.store_root_hash
+        if self.root.store_root_hash != commit.store_root_hash
             || commit
                 .author_registration
                 .verify_registration(author)
@@ -1622,7 +1625,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 control: reference.control(),
             });
             let control_bytes = read_exact_circle_object(
-                self.history.storage(),
+                self.storage,
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
@@ -1669,7 +1672,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             });
             let head_object = reference.head_object();
             let bytes = read_exact_circle_object(
-                self.history.storage(),
+                self.storage,
                 &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
@@ -1924,7 +1927,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         // error here — verification and blob checks fail as `InvalidState`.
                         match build_verified_leaf_bootstrap_image(
                             database,
-                            self.history.storage(),
+                            self.storage,
                             &root,
                             leaf,
                             &control,

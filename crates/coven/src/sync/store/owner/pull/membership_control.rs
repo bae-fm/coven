@@ -18,6 +18,7 @@ pub(crate) fn membership_authorizes(
 }
 
 pub(crate) async fn verify_merge_membership_control_with_history(
+    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
@@ -32,7 +33,6 @@ pub(crate) async fn verify_merge_membership_control_with_history(
     ),
     String,
 > {
-    let root = commit_verifier.root().clone();
     let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
         return Err("Merge membership verifier received another Store control".to_string());
     };
@@ -195,6 +195,7 @@ pub(crate) async fn verify_merge_membership_control_with_history(
         );
     }
     super::owner_promotion::verify_merge_owner_promotion_acceptance_with_history(
+        root,
         commit_verifier,
         acceptance,
         verified_commits,

@@ -17,18 +17,21 @@ pub(crate) struct CircleAcknowledgementWriter {
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
     database: &'operation crate::database::StoreDatabase,
-    history:
-        &'operation crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    storage: &'storage dyn crate::storage::SyncStorage,
+    root: &'operation crate::protocol::store_commit::StoreRootRef,
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation crate::database::StoreDatabase,
-        history: &'operation crate::sync::store::owner::verified_history::MergeHistoryVerifier<
-            'storage,
-        >,
+        storage: &'storage dyn crate::storage::SyncStorage,
+        root: &'operation crate::protocol::store_commit::StoreRootRef,
     ) -> Self {
-        Self { database, history }
+        Self {
+            database,
+            storage,
+            root,
+        }
     }
 
     pub(crate) async fn load(
@@ -38,7 +41,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
         let access = self
             .database
             .circle_package_access(
-                self.history.root().clone(),
+                self.root.clone(),
                 reference.circle_id,
                 reference.control.clone(),
             )
@@ -54,7 +57,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .activated_store_device_registration(reference.registration.clone())
             .await?;
         let context = ProtocolObjectContext::circle(
-            self.history.root().store_root_hash,
+            self.root.store_root_hash,
             ProtocolObjectDomain::CircleAcknowledgement,
             access.into_encryption(),
         );
@@ -64,12 +67,11 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             reference.sequence,
         );
         let bytes = self
-            .history
-            .storage()
+            .storage
             .read_protocol_object(&context, &reference.object, &semantic_prefix)
             .await
             .map_err(StoreObjectError::from)?;
-        CircleAck::parse_at(&bytes, self.history.root(), reference, &author)
+        CircleAck::parse_at(&bytes, self.root, reference, &author)
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
     }
 

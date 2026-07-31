@@ -1,11 +1,11 @@
 use super::*;
 
 pub(crate) async fn verify_merge_owner_promotion_acceptance_with_history(
+    root: &StoreRootRef,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     acceptance: &super::store_commit::OwnerPromotionAcceptance,
     verified_commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 ) -> Result<(), StorePullError> {
-    let root = commit_verifier.root().clone();
     let request = &acceptance.request;
     let super::store_commit::OwnerPromotionRequestActivation {
         commit: activation_commit,
@@ -18,7 +18,7 @@ pub(crate) async fn verify_merge_owner_promotion_acceptance_with_history(
         .load_registration(&request.member_registration)
         .await?;
     request
-        .verify(&root, &promoter.value)
+        .verify(root, &promoter.value)
         .map_err(|error| StorePullError::Database(error.to_string()))?;
     acceptance
         .verify(&candidate.value)

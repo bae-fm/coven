@@ -24,7 +24,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
     ) -> Result<VerifiedObject<MembershipEntry>, StoreObjectError> {
         crate::storage::load_membership_entry_ref(
             self.commit_verifier.storage,
-            self.commit_verifier.root.store_root_hash,
+            self.commit_verifier.root.reference().store_root_hash,
             reference,
         )
         .await
@@ -36,7 +36,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
     ) -> Result<VerifiedObject<StoreMembershipConflictResolution>, StoreObjectError> {
         crate::storage::load_membership_resolution_ref(
             self.commit_verifier.storage,
-            self.commit_verifier.root.store_root_hash,
+            self.commit_verifier.root.reference().store_root_hash,
             reference,
         )
         .await
@@ -63,7 +63,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             .storage
             .read_protocol_object(
                 &ProtocolObjectContext::signed_plaintext(
-                    self.commit_verifier.root.store_root_hash,
+                    self.commit_verifier.root.reference().store_root_hash,
                     ProtocolObjectDomain::StoreMembershipHead,
                 ),
                 &reference.object,
@@ -118,7 +118,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             }
         })?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.root.store_root_hash,
+            self.commit_verifier.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreMembershipHead,
         );
         let (bytes, object) = self

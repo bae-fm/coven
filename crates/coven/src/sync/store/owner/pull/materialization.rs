@@ -39,6 +39,7 @@ pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
 }
 
 pub(crate) async fn readiness(
+    root: &StoreRootRef,
     database: &StoreDatabase,
     history_verifier: &mut MergeHistoryVerifier<'_>,
     coverage: &super::store_commit::CommitFrontier,
@@ -48,7 +49,6 @@ pub(crate) async fn readiness(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Readiness, StorePullError> {
-    let root = history_verifier.root().clone();
     let stream_id = commit_stream_id(&commit_ref.coord);
     if let Some(current) = frontier.get(&stream_id) {
         if commit_ref.coord.sequence() <= current.coord.sequence() {

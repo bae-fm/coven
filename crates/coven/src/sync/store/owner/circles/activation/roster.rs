@@ -187,10 +187,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 ))
             })?;
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(context, object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != coord.entry_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle roster entry bytes differ from the signed coordinate".to_string(),
@@ -258,10 +258,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 resolution: reference,
             });
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(&context, object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != reference.resolution_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle roster resolution bytes differ from the signed reference".to_string(),
@@ -306,10 +306,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     ))
                 })?;
             let bytes = self
-                .history
+                .storage
                 .read_protocol_object(context, &object.object, &prefix)
                 .await
-                .map_err(CircleOperationError::from)?;
+                .map_err(crate::storage::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!("parse Circle roster head: {error}"))

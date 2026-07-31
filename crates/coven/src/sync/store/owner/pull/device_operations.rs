@@ -60,13 +60,13 @@ impl DeviceStateResolver<'_> {
 }
 
 pub(crate) async fn load_commit_device_operations(
+    root: &StoreRootRef,
     resolver: Option<&DeviceStateResolver<'_>>,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     commit: &StoreBatchCommit,
     predecessor_state: &ResolvedStoreDeviceState,
     predecessor_membership: Option<&MembershipChain>,
 ) -> Result<VerifiedStoreDeviceOperations, RegistrationLoadError> {
-    let root = commit_verifier.root().clone();
     if commit.device_exclusion_proposals().is_empty()
         && commit.device_exclusion_outcomes().is_empty()
     {
@@ -322,6 +322,6 @@ pub(crate) async fn load_commit_device_operations(
         );
     }
     RetainedStoreDeviceOperations::from_sources(proposals, outcomes)
-        .verify_for(&root, commit)
+        .verify_for(root, commit)
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
 }

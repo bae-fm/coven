@@ -8,8 +8,8 @@ use crate::protocol::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
     StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
-    StoreRootRef, SuccessorLink,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
+    StoreProtocolRoot, StoreRootRef, SuccessorLink,
 };
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectDomain, SyncStorage};
@@ -143,6 +143,43 @@ pub(super) enum StoreProtocolRootError {
     Missing(ObjectHash),
     #[error("Store provider check failed: {0}")]
     Provider(String),
+}
+
+#[derive(Clone)]
+pub(crate) struct VerifiedStoreRoot {
+    reference: StoreRootRef,
+    object: crate::storage::VerifiedObject<StoreProtocolRoot>,
+}
+
+impl VerifiedStoreRoot {
+    pub(crate) fn from_verified_object(
+        reference: StoreRootRef,
+        object: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    ) -> Result<Self, StoreProtocolError> {
+        let verified_reference = StoreRootRef {
+            store_root_id: object.value.descriptor.store_root_id(),
+            store_root_hash: object.semantic_hash,
+            object: object.object.clone(),
+        };
+        if verified_reference != reference {
+            return Err(StoreProtocolError::Malformed(
+                "verified Store root belongs to another exact reference".to_string(),
+            ));
+        }
+        Ok(Self { reference, object })
+    }
+
+    pub(crate) fn reference(&self) -> &StoreRootRef {
+        &self.reference
+    }
+
+    pub(crate) fn protocol(&self) -> &StoreProtocolRoot {
+        &self.object.value
+    }
+
+    pub(crate) fn object(&self) -> &crate::storage::VerifiedObject<StoreProtocolRoot> {
+        &self.object
+    }
 }
 
 fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority {

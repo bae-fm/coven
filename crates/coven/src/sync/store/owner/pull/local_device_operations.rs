@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) async fn load_local_commit_device_operations(
+    root: &StoreRootRef,
     database: &StoreDatabase,
     commit_verifier: &mut StoreCommitVerifier<'_>,
     verified_commit: &VerifiedStoreBatchCommit,
@@ -8,7 +9,6 @@ pub(crate) async fn load_local_commit_device_operations(
     state_ref: &StoreDeviceStateRef,
     state: ResolvedStoreDeviceState,
 ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
-    let root = commit_verifier.root();
     if verified_commit.store_root_hash() != root.store_root_hash {
         return Err(StorePullError::Database(
             "local device-operation commit belongs to another Store root".to_string(),
@@ -30,6 +30,7 @@ pub(crate) async fn load_local_commit_device_operations(
     verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
     let resolver = DeviceStateResolver::Database(database);
     Box::pin(load_commit_device_operations(
+        root,
         Some(&resolver),
         commit_verifier,
         commit,

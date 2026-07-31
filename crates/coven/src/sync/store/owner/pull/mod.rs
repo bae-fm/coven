@@ -14,22 +14,19 @@ use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterializ
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
-    head_slot_prefix, CirclePackageRef, CommitFrontier, DeviceStreamAnchor, ObjectHash,
-    OwnerRecoveryCursor, OwnerRecoveryPosition, ResolvedStoreDeviceState,
-    RetainedStoreDeviceExclusionOutcome, RetainedStoreDeviceExclusionProposal,
-    RetainedStoreDeviceOperations, RetainedVerifiedMergeHistorySummary,
-    RetainedVerifiedRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
-    StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    CirclePackageRef, CommitFrontier, ObjectHash, OwnerRecoveryCursor, OwnerRecoveryPosition,
+    ResolvedStoreDeviceState, RetainedStoreDeviceExclusionOutcome,
+    RetainedStoreDeviceExclusionProposal, RetainedStoreDeviceOperations,
+    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
+    StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+    StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef,
+    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
-use crate::storage::{
-    BlobSpoolProtection, ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-};
+use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};

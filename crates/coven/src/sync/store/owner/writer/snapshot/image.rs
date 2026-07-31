@@ -304,6 +304,7 @@ pub(crate) struct BootstrapResult<'storage> {
     database_image: StagedDatabaseImage,
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     storage: &'storage dyn SyncStorage,
     founder_registration:
         crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
@@ -372,6 +373,7 @@ impl<'storage> BootstrapResult<'storage> {
             database_image,
             db_hash,
             mut history_verifier,
+            root,
             storage,
             founder_registration,
             restorer_identity,
@@ -401,11 +403,11 @@ impl<'storage> BootstrapResult<'storage> {
             if snapshot_db_hash(&database_bytes) != db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
-            let root = history_verifier.root().clone();
+            let root_ref = root.reference().clone();
             let store_frontier = coverage.clone();
             let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
                 snapshot,
-                history_verifier.verified_root_object().clone(),
+                root.object().clone(),
                 founder_registration,
                 stability,
                 crate::database::InitialStoreMembershipAuthority {
@@ -422,7 +424,7 @@ impl<'storage> BootstrapResult<'storage> {
                 Some(encryption) => {
                     let routing_key = crate::protocol::circle::derive_row_routing_key(
                         encryption,
-                        root.store_root_hash,
+                        root_ref.store_root_hash,
                     )
                     .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
                     stage_restore_circle_decisions(
@@ -434,6 +436,8 @@ impl<'storage> BootstrapResult<'storage> {
                         &device_id,
                         &clock,
                         migrations,
+                        storage,
+                        &root_ref,
                         &mut history_verifier,
                         &store_frontier,
                         &restorer_identity,
@@ -465,14 +469,16 @@ impl<'storage> BootstrapResult<'storage> {
             let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
                 database.clone(),
                 storage,
-                root.clone(),
+                root_ref.clone(),
             );
             let keyrings =
-                crate::sync::store::owner::keyring::StoreKeyrings::new(storage, root.clone());
+                crate::sync::store::owner::keyring::StoreKeyrings::new(storage, root_ref);
             Ok(
                 crate::sync::store::owner::history::AuthorizedStoreHistory::from_snapshot(
                     super::SnapshotHistoryConstruction,
                     database,
+                    storage,
+                    root,
                     history_verifier,
                     blob_source,
                     keyrings,
@@ -498,7 +504,7 @@ impl<'storage> BootstrapResult<'storage> {
 /// uses, queried, then deleted; only the decisions cross back to the real
 /// install, which applies them in its single transaction.
 #[allow(clippy::too_many_arguments)]
-async fn stage_restore_circle_decisions(
+async fn stage_restore_circle_decisions<'storage>(
     raw_image_path: &Path,
     install: &crate::database::VerifiedSnapshotBootstrapInstall,
     synced_tables: &[SyncedTable],
@@ -507,7 +513,11 @@ async fn stage_restore_circle_decisions(
     device_id: &str,
     clock: &crate::clock::ClockRef,
     migrations: &[Migration],
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
+    storage: &'storage dyn SyncStorage,
+    root: &crate::protocol::store_commit::StoreRootRef,
+    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        'storage,
+    >,
     store_frontier: &crate::protocol::store_commit::CommitFrontier,
     restorer_identity: &crate::keys::UserKeypair,
     routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
@@ -533,6 +543,8 @@ async fn stage_restore_circle_decisions(
         let store_database = crate::database::StoreDatabase::from_database(query_db);
         crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
             &store_database,
+            storage,
+            root,
             history_verifier,
         )
         .select_staged_decisions(store_frontier, restorer_identity, routing_key)
@@ -1265,7 +1277,8 @@ pub(crate) async fn bootstrap_from_snapshot<'storage>(
     .select(membership_floor, binary_schema_version)
     .await?;
     let founder_registration = selected.founder_registration().await?;
-    let (history_verifier, snapshot, plaintext, stability, membership) = selected.into_parts();
+    let (root, history_verifier, snapshot, plaintext, stability, membership) =
+        selected.into_parts();
     let coverage = snapshot.meta.coverage.clone();
     let database_image =
         StagedDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
@@ -1281,6 +1294,7 @@ pub(crate) async fn bootstrap_from_snapshot<'storage>(
         database_image,
         db_hash: snapshot_db_hash(&plaintext),
         history_verifier,
+        root,
         storage,
         founder_registration,
         restorer_identity: restorer_identity.clone(),

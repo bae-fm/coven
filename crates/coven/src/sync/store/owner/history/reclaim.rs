@@ -6,15 +6,24 @@ use crate::protocol::store_commit::{
 
 pub(crate) struct ReclaimHistory<'operation, 'storage> {
     database: StoreDatabase,
+    storage: &'storage dyn crate::storage::SyncStorage,
+    root: &'operation crate::protocol::store_commit::StoreRootRef,
     history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
+        storage: &'storage dyn crate::storage::SyncStorage,
+        root: &'operation crate::protocol::store_commit::StoreRootRef,
         history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
     ) -> Self {
-        Self { database, history }
+        Self {
+            database,
+            storage,
+            root,
+            history,
+        }
     }
 
     pub(crate) fn circle_acknowledgements(
@@ -22,14 +31,20 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     ) -> super::super::circles::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
         super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
-            self.history,
+            self.storage,
+            self.root,
         )
     }
 
     pub(crate) fn circle_snapshots(
         &mut self,
     ) -> super::super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
-        super::super::circles::snapshots::CircleSnapshotReader::new(&self.database, self.history)
+        super::super::circles::snapshots::CircleSnapshotReader::new(
+            &self.database,
+            self.storage,
+            self.root,
+            self.history,
+        )
     }
 
     pub(crate) async fn load_ref(
