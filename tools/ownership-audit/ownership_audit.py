@@ -2846,6 +2846,10 @@ def build_index() -> dict[str, Any]:
         analyzer.initialize()
         try:
             analyzer.wait_until_ready()
+            print(
+                f"indexing {view.name} call hierarchy for {len(named)} callables",
+                flush=True,
+            )
             opened_paths: set[Path] = set()
             for number, record in enumerate(named, start=1):
                 path = (ROOT / record["path"]).resolve()
