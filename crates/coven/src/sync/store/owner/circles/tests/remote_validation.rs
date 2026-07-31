@@ -31,8 +31,10 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         &invented_recipient_slot,
         original_ref.leaf.leaf_id,
     );
-    let leaf = prepare_circle_object(
+    let leaf = prepare_test_circle_object(
+        &db,
         &store.storage,
+        &signer,
         &ProtocolObjectContext::recipient_sealed(
             old_commit.store_root_hash,
             ProtocolObjectDomain::CircleAccessLeaf,
@@ -50,8 +52,10 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         &invented_recipient_slot,
         original_ref.envelope.control_hash,
     );
-    let envelope = prepare_circle_object(
+    let envelope = prepare_test_circle_object(
+        &db,
         &store.storage,
+        &signer,
         &ProtocolObjectContext::store_encrypted(
             old_commit.store_root_hash,
             ProtocolObjectDomain::CircleAccessEnvelope,
@@ -118,8 +122,10 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     )
     .expect("sign commit naming invented access refs");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
-    let commit_prepared = prepare_circle_object(
+    let commit_prepared = prepare_test_circle_object(
+        &db,
         &store.storage,
+        &signer,
         &ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
@@ -289,17 +295,13 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     let mut draft = draft_from_transition(&journal.operation().creation);
     promote_store_member_access_without_adding_to_circle_roster(&mut draft, &founder, &peer);
     let (creation, objects, prepared, control_head_object, stream_activations) =
-        prepare_circle_activation_objects(
+        prepare_test_circle_activation_objects(
+            &db,
             &store.storage,
-            &store.root,
+            &founder,
             draft,
             &journal.operation().history,
-            &[],
             candidate_family,
-            &old_commit.author_registration,
-            &author,
-            &founder,
-            &device_signer,
         )
         .await
         .expect("prepare exact promoted access objects");
@@ -330,8 +332,10 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     )
     .expect("sign promoted access commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
-    let commit_prepared = prepare_circle_object(
+    let commit_prepared = prepare_test_circle_object(
+        &db,
         &store.storage,
+        &founder,
         &ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
@@ -549,17 +553,13 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .device_signer(&signer)
         .expect("derive Circle commit device signer");
     let (creation, objects, prepared, control_head_object, stream_activations) =
-        prepare_circle_activation_objects(
+        prepare_test_circle_activation_objects(
+            &db,
             &store.storage,
-            &store.root,
+            &signer,
             draft,
             &journal.operation().history,
-            &[],
             candidate_family,
-            &old_commit.author_registration,
-            &author,
-            &signer,
-            &device_signer,
         )
         .await
         .expect("prepare forged exact Circle activation objects");
@@ -589,8 +589,10 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     )
     .expect("sign forged metadata activation commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
-    let commit_prepared = prepare_circle_object(
+    let commit_prepared = prepare_test_circle_object(
+        &db,
         &store.storage,
+        &signer,
         &ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             ProtocolObjectDomain::StoreCommit,

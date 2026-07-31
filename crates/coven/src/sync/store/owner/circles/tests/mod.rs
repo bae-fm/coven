@@ -99,6 +99,83 @@ async fn prepare_circle_operation_request(
         .await
 }
 
+async fn prepare_test_circle_object(
+    db: &Database,
+    storage: &Arc<crate::storage::CloudSyncStorage>,
+    signer: &UserKeypair,
+    context: &ProtocolObjectContext,
+    semantic_prefix: &str,
+    extension: &str,
+    bytes: Vec<u8>,
+) -> Result<PreparedExactObject, CircleOperationError> {
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    let mut authority = store
+        .authorize_writer()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    authority
+        .circles()
+        .preparer()
+        .prepare_circle_object(context, semantic_prefix, extension, bytes)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_test_circle_object_at(
+    db: &Database,
+    storage: &Arc<crate::storage::CloudSyncStorage>,
+    signer: &UserKeypair,
+    context: &ProtocolObjectContext,
+    slot: crate::storage::cloud::ObjectSlot,
+    semantic_prefix: &str,
+    bytes: Vec<u8>,
+) -> Result<PreparedExactObject, CircleOperationError> {
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    let mut authority = store
+        .authorize_writer()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    authority
+        .circles()
+        .preparer()
+        .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
+}
+
+async fn prepare_test_circle_activation_objects(
+    db: &Database,
+    storage: &Arc<crate::storage::CloudSyncStorage>,
+    signer: &UserKeypair,
+    draft: CircleTransitionDraft,
+    history: &CircleTransitionHistory,
+    candidate_family: crate::protocol::store_commit::CandidateFamilyId,
+) -> Result<
+    (
+        PreparedCircleTransition,
+        CircleActivationObjects,
+        std::collections::BTreeMap<String, PreparedExactObject>,
+        Option<ExactObjectRef>,
+        Vec<StreamActivation>,
+    ),
+    CircleOperationError,
+> {
+    let store =
+        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
+            .await?;
+    let mut authority = store
+        .authorize_writer()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    authority
+        .circles()
+        .preparer()
+        .prepare_circle_activation_objects(draft, history, &[], candidate_family)
+        .await
+}
+
 async fn publish_circle_operation(
     db: &Database,
     storage: &Arc<crate::storage::CloudSyncStorage>,
@@ -471,7 +548,7 @@ async fn persist_merge_operation(
 
 async fn resign_merge_journal_with_objects(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<crate::storage::CloudSyncStorage>,
     signer: &UserKeypair,
     journal: &mut CircleOperationJournal,
     mutate: impl FnOnce(&mut CircleActivationObjects),
@@ -491,7 +568,7 @@ async fn resign_merge_journal_with_objects(
 
 async fn resign_merge_journal_with_reference(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &Arc<crate::storage::CloudSyncStorage>,
     signer: &UserKeypair,
     journal: &mut CircleOperationJournal,
     reference: crate::protocol::store_commit::CircleControlRef,
@@ -527,8 +604,10 @@ async fn resign_merge_journal_with_reference(
     mutate_commit(&mut commit);
     commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
     let StoreCommitCoord { stream_id, .. } = coord.clone();
-    let commit_prepared = prepare_circle_object(
+    let commit_prepared = prepare_test_circle_object(
+        db,
         storage,
+        signer,
         &ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
@@ -568,8 +647,10 @@ async fn resign_merge_journal_with_reference(
         .reference()
         .slot()
         .clone();
-    let head_prepared = prepare_circle_object_at(
+    let head_prepared = prepare_test_circle_object_at(
+        db,
         storage,
+        signer,
         &ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
             ProtocolObjectDomain::StoreHead,
@@ -581,6 +662,7 @@ async fn resign_merge_journal_with_reference(
         ),
         head.to_bytes(),
     )
+    .await
     .expect("prepare substituted Circle Store head");
     let operation = journal.operation_mut();
     operation.commit_bytes = commit.to_bytes();

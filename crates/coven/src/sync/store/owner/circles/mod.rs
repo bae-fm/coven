@@ -28,9 +28,6 @@ pub(crate) use packages::CirclePackageReadError;
 #[cfg(test)]
 use commands::*;
 #[cfg(test)]
-use preparation::{
-    prepare_circle_activation_objects, prepare_circle_object, prepare_circle_object_at,
-    signed_circle_commit,
-};
+use preparation::signed_circle_commit;
 #[cfg(test)]
 mod tests;

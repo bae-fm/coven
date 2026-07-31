@@ -360,8 +360,10 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         circle_id,
         control: &control_head.control,
     });
-    let prepared_head = prepare_circle_object_at(
+    let prepared_head = prepare_test_circle_object_at(
+        &db,
         &store.storage,
+        &signer,
         &ProtocolObjectContext::store_encrypted(
             commit.store_root_hash,
             ProtocolObjectDomain::CircleControl,
@@ -370,6 +372,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         &head_prefix,
         serde_json::to_vec(&control_head).expect("serialize forged control head"),
     )
+    .await
     .expect("prepare forged control head");
     journal
         .operation_mut()
