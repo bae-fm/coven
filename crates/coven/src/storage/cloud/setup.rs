@@ -9,6 +9,7 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
+#[cfg(any(feature = "oauth-providers", test))]
 use crate::keys::StoreKeys;
 
 #[cfg(feature = "oauth-providers")]
