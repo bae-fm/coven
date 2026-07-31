@@ -2,7 +2,7 @@ use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::keys;
 use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::protocol::membership::{MembershipChain, StoreMembershipRoleGrant};
+use crate::protocol::membership::StoreMembershipRoleGrant;
 use crate::protocol::store_commit::{
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionStaleReason, StreamActivation,
 };
@@ -21,31 +21,6 @@ use super::journal::{
     OwnerPromotionJournalState, OwnerPromotionStaleEvidence,
 };
 use super::OwnerPromotionError;
-
-async fn prepare_promotion_wrap(
-    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
-    store_id: &str,
-    recipient: &str,
-    encryption: &EncryptionService,
-    membership: &MembershipChain,
-) -> Result<PreparedWrappedStoreKey, OwnerPromotionError> {
-    let identity = operation.identity.clone();
-    let authorized = operation
-        .writer
-        .open_keyring_or_for_membership(membership, encryption)
-        .await
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let recipient_key = keys::ed25519_hex_to_x25519_public_key(recipient)
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let value =
-        WrappedStoreKey::seal_keyring(store_id, recipient, &recipient_key, &authorized, &identity)
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    operation
-        .writer
-        .prepare_wrapped_key(recipient, value)
-        .await
-        .map_err(OwnerPromotionError::from)
-}
 
 /// Activate an accepted promotion through Store membership and recovery state.
 impl super::AuthorizedOwnerPromotion<'_, '_> {
@@ -164,16 +139,29 @@ async fn prepare_merge_owner_promotion_finalization(
             reason,
         });
     }
-    let wrapped_key = prepare_promotion_wrap(
-        operation,
+    let identity = operation.identity.clone();
+    let authorized = operation
+        .writer
+        .open_keyring_or_for_membership(&membership, encryption)
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    let recipient = &acceptance.request.member_pubkey;
+    let recipient_key = keys::ed25519_hex_to_x25519_public_key(recipient)
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    let wrapped_key = WrappedStoreKey::seal_keyring(
         membership.store_id().ok_or_else(|| {
             OwnerPromotionError::Protocol("membership Store id is absent".to_string())
         })?,
-        &acceptance.request.member_pubkey,
-        encryption,
-        &membership,
+        recipient,
+        &recipient_key,
+        &authorized,
+        &identity,
     )
-    .await?;
+    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    let wrapped_key = operation
+        .writer
+        .prepare_wrapped_key(recipient, wrapped_key)
+        .await?;
     let candidate = operation
         .writer
         .owner_promotion_history()
