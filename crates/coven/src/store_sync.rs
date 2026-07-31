@@ -106,6 +106,17 @@ impl SyncConnection {
     fn is_connected(&self) -> bool {
         matches!(self, Self::Connected { .. })
     }
+
+    fn stop(self) -> Result<(), SyncError> {
+        if let Self::Connected {
+            loop_handle: Some(handle),
+            ..
+        } = self
+        {
+            handle.stop().map_err(SyncError::Loop)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -190,17 +201,6 @@ impl StoreSync {
             &mut *self.connection.write().unwrap(),
             SyncConnection::Disconnected,
         )
-    }
-
-    fn stop_connection(connection: SyncConnection) -> Result<(), SyncError> {
-        if let SyncConnection::Connected {
-            loop_handle: Some(handle),
-            ..
-        } = connection
-        {
-            handle.stop().map_err(SyncError::Loop)?;
-        }
-        Ok(())
     }
 
     async fn build_connection(
@@ -301,7 +301,7 @@ impl StoreSync {
                 .map_err(SyncError::StorageSetup)?;
         }
         let previous = self.take_connection();
-        Self::stop_connection(previous)?;
+        previous.stop()?;
         self.build_connection(config, cloudkit_ops).await
     }
 
@@ -335,7 +335,7 @@ impl StoreSync {
         )
         .map_err(SyncError::StorageSetup)?;
         let previous = self.take_connection();
-        Self::stop_connection(previous)?;
+        previous.stop()?;
         let routing_encryption = self
             .security
             .routing_encryption(self.database.has_scoped_graph())?;
@@ -401,7 +401,7 @@ impl StoreSync {
     pub(crate) fn stop(&self) {
         let connection = self.take_connection();
         let was_connected = connection.is_connected();
-        if let Err(stop_error) = Self::stop_connection(connection) {
+        if let Err(stop_error) = connection.stop() {
             error!("stop_sync failed: {stop_error}");
         }
         if was_connected {
@@ -413,7 +413,7 @@ impl StoreSync {
 
     pub(crate) fn disconnect(&self) {
         let connection = self.take_connection();
-        if let Err(stop_error) = Self::stop_connection(connection) {
+        if let Err(stop_error) = connection.stop() {
             error!("disconnect_sync failed to stop sync: {stop_error}");
         }
         info!("store sync disconnected");

@@ -206,6 +206,32 @@ impl StoreLayout {
             db_filename: self.db_filename.clone(),
         }
     }
+
+    /// Create a store directory, generate a device id, and save `config.yaml`.
+    ///
+    /// The caller is responsible for encryption-key setup and calling
+    /// [`Config::save_active_store`] afterward.
+    pub fn create_store(
+        &self,
+        store_id: String,
+        store_name: String,
+        ids: &dyn crate::id_provider::IdProvider,
+    ) -> Result<Config, ConfigError> {
+        validate_path_token(&store_id)
+            .map_err(|error| ConfigError::Config(format!("invalid store id: {error}")))?;
+        let store_dir = self.store_dir(&store_id);
+        if store_dir.exists() {
+            return Err(ConfigError::StoreExists(store_id));
+        }
+        std::fs::create_dir_all(&*store_dir)?;
+
+        let device_id = ids.new_id();
+        let config = Config::with_defaults(store_id, device_id, store_dir, store_name);
+        config.save_to_config_yaml()?;
+
+        info!("Created store at {}", config.store_dir.display());
+        Ok(config)
+    }
 }
 
 /// Typed wrapper for a store directory path.
@@ -534,43 +560,6 @@ impl StoreDir {
             }
         }
         Ok(())
-    }
-
-    /// Create a store directory, generate a device_id, and save config.yaml.
-    ///
-    /// The caller is responsible for encryption key setup and calling
-    /// `Config::save_active_store()` afterward.
-    ///
-    /// `store_id` is device-generated here (trusted), but it still has to name a
-    /// single directory under `layout`'s stores dir, so it passes the same
-    /// [`validate_path_token`] gate the untrusted join/restore ids pass — a
-    /// malformed id fails loudly rather than forming a stray path.
-    ///
-    /// Refuses with [`ConfigError::StoreExists`] if the directory already
-    /// exists — the same refusal join and restore give their own `stores/<id>`,
-    /// so a `store_id` collision (e.g. a device-generated id reused, or two
-    /// concurrent creates) fails loudly here too rather than overwriting an
-    /// existing store's directory.
-    pub fn create(
-        layout: &StoreLayout,
-        store_id: String,
-        store_name: String,
-        ids: &dyn crate::id_provider::IdProvider,
-    ) -> Result<Config, ConfigError> {
-        validate_path_token(&store_id)
-            .map_err(|e| ConfigError::Config(format!("invalid store id: {e}")))?;
-        let store_dir = layout.store_dir(&store_id);
-        if store_dir.exists() {
-            return Err(ConfigError::StoreExists(store_id));
-        }
-        std::fs::create_dir_all(&*store_dir)?;
-
-        let device_id = ids.new_id();
-        let config = Config::with_defaults(store_id, device_id, store_dir, store_name);
-        config.save_to_config_yaml()?;
-
-        info!("Created store at {}", config.store_dir.display());
-        Ok(config)
     }
 }
 
