@@ -393,6 +393,40 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
+    pub(super) async fn upload_commit(
+        &self,
+        candidate: &operations::PreparedStoreOperationCommit,
+    ) -> Result<(), StoreError> {
+        let stream_id = candidate.reference.coord.stream_id;
+        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            candidate.commit.store_root_hash,
+            crate::storage::ProtocolObjectDomain::StoreCommit,
+        );
+        let prefix = crate::protocol::store_commit::commit_semantic_prefix(
+            candidate.commit.candidate_family(),
+            &stream_id.to_string(),
+            candidate.commit.seq(),
+            candidate.commit.commit_hash(),
+        );
+        self.storage
+            .as_ref()
+            .create_protocol_object(&candidate.prepared)
+            .await
+            .map_err(crate::storage::StoreObjectError::from)?;
+        let opened = self
+            .storage
+            .as_ref()
+            .read_protocol_object(&context, &candidate.reference.object, &prefix)
+            .await
+            .map_err(crate::storage::StoreObjectError::from)?;
+        if opened != candidate.commit.to_bytes() {
+            return Err(StoreError::InvalidOutbound(
+                "Store operation commit exact readback differs from its signed bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn prepare_merge_snapshot_history_summary(
         &self,
         coverage: &crate::protocol::store_commit::CommitFrontier,
@@ -1243,7 +1277,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
         };
-        operations::upload_commit(self.storage.as_ref(), &activation.candidate).await?;
+        self.upload_commit(&activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
         let authorization = self
             .history

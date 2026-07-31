@@ -501,7 +501,8 @@ async fn execute_revoke_mutation(
                         .collect::<Vec<_>>(),
                 )
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            crate::sync::store::operations::upload_commit(operation.storage.as_ref(), &candidate)
+            operation
+                .upload_commit(&candidate)
                 .await
                 .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
             persistence

@@ -383,7 +383,8 @@ async fn execute_resolution_mutation(
             &plan.transition.entry_ref.object,
         )?)
         .await?;
-    operations::upload_commit(operation.storage.as_ref(), &plan.candidate)
+    operation
+        .upload_commit(&plan.candidate)
         .await
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
     persistence
