@@ -10,11 +10,12 @@ fn keyring_registration_contract() {
     keyring_core::set_default_store(
         keyring_core::mock::Store::new().expect("create mock keyring store"),
     );
-    // Before the service is registered, a key operation names the missing
-    // startup call rather than panicking.
-    let err = coven::StoreKeys::new("keyring-registration-test".to_string())
+    // A store can bind without an OS keyring when its configured custody does
+    // not use one. Any keyring operation still names the missing startup call.
+    let unregistered = coven::StoreKeys::bind("keyring-registration-test".to_string());
+    let err = unregistered
         .get_encryption_key()
-        .expect_err("service not registered yet");
+        .expect_err("the bound capability has no registered keyring");
     assert!(
         matches!(err, coven::KeyError::ServiceNotRegistered),
         "expected ServiceNotRegistered, got {err:?}"
@@ -26,6 +27,11 @@ fn keyring_registration_contract() {
 
     coven::set_keyring_service("coven-store-test").expect("register keyring service");
 
+    assert!(matches!(
+        unregistered.get_encryption_key(),
+        Err(coven::KeyError::ServiceNotRegistered)
+    ));
+
     // Re-registration: same name is a no-op, a different name is a startup
     // contradiction.
     coven::set_keyring_service("coven-store-test").expect("same-name re-registration is a no-op");
@@ -36,23 +42,14 @@ fn keyring_registration_contract() {
         "error names the conflict: {err}"
     );
 
-    // A key operation against a registry with no default store must name the
-    // missing startup step, not surface a generic persistence error.
+    let keys = coven::StoreKeys::bind("keyring-registration-test".to_string());
+
+    // The opened capability retains the exact store registered with it. A
+    // later mutation of keyring-core's process default cannot silently route
+    // this store's key operations through another backend.
     keyring_core::unset_default_store();
-    let err = coven::StoreKeys::new("keyring-registration-test".to_string())
+    let value = keys
         .get_encryption_key()
-        .expect_err("no store installed");
-    assert!(
-        matches!(err, coven::KeyError::StoreNotInstalled),
-        "expected StoreNotInstalled, got {err:?}"
-    );
-    let message = err.to_string();
-    assert!(
-        message.contains("set_keyring_service"),
-        "error names the fix: {message}"
-    );
-    assert!(
-        !message.contains("persistence") && !message.contains("Persistence"),
-        "not the generic persistence error: {message}"
-    );
+        .expect("read through the retained keyring store");
+    assert_eq!(value, None);
 }

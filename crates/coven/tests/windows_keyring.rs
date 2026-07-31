@@ -24,7 +24,7 @@ fn windows_credential_manager_round_trip() {
     coven::set_keyring_service("coven-ci-windows-keyring").expect("register keyring service");
 
     let store_id = format!("windows-keyring-test-{}", std::process::id());
-    let keys = CleanupGuard(StoreKeys::new(store_id));
+    let keys = CleanupGuard(StoreKeys::bind(store_id));
 
     assert_eq!(
         keys.0.get_encryption_key().expect("read before write"),

@@ -99,8 +99,10 @@ impl DeviceIdentityCustody for NoIdentityCustody {
 }
 
 fn established_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
+    test_keyring::install();
+    let store_keys = StoreKeys::bind("unused-store-id".to_string());
     crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
-        .resolve("unused-store-id", &StoreDir::new("unused-store-dir"))
+        .resolve(&store_keys, &StoreDir::new("unused-store-dir"))
 }
 
 fn store_sync(
@@ -145,7 +147,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path());
     let store_id = "sync-enabled-malformed-credentials";
-    let keys = StoreKeys::new(store_id.to_string());
+    let keys = StoreKeys::bind(store_id.to_string());
     keys.cloud_home_credentials_entry_for_test()
         .expect("create credentials entry")
         .set_password("{")
@@ -212,7 +214,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
     config.cloud_home.provider = Some(CloudProvider::S3);
     let sync = store_sync(
         Arc::new(move || config.clone()),
-        StoreKeys::new("sync-opaque-no-encryption".to_string()),
+        StoreKeys::bind("sync-opaque-no-encryption".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
         crate::sync::test_helpers::open_test_db(),
@@ -247,7 +249,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
             let config = config.clone();
             Arc::new(move || config.read().expect("read config").clone())
         },
-        StoreKeys::new("immutable-admission-before-stop".to_string()),
+        StoreKeys::bind("immutable-admission-before-stop".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
         database,
@@ -311,7 +313,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
     config.cloud_home.storage = HomeStorage::Browsable;
     let sync = store_sync(
         Arc::new(move || config.clone()),
-        StoreKeys::new("sync-restart".to_string()),
+        StoreKeys::bind("sync-restart".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
         crate::sync::test_helpers::open_test_db(),
@@ -343,14 +345,16 @@ async fn failed_restart_leaves_no_stale_connection() {
     );
     initial_config.cloud_home.storage = HomeStorage::Browsable;
     let config = Arc::new(RwLock::new(initial_config));
+    let store_keys = StoreKeys::bind("sync-failed-restart".to_string());
+    let custody = crate::custody::KeyCustody::InMemory(MasterKeyring::generate())
+        .resolve(&store_keys, &StoreDir::new("unused-store-dir"));
     let sync = store_sync(
         {
             let config = config.clone();
             Arc::new(move || config.read().unwrap().clone())
         },
-        StoreKeys::new("sync-failed-restart".to_string()),
-        crate::custody::KeyCustody::InMemory(MasterKeyring::generate())
-            .resolve("sync-failed-restart", &StoreDir::new("unused-store-dir")),
+        store_keys,
+        custody,
         established_identity_custody(),
         crate::sync::test_helpers::open_test_db(),
         &store_dir,
@@ -378,7 +382,7 @@ async fn connect_rejects_a_missing_device_identity() {
     test_keyring::install();
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let store_id = "sync-no-device-identity".to_string();
-    let keys = StoreKeys::new(store_id.clone());
+    let keys = StoreKeys::bind(store_id.clone());
     keys.set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
         access_key: "ak".to_string(),
         secret_key: "sk".to_string(),
@@ -448,11 +452,14 @@ async fn foreign_founder_installs_no_connection() {
 
     let victim = crate::keys::UserKeypair::generate();
     let database = crate::sync::test_helpers::open_test_db();
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::InMemory(victim).resolve(&store_keys, &store_dir);
     let sync = store_sync(
         Arc::new(move || config.clone()),
-        StoreKeys::new(store_id.to_string()),
+        store_keys,
         Arc::new(NoKeyCustody),
-        crate::identity_custody::IdentityCustody::InMemory(victim).resolve(store_id, &store_dir),
+        identity_custody,
         database.clone(),
         &store_dir,
     );
@@ -479,11 +486,12 @@ async fn foreign_founder_installs_no_connection() {
 fn cipher_resolution_reads_current_custody_each_time() {
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let store_id = "sync-resolve-cipher-fresh";
-    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let key_a = MasterKeyring::generate();
     custody.persist(&key_a).expect("establish key A");
     let security = StoreSecurity::new(
-        StoreKeys::new(store_id.to_string()),
+        store_keys,
         custody.clone(),
         established_identity_custody(),
         crate::oauth::OAuthClients::empty(),

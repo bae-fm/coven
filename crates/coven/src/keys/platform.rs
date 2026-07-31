@@ -34,7 +34,28 @@ pub enum IdentityError {
     Key(#[from] KeyError),
 }
 
-static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+#[derive(Clone)]
+struct KeyringService {
+    name: String,
+    store: std::sync::Arc<keyring_core::CredentialStore>,
+}
+
+#[derive(Clone, Copy)]
+enum KeyringBinding {
+    Registered(&'static KeyringService),
+    Unregistered,
+}
+
+impl KeyringBinding {
+    fn service(self) -> Result<&'static KeyringService, KeyError> {
+        match self {
+            Self::Registered(service) => Ok(service),
+            Self::Unregistered => Err(KeyError::ServiceNotRegistered),
+        }
+    }
+}
+
+static KEYRING_SERVICE: std::sync::OnceLock<KeyringService> = std::sync::OnceLock::new();
 
 /// Register the process-wide keyring: the service name every entry is stored
 /// under, and the platform keyring store that backs it. Both are one-time
@@ -46,10 +67,15 @@ static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new()
 pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
     crate::keyring_backend::install_platform_store()?;
     let name = name.into();
-    if KEYRING_SERVICE.set(name.clone()).is_err() {
+    let store = keyring_core::get_default_store().ok_or(KeyError::StoreNotInstalled)?;
+    let service = KeyringService {
+        name: name.clone(),
+        store,
+    };
+    if KEYRING_SERVICE.set(service).is_err() {
         let registered = KEYRING_SERVICE
             .get()
-            .map(String::as_str)
+            .map(|service| service.name.as_str())
             .expect("a keyring service is registered when set() fails");
         if registered != name {
             return Err(KeyError::Persistence(format!(
@@ -66,8 +92,12 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
 pub fn keyring_service() -> Result<&'static str, KeyError> {
     KEYRING_SERVICE
         .get()
-        .map(String::as_str)
+        .map(|service| service.name.as_str())
         .ok_or(KeyError::ServiceNotRegistered)
+}
+
+fn registered_keyring() -> Result<&'static KeyringService, KeyError> {
+    KEYRING_SERVICE.get().ok_or(KeyError::ServiceNotRegistered)
 }
 
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
@@ -238,29 +268,62 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
 /// The access policy an item is created under is fixed for its lifetime;
 /// every Coven-created Apple keyring item therefore enters the device-only
 /// class at its first write.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
-    let service = keyring_service()?;
-    let store = keyring_core::get_default_store().ok_or(KeyError::StoreNotInstalled)?;
-    match store
-        .as_any()
-        .downcast_ref::<apple_native_keyring_store::protected::Store>()
-    {
-        Some(_) => apple_native_keyring_store::protected::Cred::build(
-            service,
-            account,
-            apple_native_keyring_store::protected::AccessPolicy::WhenUnlockedThisDeviceOnly,
-            None,
-            false,
-        )
-        .map_err(map_keyring_error),
-        None => keyring_core::Entry::new(service, account).map_err(map_keyring_error),
+impl KeyringService {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn entry(&self, account: &str) -> Result<keyring_core::Entry, KeyError> {
+        match self
+            .store
+            .as_any()
+            .downcast_ref::<apple_native_keyring_store::protected::Store>()
+        {
+            Some(_) => apple_native_keyring_store::protected::Cred::build(
+                &self.name,
+                account,
+                apple_native_keyring_store::protected::AccessPolicy::WhenUnlockedThisDeviceOnly,
+                None,
+                false,
+            )
+            .map_err(map_keyring_error),
+            None => self
+                .store
+                .build(&self.name, account, None)
+                .map_err(map_keyring_error),
+        }
     }
-}
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
-    keyring_core::Entry::new(keyring_service()?, account).map_err(map_keyring_error)
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    fn entry(&self, account: &str) -> Result<keyring_core::Entry, KeyError> {
+        self.store
+            .build(&self.name, account, None)
+            .map_err(map_keyring_error)
+    }
+
+    fn read(&self, slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
+        let account = slot.account();
+        let entry = self.entry(&account)?;
+        match entry.get_password() {
+            Ok(password) if password.is_empty() => Err(KeyError::Persistence(format!(
+                "keyring entry {account} is present but empty (corrupt)"
+            ))),
+            Ok(password) => Ok(Some(password)),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
+            Err(error) => Err(map_keyring_error(error)),
+        }
+    }
+
+    fn write(&self, slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
+        self.entry(&slot.account())?
+            .set_password(value)
+            .map_err(map_keyring_error)
+    }
+
+    fn delete(&self, slot: &KeyringSlot) -> Result<bool, KeyError> {
+        match self.entry(&slot.account())?.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring_core::Error::NoEntry) => Ok(false),
+            Err(error) => Err(map_keyring_error(error)),
+        }
+    }
 }
 
 #[cfg(all(
@@ -283,7 +346,7 @@ pub struct AppleKeyringEntryFacts {
 pub fn apple_keyring_entry_facts_for_test(
     account: &str,
 ) -> Result<AppleKeyringEntryFacts, KeyError> {
-    let entry = entry_for(account)?;
+    let entry = registered_keyring()?.entry(account)?;
     let credential = entry
         .as_any()
         .downcast_ref::<apple_native_keyring_store::protected::Cred>()
@@ -298,33 +361,6 @@ pub fn apple_keyring_entry_facts_for_test(
         service: credential.service.clone(),
         account: credential.account.clone(),
     })
-}
-
-pub(crate) fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
-    let account = slot.account();
-    let entry = entry_for(&account)?;
-    match entry.get_password() {
-        Ok(p) if p.is_empty() => Err(KeyError::Persistence(format!(
-            "keyring entry {account} is present but empty (corrupt)"
-        ))),
-        Ok(p) => Ok(Some(p)),
-        Err(keyring_core::Error::NoEntry) => Ok(None),
-        Err(e) => Err(map_keyring_error(e)),
-    }
-}
-
-pub(crate) fn write(slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
-    entry_for(&slot.account())?
-        .set_password(value)
-        .map_err(map_keyring_error)
-}
-
-pub(crate) fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
-    match entry_for(&slot.account())?.delete_credential() {
-        Ok(()) => Ok(true),
-        Err(keyring_core::Error::NoEntry) => Ok(false),
-        Err(e) => Err(map_keyring_error(e)),
-    }
 }
 
 /// This store's established signing identity through `custody`, or
@@ -359,7 +395,7 @@ pub(crate) fn identity_public_key(
 /// not a store's lifetime).
 pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
     let keypair = UserKeypair::generate();
-    write(
+    registered_keyring()?.write(
         &KeyringSlot::PendingIdentity(public_key_hex(&keypair)),
         &hex::encode(keypair.to_keypair_bytes()),
     )?;
@@ -382,9 +418,11 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
     let KeyringSlot::PendingIdentity(request_public_key_hex) = slot else {
         unreachable!("read_pending_identity_slot is only ever called with a PendingIdentity slot");
     };
-    let sk_hex = read(slot)?.ok_or_else(|| KeyError::NoPendingIdentity {
-        request_public_key_hex: request_public_key_hex.clone(),
-    })?;
+    let sk_hex = registered_keyring()?
+        .read(slot)?
+        .ok_or_else(|| KeyError::NoPendingIdentity {
+            request_public_key_hex: request_public_key_hex.clone(),
+        })?;
     let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
         .map_err(|e| KeyError::Crypto(format!("invalid pending identity hex: {e}")))?
         .try_into()
@@ -397,10 +435,11 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
 /// join has already established in the store's own custody. `Ok` whether or
 /// not one was pending.
 pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
-    delete(&KeyringSlot::PendingIdentity(
-        request_public_key_hex.to_string(),
-    ))
-    .map(|_| ())
+    registered_keyring()?
+        .delete(&KeyringSlot::PendingIdentity(
+            request_public_key_hex.to_string(),
+        ))
+        .map(|_| ())
 }
 
 /// One store's key material: the encryption master key, cloud-home credentials,
@@ -410,24 +449,39 @@ pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(
 /// master key goes through [`crate::custody::KeyCustody`].
 #[derive(Clone)]
 pub struct StoreKeys {
+    keyring: KeyringBinding,
     store_id: String,
 }
 
 impl StoreKeys {
-    pub fn new(store_id: String) -> Self {
-        Self { store_id }
+    pub fn bind(store_id: String) -> Self {
+        let keyring = match KEYRING_SERVICE.get() {
+            Some(service) => KeyringBinding::Registered(service),
+            None => KeyringBinding::Unregistered,
+        };
+        Self { keyring, store_id }
     }
 
     pub fn store_id(&self) -> &str {
         &self.store_id
     }
 
+    pub(crate) fn device_identity_custody(&self) -> std::sync::Arc<dyn DeviceIdentityCustody> {
+        std::sync::Arc::new(KeyringIdentityCustody { keys: self.clone() })
+    }
+
+    pub(crate) fn master_key_custody(&self) -> std::sync::Arc<dyn crate::keys::MasterKeyCustody> {
+        std::sync::Arc::new(KeyringMasterKeyCustody { keys: self.clone() })
+    }
+
     pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
-        read(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))
+        self.keyring
+            .service()?
+            .read(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))
     }
 
     pub fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
-        write(
+        self.keyring.service()?.write(
             &KeyringSlot::EncryptionMasterKey(self.store_id.clone()),
             value,
         )?;
@@ -436,7 +490,11 @@ impl StoreKeys {
     }
 
     pub fn delete_encryption_key(&self) -> Result<(), KeyError> {
-        if delete(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))? {
+        if self
+            .keyring
+            .service()?
+            .delete(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))?
+        {
             info!("Encryption key deleted from keyring");
         }
         Ok(())
@@ -444,13 +502,19 @@ impl StoreKeys {
 
     #[cfg(test)]
     pub(crate) fn write_empty_encryption_key_for_test(&self) -> Result<(), KeyError> {
-        entry_for(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()).account())?
+        self.keyring
+            .service()?
+            .entry(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()).account())?
             .set_password("")
             .map_err(map_keyring_error)
     }
 
     pub fn get_cloud_home_credentials(&self) -> Result<Option<CloudHomeCredentials>, KeyError> {
-        match read(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))? {
+        match self
+            .keyring
+            .service()?
+            .read(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))?
+        {
             None => Ok(None),
             Some(j) => serde_json::from_str(&j).map(Some).map_err(|e| {
                 KeyError::Crypto(format!("malformed cloud home credentials JSON: {e}"))
@@ -461,7 +525,7 @@ impl StoreKeys {
     pub fn set_cloud_home_credentials(&self, creds: &CloudHomeCredentials) -> Result<(), KeyError> {
         let json = serde_json::to_string(creds)
             .map_err(|e| KeyError::Crypto(format!("serialize credentials: {e}")))?;
-        write(
+        self.keyring.service()?.write(
             &KeyringSlot::CloudHomeCredentials(self.store_id.clone()),
             &json,
         )?;
@@ -483,11 +547,17 @@ impl StoreKeys {
     pub(crate) fn cloud_home_credentials_entry_for_test(
         &self,
     ) -> Result<keyring_core::Entry, KeyError> {
-        entry_for(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()).account())
+        self.keyring
+            .service()?
+            .entry(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()).account())
     }
 
     pub fn delete_cloud_home_credentials(&self) -> Result<(), KeyError> {
-        if delete(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))? {
+        if self
+            .keyring
+            .service()?
+            .delete(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))?
+        {
             info!("Cloud home credentials deleted from keyring");
         }
         Ok(())
@@ -507,14 +577,16 @@ impl StoreKeys {
     /// empty, or contains `:` (see `validate_host_secret_name`).
     pub fn get_host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
         validate_host_secret_name(name)?;
-        read(&self.host_secret_slot(name))
+        self.keyring.service()?.read(&self.host_secret_slot(name))
     }
 
     /// Set a host's own store-scoped secret. Same name restrictions as
     /// [`get_host_secret`](Self::get_host_secret).
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
         validate_host_secret_name(name)?;
-        write(&self.host_secret_slot(name), value)?;
+        self.keyring
+            .service()?
+            .write(&self.host_secret_slot(name), value)?;
         info!("Host secret {name:?} saved to keyring");
         Ok(())
     }
@@ -523,10 +595,71 @@ impl StoreKeys {
     /// restrictions as [`get_host_secret`](Self::get_host_secret).
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
         validate_host_secret_name(name)?;
-        if delete(&self.host_secret_slot(name))? {
+        if self
+            .keyring
+            .service()?
+            .delete(&self.host_secret_slot(name))?
+        {
             info!("Host secret {name:?} deleted from keyring");
         }
         Ok(())
+    }
+}
+
+struct KeyringIdentityCustody {
+    keys: StoreKeys,
+}
+
+impl DeviceIdentityCustody for KeyringIdentityCustody {
+    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
+        let slot = KeyringSlot::DeviceSigningKey(self.keys.store_id.clone());
+        let Some(signing_key_hex) = self.keys.keyring.service()?.read(&slot)? else {
+            return Ok(None);
+        };
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&signing_key_hex)
+            .map_err(|error| KeyError::Crypto(format!("Invalid signing key hex: {error}")))?
+            .try_into()
+            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
+        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
+    }
+
+    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
+        self.keys.keyring.service()?.write(
+            &KeyringSlot::DeviceSigningKey(self.keys.store_id.clone()),
+            &hex::encode(keypair.to_keypair_bytes()),
+        )
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        self.keys
+            .keyring
+            .service()?
+            .delete(&KeyringSlot::DeviceSigningKey(self.keys.store_id.clone()))
+            .map(|_| ())
+    }
+}
+
+struct KeyringMasterKeyCustody {
+    keys: StoreKeys,
+}
+
+impl crate::keys::MasterKeyCustody for KeyringMasterKeyCustody {
+    fn unlock(&self) -> Result<Option<crate::encryption::MasterKeyring>, KeyError> {
+        self.keys
+            .get_encryption_key()?
+            .map(|serialized| {
+                crate::encryption::MasterKeyring::from_serialized(&serialized)
+                    .map_err(|error| KeyError::Crypto(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn persist(&self, keyring: &crate::encryption::MasterKeyring) -> Result<(), KeyError> {
+        self.keys.set_encryption_key(&keyring.to_serialized())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        self.keys.delete_encryption_key()
     }
 }
 
@@ -610,12 +743,17 @@ mod tests {
         test_keyring::install();
         let slot = KeyringSlot::EncryptionMasterKey("empty-keyring-entry-store".to_string());
         let account = slot.account();
-        entry_for(&account)
+        registered_keyring()
+            .expect("registered test keyring")
+            .entry(&account)
             .expect("create keyring entry")
             .set_password("")
             .expect("write empty keyring entry");
 
-        let error = read(&slot).expect_err("empty entry is corrupt");
+        let error = registered_keyring()
+            .expect("registered test keyring")
+            .read(&slot)
+            .expect_err("empty entry is corrupt");
 
         assert!(error.to_string().contains("present but empty"));
         assert!(error.to_string().contains(&account));
@@ -664,7 +802,7 @@ mod tests {
     #[test]
     fn host_secret_round_trips_and_absent_reads_none() {
         test_keyring::install();
-        let keys = StoreKeys::new("host-secret-round-trip".to_string());
+        let keys = StoreKeys::bind("host-secret-round-trip".to_string());
 
         assert_eq!(
             keys.get_host_secret("discogs_api_key").expect("get"),
@@ -693,7 +831,7 @@ mod tests {
     #[test]
     fn host_secret_refuses_every_reserved_name() {
         test_keyring::install();
-        let keys = StoreKeys::new("host-secret-reserved-names".to_string());
+        let keys = StoreKeys::bind("host-secret-reserved-names".to_string());
 
         for reserved in RESERVED_HOST_SECRET_NAMES {
             let error = keys.set_host_secret(reserved, "value").expect_err(&format!(
@@ -709,7 +847,7 @@ mod tests {
     #[test]
     fn host_secret_refuses_a_name_containing_colon() {
         test_keyring::install();
-        let keys = StoreKeys::new("host-secret-colon-name".to_string());
+        let keys = StoreKeys::bind("host-secret-colon-name".to_string());
 
         let error = keys
             .set_host_secret("discogs:api_key", "value")
@@ -723,7 +861,7 @@ mod tests {
     #[test]
     fn host_secret_refuses_an_empty_name() {
         test_keyring::install();
-        let keys = StoreKeys::new("host-secret-empty-name".to_string());
+        let keys = StoreKeys::bind("host-secret-empty-name".to_string());
 
         let error = keys
             .set_host_secret("", "value")
@@ -745,12 +883,14 @@ mod tests {
             store_id: "host-secret-empty-entry-store".to_string(),
         };
         let account = slot.account();
-        entry_for(&account)
+        registered_keyring()
+            .expect("registered test keyring")
+            .entry(&account)
             .expect("create keyring entry")
             .set_password("")
             .expect("write empty keyring entry");
 
-        let keys = StoreKeys::new("host-secret-empty-entry-store".to_string());
+        let keys = StoreKeys::bind("host-secret-empty-entry-store".to_string());
         let error = keys
             .get_host_secret("discogs_api_key")
             .expect_err("empty entry is corrupt");
@@ -762,8 +902,8 @@ mod tests {
     #[test]
     fn host_secret_is_scoped_to_its_store() {
         test_keyring::install();
-        let store_a = StoreKeys::new("host-secret-scope-a".to_string());
-        let store_b = StoreKeys::new("host-secret-scope-b".to_string());
+        let store_a = StoreKeys::bind("host-secret-scope-a".to_string());
+        let store_b = StoreKeys::bind("host-secret-scope-b".to_string());
 
         store_a
             .set_host_secret("discogs_api_key", "key-for-store-a")
@@ -783,8 +923,9 @@ mod tests {
     /// A per-store keyring identity custody. Each test names its own
     /// `store_id` so tests never race each other's keyring accounts.
     fn test_identity_custody(store_id: &str) -> std::sync::Arc<dyn DeviceIdentityCustody> {
+        let store_keys = StoreKeys::bind(store_id.to_string());
         crate::identity_custody::IdentityCustody::Keyring.resolve(
-            store_id,
+            &store_keys,
             &crate::store_dir::StoreDir::new("unused-store-dir"),
         )
     }
@@ -803,11 +944,13 @@ mod tests {
         // Write via the raw keyring under the store's signing-key account, the
         // way the identity custody preset does — no `require_identity` involved
         // on the write side.
-        write(
-            &KeyringSlot::DeviceSigningKey(store_id.to_string()),
-            &hex::encode(keypair.to_keypair_bytes()),
-        )
-        .expect("write signing key to the raw keyring");
+        registered_keyring()
+            .expect("registered test keyring")
+            .write(
+                &KeyringSlot::DeviceSigningKey(store_id.to_string()),
+                &hex::encode(keypair.to_keypair_bytes()),
+            )
+            .expect("write signing key to the raw keyring");
 
         let custody = test_identity_custody(store_id);
         let read = require_identity(custody.as_ref()).expect("read the identity back");

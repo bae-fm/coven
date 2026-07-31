@@ -734,7 +734,7 @@ async fn restore_cancelled_before_snapshot_leaves_no_residue() {
         "a cancelled restore must leave no store directory at {}",
         store_dir.display(),
     );
-    let store_keys = crate::keys::StoreKeys::new("cancel-preset".to_string());
+    let store_keys = crate::keys::StoreKeys::bind("cancel-preset".to_string());
     assert_eq!(
         store_keys.get_encryption_key().expect("read keyring"),
         None,
@@ -882,10 +882,10 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         joiner_keypair.clone(),
     )
     .expect("build joiner cloud storage");
-    let store_keys = StoreKeys::new(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
     let join_info = CloudHomeJoinInfo::S3 {
         bucket: "b".to_string(),
         region: "us-east-1".to_string(),
@@ -1361,8 +1361,9 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
     .expect("restore through code service");
     let layout = StoreLayout::new(app.path());
     let lib_b = config.store_dir.clone();
+    let store_keys = StoreKeys::bind(store_id.to_string());
     let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
 
     // The config is saved, and a saved config implies the identity was imported
     // before it — the restored device's signing identity resolves in custody.
@@ -1374,8 +1375,9 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
         Some(joiner_keypair.public_key()),
         "a completed restore has its signing identity in custody",
     );
+    let other_store_keys = StoreKeys::bind("restore-anti-clobber-other-store".to_string());
     let other_identity_custody = crate::identity_custody::IdentityCustody::Keyring.resolve(
-        "restore-anti-clobber-other-store",
+        &other_store_keys,
         &layout.store_dir("restore-anti-clobber-other-store"),
     );
     assert!(
@@ -1769,10 +1771,10 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         joiner_keypair.clone(),
     )
     .expect("build joiner cloud storage");
-    let store_keys = StoreKeys::new(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &lib_b);
     let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
     let continuation = owner_device
         .export_activated_device_continuation()

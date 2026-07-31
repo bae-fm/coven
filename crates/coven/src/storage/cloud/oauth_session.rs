@@ -290,7 +290,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            StoreKeys::new("oauth-retry".to_string()),
+            StoreKeys::bind("oauth-retry".to_string()),
             Arc::new(SystemClock),
             oauth_config("http://token.invalid/token".to_string()),
             "Provider",
@@ -418,7 +418,7 @@ mod tests {
         )
         .await;
         crate::keys::test_keyring::install();
-        let key_service = StoreKeys::new("oauth-persist-failure".to_string());
+        let key_service = StoreKeys::bind("oauth-persist-failure".to_string());
         fail_next_cloud_credentials_write(&key_service);
         let session = OAuthSession::new(
             OAuthTokens {

@@ -8,7 +8,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::envelope::PassphraseVault;
-use crate::keys::{DeviceIdentityCustody, KeyError, KeyringSlot, UserKeypair, SIGN_SECRETKEYBYTES};
+use crate::keys::{DeviceIdentityCustody, KeyError, StoreKeys, UserKeypair, SIGN_SECRETKEYBYTES};
 use crate::store_dir::StoreDir;
 
 pub(crate) use crate::envelope::Passphrase;
@@ -31,66 +31,26 @@ pub enum IdentityCustody {
 impl IdentityCustody {
     /// Resolve the selected policy into the trait object the identity-
     /// establishing call sites drive, injecting what each preset needs from
-    /// the store's identity: `store_id` for [`IdentityCustody::Keyring`] (the
-    /// keyring account name), `store_dir` for [`IdentityCustody::Passphrase`]
-    /// (the wrapped-file path).
+    /// the store's retained owners: `store_keys` for
+    /// [`IdentityCustody::Keyring`] and `store_dir` for
+    /// [`IdentityCustody::Passphrase`].
     ///
-    /// Public to match [`KeyCustody::resolve`](crate::KeyCustody::resolve): the
-    /// low-level [`restore_from_cloud`](crate::restore_from_cloud) takes the
-    /// already-resolved `Arc<dyn DeviceIdentityCustody>`, so a host restoring by
-    /// a directly-supplied key (no restore code) must be able to resolve a preset
-    /// itself, the same way it already resolves its `KeyCustody`.
-    pub fn resolve(self, store_id: &str, store_dir: &StoreDir) -> Arc<dyn DeviceIdentityCustody> {
+    /// Public to match [`KeyCustody::resolve`](crate::KeyCustody::resolve): a
+    /// host can resolve either policy against the same retained store-key
+    /// capability used by the store boundary.
+    pub fn resolve(
+        self,
+        store_keys: &StoreKeys,
+        store_dir: &StoreDir,
+    ) -> Arc<dyn DeviceIdentityCustody> {
         match self {
-            IdentityCustody::Keyring => Arc::new(KeyringIdentityCustody::new(store_id.to_string())),
+            IdentityCustody::Keyring => store_keys.device_identity_custody(),
             IdentityCustody::Passphrase(passphrase) => {
                 Arc::new(PassphraseIdentityCustody::new(passphrase, store_dir))
             }
             IdentityCustody::InMemory(keypair) => Arc::new(InMemoryIdentityCustody::new(keypair)),
             IdentityCustody::Custom(custody) => custody,
         }
-    }
-}
-
-// =============================================================================
-// Keyring preset
-// =============================================================================
-
-/// The OS keyring, wrapping this store's [`KeyringSlot::DeviceSigningKey`]
-/// account verbatim (`keyring_account_names_are_a_stable_storage_contract`
-/// pins the account name), so an already-stored identity is found unchanged.
-struct KeyringIdentityCustody {
-    store_id: String,
-}
-
-impl KeyringIdentityCustody {
-    fn new(store_id: String) -> Self {
-        Self { store_id }
-    }
-}
-
-impl DeviceIdentityCustody for KeyringIdentityCustody {
-    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let slot = KeyringSlot::DeviceSigningKey(self.store_id.clone());
-        let Some(sk_hex) = crate::keys::read(&slot)? else {
-            return Ok(None);
-        };
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
-            .map_err(|e| KeyError::Crypto(format!("Invalid signing key hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
-        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
-    }
-
-    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
-        crate::keys::write(
-            &KeyringSlot::DeviceSigningKey(self.store_id.clone()),
-            &hex::encode(keypair.to_keypair_bytes()),
-        )
-    }
-
-    fn forget(&self) -> Result<(), KeyError> {
-        crate::keys::delete(&KeyringSlot::DeviceSigningKey(self.store_id.clone())).map(|_| ())
     }
 }
 
@@ -208,7 +168,8 @@ mod tests {
     #[test]
     fn keyring_preset_unlock_persist_forget_round_trip() {
         test_keyring::install();
-        let custody = KeyringIdentityCustody::new("identity-keyring-roundtrip".to_string());
+        let store_keys = StoreKeys::bind("identity-keyring-roundtrip".to_string());
+        let custody = IdentityCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
 
         assert!(
             custody.unlock().expect("unlock a fresh store").is_none(),
@@ -236,8 +197,10 @@ mod tests {
     #[test]
     fn keyring_preset_is_scoped_to_its_store() {
         test_keyring::install();
-        let store_a = KeyringIdentityCustody::new("identity-keyring-scope-a".to_string());
-        let store_b = KeyringIdentityCustody::new("identity-keyring-scope-b".to_string());
+        let store_a_keys = StoreKeys::bind("identity-keyring-scope-a".to_string());
+        let store_b_keys = StoreKeys::bind("identity-keyring-scope-b".to_string());
+        let store_a = IdentityCustody::Keyring.resolve(&store_a_keys, &StoreDir::new("unused"));
+        let store_b = IdentityCustody::Keyring.resolve(&store_b_keys, &StoreDir::new("unused"));
 
         let keypair_a = UserKeypair::generate();
         store_a.persist(&keypair_a).expect("persist to store a");

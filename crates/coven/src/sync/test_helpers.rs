@@ -719,13 +719,14 @@ pub(crate) fn test_store_security(
     store_id: &str,
     master_keys: Arc<dyn MasterKeyCustody>,
 ) -> crate::store_security::StoreSecurity {
+    let store_keys = crate::keys::StoreKeys::bind(store_id.to_string());
     let identity = crate::identity_custody::IdentityCustody::InMemory(UserKeypair::generate())
         .resolve(
-            store_id,
+            &store_keys,
             &StoreDir::new(format!("{store_id}-unused-test-identity-directory")),
         );
     crate::store_security::StoreSecurity::new(
-        crate::keys::StoreKeys::new(store_id.to_string()),
+        store_keys,
         master_keys,
         identity,
         crate::oauth::OAuthClients::empty(),

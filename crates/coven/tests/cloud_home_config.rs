@@ -12,6 +12,11 @@ use coven::{
 
 #[tokio::test]
 async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
+    keyring_core::set_default_store(
+        keyring_core::mock::Store::new().expect("create mock keyring store"),
+    );
+    coven::set_keyring_service("coven-cloud-home-config-test")
+        .expect("register test keyring service");
     let tmp = tempfile::tempdir().expect("temp dir");
     let mut config = Config::with_defaults(
         "lib-cfg".to_string(),
@@ -24,7 +29,7 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     config.cloud_home.provider = Some(CloudProvider::S3);
     config.cloud_home.s3_bucket = None;
 
-    let key_service = StoreKeys::new("lib-cfg".to_string());
+    let key_service = StoreKeys::bind("lib-cfg".to_string());
     let error = match create_cloud_home(
         &config,
         &key_service,

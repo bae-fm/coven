@@ -120,7 +120,6 @@ pub struct Coven;
 impl Coven {
     pub fn builder(config: impl Into<CovenConfig>) -> CovenBuilder {
         let config = config.into();
-        let current = config.current();
         CovenBuilder {
             config,
             synced_tables: None,
@@ -130,7 +129,6 @@ impl Coven {
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
             clock: Arc::new(SystemClock),
-            key_service: StoreKeys::new(current.store_id),
             key_custody: KeyCustody::Keyring,
             identity_custody: IdentityCustody::Keyring,
             oauth_clients: crate::oauth::OAuthClients::empty(),
@@ -148,7 +146,6 @@ pub struct CovenBuilder {
     max_concurrent_uploads: NonZeroUsize,
     max_concurrent_downloads: NonZeroUsize,
     clock: ClockRef,
-    key_service: StoreKeys,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_clients: crate::oauth::OAuthClients,
@@ -270,11 +267,6 @@ impl CovenBuilder {
         self
     }
 
-    pub fn key_service(mut self, key_service: StoreKeys) -> Self {
-        self.key_service = key_service;
-        self
-    }
-
     /// How the store's master key is protected: the OS keyring (the
     /// default), a passphrase-wrapped file, an in-memory session value, or a
     /// host's own [`MasterKeyCustody`](crate::MasterKeyCustody) implementation.
@@ -367,15 +359,16 @@ impl CovenBuilder {
             self.clock.clone(),
             &migrations,
         )?;
-        let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
-        let identity_custody = self.identity_custody.resolve(&config.store_id, &store_dir);
+        let key_service = StoreKeys::bind(config.store_id.clone());
+        let key_custody = self.key_custody.resolve(&key_service, &store_dir);
+        let identity_custody = self.identity_custody.resolve(&key_service, &store_dir);
         Ok(CovenHandle::new(
             db,
             read_db,
             stamper,
             store_dir,
             provider,
-            self.key_service,
+            key_service,
             key_custody,
             identity_custody,
             self.oauth_clients,
@@ -429,13 +422,14 @@ impl CovenBuilder {
             self.clock.clone(),
             &migrations,
         )?;
-        let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
-        let identity_custody = self.identity_custody.resolve(&config.store_id, &store_dir);
+        let key_service = StoreKeys::bind(config.store_id.clone());
+        let key_custody = self.key_custody.resolve(&key_service, &store_dir);
+        let identity_custody = self.identity_custody.resolve(&key_service, &store_dir);
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
             store_dir,
             provider,
-            self.key_service,
+            key_service,
             key_custody,
             identity_custody,
             self.oauth_clients,

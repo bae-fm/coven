@@ -787,7 +787,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            StoreKeys::new("test".to_string()),
+            StoreKeys::bind("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
     }

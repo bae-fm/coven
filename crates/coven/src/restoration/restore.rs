@@ -14,7 +14,7 @@ use crate::custody::KeyCustody;
 use crate::encryption::MasterKeyring;
 use crate::identity_custody::IdentityCustody;
 use crate::joining::{bootstrap_and_save_store, BootstrapCleanup, BootstrapError};
-use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys, UserKeypair};
+use crate::keys::{StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
@@ -47,7 +47,7 @@ fn require_and_persist_oauth(
     let tokens = oauth_tokens.ok_or_else(|| {
         BootstrapError::Provider(format!("{provider_name} restore requires OAuth token"))
     })?;
-    let ks = StoreKeys::new(store_id.to_string());
+    let ks = StoreKeys::bind(store_id.to_string());
     ks.set_cloud_home_oauth_tokens(&tokens)?;
     Ok((tokens, ks))
 }
@@ -187,8 +187,8 @@ pub async fn restore_from_cloud(
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
-    custody: Arc<dyn MasterKeyCustody>,
-    identity_custody: Arc<dyn DeviceIdentityCustody>,
+    key_custody: KeyCustody,
+    identity_custody: IdentityCustody,
     source: RestoreSource,
     membership_floor: &crate::joining::MembershipFloor,
     keypair: &UserKeypair,
@@ -217,7 +217,9 @@ pub async fn restore_from_cloud(
     // including `build_cloud_home`'s OAuth persist, which runs before the store
     // directory is created — funnels through the same rollback instead of a
     // bare `?` escaping it.
-    let store_keys = StoreKeys::new(store_id.to_string());
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let custody = key_custody.resolve(&store_keys, &store_dir);
+    let identity_custody = identity_custody.resolve(&store_keys, &store_dir);
 
     // Refuse a *completed* store (config present) and clear a torn one before
     // any provider side effect. The decode guaranteed the id is a safe single
@@ -375,9 +377,6 @@ pub async fn restore_from_code(
         custom_s3_exact_slots,
     )
     .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
-    let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
-    let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
-
     // `decode_restore_code` already validated the field; rebuild this store's
     // restored signing identity from it. The storage signs its control objects
     // with this keypair during restore, and `restore_from_cloud` imports it into
@@ -442,8 +441,8 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         migrations,
-        custody.clone(),
-        identity_custody.clone(),
+        key_custody,
+        identity_custody,
         source,
         &parsed.membership_floor,
         &keypair,
@@ -497,7 +496,7 @@ mod tests {
             .await
             .expect("build restore cloud home for Dropbox");
 
-        let stored = StoreKeys::new(store_id.to_string())
+        let stored = StoreKeys::bind(store_id.to_string())
             .get_cloud_home_credentials()
             .expect("read cloud home credentials")
             .expect("restore must persist OAuth tokens to the keyring");

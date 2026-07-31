@@ -168,7 +168,7 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
 #[tokio::test]
 async fn neither_owner_nor_zone_builds_a_private_home() {
     let config = cloudkit_config(None);
-    let key_service = StoreKeys::new(config.store_id.clone());
+    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
@@ -192,7 +192,7 @@ async fn neither_owner_nor_zone_builds_a_private_home() {
 #[tokio::test]
 async fn both_owner_and_zone_build_a_shared_home() {
     let config = cloudkit_config(Some(("owner-name", "zone-name")));
-    let key_service = StoreKeys::new(config.store_id.clone());
+    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
@@ -220,7 +220,7 @@ async fn both_owner_and_zone_build_a_shared_home() {
 async fn mixed_owner_zone_is_a_configuration_error() {
     let mut config = cloudkit_config(None);
     config.cloud_home.cloudkit_owner_name = Some("owner-name".to_string());
-    let key_service = StoreKeys::new(config.store_id.clone());
+    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 

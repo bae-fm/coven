@@ -359,6 +359,7 @@ pub struct DeviceJoinClient {
     synced_tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     oauth_clients: crate::oauth::OAuthClients,
@@ -403,8 +404,9 @@ impl DeviceJoinClient {
         crate::store_dir::validate_path_token(&code.store_id)
             .map_err(|error| BootstrapError::InvalidCode(format!("invalid store id: {error}")))?;
         let store_dir = layout.store_dir(&code.store_id);
-        let custody = key_custody.resolve(&code.store_id, &store_dir);
-        let identity_custody = identity_custody.resolve(&code.store_id, &store_dir);
+        let store_keys = StoreKeys::bind(code.store_id.clone());
+        let custody = key_custody.resolve(&store_keys, &store_dir);
+        let identity_custody = identity_custody.resolve(&store_keys, &store_dir);
         Ok(Self {
             code,
             member_pubkey,
@@ -412,6 +414,7 @@ impl DeviceJoinClient {
             synced_tables,
             migrations,
             custom_s3_exact_slots,
+            store_keys,
             custody,
             identity_custody,
             oauth_clients,
@@ -520,10 +523,9 @@ impl DeviceJoinClient {
         if store_dir.config_path().exists() {
             return Err(BootstrapError::StoreExists(self.code.store_id.clone()));
         }
-        let store_keys = StoreKeys::new(self.code.store_id.clone());
         let cleanup = BootstrapCleanup::new(
             &store_dir,
-            &store_keys,
+            &self.store_keys,
             self.custody.as_ref(),
             self.identity_custody.as_ref(),
         );
@@ -712,13 +714,12 @@ impl DeviceJoinClient {
         on_status("Saving configuration...");
         self.custody.persist(&join.keyring)?;
         self.identity_custody.establish(&signer)?;
-        let store_keys = StoreKeys::new(self.code.store_id.clone());
         if let Some(credentials) = derive_credentials(&self.code.join_info) {
-            store_keys.set_cloud_home_credentials(&credentials)?;
+            self.store_keys.set_cloud_home_credentials(&credentials)?;
         }
         #[cfg(feature = "oauth-providers")]
         if let Some(tokens) = &self.oauth_tokens {
-            store_keys.set_cloud_home_oauth_tokens(tokens)?;
+            self.store_keys.set_cloud_home_oauth_tokens(tokens)?;
         }
         let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
         let mut config = build_config(
@@ -767,7 +768,7 @@ impl DeviceJoinClient {
         }
         build_cloud_home_for_join(
             &self.code.join_info,
-            &StoreKeys::new(self.code.store_id.clone()),
+            &self.store_keys,
             &self.oauth_clients,
             self.oauth_tokens.clone(),
             self.cloudkit_ops.clone(),
@@ -1143,13 +1144,12 @@ mod tests {
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
         std::fs::write(store_dir.config_path(), b"store_id: completed\n")
             .expect("seed completion marker");
-        let store_keys = StoreKeys::new("guard-completed-test".to_string());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("guard-completed-test", &store_dir);
+        let store_keys = StoreKeys::bind("guard-completed-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
         custody
             .persist(&MasterKeyring::generate())
             .expect("seed the master key");
-        let identity_custody = IdentityCustody::Keyring.resolve("guard-completed-test", &store_dir);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
 
         let cleanup = BootstrapCleanup::new(
             &store_dir,
@@ -1182,12 +1182,12 @@ mod tests {
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
         // Partial bootstrap residue: a torn database image, no config marker.
         std::fs::write(store_dir.db_path(), b"half-written-db").expect("seed torn db");
-        let store_keys = StoreKeys::new("guard-torn-test".to_string());
-        let custody = crate::custody::KeyCustody::Keyring.resolve("guard-torn-test", &store_dir);
+        let store_keys = StoreKeys::bind("guard-torn-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
         custody
             .persist(&MasterKeyring::generate())
             .expect("seed the master key");
-        let identity_custody = IdentityCustody::Keyring.resolve("guard-torn-test", &store_dir);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
         identity_custody
             .persist(&UserKeypair::generate())
             .expect("seed the identity");
@@ -1242,11 +1242,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let blocked = StoreDir::new(tmp.path().join("blocked-by-a-file"));
         std::fs::write(&*blocked, b"not a directory").expect("seed a file at the store dir path");
-        let store_keys = StoreKeys::new("cleanup-failure-cause-test".to_string());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
-        let identity_custody =
-            IdentityCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
+        let store_keys = StoreKeys::bind("cleanup-failure-cause-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &blocked);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &blocked);
 
         let cleanup = BootstrapCleanup::new(
             &blocked,
@@ -1276,11 +1274,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new(tmp.path().join("to-remove"));
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
-        let store_keys = StoreKeys::new("successful-cleanup-test".to_string());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
-        let identity_custody =
-            IdentityCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
+        let store_keys = StoreKeys::bind("successful-cleanup-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
 
         let cleanup = BootstrapCleanup::new(
             &store_dir,
@@ -1308,11 +1304,9 @@ mod tests {
         crate::keys::test_keyring::install();
         let tmp = tempfile::tempdir().expect("temp dir");
         let never_created = StoreDir::new(tmp.path().join("never-created"));
-        let store_keys = StoreKeys::new("never-created-dir-test".to_string());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("never-created-dir-test", &never_created);
-        let identity_custody =
-            IdentityCustody::Keyring.resolve("never-created-dir-test", &never_created);
+        let store_keys = StoreKeys::bind("never-created-dir-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &never_created);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &never_created);
 
         let cleanup = BootstrapCleanup::new(
             &never_created,
@@ -1341,13 +1335,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new(tmp.path().join("keyring-cleanup-test"));
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
-        let store_keys = StoreKeys::new("keyring-cleanup-test".to_string());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("keyring-cleanup-test", &store_dir);
+        let store_keys = StoreKeys::bind("keyring-cleanup-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
         custody
             .persist(&MasterKeyring::generate())
             .expect("seed the master key via custody");
-        let identity_custody = IdentityCustody::Keyring.resolve("keyring-cleanup-test", &store_dir);
+        let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
         identity_custody
             .persist(&crate::keys::UserKeypair::generate())
             .expect("seed this store's identity via custody");

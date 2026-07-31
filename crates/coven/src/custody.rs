@@ -30,59 +30,21 @@ pub enum KeyCustody {
 impl KeyCustody {
     /// Resolve the selected policy into the trait object coven drives the
     /// sync engine through, injecting what each preset needs from the store's
-    /// identity: `store_id` for [`KeyCustody::Keyring`] (the keyring account
-    /// name), `store_dir` for [`KeyCustody::Passphrase`] (the wrapped-file
-    /// path).
-    pub fn resolve(self, store_id: &str, store_dir: &StoreDir) -> Arc<dyn MasterKeyCustody> {
+    /// retained owners: `store_keys` for [`KeyCustody::Keyring`] and
+    /// `store_dir` for [`KeyCustody::Passphrase`].
+    pub fn resolve(
+        self,
+        store_keys: &StoreKeys,
+        store_dir: &StoreDir,
+    ) -> Arc<dyn MasterKeyCustody> {
         match self {
-            KeyCustody::Keyring => Arc::new(KeyringCustody::new(store_id.to_string())),
+            KeyCustody::Keyring => store_keys.master_key_custody(),
             KeyCustody::Passphrase(passphrase) => {
                 Arc::new(PassphraseCustody::new(passphrase, store_dir))
             }
             KeyCustody::InMemory(keyring) => Arc::new(InMemoryCustody::new(keyring)),
             KeyCustody::Custom(custody) => custody,
         }
-    }
-}
-
-// =============================================================================
-// Keyring preset
-// =============================================================================
-
-/// The OS keyring, wrapping [`StoreKeys`]'s master-key methods verbatim: same
-/// `encryption_master_key:{store_id}` account
-/// (`keyring_account_names_are_a_stable_storage_contract` pins it), same
-/// present-but-empty-is-corrupt read discipline (enforced once, at
-/// [`StoreKeys::get_encryption_key`]'s single keyring-read chokepoint), so
-/// existing installs' keys are found unchanged.
-struct KeyringCustody {
-    keys: StoreKeys,
-}
-
-impl KeyringCustody {
-    fn new(store_id: String) -> Self {
-        Self {
-            keys: StoreKeys::new(store_id),
-        }
-    }
-}
-
-impl MasterKeyCustody for KeyringCustody {
-    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
-        self.keys
-            .get_encryption_key()?
-            .map(|s| {
-                MasterKeyring::from_serialized(&s).map_err(|e| KeyError::Crypto(e.to_string()))
-            })
-            .transpose()
-    }
-
-    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
-        self.keys.set_encryption_key(&keyring.to_serialized())
-    }
-
-    fn forget(&self) -> Result<(), KeyError> {
-        self.keys.delete_encryption_key()
     }
 }
 
@@ -192,7 +154,8 @@ mod tests {
     #[test]
     fn keyring_preset_unlock_persist_forget_round_trip() {
         crate::keys::test_keyring::install();
-        let custody = KeyringCustody::new("custody-keyring-roundtrip".to_string());
+        let store_keys = StoreKeys::bind("custody-keyring-roundtrip".to_string());
+        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
 
         assert!(
             custody.unlock().expect("unlock a fresh store").is_none(),
@@ -223,11 +186,12 @@ mod tests {
     fn keyring_preset_unlock_does_not_read_a_corrupt_empty_entry_as_absent() {
         crate::keys::test_keyring::install();
         let store_id = "custody-keyring-corrupt-empty".to_string();
-        StoreKeys::new(store_id.clone())
+        let store_keys = StoreKeys::bind(store_id.clone());
+        store_keys
             .write_empty_encryption_key_for_test()
             .expect("write empty entry");
 
-        let custody = KeyringCustody::new(store_id);
+        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
         let error = custody.unlock().expect_err("empty entry is corrupt");
         assert!(error.to_string().contains("present but empty"));
     }

@@ -1180,9 +1180,15 @@ mod tests {
     /// (bypassing the builder) and never exercise master-key lifecycle
     /// methods — the blob/storage/status tests in this module. Seeded
     /// in-memory so it needs no keyring registration.
+    fn test_store_keys(store_id: &str) -> StoreKeys {
+        crate::keys::test_keyring::install();
+        StoreKeys::bind(store_id.to_string())
+    }
+
     fn test_key_custody() -> Arc<dyn crate::keys::MasterKeyCustody> {
+        let store_keys = test_store_keys("unused-store-id");
         crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate()).resolve(
-            "unused-store-id",
+            &store_keys,
             &crate::store_dir::StoreDir::new("unused-store-dir"),
         )
     }
@@ -1191,9 +1197,10 @@ mod tests {
     /// so it needs no keyring registration — the identity sibling of
     /// [`test_key_custody`].
     fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
+        let store_keys = test_store_keys("unused-store-id");
         crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
             .resolve(
-                "unused-store-id",
+                &store_keys,
                 &crate::store_dir::StoreDir::new("unused-store-dir"),
             )
     }
@@ -1358,7 +1365,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-setup-error".to_string()),
+            StoreKeys::bind("lib-setup-error".to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -1398,8 +1405,10 @@ mod tests {
         store_id: &str,
         store_dir: StoreDir,
         db: Database,
-        key_custody: Arc<dyn crate::keys::MasterKeyCustody>,
+        key_custody: crate::custody::KeyCustody,
     ) -> CovenHandle {
+        let store_keys = test_store_keys(store_id);
+        let key_custody = key_custody.resolve(&store_keys, &store_dir);
         test_handle_with_custody_and_storage(
             store_id,
             store_dir,
@@ -1433,7 +1442,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new(store_id.to_string()),
+            StoreKeys::bind(store_id.to_string()),
             key_custody,
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -1728,8 +1737,9 @@ mod tests {
         let store = TestStore::create(&db, "lib-test", signer.clone())
             .await
             .expect("create exact test Store");
+        let store_keys = test_store_keys("lib-test");
         let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
-            .resolve("lib-test", &store_dir);
+            .resolve(&store_keys, &store_dir);
 
         let stamper = db.stamper();
         let handle = CovenHandle::new(
@@ -1741,7 +1751,7 @@ mod tests {
             stamper,
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-test".to_string()),
+            store_keys,
             test_key_custody(),
             identity_custody,
             crate::oauth::OAuthClients::empty(),
@@ -1875,8 +1885,9 @@ mod tests {
         let store = TestStore::create(&db, "lib-chunking", signer.clone())
             .await
             .expect("create exact test Store");
+        let store_keys = test_store_keys("lib-chunking");
         let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
-            .resolve("lib-chunking", &store_dir);
+            .resolve(&store_keys, &store_dir);
         // Holds the loop off the upload queue so this test's explicit
         // `drain_uploads` is the call that seals the object.
         let upload_pause = Arc::new(PausedUploadDrain::new());
@@ -1890,7 +1901,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-chunking".to_string()),
+            store_keys,
             test_key_custody(),
             identity_custody,
             crate::oauth::OAuthClients::empty(),
@@ -2000,7 +2011,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-cloudkit-home-reuse".to_string()),
+            StoreKeys::bind("lib-cloudkit-home-reuse".to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -2057,7 +2068,8 @@ mod tests {
         config.cloud_home.provider = Some(CloudProvider::CloudKit);
         config.cloud_home.storage = HomeStorage::Opaque;
 
-        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let key_service = test_store_keys(store_id);
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
         custody
             .persist(&crate::encryption::MasterKeyring::generate())
             .expect("establish a master key");
@@ -2065,13 +2077,12 @@ mod tests {
         // Exact opaque blob locators bind their uploader registration, so establish
         // the writer's signing identity before connecting storage.
         let identity_custody =
-            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
+            crate::identity_custody::IdentityCustody::Keyring.resolve(&key_service, &store_dir);
         identity_custody
             .persist(&crate::keys::UserKeypair::generate())
             .expect("establish this store's signing identity");
 
         let ops = Arc::new(TestCloudKitOps::new());
-        let key_service = StoreKeys::new(store_id.to_string());
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
@@ -2145,9 +2156,12 @@ mod tests {
         test_keyring::install();
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve("lib-init-master-key-twice", &store_dir);
-        let handle = test_handle_with_custody("lib-init-master-key-twice", store_dir, db, custody);
+        let handle = test_handle_with_custody(
+            "lib-init-master-key-twice",
+            store_dir,
+            db,
+            crate::custody::KeyCustody::Keyring,
+        );
 
         let fingerprint = handle
             .initialize_master_key()
@@ -2213,16 +2227,17 @@ mod tests {
             Arc::new(move || config.clone())
         };
 
-        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let store_keys = test_store_keys(store_id);
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
         let identity_custody =
-            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
+            crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
         let handle = CovenHandle::new(
             db.clone(),
             db.clone(),
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new(store_id.to_string()),
+            store_keys,
             custody,
             identity_custody,
             crate::oauth::OAuthClients::empty(),
@@ -2339,15 +2354,18 @@ mod tests {
             "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
+        let store_keys = test_store_keys(store_id);
+        let identity_custody =
+            crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
         CovenHandle::new(
             db.clone(),
             db.clone(),
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new(store_id.to_string()),
+            store_keys,
             test_key_custody(),
-            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir),
+            identity_custody,
             crate::oauth::OAuthClients::empty(),
             Arc::new(SystemClock),
             None,
@@ -2471,7 +2489,7 @@ mod tests {
             store_id,
             store_dir.clone(),
             db,
-            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            crate::custody::KeyCustody::Keyring,
         );
         handle
             .initialize_master_key()
@@ -2512,7 +2530,7 @@ mod tests {
             store_id,
             store_dir.clone(),
             db.clone(),
-            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            crate::custody::KeyCustody::Keyring,
         );
         writer
             .initialize_master_key()
@@ -2530,12 +2548,14 @@ mod tests {
             );
             Arc::new(move || config.clone())
         };
+        let store_keys = test_store_keys(store_id);
+        let key_custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
         let reader = crate::read_handle::CovenReadHandle::new(
             db,
             store_dir.clone(),
             config_provider,
-            StoreKeys::new(store_id.to_string()),
-            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            store_keys,
+            key_custody,
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
             Arc::new(SystemClock),
@@ -2565,7 +2585,7 @@ mod tests {
             store_id,
             store_dir.clone(),
             db,
-            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            crate::custody::KeyCustody::Keyring,
         );
         assert!(
             handle.master_key_fingerprint().unwrap().is_none(),
@@ -2639,10 +2659,12 @@ mod tests {
             let (_tmp, store_dir) = temp_store_dir();
             let db = read_test_db("images");
             let keyring = crate::encryption::MasterKeyring::generate();
-            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-                .resolve("lib-create-circle-merge", &store_dir);
-            let handle =
-                test_handle_with_custody("lib-create-circle-merge", store_dir, db.clone(), custody);
+            let handle = test_handle_with_custody(
+                "lib-create-circle-merge",
+                store_dir,
+                db.clone(),
+                crate::custody::KeyCustody::InMemory(keyring.clone()),
+            );
             handle
                 .connect_sync_with_test_home(
                     Arc::new(InMemoryCloudHome::new()),
@@ -2748,10 +2770,12 @@ mod tests {
             let (_tmp, store_dir) = temp_store_dir();
             let db = read_test_db("images");
             let keyring = crate::encryption::MasterKeyring::generate();
-            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-                .resolve("lib-circles-namespace", &store_dir);
-            let handle =
-                test_handle_with_custody("lib-circles-namespace", store_dir, db.clone(), custody);
+            let handle = test_handle_with_custody(
+                "lib-circles-namespace",
+                store_dir,
+                db.clone(),
+                crate::custody::KeyCustody::InMemory(keyring.clone()),
+            );
             handle
                 .connect_sync_with_test_home(
                     Arc::new(InMemoryCloudHome::new()),
@@ -2803,9 +2827,12 @@ mod tests {
             let (_tmp, store_dir) = temp_store_dir();
             let db = read_test_db("images");
             let keyring = crate::encryption::MasterKeyring::generate();
-            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-                .resolve("lib-circles-dispatch", &store_dir);
-            let handle = test_handle_with_custody("lib-circles-dispatch", store_dir, db, custody);
+            let handle = test_handle_with_custody(
+                "lib-circles-dispatch",
+                store_dir,
+                db,
+                crate::custody::KeyCustody::InMemory(keyring.clone()),
+            );
             handle
                 .connect_sync_with_test_home(
                     Arc::new(InMemoryCloudHome::new()),
@@ -2923,7 +2950,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-reconnect-loop".to_string()),
+            StoreKeys::bind("lib-reconnect-loop".to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -3001,7 +3028,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-stopped-loop-readiness".to_string()),
+            StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -3076,7 +3103,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new("lib-test".to_string()),
+            StoreKeys::bind("lib-test".to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),
@@ -3198,7 +3225,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            StoreKeys::new(store_id.to_string()),
+            StoreKeys::bind(store_id.to_string()),
             test_key_custody(),
             test_identity_custody(),
             crate::oauth::OAuthClients::empty(),

@@ -530,7 +530,7 @@ mod tests {
         let identity = crate::identity_custody::IdentityCustody::InMemory(
             crate::keys::UserKeypair::generate(),
         )
-        .resolve(&config.store_id, &config.store_dir);
+        .resolve(&keys, &config.store_dir);
         crate::store_security::StoreSecurity::new(
             keys,
             master_keys,
@@ -613,7 +613,7 @@ mod tests {
         config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
         config.cloud_home.s3_exact_slots =
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests);
-        let key_service = StoreKeys::new(config.store_id.clone());
+        let key_service = StoreKeys::bind(config.store_id.clone());
         key_service
             .set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
                 access_key: "access".to_string(),
@@ -622,7 +622,7 @@ mod tests {
             .expect("store credentials");
         let custody =
             crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate())
-                .resolve(&config.store_id, &config.store_dir);
+                .resolve(&key_service, &config.store_dir);
         let security = store_security(&config, key_service, custody);
         let encoded = security
             .generate_restore_code(
@@ -656,9 +656,8 @@ mod tests {
         crate::keys::test_keyring::install();
 
         let config = cloudkit_config(Some(("owner-name", "zone-name")));
-        let key_service = StoreKeys::new(config.store_id.clone());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
+        let key_service = StoreKeys::bind(config.store_id.clone());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
         let security = store_security(&config, key_service, custody);
         let err = security
             .generate_restore_code(
@@ -683,9 +682,8 @@ mod tests {
         crate::keys::test_keyring::install();
 
         let config = cloudkit_config(None);
-        let key_service = StoreKeys::new(config.store_id.clone());
-        let custody =
-            crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
+        let key_service = StoreKeys::bind(config.store_id.clone());
+        let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
         let security = store_security(&config, key_service, custody);
         let code = security
             .generate_restore_code(

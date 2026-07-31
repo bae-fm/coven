@@ -13,7 +13,7 @@
 //! its protected store "must be code-signed with a provisioning profile" and
 //! ships its own protected-store tests as a static library linked into a
 //! signed iOS test harness, not as a `cargo test` binary). So this pins
-//! *construction*: which store `entry_for` dispatches to, and which
+//! *construction*: which store the registered keyring service retains, and which
 //! `AccessPolicy` it builds the entry with — that decision is made entirely
 //! in memory, before any Keychain syscall, so it needs no entitlement. The
 //! resulting item's actual on-disk accessibility class is verified
@@ -23,7 +23,7 @@
 use apple_native_keyring_store::protected::{AccessPolicy, Store};
 
 #[test]
-fn entry_for_dispatches_to_the_protected_store_device_only() {
+fn registered_service_builds_protected_device_only_entries() {
     coven::set_keyring_service("coven-apple-keyring-test").expect("register keyring service");
 
     let default_store =
@@ -34,12 +34,12 @@ fn entry_for_dispatches_to_the_protected_store_device_only() {
     );
 
     let facts = coven::apple_keyring_entry_facts_for_test("coven-apple-keyring-test-account")
-        .expect("entry_for builds an entry with no keychain I/O");
+        .expect("the registered service builds an entry with no keychain I/O");
 
     assert_eq!(
         facts.access_policy,
         AccessPolicy::WhenUnlockedThisDeviceOnly,
-        "entry_for must select the device-only policy directly (Cred::build), \
+        "the registered service must select the device-only policy directly (Cred::build), \
          never the modifier-string path apple-native-keyring-store maps to \
          the non-device-only AccessPolicy::WhenUnlocked",
     );
