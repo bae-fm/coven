@@ -243,104 +243,21 @@ pub(crate) async fn run_single_sync_cycle(
         .authorize_writer()
         .await
         .map_err(|error| SyncCycleFailure::operation("authorize local Store writer", error))?;
-    Box::pin(run_single_sync_cycle_with_authorization(
+    AuthorizedSyncCycle {
         device_id,
         hlc,
         clock,
         cipher,
         pending_rotation,
         security,
-        None,
+        routing_encryption: None,
         store_dir,
         cloud_home,
         observer,
         authorization,
-    ))
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_single_sync_cycle_with_authorization(
-    device_id: &str,
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    security: Option<&crate::store_security::StoreSecurity>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-    mut authorization: crate::sync::store::AuthorizedWriterOperation<'_>,
-) -> Result<SyncCycleResult, SyncCycleFailure> {
-    authorization.resume_operations(routing_encryption).await?;
-    let prepared = match Box::pin(prepare_cycle_before_pull(
-        hlc,
-        clock,
-        cipher,
-        pending_rotation,
-        security,
-        routing_encryption,
-        store_dir,
-        cloud_home,
-        observer,
-        &mut authorization,
-    ))
-    .await?
-    {
-        CycleBeforePull::Continue(prepared) => prepared,
-        CycleBeforePull::Complete(result) => return Ok(result),
-    };
-    let store_pull = authorization.pull(store_dir, routing_encryption).await?;
-    let completed = Box::pin(complete_cycle_after_pull(
-        hlc,
-        store_dir,
-        &mut authorization,
-        routing_encryption,
-        prepared,
-        store_pull,
-    ))
-    .await?;
-    if completed.rotation_pending.is_none() {
-        authorization
-            .circles()
-            .close()
-            .publish_circle_epoch_close_responses()
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("publish Circle epoch-close responses", error)
-            })?;
-        if let Some(routing_encryption) = routing_encryption {
-            authorization
-                .circles()
-                .close()
-                .finalize_ready_circle_epoch_closes(
-                    &completed.sync_time,
-                    store_dir,
-                    routing_encryption,
-                )
-                .await
-                .map_err(|error| {
-                    SyncCycleFailure::operation("finalize Circle epoch closes", error)
-                })?;
-        }
-        Box::pin(authorization.stage_and_publish_ack(&completed.sync_time)).await?;
-        Box::pin(reclaim_cycle_packages(&mut authorization)).await?;
     }
-    Ok(SyncCycleResult {
-        changesets_applied: completed.store_pull.changesets_applied,
-        held_positions: completed.store_pull.held_positions,
-        device_activity: super::status::other_device_activity(
-            &completed.store_pull.visible_heads,
-            device_id,
-        ),
-        sync_time: completed.sync_time,
-        asset_downloads_failed: completed.store_pull.asset_downloads_failed,
-        local_blob_cleanup_pending: completed.local_blob_cleanup_pending,
-        row_changes: completed.store_pull.row_changes,
-        resume_drain_promptly: completed.resume_drain_promptly,
-        rotation_pending: completed.rotation_pending,
-    })
+    .run()
+    .await
 }
 
 struct PreparedCycle {
@@ -362,214 +279,286 @@ struct CompletedPullCycle {
     rotation_pending: Option<RotationPending>,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn prepare_cycle_before_pull(
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    security: Option<&crate::store_security::StoreSecurity>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-    authorization: &mut AuthorizedWriterOperation<'_>,
-) -> Result<CycleBeforePull, SyncCycleFailure> {
-    // Refresh authorization/decryption state BEFORE anything this cycle pushes,
-    // judges, or decrypts. Membership and the rotatable store key are
-    // per-cycle preconditions, not init-time bootstraps:
-    // re-read them now so a removed member's writes are rejected and a rotated key
-    // is adopted on a running device without a restart. Runs before the blob drain
-    // so the drain (and every push/pull below) uses the current key. A failure here
-    // aborts the cycle and retries next time — a refresh that can't complete must
-    // not also corrupt state. Adoption itself failing is not this kind of failure —
-    // see `rotation_pending` below.
-    authorization
-        .refresh_authorization_state(cipher, pending_rotation, security)
-        .await?;
+struct AuthorizedSyncCycle<'cycle, 'store> {
+    device_id: &'cycle str,
+    hlc: &'cycle Hlc,
+    clock: &'cycle dyn crate::clock::Clock,
+    cipher: &'cycle dyn CloudCipherAccess,
+    pending_rotation: &'cycle PendingRotation,
+    security: Option<&'cycle crate::store_security::StoreSecurity>,
+    routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
+    store_dir: &'cycle StoreDir,
+    cloud_home: Option<&'cycle dyn CloudHome>,
+    observer: Option<&'cycle dyn BlobTransitionObserver>,
+    authorization: AuthorizedWriterOperation<'store>,
+}
 
-    // Whether this device has adopted everything the store has committed. Read
-    // once, right after the refresh that is the one place this cycle could adopt
-    // a rotation, and used below to skip every write that would otherwise seal
-    // new data under a generation the store has already superseded: the blob
-    // upload drain, Store write preparation, the tombstone
-    // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
-    // and delete-only tombstone GC are unaffected — the gate
-    // is on sealing for the cloud, not on using the store. An unadoptable
-    // rotation is marked pending by the refresh and pauses exactly this set; it
-    // never aborts the cycle.
-    let rotation_pending = pending_rotation.check(&cipher.snapshot()).err();
-    if let Some(pending) = &rotation_pending {
-        warn!(
-            rotation_state = ?pending.state,
-            live_generation = pending.live_generation,
-            "sync paused: store-key rotation work is incomplete; sealing nothing new for the cloud"
-        );
+impl AuthorizedSyncCycle<'_, '_> {
+    async fn run(mut self) -> Result<SyncCycleResult, SyncCycleFailure> {
+        self.authorization
+            .resume_operations(self.routing_encryption)
+            .await?;
+        let prepared = match Box::pin(self.prepare_before_pull()).await? {
+            CycleBeforePull::Continue(prepared) => prepared,
+            CycleBeforePull::Complete(result) => return Ok(result),
+        };
+        let store_pull = self
+            .authorization
+            .pull(self.store_dir, self.routing_encryption)
+            .await?;
+        let completed = Box::pin(self.complete_after_pull(prepared, store_pull)).await?;
+        if completed.rotation_pending.is_none() {
+            self.authorization
+                .circles()
+                .close()
+                .publish_circle_epoch_close_responses()
+                .await
+                .map_err(|error| {
+                    SyncCycleFailure::operation("publish Circle epoch-close responses", error)
+                })?;
+            if let Some(routing_encryption) = self.routing_encryption {
+                self.authorization
+                    .circles()
+                    .close()
+                    .finalize_ready_circle_epoch_closes(
+                        &completed.sync_time,
+                        self.store_dir,
+                        routing_encryption,
+                    )
+                    .await
+                    .map_err(|error| {
+                        SyncCycleFailure::operation("finalize Circle epoch closes", error)
+                    })?;
+            }
+            Box::pin(
+                self.authorization
+                    .stage_and_publish_ack(&completed.sync_time),
+            )
+            .await?;
+            Box::pin(self.reclaim_packages()).await?;
+        }
+        Ok(SyncCycleResult {
+            changesets_applied: completed.store_pull.changesets_applied,
+            held_positions: completed.store_pull.held_positions,
+            device_activity: super::status::other_device_activity(
+                &completed.store_pull.visible_heads,
+                self.device_id,
+            ),
+            sync_time: completed.sync_time,
+            asset_downloads_failed: completed.store_pull.asset_downloads_failed,
+            local_blob_cleanup_pending: completed.local_blob_cleanup_pending,
+            row_changes: completed.store_pull.row_changes,
+            resume_drain_promptly: completed.resume_drain_promptly,
+            rotation_pending: completed.rotation_pending,
+        })
     }
 
-    if let Some(home) = cloud_home {
-        if rotation_pending.is_none() {
-            let drained = authorization
-                .drain_tombstones(home, cipher, pending_rotation, clock)
+    async fn prepare_before_pull(&mut self) -> Result<CycleBeforePull, SyncCycleFailure> {
+        // Refresh authorization/decryption state BEFORE anything this cycle pushes,
+        // judges, or decrypts. Membership and the rotatable store key are
+        // per-cycle preconditions, not init-time bootstraps:
+        // re-read them now so a removed member's writes are rejected and a rotated key
+        // is adopted on a running device without a restart. Runs before the blob drain
+        // so the drain (and every push/pull below) uses the current key. A failure here
+        // aborts the cycle and retries next time — a refresh that can't complete must
+        // not also corrupt state. Adoption itself failing is not this kind of failure —
+        // see `rotation_pending` below.
+        self.authorization
+            .refresh_authorization_state(self.cipher, self.pending_rotation, self.security)
+            .await?;
+
+        // Whether this device has adopted everything the store has committed. Read
+        // once, right after the refresh that is the one place this cycle could adopt
+        // a rotation, and used below to skip every write that would otherwise seal
+        // new data under a generation the store has already superseded: the blob
+        // upload drain, Store write preparation, the tombstone
+        // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
+        // and delete-only tombstone GC are unaffected — the gate
+        // is on sealing for the cloud, not on using the store. An unadoptable
+        // rotation is marked pending by the refresh and pauses exactly this set; it
+        // never aborts the cycle.
+        let rotation_pending = self.pending_rotation.check(&self.cipher.snapshot()).err();
+        if let Some(pending) = &rotation_pending {
+            warn!(
+                rotation_state = ?pending.state,
+                live_generation = pending.live_generation,
+                "sync paused: store-key rotation work is incomplete; sealing nothing new for the cloud"
+            );
+        }
+
+        if let Some(home) = self.cloud_home {
+            if rotation_pending.is_none() {
+                let drained = self
+                    .authorization
+                    .drain_tombstones(home, self.cipher, self.pending_rotation, self.clock)
+                    .await
+                    .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
+                if drained > 0 {
+                    info!(count = drained, "Drained blob tombstones");
+                }
+            }
+            let reclaimed = self
+                .authorization
+                .gc_tombstones(home, self.cipher, self.clock)
                 .await
-                .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
-            if drained > 0 {
-                info!(count = drained, "Drained blob tombstones");
+                .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
+            if reclaimed > 0 {
+                info!(count = reclaimed, "Reclaimed tombstoned blobs");
             }
         }
-        let reclaimed = authorization
-            .gc_tombstones(home, cipher, clock)
+
+        let local_seq = self
+            .authorization
+            .latest_local_store_position()
             .await
-            .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
-        if reclaimed > 0 {
-            info!(count = reclaimed, "Reclaimed tombstoned blobs");
-        }
-    }
-
-    let local_seq = authorization
-        .latest_local_store_position()
-        .await
-        .map_err(|error| format!("read local Store position: {error}"))?
-        .map_or(0, |reference| reference.coord.sequence());
-    authorization
-        .drain_published_blob_drop_intents(store_dir, local_seq)
-        .await?;
-
-    // One wall-clock reading for this whole cycle. Store acknowledgements and
-    // the status built at the end record the same instant. Store write commits
-    // carry a separate HLC stamp (`timestamp` below) for causal ordering.
-    let sync_time = clock.now().to_rfc3339();
-
-    let mut resume_drain_promptly = false;
-    if rotation_pending.is_none() {
-        let outcome = authorization
-            .drain_uploads(store_dir, clock, hlc, routing_encryption, observer)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
-        if outcome.failures.has_transport_failure() {
-            return Err(SyncCycleFailure::operation(
-                "upload queued blobs",
-                outcome.failures,
-            ));
-        }
-        resume_drain_promptly = outcome.yielded_for_publish;
-        if outcome.uploaded > 0 {
-            info!(count = outcome.uploaded, "Drained blob uploads");
-        }
-    }
-
-    if rotation_pending.is_none() {
-        let published = authorization.publish_prepared_store_writes().await?;
-        if published > 0 {
-            info!(published, "Published queued Store writes");
-        }
-    }
-
-    if authorization.should_stop_before_pull().await? {
-        return Ok(CycleBeforePull::Complete(SyncCycleResult {
-            changesets_applied: 0,
-            held_positions: Vec::new(),
-            device_activity: Vec::new(),
-            sync_time,
-            asset_downloads_failed: false,
-            local_blob_cleanup_pending: false,
-            row_changes: Vec::new(),
-            resume_drain_promptly: false,
-            rotation_pending,
-        }));
-    }
-
-    Ok(CycleBeforePull::Continue(PreparedCycle {
-        sync_time,
-        resume_drain_promptly,
-        rotation_pending,
-    }))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn complete_cycle_after_pull(
-    hlc: &Hlc,
-    store_dir: &StoreDir,
-    authorization: &mut AuthorizedWriterOperation<'_>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    prepared: PreparedCycle,
-    store_pull: super::store::StorePullResult,
-) -> Result<CompletedPullCycle, SyncCycleFailure> {
-    let PreparedCycle {
-        sync_time,
-        resume_drain_promptly,
-        rotation_pending,
-    } = prepared;
-    if rotation_pending.is_none() {
-        // Pull installs the membership state that decides whether this active
-        // member may write. One capability then retains that decision through
-        // preparation and publication of every pending Store write.
-        let published = authorization
-            .publish_pending_store_writes(store_dir)
+            .map_err(|error| format!("read local Store position: {error}"))?
+            .map_or(0, |reference| reference.coord.sequence());
+        self.authorization
+            .drain_published_blob_drop_intents(self.store_dir, local_seq)
             .await?;
-        if published > 0 {
-            info!(published, "Published Store writes");
+
+        // One wall-clock reading for this whole cycle. Store acknowledgements and
+        // the status built at the end record the same instant. Store write commits
+        // carry a separate HLC stamp (`timestamp` below) for causal ordering.
+        let sync_time = self.clock.now().to_rfc3339();
+
+        let mut resume_drain_promptly = false;
+        if rotation_pending.is_none() {
+            let outcome = self
+                .authorization
+                .drain_uploads(
+                    self.store_dir,
+                    self.clock,
+                    self.hlc,
+                    self.routing_encryption,
+                    self.observer,
+                )
+                .await
+                .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
+            if outcome.failures.has_transport_failure() {
+                return Err(SyncCycleFailure::operation(
+                    "upload queued blobs",
+                    outcome.failures,
+                ));
+            }
+            resume_drain_promptly = outcome.yielded_for_publish;
+            if outcome.uploaded > 0 {
+                info!(count = outcome.uploaded, "Drained blob uploads");
+            }
         }
+
+        if rotation_pending.is_none() {
+            let published = self.authorization.publish_prepared_store_writes().await?;
+            if published > 0 {
+                info!(published, "Published queued Store writes");
+            }
+        }
+
+        if self.authorization.should_stop_before_pull().await? {
+            return Ok(CycleBeforePull::Complete(SyncCycleResult {
+                changesets_applied: 0,
+                held_positions: Vec::new(),
+                device_activity: Vec::new(),
+                sync_time,
+                asset_downloads_failed: false,
+                local_blob_cleanup_pending: false,
+                row_changes: Vec::new(),
+                resume_drain_promptly: false,
+                rotation_pending,
+            }));
+        }
+
+        Ok(CycleBeforePull::Continue(PreparedCycle {
+            sync_time,
+            resume_drain_promptly,
+            rotation_pending,
+        }))
     }
 
-    let local_seq = authorization
-        .latest_local_store_position()
-        .await
-        .map_err(|error| format!("read local Store position after publish: {error}"))?
-        .map_or(0, |position| position.coord.sequence());
-    authorization
-        .drain_published_blob_drop_intents(store_dir, local_seq)
-        .await?;
-    let local_blob_cleanup_pending = authorization
-        .drain_local_blob_cleanup(store_dir)
-        .await
-        .map_err(|error| format!("drain local blob cleanup after Store publication: {error}"))?
-        || store_pull.local_blob_cleanup_pending;
+    async fn complete_after_pull(
+        &mut self,
+        prepared: PreparedCycle,
+        store_pull: super::store::StorePullResult,
+    ) -> Result<CompletedPullCycle, SyncCycleFailure> {
+        let PreparedCycle {
+            sync_time,
+            resume_drain_promptly,
+            rotation_pending,
+        } = prepared;
+        if rotation_pending.is_none() {
+            // Pull installs the membership state that decides whether this active
+            // member may write. One capability then retains that decision through
+            // preparation and publication of every pending Store write.
+            let published = self
+                .authorization
+                .publish_pending_store_writes(self.store_dir)
+                .await?;
+            if published > 0 {
+                info!(published, "Published Store writes");
+            }
+        }
 
-    // Flush the clock's high-water mark so a restart re-seeds past it. Store pull
-    // advances the clock in the row-and-materialized-position commit closure, so
-    // `high_water` reflects remote commits and host stamps minted this cycle. A
-    // persist error aborts the cycle rather than risking a backward jump.
-    authorization
-        .persist_hlc_high_water(hlc)
-        .await
-        .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
+        let local_seq = self
+            .authorization
+            .latest_local_store_position()
+            .await
+            .map_err(|error| format!("read local Store position after publish: {error}"))?
+            .map_or(0, |position| position.coord.sequence());
+        self.authorization
+            .drain_published_blob_drop_intents(self.store_dir, local_seq)
+            .await?;
+        let local_blob_cleanup_pending = self
+            .authorization
+            .drain_local_blob_cleanup(self.store_dir)
+            .await
+            .map_err(|error| {
+                format!("drain local blob cleanup after Store publication: {error}")
+            })?
+            || store_pull.local_blob_cleanup_pending;
 
-    authorization
-        .publish_due_snapshots(
-            store_dir,
-            &sync_time,
-            routing_encryption,
-            rotation_pending.is_some(),
-        )
-        .await?;
+        // Flush the clock's high-water mark so a restart re-seeds past it. Store pull
+        // advances the clock in the row-and-materialized-position commit closure, so
+        // `high_water` reflects remote commits and host stamps minted this cycle. A
+        // persist error aborts the cycle rather than risking a backward jump.
+        self.authorization
+            .persist_hlc_high_water(self.hlc)
+            .await
+            .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
-    Ok(CompletedPullCycle {
-        store_pull,
-        local_blob_cleanup_pending,
-        sync_time,
-        resume_drain_promptly,
-        rotation_pending,
-    })
-}
+        self.authorization
+            .publish_due_snapshots(
+                self.store_dir,
+                &sync_time,
+                self.routing_encryption,
+                rotation_pending.is_some(),
+            )
+            .await?;
 
-async fn reclaim_cycle_packages(
-    authorization: &mut AuthorizedWriterOperation<'_>,
-) -> Result<(), SyncCycleFailure> {
-    match authorization.reclaim_packages().await {
-        Ok(result) if result.packages_deleted > 0 => info!(
-            packages = result.packages_deleted,
-            copies = result.physical_copies_deleted,
-            "Reclaimed snapshot-covered Store packages"
-        ),
-        Ok(_) => {}
-        Err(
-            error @ (super::store::StoreReclaimError::NoSnapshot
-            | super::store::StoreReclaimError::MissingAcknowledgement { .. }),
-        ) => info!(%error, "Store package reclamation is awaiting coverage"),
-        Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
+        Ok(CompletedPullCycle {
+            store_pull,
+            local_blob_cleanup_pending,
+            sync_time,
+            resume_drain_promptly,
+            rotation_pending,
+        })
     }
-    Ok(())
+
+    async fn reclaim_packages(&mut self) -> Result<(), SyncCycleFailure> {
+        match self.authorization.reclaim_packages().await {
+            Ok(result) if result.packages_deleted > 0 => info!(
+                packages = result.packages_deleted,
+                copies = result.physical_copies_deleted,
+                "Reclaimed snapshot-covered Store packages"
+            ),
+            Ok(_) => {}
+            Err(
+                error @ (super::store::StoreReclaimError::NoSnapshot
+                | super::store::StoreReclaimError::MissingAcknowledgement { .. }),
+            ) => info!(%error, "Store package reclamation is awaiting coverage"),
+            Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1027,19 +1016,20 @@ impl SyncComponents {
             self.store.authorize_writer().await.map_err(|error| {
                 SyncCycleFailure::operation("authorize local Store writer", error)
             })?;
-        run_single_sync_cycle_with_authorization(
-            &self.device_id,
-            &self.hlc,
+        AuthorizedSyncCycle {
+            device_id: &self.device_id,
+            hlc: &self.hlc,
             clock,
-            &self.cipher,
-            &self.pending_rotation,
+            cipher: &self.cipher,
+            pending_rotation: &self.pending_rotation,
             security,
-            self.routing_encryption.as_ref(),
+            routing_encryption: self.routing_encryption.as_ref(),
             store_dir,
-            Some(self.storage.cloud_home()),
+            cloud_home: Some(self.storage.cloud_home()),
             observer,
             authorization,
-        )
+        }
+        .run()
         .await
     }
 }
