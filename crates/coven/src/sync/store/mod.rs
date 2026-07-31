@@ -60,12 +60,6 @@ pub(crate) use owner::device_exclusion::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
-pub(crate) use owner::device_join::{
-    load_pending_device_join_actions, load_pending_device_join_status, DeviceJoinAbandonmentRef,
-    DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
-    DeviceProviderResponseReservation, JoiningStore, PendingDeviceJoinAuthority,
-    PendingDeviceJoinObservation,
-};
 pub use owner::device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
@@ -78,10 +72,13 @@ pub use owner::device_join::{
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
 };
+pub(crate) use owner::device_join::{
+    DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
+    DeviceProviderResponseReservation, JoiningStore, PendingDeviceJoinAuthority,
+    PendingDeviceJoinObservation,
+};
 #[cfg(test)]
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
-#[cfg(test)]
-pub(crate) use owner::history::retained_membership_floor_is_included;
 pub(crate) use owner::history::InvitationHistory;
 pub(crate) use owner::operations::{
     CircleAckActivation, PreparedStoreOperationCommit, StoreMembershipJournalCompletion,

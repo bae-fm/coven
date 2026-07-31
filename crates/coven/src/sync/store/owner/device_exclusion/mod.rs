@@ -681,13 +681,26 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         self.drive(Box::new(operation)).await.map(Some)
     }
 
+    async fn reject_active_operation(&self) -> Result<(), StoreDeviceExclusionError> {
+        if let Some(operation) = self
+            .database
+            .active_outbound_store_device_exclusion()
+            .await?
+        {
+            return Err(StoreDeviceExclusionError::OperationActive(
+                operation.operation_id(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn propose(
         &mut self,
         target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
         let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
-        reject_active_operation(&database).await?;
+        self.reject_active_operation().await?;
         let durable = self.prepare_proposal(target).await?;
         self.drive(Box::new(durable)).await
     }
@@ -830,7 +843,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
         let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
-        reject_active_operation(&database).await?;
+        self.reject_active_operation().await?;
         let durable = self.prepare_outcome(proposal_ref, intent).await?;
         self.drive(Box::new(durable)).await
     }
@@ -1376,17 +1389,6 @@ fn completion_result(
             candidate: candidate.reference.clone(),
         },
     })
-}
-
-async fn reject_active_operation(
-    database: &StoreDatabase,
-) -> Result<(), StoreDeviceExclusionError> {
-    if let Some(operation) = database.active_outbound_store_device_exclusion().await? {
-        return Err(StoreDeviceExclusionError::OperationActive(
-            operation.operation_id(),
-        ));
-    }
-    Ok(())
 }
 
 fn require_active_target(

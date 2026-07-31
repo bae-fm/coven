@@ -1,4 +1,3 @@
-use super::super::history::abandonment::verify_merge_candidate_nonactivations;
 use crate::protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
@@ -121,8 +120,7 @@ async fn drain_prepared_store_writes(
                     let registration = database
                         .activated_store_device_registration(head.author_registration.clone())
                         .await?;
-                    let nonactivations = verify_merge_candidate_nonactivations(
-                        &observation,
+                    let nonactivations = observation.verified_nonactivations(
                         commit
                             .abandoned_candidates()
                             .iter()
@@ -158,8 +156,7 @@ async fn drain_prepared_store_writes(
                 let registration = database
                     .activated_store_device_registration(head.author_registration.clone())
                     .await?;
-                let nonactivations = verify_merge_candidate_nonactivations(
-                    &observation,
+                let nonactivations = observation.verified_nonactivations(
                     std::iter::once(StoreBatchCommitDeletionTarget {
                         coord: head.commit.coord.clone(),
                         object: head.commit.object.clone(),
@@ -192,8 +189,7 @@ async fn drain_prepared_store_writes(
             let registration = database
                 .activated_store_device_registration(head.author_registration.clone())
                 .await?;
-            let nonactivations = verify_merge_candidate_nonactivations(
-                &observation,
+            let nonactivations = observation.verified_nonactivations(
                 commit
                     .abandoned_candidates()
                     .iter()

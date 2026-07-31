@@ -180,6 +180,21 @@ impl DeviceProviderAccessRequest {
         ObjectHash::digest(&domain_json(ACCESS_REQUEST_DOMAIN, &self.signed_fields()))
     }
 
+    pub(super) fn cross_challenge_context(
+        &self,
+    ) -> crate::protocol::provider::CrossPrincipalChallengeContext {
+        crate::protocol::provider::CrossPrincipalChallengeContext {
+            root: self.offer.store_root.clone(),
+            attempt_id: self.offer.attempt_id,
+            access_request_hash: self.request_hash(),
+            provider_admin_grant: self.offer.provider_admin.grant_id.clone(),
+            owner_registration: self.offer.owner_registration.clone(),
+            member_pubkey: self.offer.member_pubkey.clone(),
+            administrator_binding: self.offer.provider_admin.provider.clone(),
+            peer_binding: self.peer_provider.clone(),
+        }
+    }
+
     fn signed_fields(&self) -> (&DeviceJoinOffer, &ProviderDeviceBinding) {
         (&self.offer, &self.peer_provider)
     }
@@ -1079,7 +1094,7 @@ pub struct JoinedStore {
 
 fn sign<T: Serialize>(signer: &UserKeypair, domain: &[u8], value: &T) -> String {
     let digest = ObjectHash::digest(&domain_json(domain, value));
-    hex::encode(signer.sign(digest.as_bytes()))
+    keys::sign_hex(signer, digest.as_bytes()).1
 }
 
 fn verify_signature<T: Serialize>(

@@ -44,6 +44,28 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             registration,
         }
     }
+
+    fn exact_member_grant(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::protocol::membership::MembershipGrantId, OwnerPromotionError> {
+        let grants = self.membership.active_grant_ids(member_pubkey);
+        let Some(grant) = grants.iter().next() else {
+            return Err(OwnerPromotionError::Protocol(
+                "promotion target has no active Member grant".to_string(),
+            ));
+        };
+        if grants.len() != 1
+            || self.membership.active_grant(grant).is_none_or(|record| {
+                record.role != crate::protocol::membership::StoreMembershipRoleGrant::Member
+            })
+        {
+            return Err(OwnerPromotionError::Protocol(
+                "promotion target does not have exactly one active Member grant".to_string(),
+            ));
+        }
+        Ok(grant.clone())
+    }
 }
 
 #[cfg(test)]

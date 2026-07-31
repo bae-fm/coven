@@ -1,4 +1,3 @@
-use super::joiner::cross_challenge_context;
 use super::journal::{database_error, provider_error};
 use super::*;
 
@@ -684,7 +683,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     }
                 };
                 let context = crate::protocol::provider::CrossPrincipalResponseContext {
-                    challenge: cross_challenge_context(&attempt.provider_approval.request),
+                    challenge: attempt.provider_approval.request.cross_challenge_context(),
                     expected_registration_hash: attempt.expected_registration.registration_hash(),
                     response_slot,
                 };

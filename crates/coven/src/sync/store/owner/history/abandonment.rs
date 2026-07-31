@@ -104,6 +104,28 @@ impl VerifiedMergeWinner {
         )
     }
 
+    pub(crate) fn verified_nonactivations(
+        &self,
+        targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
+        author: &StoreDeviceRegistration,
+    ) -> Result<Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+    {
+        let mut nonactivations = Vec::new();
+        for target in targets {
+            if target.coord == self.winner.commit.coord
+                && target.object == self.winner.commit.object
+                && target.canonical_signed_bytes == self.winner_commit.to_bytes()
+            {
+                continue;
+            }
+            nonactivations.push(
+                self.verified_nonactivation(target, author)
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+            );
+        }
+        Ok(nonactivations)
+    }
+
     pub(crate) fn winner(&self) -> &StoreDeviceHead {
         &self.winner
     }
@@ -112,6 +134,7 @@ impl VerifiedMergeWinner {
         &self.winner_prepared
     }
 
+    #[cfg(test)]
     pub(crate) fn winner_commit(&self) -> &VerifiedStoreBatchCommit {
         &self.winner_commit
     }
@@ -137,26 +160,4 @@ impl VerifiedMergeWinner {
 pub(crate) enum ExcludedCandidateHeadObservation {
     AuthorExclusion,
     MergeWinner(VerifiedMergeWinner),
-}
-
-pub(crate) fn verify_merge_candidate_nonactivations(
-    observation: &VerifiedMergeWinner,
-    targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
-    author: &StoreDeviceRegistration,
-) -> Result<Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError> {
-    let mut nonactivations = Vec::new();
-    for target in targets {
-        if target.coord == observation.winner().commit.coord
-            && target.object == observation.winner().commit.object
-            && target.canonical_signed_bytes == observation.winner_commit().to_bytes()
-        {
-            continue;
-        }
-        nonactivations.push(
-            observation
-                .verified_nonactivation(target, author)
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
-        );
-    }
-    Ok(nonactivations)
 }

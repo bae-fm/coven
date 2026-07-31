@@ -1480,17 +1480,13 @@ impl AuthorizedStoreHistory<'_> {
         &self,
         order: &crate::protocol::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
-        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
             .0;
         let checkpoints = self
-            .database
-            .retained_merge_history_frontier(root.clone(), frontier.values().cloned().collect())
-            .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        require_complete_retained_frontier(root, &frontier, &checkpoints)?;
+            .retained_history_checkpoints(frontier.values().cloned().collect())
+            .await?;
         retained_merge_device_state(&self.history_verifier, &frontier, &checkpoints).await
     }
 
@@ -1501,17 +1497,13 @@ impl AuthorizedStoreHistory<'_> {
         author_registration: &StoreDeviceRegistrationRef,
         resolver_pubkey: &str,
     ) -> Result<MergeConflictResolutionAuthorization, pull::StorePullError> {
-        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
             .0;
         let checkpoints = self
-            .database
-            .retained_merge_history_frontier(root.clone(), frontier.values().cloned().collect())
-            .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        require_complete_retained_frontier(root, &frontier, &checkpoints)?;
+            .retained_history_checkpoints(frontier.values().cloned().collect())
+            .await?;
         let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
@@ -1551,17 +1543,13 @@ impl AuthorizedStoreHistory<'_> {
         candidate_membership_heads: &[MembershipHeadRef],
         author_registration: &StoreDeviceRegistrationRef,
     ) -> Result<MergeOutboundAuthorization, pull::StorePullError> {
-        let root = self.history_verifier.root();
         let frontier = order
             .predecessor_cut()
             .map_err(|error| pull::StorePullError::Database(error.to_string()))?
             .0;
         let checkpoints = self
-            .database
-            .retained_merge_history_frontier(root.clone(), frontier.values().cloned().collect())
-            .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-        require_complete_retained_frontier(root, &frontier, &checkpoints)?;
+            .retained_history_checkpoints(frontier.values().cloned().collect())
+            .await?;
         let prefix = VerifiedMergeMembershipPrefix::from_retained(&checkpoints)?;
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
@@ -1629,17 +1617,8 @@ impl AuthorizedStoreHistory<'_> {
         let predecessor_refs =
             crate::sync::store::owner::pull::commit_predecessor_references(commit);
         let predecessors = self
-            .database
-            .retained_merge_history_frontier(root.clone(), predecessor_refs.clone())
-            .await
-            .map_err(|error| {
-                crate::sync::store::owner::pull::StorePullError::Database(error.to_string())
-            })?;
-        if predecessors.len() != predecessor_refs.len() {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "Merge successor is missing a retained direct predecessor".to_string(),
-            ));
-        }
+            .retained_history_checkpoints(predecessor_refs.clone())
+            .await?;
         let (expected_predecessor_ref, predecessor_state) = self
             .database
             .store_device_state_for_order(&commit.order)
@@ -1724,18 +1703,8 @@ impl AuthorizedStoreHistory<'_> {
         let frontier = &coverage.0;
         let root = self.history_verifier.root();
         let predecessors = self
-            .database
-            .retained_merge_history_frontier(root.clone(), frontier.values().cloned().collect())
-            .await
-            .map_err(|error| {
-                crate::sync::store::owner::pull::StorePullError::Database(error.to_string())
-            })?;
-        if predecessors.len() != frontier.len() {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "Merge snapshot is missing a retained checkpoint at its coverage frontier"
-                    .to_string(),
-            ));
-        }
+            .retained_history_checkpoints(frontier.values().cloned().collect())
+            .await?;
         compose_merge_snapshot_history_summary(
             root,
             coverage,
@@ -1821,6 +1790,27 @@ impl AuthorizedStoreHistory<'_> {
             winner_prepared,
             winner_commit,
         ))
+    }
+
+    async fn retained_history_checkpoints(
+        &self,
+        references: Vec<StoreBatchCommitRef>,
+    ) -> Result<Vec<OpenedRetainedMergeHistorySummary>, pull::StorePullError> {
+        let root = self.history_verifier.root();
+        let checkpoints = self
+            .database
+            .retained_merge_history_frontier(root.clone(), references)
+            .await
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+        if checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.summary.store_root_hash != root.store_root_hash)
+        {
+            return Err(pull::StorePullError::Database(
+                "Merge operation is missing retained predecessor authority".to_string(),
+            ));
+        }
+        Ok(checkpoints)
     }
 
     pub(super) async fn observe_excluded_candidate_head(
@@ -2281,51 +2271,21 @@ impl AuthorizedStoreHistory<'_> {
     }
 }
 
-fn require_complete_retained_frontier(
-    root: &StoreRootRef,
-    frontier: &BTreeMap<AuthorStreamId, StoreBatchCommitRef>,
-    checkpoints: &[OpenedRetainedMergeHistorySummary],
-) -> Result<(), pull::StorePullError> {
-    if checkpoints.len() != frontier.len()
-        || checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.summary.store_root_hash != root.store_root_hash)
-    {
-        return Err(pull::StorePullError::Database(
-            "Merge operation is missing retained predecessor authority".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_retained_membership_floors(
     checkpoints: &[OpenedRetainedMergeHistorySummary],
     membership: &MembershipChain,
 ) -> Result<(), pull::StorePullError> {
     if checkpoints.iter().any(|checkpoint| {
-        !retained_membership_floor_is_included(&checkpoint.summary.membership_floor, membership)
+        !checkpoint
+            .summary
+            .membership_floor
+            .is_included_in(membership)
     }) {
         return Err(pull::StorePullError::Database(
             "Merge membership omits retained effective predecessor authority".to_string(),
         ));
     }
     Ok(())
-}
-
-pub(crate) fn retained_membership_floor_is_included(
-    floor: &crate::protocol::store_commit::MembershipCausalFloor,
-    membership: &MembershipChain,
-) -> bool {
-    floor
-        .effective_coordinates
-        .iter()
-        .all(|coordinate| membership.effectively_contains_coord(coordinate))
-        && floor.resolutions.iter().all(|reference| {
-            membership
-                .resolution_refs()
-                .binary_search(reference)
-                .is_ok()
-        })
 }
 
 async fn retained_merge_device_state(

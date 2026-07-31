@@ -34,6 +34,21 @@ impl MembershipCausalFloor {
         self.validate()
     }
 
+    pub(crate) fn is_included_in(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+    ) -> bool {
+        self.effective_coordinates
+            .iter()
+            .all(|coordinate| membership.effectively_contains_coord(coordinate))
+            && self.resolutions.iter().all(|reference| {
+                membership
+                    .resolution_refs()
+                    .binary_search(reference)
+                    .is_ok()
+            })
+    }
+
     fn validate(&self) -> Result<(), StoreProtocolError> {
         if self
             .effective_coordinates

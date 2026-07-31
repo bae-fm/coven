@@ -465,16 +465,12 @@ impl DeviceJoinClient {
         attempt_id: crate::DeviceJoinAttemptId,
     ) -> Result<Option<crate::DeviceJoinStatus>, BootstrapError> {
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::store::load_pending_device_join_status(
-            &pending, attempt_id,
-        )?)
+        Ok(pending.status(attempt_id)?)
     }
 
     pub fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, BootstrapError> {
         let pending = self.open_pending_journal()?;
-        Ok(crate::sync::store::load_pending_device_join_actions(
-            &pending,
-        )?)
+        Ok(pending.actions()?)
     }
 
     pub async fn close_pending_device_join(
@@ -500,10 +496,7 @@ impl DeviceJoinClient {
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), BootstrapError> {
         let pending = self.open_pending_journal()?;
-        match crate::sync::store::load_pending_device_join_status(
-            &pending,
-            activation.receipt.attempt_id,
-        )? {
+        match pending.status(activation.receipt.attempt_id)? {
             Some(crate::DeviceJoinStatus::CleanupActivated {
                 activation: durable,
             }) if durable == activation => {}

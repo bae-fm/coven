@@ -5814,10 +5814,7 @@ mod tests {
             resolutions: resumed.resolution_refs().to_vec(),
         };
         assert!(
-            !crate::sync::store::retained_membership_floor_is_included(
-                &checkpoint_floor,
-                &resumed,
-            ),
+            !checkpoint_floor.is_included_in(&resumed),
             "a coordinate present only in the raw losing branch cannot satisfy a retained effective checkpoint floor",
         );
         assert_eq!(

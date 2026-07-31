@@ -466,10 +466,8 @@ fn exercise_pre_attempt_abandonment<'a>(
             Some(DeviceJoinStatus::Abandoned { abandonment: durable }) if durable == abandonment
         ));
         assert!(matches!(
-            crate::sync::store::load_pending_device_join_status(
-                &pending,
-                abandonment.abandonment.attempt_id,
-            )
+            pending
+                .status(abandonment.abandonment.attempt_id)
             .expect("load joiner join status"),
             Some(DeviceJoinStatus::Abandoned { abandonment: durable }) if durable == abandonment
         ));
@@ -855,7 +853,8 @@ fn exercise_post_attempt_cancellation<'a>(
             Some(DeviceJoinStatus::CleanupActivated { .. })
         ));
         assert!(matches!(
-            crate::sync::store::load_pending_device_join_status(&pending, attempt_id)
+            pending
+                .status(attempt_id)
                 .expect("load joiner cancellation status"),
             Some(DeviceJoinStatus::CleanupActivated { .. })
         ));

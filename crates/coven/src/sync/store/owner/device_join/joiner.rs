@@ -821,9 +821,12 @@ impl JoiningStore<'_> {
                 },
             ) if challenge == published => {
                 let context = crate::protocol::provider::CrossPrincipalResponseContext {
-                    challenge: cross_challenge_context(
-                        &bootstrap.bootstrap.request.approval.request,
-                    ),
+                    challenge: bootstrap
+                        .bootstrap
+                        .request
+                        .approval
+                        .request
+                        .cross_challenge_context(),
                     expected_registration_hash: bootstrap
                         .bootstrap
                         .request
@@ -935,21 +938,6 @@ impl PendingJoinJournal {
             }
         }
         Ok(readiness)
-    }
-}
-
-pub(super) fn cross_challenge_context(
-    request: &DeviceProviderAccessRequest,
-) -> crate::protocol::provider::CrossPrincipalChallengeContext {
-    crate::protocol::provider::CrossPrincipalChallengeContext {
-        root: request.offer.store_root.clone(),
-        attempt_id: request.offer.attempt_id,
-        access_request_hash: request.request_hash(),
-        provider_admin_grant: request.offer.provider_admin.grant_id.clone(),
-        owner_registration: request.offer.owner_registration.clone(),
-        member_pubkey: request.offer.member_pubkey.clone(),
-        administrator_binding: request.offer.provider_admin.provider.clone(),
-        peer_binding: request.peer_provider.clone(),
     }
 }
 

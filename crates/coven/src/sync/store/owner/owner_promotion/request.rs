@@ -4,7 +4,7 @@ use crate::protocol::store_commit::{
 };
 use crate::sync::store::operations::{StoreOperationBatch, StoreOperationPublicationOutcome};
 
-use super::authority::{exact_merge_member_grant, target_key};
+use super::authority::target_key;
 use super::journal::{
     advance_owner_promotion_journal, OwnerPromotionJournal, OwnerPromotionJournalPredecessor,
     OwnerPromotionJournalState,
@@ -98,7 +98,6 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
     ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
         let operation = self;
         let database = operation.database.clone();
-        let membership = operation.membership.clone();
         let db = &database;
         let (allocated, failed_attempt) = if let Some(existing) = database
             .load_owner_promotion_target(target_key(&member_registration)?)
@@ -125,12 +124,13 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
             .await
             .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
         let plan = operation.writer.prepare_plan().await?;
-        let member_grant = exact_merge_member_grant(&membership, &member.value.author_pubkey)?;
+        let member_grant = operation.exact_member_grant(&member.value.author_pubkey)?;
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
             OwnerPromotionError::Protocol("promotion author is not an Owner".to_string())
         })?;
-        let reusable =
-            membership.reusable_author_streams(&plan.registration().author_pubkey, &owner_grant);
+        let reusable = operation
+            .membership
+            .reusable_author_streams(&plan.registration().author_pubkey, &owner_grant);
         let author_stream = database
             .select_membership_author_stream(
                 &plan.registration().author_pubkey,
@@ -138,7 +138,8 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
                 reusable,
             )
             .await?;
-        let (seq, previous_hash) = membership
+        let (seq, previous_hash) = operation
+            .membership
             .next_stream_position(
                 &plan.registration().author_pubkey,
                 &owner_grant,

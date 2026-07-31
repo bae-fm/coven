@@ -482,6 +482,14 @@ impl DeviceJoinJournalDatabase {
             .collect())
     }
 
+    pub fn status(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinError> {
+        self.load(attempt_id, DeviceJoinRole::Joiner)
+            .map(|record| record.as_ref().map(DeviceJoinJournalRecord::status))
+    }
+
     pub fn completed_joiner_readiness(
         &self,
         attempt: &DeviceJoinAttemptRef,
@@ -941,21 +949,6 @@ fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoinActi
             | JoinerJoinProgress::CancelledComplete(_),
         ) => None,
     }
-}
-
-pub(crate) fn load_pending_device_join_actions(
-    pending: &DeviceJoinJournalDatabase,
-) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
-    pending.actions()
-}
-
-pub(crate) fn load_pending_device_join_status(
-    pending: &DeviceJoinJournalDatabase,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<Option<DeviceJoinStatus>, DeviceJoinError> {
-    pending
-        .load(attempt_id, DeviceJoinRole::Joiner)
-        .map(|record| record.as_ref().map(DeviceJoinJournalRecord::status))
 }
 
 pub(super) fn store_journal_key(attempt_id: DeviceJoinAttemptId, role: &str) -> String {

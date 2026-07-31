@@ -1,5 +1,4 @@
 use super::cleanup::require_cancelled_outcome;
-use super::joiner::cross_challenge_context;
 use super::journal::provider_error;
 use super::*;
 
@@ -288,16 +287,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             DeviceProviderAdmissionChallenge::SamePrincipal
         } else {
             let exact = self.storage.exact_slot_storage();
-            let challenge_context = crate::protocol::provider::CrossPrincipalChallengeContext {
-                root: request.offer.store_root.clone(),
-                attempt_id: request.offer.attempt_id,
-                access_request_hash: request.request_hash(),
-                provider_admin_grant: provider_admin.grant_id.clone(),
-                owner_registration: request.offer.owner_registration.clone(),
-                member_pubkey: request.offer.member_pubkey.clone(),
-                administrator_binding: provider_admin.provider.clone(),
-                peer_binding: request.peer_provider.clone(),
-            };
+            let challenge_context = request.cross_challenge_context();
             let probe_id = crate::protocol::provider::ProviderProbeId::from_bytes(
                 *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
             );
@@ -356,7 +346,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                 DeviceProviderChallengePublication::SamePrincipal
             }
             DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
-                let context = cross_challenge_context(&bootstrap.request.approval.request);
+                let context = bootstrap.request.approval.request.cross_challenge_context();
                 let authorization = DeviceJoinChallengePublicationAuthorization {
                     attempt: bootstrap.publication_authorization.attempt.clone(),
                     attempt_activation: bootstrap
@@ -480,9 +470,12 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                 DeviceProviderReadiness::CrossPrincipal(response),
             ) => {
                 let context = crate::protocol::provider::CrossPrincipalResponseContext {
-                    challenge: cross_challenge_context(
-                        &bootstrap.bootstrap.request.approval.request,
-                    ),
+                    challenge: bootstrap
+                        .bootstrap
+                        .request
+                        .approval
+                        .request
+                        .cross_challenge_context(),
                     expected_registration_hash: bootstrap
                         .bootstrap
                         .request
