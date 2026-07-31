@@ -441,13 +441,7 @@ pub(crate) async fn drop_cached_blob(
     reference: &RowBlobRef,
 ) -> Result<(), BlobCacheError> {
     db.validate_row_blob_ref(reference).await?;
-    drop_cached_stored_blob(store_dir, remote_stored_ref(reference)?).await
-}
-
-pub(crate) async fn drop_cached_stored_blob(
-    store_dir: &StoreDir,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<(), BlobCacheError> {
+    let stored = remote_stored_ref(reference)?;
     let locator = stored.locator();
     store_dir
         .remove_cached_locator(locator.namespace(), locator.locator_hash())

@@ -565,7 +565,9 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                         .remove_outbound_blob_spool(stored.locator().locator_hash())
                         .await
                         .map_err(UploadFailureCause::Local)?;
-                    crate::blob::cache::drop_cached_stored_blob(self.store_dir, stored)
+                    let locator = stored.locator();
+                    self.store_dir
+                        .remove_cached_locator(locator.namespace(), locator.locator_hash())
                         .await
                         .map_err(|error| {
                             UploadFailureCause::Local(format!("drop cancelled cache copy: {error}"))
