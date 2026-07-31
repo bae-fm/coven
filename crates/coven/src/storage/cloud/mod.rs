@@ -719,28 +719,6 @@ pub(crate) fn combine_cleanup_failure(
     }
 }
 
-/// The central upload driver: pick single-request vs multipart by size and pump
-/// the parts. A blob at or below the home's `multipart_threshold` goes up as one
-/// bounded `put_object`; a larger one opens a multipart/resumable session and
-/// streams [`BlobBody`] parts into it, reporting cumulative progress. The trait's
-/// `write` is this; no backend overrides it.
-async fn write_blob<C: CloudHome + ?Sized>(
-    home: &C,
-    key: &str,
-    body: BlobBody,
-    progress: &UploadProgress<'_>,
-) -> Result<(), CloudHomeError> {
-    if body.len() <= home.multipart_threshold() {
-        let data = body.collect().await?;
-        let n = data.len() as u64;
-        home.put_object(key, data).await?;
-        progress(n);
-        return Ok(());
-    }
-    let sink = home.open_multipart(key, body.len()).await?;
-    MultipartUpload::new(key, body, sink, progress).run().await
-}
-
 /// One open multipart upload, including its source body, provider session, and
 /// progress reporting. The operation either finishes the provider session or
 /// awaits its abort and preserves both the operation and cleanup failures.
@@ -947,7 +925,15 @@ pub trait CloudHome: Send + Sync {
         body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        write_blob(self, key, body, progress).await
+        if body.len() <= self.multipart_threshold() {
+            let data = body.collect().await?;
+            let n = data.len() as u64;
+            self.put_object(key, data).await?;
+            progress(n);
+            return Ok(());
+        }
+        let sink = self.open_multipart(key, body.len()).await?;
+        MultipartUpload::new(key, body, sink, progress).run().await
     }
 
     /// Read the full contents of a key.
