@@ -403,7 +403,7 @@ pub(super) async fn apply_candidate(
     let mut packages =
         Vec::with_capacity(usize::from(candidate.package.is_some()) + circle_packages.len());
     if let Some(bytes) = candidate.package.as_ref() {
-        let package = match parse_candidate_store_package(candidate, bytes) {
+        let package = match candidate.parse_store_package(bytes) {
             Ok(package) => package,
             Err(error) => {
                 return Ok(ApplyOutcome::Held(
@@ -426,7 +426,7 @@ pub(super) async fn apply_candidate(
         }
     }
     for loaded in &circle_packages {
-        let package = match parse_candidate_circle_package(candidate, loaded) {
+        let package = match candidate.parse_circle_package(loaded) {
             Ok(package) => package,
             Err(error) => {
                 return Ok(ApplyOutcome::Held(

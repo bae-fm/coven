@@ -123,10 +123,9 @@ pub(crate) use local_device_operations::{
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(crate) use model::{
-    commit_stream_id, parse_candidate_circle_package, parse_candidate_store_package, Candidate,
-    HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, LoadedCirclePackage,
-    LocalStoreMembership, StorePullError, StorePullFuture, StorePullMembershipError,
-    StorePullResult, VerifiedStoreDeviceHead,
+    commit_stream_id, Candidate, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
+    LoadedCirclePackage, LocalStoreMembership, StorePullError, StorePullFuture,
+    StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
 };
 pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_history;
 pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};

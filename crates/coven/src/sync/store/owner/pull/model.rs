@@ -265,6 +265,56 @@ impl Candidate {
     pub(crate) fn author(&self) -> &StoreDeviceRegistration {
         self.verified.author()
     }
+
+    pub(crate) fn parse_store_package(&self, bytes: &[u8]) -> Result<AudiencePackage, String> {
+        let commit = self.commit();
+        let package = AudiencePackage::parse(bytes)
+            .map_err(|error| format!("invalid Store audience package: {error}"))?;
+        if !matches!(package.audience(), PackageAudience::Store)
+            || package.store_root_hash() != commit.store_root_hash
+            || package.write_id() != &commit.write_id
+            || package.commit_coord() != &self.commit_ref().coord
+            || package.candidate_family() != commit.candidate_family()
+            || commit
+                .store_package()
+                .as_ref()
+                .is_none_or(|reference| package.schema_version() != reference.schema_version)
+        {
+            return Err("Store audience package differs from its exact commit".to_string());
+        }
+        Ok(package)
+    }
+
+    pub(crate) fn parse_circle_package(
+        &self,
+        loaded: &LoadedCirclePackage,
+    ) -> Result<AudiencePackage, String> {
+        let commit = self.commit();
+        let package = AudiencePackage::parse(&loaded.bytes)
+            .map_err(|error| format!("invalid Circle audience package: {error}"))?;
+        let expected = &loaded.reference;
+        if !matches!(
+            package.audience(),
+            PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } if *circle_id == expected.circle_id
+                && control == &expected.control
+                && *key_fingerprint == expected.key_fingerprint
+        ) || package.store_root_hash() != commit.store_root_hash
+            || package.write_id() != &commit.write_id
+            || package.commit_coord() != &self.commit_ref().coord
+            || package.candidate_family() != commit.candidate_family()
+            || package.schema_version() != expected.package.schema_version
+        {
+            return Err("Circle audience package differs from its exact commit".to_string());
+        }
+        package
+            .validate_blob_uploader(&commit.author_registration)
+            .map_err(|error| format!("invalid Circle blob authority: {error}"))?;
+        Ok(package)
+    }
 }
 
 #[derive(Clone)]
@@ -272,59 +322,6 @@ pub(crate) struct LoadedCirclePackage {
     pub(crate) reference: CirclePackageRef,
     pub(crate) bytes: Vec<u8>,
     pub(crate) blob_protection: BlobSpoolProtection,
-}
-
-pub(crate) fn parse_candidate_store_package(
-    candidate: &Candidate,
-    bytes: &[u8],
-) -> Result<AudiencePackage, String> {
-    let commit = candidate.commit();
-    let package = AudiencePackage::parse(bytes)
-        .map_err(|error| format!("invalid Store audience package: {error}"))?;
-    if !matches!(package.audience(), PackageAudience::Store)
-        || package.store_root_hash() != commit.store_root_hash
-        || package.write_id() != &commit.write_id
-        || package.commit_coord() != &candidate.commit_ref().coord
-        || package.candidate_family() != commit.candidate_family()
-        || commit
-            .store_package()
-            .as_ref()
-            .is_none_or(|reference| package.schema_version() != reference.schema_version)
-    {
-        return Err("Store audience package differs from its exact commit".to_string());
-    }
-    Ok(package)
-}
-
-pub(crate) fn parse_candidate_circle_package(
-    candidate: &Candidate,
-    loaded: &LoadedCirclePackage,
-) -> Result<AudiencePackage, String> {
-    let commit = candidate.commit();
-    let package = AudiencePackage::parse(&loaded.bytes)
-        .map_err(|error| format!("invalid Circle audience package: {error}"))?;
-    let expected = &loaded.reference;
-    if !matches!(
-        package.audience(),
-        PackageAudience::Circle {
-            circle_id,
-            control,
-            key_fingerprint,
-        } if *circle_id == expected.circle_id
-            && control == &expected.control
-            && *key_fingerprint == expected.key_fingerprint
-    ) || package.store_root_hash() != commit.store_root_hash
-        || package.write_id() != &commit.write_id
-        || package.commit_coord() != &candidate.commit_ref().coord
-        || package.candidate_family() != commit.candidate_family()
-        || package.schema_version() != expected.package.schema_version
-    {
-        return Err("Circle audience package differs from its exact commit".to_string());
-    }
-    package
-        .validate_blob_uploader(&commit.author_registration)
-        .map_err(|error| format!("invalid Circle blob authority: {error}"))?;
-    Ok(package)
 }
 
 pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {
