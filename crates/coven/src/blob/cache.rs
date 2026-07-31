@@ -359,10 +359,11 @@ pub(crate) async fn write_blob_from_file(
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     let dest = store_dir.cache_blob_path(namespace, locator_hash)?;
-    let mut staged = crate::local_blob::AtomicStagedFile::create(&dest)
+    let staged = crate::local_blob::AtomicStagedFile::create(&dest)
         .await
         .map_err(BlobCacheError::Io)?;
-    crate::local_blob::copy_atomic(src_path, staged.path_for_atomic_replacement())
+    let (staged, _, _) = staged
+        .copy_from(src_path)
         .await
         .map_err(BlobCacheError::Io)?;
     verify_local_file_facts(staged.path(), plaintext_size, plaintext_hash).await?;
@@ -412,10 +413,11 @@ pub(crate) async fn populate_pinned_from_file(
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     let dest = store_dir.pinned_blob_path(namespace, locator_hash)?;
-    let mut staged = crate::local_blob::AtomicStagedFile::create(&dest)
+    let staged = crate::local_blob::AtomicStagedFile::create(&dest)
         .await
         .map_err(BlobCacheError::Io)?;
-    crate::local_blob::copy_atomic(src_path, staged.path_for_atomic_replacement())
+    let (staged, _, _) = staged
+        .copy_from(src_path)
         .await
         .map_err(BlobCacheError::Io)?;
     verify_local_file_facts(staged.path(), plaintext_size, plaintext_hash).await?;
@@ -1447,13 +1449,11 @@ async fn stage_exact_local_copy(
     to: &std::path::Path,
     reference: &RowBlobRef,
 ) -> Result<crate::local_blob::AtomicStagedFile, BlobCacheError> {
-    let mut staged = crate::local_blob::AtomicStagedFile::create(to)
+    let staged = crate::local_blob::AtomicStagedFile::create(to)
         .await
         .map_err(BlobCacheError::Io)?;
-    let (actual_size, actual_hash) =
-        crate::local_blob::copy_atomic_with_facts(from, staged.path_for_atomic_replacement())
-            .await
-            .map_err(BlobCacheError::Io)?;
+    let (staged, actual_size, actual_hash) =
+        staged.copy_from(from).await.map_err(BlobCacheError::Io)?;
     verify_local_file_identity(from, reference, actual_size, actual_hash)?;
     Ok(staged)
 }

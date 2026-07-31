@@ -224,19 +224,26 @@ pub async fn write_cloud_object_stream(
     destination: &Path,
     stream: CloudObjectStream,
 ) -> Result<u64, CloudFileReadError> {
-    crate::local_blob::write_byte_stream_atomic(destination, stream)
+    let staged = crate::local_blob::AtomicStagedFile::create(destination)
         .await
-        .map_err(|error| match error {
-            crate::local_blob::ByteStreamWriteError::Source(error) => {
-                CloudFileReadError::Source(error)
-            }
-            crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
-                CloudFileReadError::SourceCleanup { source, cleanup }
-            }
-            crate::local_blob::ByteStreamWriteError::Local(error) => {
-                CloudFileReadError::Local(error)
-            }
-        })
+        .map_err(CloudFileReadError::Local)?;
+    let (staged, written) =
+        staged
+            .write_byte_stream(stream)
+            .await
+            .map_err(|error| match error {
+                crate::local_blob::ByteStreamWriteError::Source(error) => {
+                    CloudFileReadError::Source(error)
+                }
+                crate::local_blob::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
+                    CloudFileReadError::SourceCleanup { source, cleanup }
+                }
+                crate::local_blob::ByteStreamWriteError::Local(error) => {
+                    CloudFileReadError::Local(error)
+                }
+            })?;
+    staged.commit().await.map_err(CloudFileReadError::Local)?;
+    Ok(written)
 }
 
 impl CloudHomeError {

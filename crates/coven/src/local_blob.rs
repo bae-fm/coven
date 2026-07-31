@@ -254,6 +254,18 @@ impl AtomicStagedFile {
         }
     }
 
+    /// Fill this unpublished stage from one opened source file while computing
+    /// the exact identity of the copied bytes from that same descriptor.
+    pub(crate) async fn copy_from(
+        self,
+        source: &Path,
+    ) -> Result<(Self, u64, crate::protocol::store_commit::ObjectHash), String> {
+        let input = tokio::fs::File::open(source)
+            .await
+            .map_err(|error| format!("open copy source {}: {error}", source.display()))?;
+        self.write_open_file_with_facts(input, source).await
+    }
+
     async fn write_open_file_with_facts(
         mut self,
         mut input: tokio::fs::File,
@@ -855,35 +867,12 @@ pub(crate) async fn verify_exact_file(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
-    copy_atomic_with_facts(src, dst).await.map(|_| ())
-}
-
-/// Copy one file atomically while calculating the exact identity of the bytes
-/// written from the same open source handle.
-pub(crate) async fn copy_atomic_with_facts(
-    src: &Path,
-    dst: &Path,
-) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
-    let input = tokio::fs::File::open(src)
-        .await
-        .map_err(|error| format!("open copy source {}: {error}", src.display()))?;
     let staged = AtomicStagedFile::create(dst).await?;
-    let (staged, size, hash) = staged.write_open_file_with_facts(input, src).await?;
+    let (staged, _, _) = staged.copy_from(src).await?;
     staged.commit().await?;
-    Ok((size, hash))
-}
-
-pub(crate) async fn write_byte_stream_atomic<E: Send>(
-    path: &Path,
-    stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
-) -> Result<u64, ByteStreamWriteError<E>> {
-    let staged = AtomicStagedFile::create(path)
-        .await
-        .map_err(ByteStreamWriteError::Local)?;
-    let (staged, written) = staged.write_byte_stream(stream).await?;
-    staged.commit().await.map_err(ByteStreamWriteError::Local)?;
-    Ok(written)
+    Ok(())
 }
 
 pub(crate) async fn read(path: &Path) -> Result<Vec<u8>, String> {
@@ -1382,9 +1371,13 @@ mod tests {
         let stream =
             futures_util::stream::iter([Ok(Bytes::from_static(b"partial")), Err("source failed")]);
 
-        let error = write_byte_stream_atomic(&path, Box::pin(stream))
+        let staged = AtomicStagedFile::create(&path)
             .await
-            .expect_err("source failure");
+            .expect("reserve destination stage");
+        let error = match staged.write_byte_stream(Box::pin(stream)).await {
+            Ok(_) => panic!("source failure must reject the staged write"),
+            Err(error) => error,
+        };
 
         assert!(matches!(
             error,
@@ -1409,10 +1402,12 @@ mod tests {
         })
         .chain(futures_util::stream::pending());
         let write_path = path.clone();
-        let write =
-            tokio::spawn(
-                async move { write_byte_stream_atomic(&write_path, Box::pin(stream)).await },
-            );
+        let write = tokio::spawn(async move {
+            let staged = AtomicStagedFile::create(&write_path)
+                .await
+                .map_err(ByteStreamWriteError::Local)?;
+            staged.write_byte_stream(Box::pin(stream)).await
+        });
         first_yielded.notified().await;
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -1430,7 +1425,11 @@ mod tests {
         .expect("partial temp file was written");
 
         write.abort();
-        assert!(write.await.expect_err("write task canceled").is_cancelled());
+        let cancellation = match write.await {
+            Ok(_) => panic!("write task must be canceled"),
+            Err(error) => error,
+        };
+        assert!(cancellation.is_cancelled());
 
         assert_eq!(read(&path).await.expect("read destination"), b"committed");
         assert!(temp_entries(tmp.path()).await.is_empty());
