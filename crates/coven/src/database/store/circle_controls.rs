@@ -198,6 +198,21 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn complete_circle_operation_upload_step(
+        &self,
+        journal: &mut CircleOperationJournal,
+        step: &str,
+    ) -> Result<(), DbError> {
+        if journal.operation().uploaded.contains(step) {
+            return Ok(());
+        }
+        let mut completed = journal.clone();
+        completed.operation_mut().uploaded.insert(step.to_string());
+        self.update_circle_operation(completed.clone()).await?;
+        *journal = completed;
+        Ok(())
+    }
+
     pub(crate) async fn begin_circle_operation_finalization(
         &self,
         journal: CircleOperationJournal,

@@ -793,7 +793,10 @@ async fn append_step(
             "circle upload step {step:?} differs from its prepared journal bytes"
         )));
     }
-    complete_step(database, journal, step).await
+    database
+        .complete_circle_operation_upload_step(journal, step)
+        .await?;
+    Ok(())
 }
 
 async fn append_hashed_step(
@@ -811,7 +814,10 @@ async fn append_hashed_step(
             "circle upload step {step:?} differs from its signed image hash"
         )));
     }
-    complete_step(database, journal, step).await
+    database
+        .complete_circle_operation_upload_step(journal, step)
+        .await?;
+    Ok(())
 }
 
 async fn create_or_read_step(
@@ -840,17 +846,4 @@ async fn create_or_read_step(
         .await
         .map_err(crate::storage::StoreObjectError::from)?;
     read_exact_circle_object(storage, context, prepared.reference(), semantic_prefix).await
-}
-
-async fn complete_step(
-    database: &StoreDatabase,
-    journal: &mut CircleOperationJournal,
-    step: &str,
-) -> Result<(), CircleOperationError> {
-    if journal.operation().uploaded.contains(step) {
-        return Ok(());
-    }
-    journal.operation_mut().uploaded.insert(step.to_string());
-    database.update_circle_operation(journal.clone()).await?;
-    Ok(())
 }
