@@ -7,7 +7,7 @@ use crate::keys::{
     MasterKeyError, StoreKeys, UserKeypair,
 };
 use crate::storage::cloud::{CloudHome, CloudHomeError};
-use crate::storage::{BlobChunking, CloudCipher, CloudSyncStorage};
+use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 #[derive(Clone)]
 pub(crate) struct StoreSecurity {
@@ -167,17 +167,9 @@ impl StoreSecurity {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config)?,
         };
-        crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-            config,
-            &self.keys,
-            &self.oauth_clients,
-            self.identity.as_ref(),
-            cipher,
-            clock,
-            cloudkit_ops,
-            blob_chunking,
-        )
-        .await
+        crate::storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
+        let home = self.create_cloud_home(config, clock, cloudkit_ops).await?;
+        self.create_sync_storage_with_home(config, Arc::from(home), Some(cipher), blob_chunking)
     }
 
     pub(crate) fn create_sync_storage_with_home(
@@ -191,13 +183,19 @@ impl StoreSecurity {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config)?,
         };
-        crate::storage::cloud::setup::create_sync_storage_with_home(
-            config,
-            self.identity.as_ref(),
+        crate::storage::cloud::setup::require_exact_slot_capabilities_home(
+            home.clone(),
+            config.cloud_home.provider.clone(),
+        )?;
+        let identity = self.require_identity()?;
+        Ok(CloudSyncStorage::new(
             home,
             cipher,
-            blob_chunking,
-        )
+            BlobPathScheme::for_storage(config.cloud_home.storage),
+            config.store_id.clone(),
+            identity,
+        )?
+        .with_blob_chunking(blob_chunking))
     }
 
     fn cloud_cipher(

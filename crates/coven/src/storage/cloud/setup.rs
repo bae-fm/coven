@@ -9,11 +9,7 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
-use crate::keys::{DeviceIdentityCustody, StoreKeys};
-use crate::storage::BlobChunking;
-use crate::storage::BlobPathScheme;
-use crate::storage::CloudCipher;
-use std::sync::Arc;
+use crate::keys::StoreKeys;
 
 #[cfg(feature = "oauth-providers")]
 fn oauth_token_save_error(error: crate::keys::KeyError) -> SetupError {
@@ -337,72 +333,6 @@ fn exact_slot_capabilities_supported(
     }
 }
 
-/// Create sync storage from config and credentials.
-///
-/// This is a lighter version of `sync::cycle::init_sync_over_storage` that only
-/// creates the storage client without starting a sync session or extracting raw
-/// DB handles. Used by membership management which only needs storage access.
-///
-/// `cipher` is built by the store's security owner so the sync loop and storage
-/// share one instance for in-place key rotation.
-pub(crate) async fn create_sync_storage_with_cloudkit(
-    config: &Config,
-    key_service: &StoreKeys,
-    oauth_clients: &crate::oauth::OAuthClients,
-    identity_custody: &dyn DeviceIdentityCustody,
-    cipher: CloudCipher,
-    clock: crate::clock::ClockRef,
-    cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
-    blob_chunking: BlobChunking,
-) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
-    require_exact_slot_capabilities_config(config)?;
-    let cloud_home = super::create_cloud_home_with_cloudkit(
-        config,
-        key_service,
-        oauth_clients,
-        clock,
-        cloudkit_ops.clone(),
-    )
-    .await?;
-    create_sync_storage_with_home(
-        config,
-        identity_custody,
-        Arc::from(cloud_home),
-        cipher,
-        blob_chunking,
-    )
-}
-
-/// Create sync storage over an already-built [`CloudHome`](super::CloudHome).
-/// Unlike [`create_sync_storage_with_cloudkit`], this needs no store-scoped
-/// cloud credentials or master-key custody (the home and cipher are already
-/// built by their owners).
-pub(crate) fn create_sync_storage_with_home(
-    config: &Config,
-    identity_custody: &dyn DeviceIdentityCustody,
-    home: Arc<dyn super::CloudHome>,
-    cipher: CloudCipher,
-    blob_chunking: BlobChunking,
-) -> Result<crate::storage::CloudSyncStorage, StorageSetupError> {
-    require_exact_slot_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
-
-    // This store's signing identity, used to sign the control objects the
-    // storage writes (its head, the min_schema floor) so a reader can attribute
-    // and verify them against the membership chain. A connect path, so this
-    // never mints: an unestablished identity fails with
-    // `KeyError::NoDeviceIdentity` rather than forging one.
-    let keypair = crate::keys::require_identity(identity_custody)?;
-
-    Ok(crate::storage::CloudSyncStorage::new(
-        home,
-        cipher,
-        BlobPathScheme::for_storage(config.cloud_home.storage),
-        config.store_id.clone(),
-        keypair,
-    )?
-    .with_blob_chunking(blob_chunking))
-}
-
 /// Cloud provider setup error.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -415,6 +345,7 @@ mod tests {
     use crate::restoration::decode_restore_code;
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::store_dir::StoreDir;
+    use std::sync::Arc;
 
     fn membership_floor(
         author_pubkey: String,
