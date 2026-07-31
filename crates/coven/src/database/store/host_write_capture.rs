@@ -25,13 +25,6 @@ enum StoreWriteSqlAuthority {
 }
 
 impl StoreDatabase {
-    fn start_host_change_journal_on<'c>(
-        conn: &'c Connection,
-        synced_tables: &[SyncedTable],
-    ) -> Result<rusqlite::session::Session<'c>, DbError> {
-        attach_session(conn, synced_tables)
-    }
-
     fn drain_host_change_journal_on(
         session: &mut rusqlite::session::Session<'_>,
     ) -> Result<Vec<u8>, DbError> {
@@ -497,8 +490,7 @@ impl StoreDatabase {
                 .unchecked_transaction()
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let mut journal =
-                Self::start_host_change_journal_on(&tx, synced_tables).map_err(E::from)?;
+            let mut journal = attach_session(&tx, synced_tables).map_err(E::from)?;
             let value = match sql_authority {
                 StoreWriteSqlAuthority::Host => {
                     HostSqlTransaction::begin(&tx).map_err(E::from)?.run(f)?

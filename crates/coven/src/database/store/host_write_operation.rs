@@ -377,7 +377,18 @@ async fn stage_blobs<E>(
         match StagedBlob::stage(store_dir, blob).await {
             Ok(blob) => staged.push(blob),
             Err(error) => {
-                let cleanup = discard_staged_blobs(staged).await;
+                let mut failures = Vec::new();
+                for blob in staged {
+                    let identity = format!("{}/{}", blob.namespace, blob.id);
+                    if let Err(error) = blob.discard().await {
+                        failures.push(format!("{identity}: {error}"));
+                    }
+                }
+                let cleanup = if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(failures.join("; "))
+                };
                 return match cleanup {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
@@ -389,19 +400,4 @@ async fn stage_blobs<E>(
         }
     }
     Ok(staged)
-}
-
-async fn discard_staged_blobs(staged: Vec<StagedBlob>) -> Result<(), String> {
-    let mut failures = Vec::new();
-    for blob in staged {
-        let identity = format!("{}/{}", blob.namespace, blob.id);
-        if let Err(error) = blob.discard().await {
-            failures.push(format!("{identity}: {error}"));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
 }
