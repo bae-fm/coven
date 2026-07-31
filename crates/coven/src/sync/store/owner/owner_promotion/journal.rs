@@ -227,10 +227,6 @@ fn transition_matches_acceptance(
         )
 }
 
-fn prepared_candidate_has_closed_shape(candidate: &PreparedStoreOperationCommit) -> bool {
-    candidate.validate_closed_shape().is_ok()
-}
-
 fn merge_candidate_matches_finalization(
     candidate: &PreparedStoreOperationCommit,
     transition: &PreparedMembershipTransition,
@@ -258,7 +254,7 @@ fn merge_candidate_matches_finalization(
     let Some(operations) = candidate.commit.operations() else {
         return false;
     };
-    prepared_candidate_has_closed_shape(candidate)
+    candidate.validate_closed_shape().is_ok()
         && candidate.commit.author_registration == acceptance.request.promoter_registration
         && candidate.commit.control()
             == Some(&crate::protocol::store_commit::StoreControl {
