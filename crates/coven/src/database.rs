@@ -178,7 +178,8 @@ use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
 pub(crate) use schema_introspection::{
-    foreign_key_edges, quote_ident, table_columns, ForeignKeyEdge, ForeignKeySchemaError,
+    create_table_sql, foreign_key_edges, quote_ident, rewrite_create_into_schema, table_columns,
+    CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
 };
 #[cfg(test)]
 pub(crate) use store::{

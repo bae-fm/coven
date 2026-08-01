@@ -64,7 +64,6 @@ use std::ffi::c_int;
 use rusqlite::{Connection, OptionalExtension, Params};
 
 mod audience;
-mod create_table;
 mod ffi;
 mod model;
 mod outbound;
@@ -203,11 +202,7 @@ pub(crate) enum GateError {
     NoGatedDescendants(String),
     /// The gated tables form an FK cycle, so no parent-first apply order exists.
     FkCycle(Vec<String>),
-    NoSchema(String),
-    BadCreateTableSql {
-        table: String,
-        sql: String,
-    },
+    CreateTableSchema(crate::database::CreateTableSchemaError),
     Sql(String, rusqlite::Error),
     Cleanup {
         operation: Box<GateError>,
@@ -297,10 +292,7 @@ impl std::fmt::Display for GateError {
             GateError::FkCycle(tables) => {
                 write!(f, "gated tables form an FK cycle: {}", tables.join(", "))
             }
-            GateError::NoSchema(tbl) => write!(f, "no CREATE TABLE schema for {tbl}"),
-            GateError::BadCreateTableSql { table, sql } => {
-                write!(f, "bad CREATE TABLE SQL for {table}: {sql}")
-            }
+            GateError::CreateTableSchema(error) => error.fmt(f),
             GateError::Sql(op, err) => write!(f, "{op} failed: {err}"),
             GateError::Cleanup { operation, cleanup } => {
                 write!(
@@ -313,6 +305,12 @@ impl std::fmt::Display for GateError {
 }
 
 impl std::error::Error for GateError {}
+
+impl From<crate::database::CreateTableSchemaError> for GateError {
+    fn from(error: crate::database::CreateTableSchemaError) -> Self {
+        Self::CreateTableSchema(error)
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -8,13 +8,12 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 use tracing::{debug, warn};
 
-use super::create_table::{create_table_sql, rewrite_create_into_schema};
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{
     foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
-use crate::database::quote_ident;
+use crate::database::{create_table_sql, quote_ident, rewrite_create_into_schema};
 use crate::protocol::circle::Audience;
 
 #[derive(Clone, Copy)]
