@@ -424,16 +424,10 @@ fn project_membership_cut_to_store_prefix(
 }
 
 pub(super) async fn project_anchored_chain_to_verified_store_prefix(
-    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
-    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
+    authority: &mut MembershipActivationAuthority<'_, '_>,
     candidate_heads: &[MembershipHeadRef],
     prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let mut authority = MembershipActivationAuthority::VerifiedPrefix {
-        root: root.clone(),
-        commit_verifier,
-        activations: prefix,
-    };
     let candidate = authority
         .load_exact_membership_graph_objects(candidate_heads)
         .await?;
@@ -442,7 +436,7 @@ pub(super) async fn project_anchored_chain_to_verified_store_prefix(
     let root = authority.root().clone();
     let root_value = authority.verified_root().clone();
     let projected = load_anchored_chain_at_exact_heads_with_root_impl(
-        &mut authority,
+        authority,
         &root,
         &root_value,
         &owner_pubkey,

@@ -70,123 +70,12 @@ pub(crate) struct PreparedMergeMaterialization {
     pub(crate) package_application: Option<crate::database::RetainedPackageApplication>,
 }
 
-pub(crate) async fn verified_merge_membership_objects(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-) -> Result<Option<VerifiedMergeMembershipClosure>, StorePullError> {
-    let Some(super::store_commit::StoreControl { transition }) = commit.control() else {
-        return Ok(None);
-    };
-    let entry = commit_verifier
-        .membership_objects()
-        .load_entry(&transition.body.entry)
-        .await
-        .map_err(StorePullError::Object)?;
-    let coord = &transition.body.entry.coord;
-    let loaded_head = commit_verifier
-        .membership_objects()
-        .load_head_at_slot(
-            &transition.head_slot,
-            &coord.author_pubkey,
-            &coord.author_owner_grant,
-            coord.stream_id,
-            coord.seq,
-        )
-        .await
-        .map_err(StorePullError::Object)?;
-    let head_bytes = loaded_head.bytes;
-    let head_object = loaded_head.object;
-    let head = loaded_head.value;
-    let head_ref = super::membership::MembershipHeadRef {
-        coord: head.entry_coord(),
-        head_hash: head.head_hash(),
-        object: head_object,
-    };
-    let objects = crate::database::VerifiedMergeMembershipObjects::verify(
-        commit,
-        commit_ref,
-        &entry.value,
-        &head,
-        head_ref.clone(),
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let family = commit.candidate_family();
-    let resolution = match &entry.value.change {
-        super::membership::MembershipChange::ResolutionActivation { resolution } => {
-            Some(resolution.clone())
-        }
-        _ => None,
-    };
-    let resolution_loaded = if let Some(resolution) = &resolution {
-        let loaded = commit_verifier
-            .membership_objects()
-            .load_resolution(resolution)
-            .await
-            .map_err(StorePullError::Object)?;
-        Some((loaded.bytes, loaded.value))
-    } else {
-        None
-    };
-    let remote_objects = activated_merge_membership_remote_objects(
-        family,
-        &objects,
-        MembershipAuthorityBytes::identical(entry.bytes),
-        MembershipAuthorityBytes::identical(head_bytes),
-        resolution_loaded
-            .as_ref()
-            .map(|(bytes, _)| MembershipAuthorityBytes::identical(bytes.clone())),
-        commit_ref,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let resolution_value = resolution_loaded.map(|(_, value)| value);
-    let proof = super::store_commit::RetainedMergeMembershipProof {
-        commit: commit_ref.clone(),
-        commit_value: commit.clone(),
-        announcement: None,
-        entry: transition.body.entry.clone(),
-        entry_value: entry.value,
-        head: head_ref,
-        head_value: head,
-        resolution,
-        resolution_value,
-    };
-    Ok(Some(VerifiedMergeMembershipClosure {
-        objects,
-        remote_objects,
-        proof,
-    }))
-}
-
-pub(crate) struct VerifiedMergeMembershipClosure {
-    objects: crate::database::VerifiedMergeMembershipObjects,
-    remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
-    pub(crate) proof: super::store_commit::RetainedMergeMembershipProof,
-}
-
-impl VerifiedMergeMembershipClosure {
-    pub(super) fn objects(&self) -> &crate::database::VerifiedMergeMembershipObjects {
-        &self.objects
-    }
-
-    pub(super) fn into_remote_objects(self) -> Vec<super::remote_object::RemoteObjectRecord> {
-        self.remote_objects
-    }
-}
-
 pub(crate) struct MembershipAuthorityBytes {
     canonical: Vec<u8>,
     stored: Vec<u8>,
 }
 
 impl MembershipAuthorityBytes {
-    fn identical(bytes: Vec<u8>) -> Self {
-        Self {
-            canonical: bytes.clone(),
-            stored: bytes,
-        }
-    }
-
     pub(crate) fn new(canonical: Vec<u8>, stored: Vec<u8>) -> Self {
         Self { canonical, stored }
     }

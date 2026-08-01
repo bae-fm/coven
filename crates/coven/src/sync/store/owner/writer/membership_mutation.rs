@@ -1,27 +1,43 @@
 //! Store membership operations authorized by a retained local writer.
 
-mod invitation;
-mod journal;
 mod publication;
 mod removal;
 mod resolution;
 
 use crate::sync::store::membership::InviteError;
 
-pub(super) use invitation::create_invitation_with_encryption_durable;
 pub(crate) use publication::AuthorizedMembershipPublication;
 pub(crate) use publication::{validate_prepared_publication, validate_prepared_transition};
 pub(super) use removal::revoke_member_durable;
 pub(super) use resolution::resolve_membership_conflict;
 
-use journal::{
+use super::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
-    MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan, RevokeMembershipPublication,
-    RevokeMutationPlan,
+    exact_owned_remote, MembershipMutationPlan, MembershipMutationProgress, MutationPersistence,
+    PreparedMembershipPublication, PreparedMembershipTransition, ReplacementWrappedKey,
+    ResolveMutationPlan, RevokeMembershipPublication, RevokeMutationPlan,
 };
-pub(crate) use journal::{PreparedMembershipPublication, PreparedMembershipTransition};
-use publication::chain_with_exact_entry;
+
+pub(super) fn chain_with_exact_entry(
+    chain: &crate::protocol::membership::MembershipChain,
+    entry: &crate::protocol::membership::MembershipEntry,
+) -> Result<crate::protocol::membership::MembershipChain, InviteError> {
+    let coord = entry.coord();
+    if let Some((_, stored)) = chain
+        .entries_with_coords()
+        .find(|(stored_coord, _)| **stored_coord == coord)
+    {
+        if stored != entry {
+            return Err(InviteError::InvalidDurableMutation(format!(
+                "committed entry at {coord:?} differs from the durable plan"
+            )));
+        }
+        return Ok(chain.clone());
+    }
+    let mut validated = chain.clone();
+    validated.add_entry_at(coord, entry.clone())?;
+    Ok(validated)
+}
 
 pub(super) fn validate_revoke_rotation_adoption(
     row: crate::database::DurableMembershipMutation,

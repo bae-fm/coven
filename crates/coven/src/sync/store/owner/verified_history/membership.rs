@@ -15,33 +15,6 @@ mod graph;
 
 use graph::load_anchored_chain_at_exact_heads_with_root_impl;
 
-#[cfg(test)]
-pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
-    history: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    heads: &[MembershipHeadRef],
-) {
-    let mut authority = MembershipActivationAuthority::History {
-        root: history.root.clone(),
-        history,
-    };
-    graph::assert_deep_valid_predecessor_path_is_iterative(&mut authority, heads).await;
-}
-
-pub(super) async fn project_anchored_chain_to_verified_store_prefix(
-    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
-    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
-    candidate_heads: &[MembershipHeadRef],
-    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
-) -> Result<MembershipChain, AnchoredChainError> {
-    graph::project_anchored_chain_to_verified_store_prefix(
-        root,
-        commit_verifier,
-        candidate_heads,
-        prefix,
-    )
-    .await
-}
-
 struct ExactMembershipStream {
     entries: Vec<(MembershipCoord, MembershipEntry)>,
     heads: Vec<(MembershipHeadRef, AuthorHead)>,
@@ -56,9 +29,8 @@ type LoadedMembershipGraphFuture<'a> = Pin<
     >,
 >;
 
-pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
+enum MembershipActivationAuthority<'operation, 'storage> {
     History {
-        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
@@ -71,7 +43,245 @@ pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
     },
 }
 
+pub(super) struct HistoryMembershipActivation<'operation, 'storage> {
+    authority: MembershipActivationAuthority<'operation, 'storage>,
+}
+
+pub(crate) struct VerifiedPrefixMembershipActivation<'operation, 'storage> {
+    authority: MembershipActivationAuthority<'operation, 'storage>,
+}
+
+impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
+    pub(super) fn new(
+        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+    ) -> Self {
+        Self {
+            authority: MembershipActivationAuthority::History { history },
+        }
+    }
+
+    pub(super) async fn load_exact_anchored_chain(
+        &mut self,
+        cursors: &[MembershipHeadRef],
+        owner_pubkey: Option<&str>,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        self.authority
+            .load_exact_anchored_chain(cursors, owner_pubkey)
+            .await
+    }
+
+    pub(super) async fn load_at_exact_heads(
+        &mut self,
+        exact_heads: &[MembershipHeadRef],
+        exact_resolutions: &[StoreMembershipConflictResolutionRef],
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        self.authority
+            .load_at_exact_heads(exact_heads, exact_resolutions, None)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn assert_deep_valid_predecessor_path_is_iterative(
+        &mut self,
+        heads: &[MembershipHeadRef],
+    ) {
+        graph::assert_deep_valid_predecessor_path_is_iterative(&mut self.authority, heads).await;
+    }
+}
+
+impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'storage> {
+    pub(crate) fn new(
+        root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
+        commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
+        activations: &'operation crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    ) -> Self {
+        Self {
+            authority: MembershipActivationAuthority::VerifiedPrefix {
+                root: root.clone(),
+                commit_verifier,
+                activations,
+            },
+        }
+    }
+
+    pub(crate) async fn load_at_exact_heads(
+        &mut self,
+        exact_heads: &[MembershipHeadRef],
+        exact_resolutions: &[StoreMembershipConflictResolutionRef],
+        pending_resolution: Option<
+            &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+        >,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        self.authority
+            .load_at_exact_heads(exact_heads, exact_resolutions, pending_resolution)
+            .await
+    }
+
+    pub(super) async fn project(
+        &mut self,
+        candidate_heads: &[MembershipHeadRef],
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        let MembershipActivationAuthority::VerifiedPrefix { activations, .. } = &self.authority
+        else {
+            unreachable!("verified-prefix membership authority has one construction state")
+        };
+        let prefix = (*activations).clone();
+        graph::project_anchored_chain_to_verified_store_prefix(
+            &mut self.authority,
+            candidate_heads,
+            &prefix,
+        )
+        .await
+    }
+}
+
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
+    async fn load_exact_anchored_chain(
+        &mut self,
+        cursors: &[MembershipHeadRef],
+        owner_pubkey: Option<&str>,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        let root = self.root().clone();
+        let root_value = self.verified_root().clone();
+        if let Some(owner) = owner_pubkey {
+            if root_value.descriptor.founder_pubkey != owner {
+                return Err(AnchoredChainError::FounderMismatch {
+                    founder: Some(root_value.descriptor.founder_pubkey),
+                    owner: owner.to_string(),
+                });
+            }
+        }
+        let anchor = &root_value.descriptor.founder_membership;
+        let founder_stream = crate::protocol::membership::derive_founder_stream_id(
+            &root.store_root_id.to_string(),
+            &root_value.descriptor.founder_pubkey,
+        );
+        let cursor = cursors.iter().find(|cursor| {
+            cursor.coord.author_pubkey == root_value.descriptor.founder_pubkey
+                && cursor.coord.author_owner_grant == root_value.descriptor.founder_grant
+                && cursor.coord.stream_id == founder_stream
+        });
+        let founder_loaded = Box::pin(traverse_exact_membership_stream(
+            self,
+            &root,
+            &root_value.descriptor.founder_pubkey,
+            &root_value.descriptor.founder_grant,
+            founder_stream,
+            anchor,
+            cursor,
+        ))
+        .await?;
+        let founder_latest = founder_loaded.heads.last().cloned().ok_or_else(|| {
+            AnchoredChainError::LoadFailed("founder membership head is absent".to_string())
+        })?;
+        let founder = founder_loaded
+            .entries
+            .first()
+            .map(|(_, entry)| entry)
+            .ok_or_else(|| {
+                AnchoredChainError::LoadFailed("founder membership entry is absent".to_string())
+            })?;
+        if root_value
+            .descriptor
+            .validate_merge_founder_entry(founder)
+            .is_err()
+        {
+            return Err(AnchoredChainError::LoadFailed(
+                "first exact membership entry differs from the signed Store founder".to_string(),
+            ));
+        }
+        let mut discovered =
+            std::collections::BTreeSet::from([founder_latest.0.coord.stream_key()]);
+        let mut consumed_cursors = std::collections::BTreeSet::new();
+        if let Some(cursor) = cursor {
+            consumed_cursors.insert(cursor.clone());
+        }
+        let mut latest_heads = vec![founder_latest];
+        let mut resolutions = founder_loaded.resolutions;
+
+        loop {
+            let exact_heads = latest_heads
+                .iter()
+                .map(|(reference, _)| reference.clone())
+                .collect::<Vec<_>>();
+            let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
+            let chain = Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
+                self,
+                &root,
+                &root_value,
+                &root_value.descriptor.founder_pubkey,
+                &exact_heads,
+                &resolution_refs,
+                None,
+            ))
+            .await?;
+            let pending = chain
+                .activated_membership_streams()
+                .into_iter()
+                .filter(|(stream, _)| !discovered.contains(stream))
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                if consumed_cursors.len() != cursors.len() {
+                    return Err(AnchoredChainError::LoadFailed(
+                        "membership cursor names a stream that is not activated by the anchored chain"
+                            .to_string(),
+                    ));
+                }
+                return Ok(chain);
+            }
+
+            for (stream, anchor) in pending {
+                let cursor = cursors
+                    .iter()
+                    .find(|cursor| cursor.coord.stream_key() == stream);
+                let loaded = Box::pin(traverse_exact_membership_stream(
+                    self,
+                    &root,
+                    &stream.author_pubkey,
+                    &stream.author_owner_grant,
+                    stream.stream_id,
+                    &anchor,
+                    cursor,
+                ))
+                .await?;
+                if let Some(cursor) = cursor {
+                    consumed_cursors.insert(cursor.clone());
+                }
+                resolutions.extend(loaded.resolutions);
+                if let Some(latest) = loaded.heads.last().cloned() {
+                    latest_heads.push(latest);
+                    latest_heads.sort_by_key(|(reference, _)| reference.coord.stream_key());
+                }
+                discovered.insert(stream);
+            }
+        }
+    }
+
+    async fn load_at_exact_heads(
+        &mut self,
+        exact_heads: &[MembershipHeadRef],
+        exact_resolutions: &[StoreMembershipConflictResolutionRef],
+        pending_resolution: Option<
+            &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+        >,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        let root = self.root().clone();
+        let root_value = self.verified_root().clone();
+        let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
+        Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
+            self,
+            &root,
+            &root_value,
+            &owner_pubkey,
+            exact_heads,
+            exact_resolutions,
+            pending_resolution,
+        ))
+        .await
+    }
+
     fn load_exact_membership_graph_objects<'a>(
         &'a mut self,
         exact_heads: &'a [MembershipHeadRef],
@@ -203,13 +413,15 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
     fn root(&self) -> &StoreRootRef {
         match self {
-            Self::History { root, .. } | Self::VerifiedPrefix { root, .. } => root.reference(),
+            Self::History { history } => history.root.reference(),
+            Self::VerifiedPrefix { root, .. } => root.reference(),
         }
     }
 
     fn verified_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
         match self {
-            Self::History { root, .. } | Self::VerifiedPrefix { root, .. } => root.protocol(),
+            Self::History { history } => history.root.protocol(),
+            Self::VerifiedPrefix { root, .. } => root.protocol(),
         }
     }
 
@@ -347,13 +559,11 @@ async fn validate_membership_head_activation(
                     }
                     Ok(true)
                 }
-                MembershipActivationAuthority::History { history, .. } => Box::pin(
-                    crate::sync::store::owner::pull::verify_merge_membership_head_activation(
-                        history, reference, head, commit,
-                    ),
-                )
-                .await
-                .map_err(AnchoredChainError::LoadFailed),
+                MembershipActivationAuthority::History { history, .. } => {
+                    Box::pin(history.verify_membership_head_activation(reference, head, commit))
+                        .await
+                        .map_err(AnchoredChainError::LoadFailed)
+                }
             }
         }
         (true, crate::protocol::membership::MembershipHeadActivation::Direct) => {
@@ -489,182 +699,6 @@ async fn traverse_exact_membership_stream(
         heads,
         resolutions,
     })
-}
-
-pub(super) async fn load_exact_anchored_chain_with_history(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    cursors: &[MembershipHeadRef],
-    owner_pubkey: Option<&str>,
-) -> Result<MembershipChain, AnchoredChainError> {
-    let root = history_verifier.root.reference().clone();
-    let root_value = history_verifier.root.protocol().clone();
-    let mut activation_authority = MembershipActivationAuthority::History {
-        root: history_verifier.root.clone(),
-        history: history_verifier,
-    };
-    if let Some(owner) = owner_pubkey {
-        if root_value.descriptor.founder_pubkey != owner {
-            return Err(AnchoredChainError::FounderMismatch {
-                founder: Some(root_value.descriptor.founder_pubkey),
-                owner: owner.to_string(),
-            });
-        }
-    }
-    let anchor = &root_value.descriptor.founder_membership;
-    let founder_stream = crate::protocol::membership::derive_founder_stream_id(
-        &root.store_root_id.to_string(),
-        &root_value.descriptor.founder_pubkey,
-    );
-    let cursor = cursors.iter().find(|cursor| {
-        cursor.coord.author_pubkey == root_value.descriptor.founder_pubkey
-            && cursor.coord.author_owner_grant == root_value.descriptor.founder_grant
-            && cursor.coord.stream_id == founder_stream
-    });
-    let founder_loaded = Box::pin(traverse_exact_membership_stream(
-        &mut activation_authority,
-        &root,
-        &root_value.descriptor.founder_pubkey,
-        &root_value.descriptor.founder_grant,
-        founder_stream,
-        anchor,
-        cursor,
-    ))
-    .await?;
-    let founder_latest = founder_loaded.heads.last().cloned().ok_or_else(|| {
-        AnchoredChainError::LoadFailed("founder membership head is absent".to_string())
-    })?;
-    let founder = founder_loaded
-        .entries
-        .first()
-        .map(|(_, entry)| entry)
-        .ok_or_else(|| {
-            AnchoredChainError::LoadFailed("founder membership entry is absent".to_string())
-        })?;
-    if root_value
-        .descriptor
-        .validate_merge_founder_entry(founder)
-        .is_err()
-    {
-        return Err(AnchoredChainError::LoadFailed(
-            "first exact membership entry differs from the signed Store founder".to_string(),
-        ));
-    }
-    let mut discovered = std::collections::BTreeSet::from([founder_latest.0.coord.stream_key()]);
-    let mut consumed_cursors = std::collections::BTreeSet::new();
-    if let Some(cursor) = cursor {
-        consumed_cursors.insert(cursor.clone());
-    }
-    let mut latest_heads = vec![founder_latest];
-    let mut resolutions = founder_loaded.resolutions;
-
-    loop {
-        let exact_heads = latest_heads
-            .iter()
-            .map(|(reference, _)| reference.clone())
-            .collect::<Vec<_>>();
-        let resolution_refs = resolutions.keys().cloned().collect::<Vec<_>>();
-        let chain = Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
-            &mut activation_authority,
-            &root,
-            &root_value,
-            &root_value.descriptor.founder_pubkey,
-            &exact_heads,
-            &resolution_refs,
-            None,
-        ))
-        .await?;
-        let pending = chain
-            .activated_membership_streams()
-            .into_iter()
-            .filter(|(stream, _)| !discovered.contains(stream))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            if consumed_cursors.len() != cursors.len() {
-                return Err(AnchoredChainError::LoadFailed(
-                    "membership cursor names a stream that is not activated by the anchored chain"
-                        .to_string(),
-                ));
-            }
-            return Ok(chain);
-        }
-
-        for (stream, anchor) in pending {
-            let cursor = cursors
-                .iter()
-                .find(|cursor| cursor.coord.stream_key() == stream);
-            let loaded = Box::pin(traverse_exact_membership_stream(
-                &mut activation_authority,
-                &root,
-                &stream.author_pubkey,
-                &stream.author_owner_grant,
-                stream.stream_id,
-                &anchor,
-                cursor,
-            ))
-            .await?;
-            if let Some(cursor) = cursor {
-                consumed_cursors.insert(cursor.clone());
-            }
-            resolutions.extend(loaded.resolutions);
-            if let Some(latest) = loaded.heads.last().cloned() {
-                latest_heads.push(latest);
-                latest_heads.sort_by_key(|(reference, _)| reference.coord.stream_key());
-            }
-            discovered.insert(stream);
-        }
-    }
-}
-
-pub(super) async fn load_anchored_chain_at_exact_heads_with_history(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    exact_heads: &[MembershipHeadRef],
-    exact_resolutions: &[StoreMembershipConflictResolutionRef],
-) -> Result<MembershipChain, AnchoredChainError> {
-    let root = history_verifier.root.reference().clone();
-    let root_value = history_verifier.root.protocol().clone();
-    let owner_pubkey = root_value.descriptor.founder_pubkey.clone();
-    let mut activation_authority = MembershipActivationAuthority::History {
-        root: history_verifier.root.clone(),
-        history: history_verifier,
-    };
-    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
-        &mut activation_authority,
-        &root,
-        &root_value,
-        &owner_pubkey,
-        exact_heads,
-        exact_resolutions,
-        None,
-    ))
-    .await
-}
-
-pub(super) async fn load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-    root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
-    commit_verifier: &crate::sync::store::owner::StoreCommitVerifier<'_>,
-    exact_heads: &[MembershipHeadRef],
-    exact_resolutions: &[StoreMembershipConflictResolutionRef],
-    verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
-    pending_resolution: Option<
-        &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
-    >,
-) -> Result<MembershipChain, AnchoredChainError> {
-    let owner_pubkey = root.protocol().descriptor.founder_pubkey.clone();
-    let mut activation_authority = MembershipActivationAuthority::VerifiedPrefix {
-        root: root.clone(),
-        commit_verifier,
-        activations: verified_activations,
-    };
-    Box::pin(load_anchored_chain_at_exact_heads_with_root_impl(
-        &mut activation_authority,
-        root.reference(),
-        root.protocol(),
-        &owner_pubkey,
-        exact_heads,
-        exact_resolutions,
-        pending_resolution,
-    ))
-    .await
 }
 
 pub(super) fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {

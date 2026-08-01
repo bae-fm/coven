@@ -1,6 +1,5 @@
 use crate::keys;
-use crate::protocol::membership::{self, MembershipChain, MembershipChange, MembershipError};
-use crate::protocol::remote_object;
+use crate::protocol::membership::{self, MembershipChain, MembershipError};
 use crate::protocol::store_commit;
 use crate::protocol::store_commit::membership_head_slot_prefix;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -8,90 +7,16 @@ use crate::sync::store::operations;
 
 use super::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, validate_prepared_publication, validate_prepared_transition,
-    AuthorizedMembershipPublication, InviteError, MembershipMutationPlan,
+    exact_owned_remote, AuthorizedMembershipPublication, InviteError, MembershipMutationPlan,
     MembershipMutationProgress, MutationPersistence, ResolveMutationPlan,
 };
-
-impl ResolveMutationPlan {
-    pub(super) fn candidate_cleanup_objects(
-        &self,
-    ) -> (
-        Vec<crate::storage::ExactObjectRef>,
-        Vec<crate::storage::ExactObjectRef>,
-    ) {
-        (
-            vec![
-                self.candidate.reference.object.clone(),
-                self.transition.entry_ref.object.clone(),
-                self.publication.head_ref.object.clone(),
-            ],
-            vec![
-                self.reference.object.clone(),
-                self.candidate.head_ref().object,
-            ],
-        )
-    }
-
-    fn remote_objects(&self) -> Result<Vec<remote_object::RemoteObjectRecord>, InviteError> {
-        self.candidate
-            .merge_membership_resolution_remote_objects(
-                &self.transition,
-                &self.publication,
-                &self.resolution,
-                &self.reference,
-                &self.resolution_object,
-            )
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
-    }
-
-    fn validate_closed_shape(&self) -> Result<(), InviteError> {
-        validate_prepared_transition(&self.transition)?;
-        validate_prepared_publication(&self.publication)?;
-        if !self.resolution.verify_signature()
-            || self.reference
-                != self
-                    .resolution
-                    .resolution_ref(self.resolution_object.reference().clone())
-            || self.resolution_object.stored_bytes()
-                != serde_json::to_vec(&self.resolution).map_err(|error| {
-                    InviteError::InvalidDurableMutation(format!(
-                        "serialize membership resolution: {error}"
-                    ))
-                })?
-            || self.transition.entry != self.publication.entry
-            || self.transition.entry_ref != self.publication.entry_ref
-            || self.transition.entry_object != self.publication.entry_object
-            || self.candidate.commit.control()
-                != Some(&store_commit::StoreControl {
-                    transition: self.transition.transition.clone(),
-                })
-            || !matches!(
-                &self.publication.entry.change,
-                MembershipChange::ResolutionActivation { resolution }
-                    if resolution == &self.reference
-            )
-            || !matches!(
-                &self.publication.head.activation,
-                membership::MembershipHeadActivation::StoreCommit { commit }
-                    if commit == &self.candidate.reference
-            )
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership resolution plan violates its exact activation graph".to_string(),
-            ));
-        }
-        self.remote_objects()?;
-        Ok(())
-    }
-}
 
 /// Composes the resolution's Store candidate against this device's next stream
 /// position and returns it for staging; the turn that claimed the position is
 /// released with the plan, and the publication below takes its own. A writer that
 /// takes the position in between is not a lost operation: publication reads the
 /// occupant, verifies it, and returns a nonactivated candidate, which
-/// `execute_resolution_mutation` ends on — deleting what the candidate published
+/// `resolve_membership_conflict` ends on — deleting what the candidate published
 /// and clearing the staged mutation, so the next resolution composes at the
 /// position that follows.
 impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
@@ -283,13 +208,58 @@ impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
     }
 }
 
-async fn execute_resolution_mutation(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_membership_conflict(
     operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
     chain: &mut MembershipChain,
-    mut plan: ResolveMutationPlan,
-    progress: MembershipMutationProgress,
-    mut persistence: MutationPersistence<'_>,
+    conflict_hash: store_commit::ObjectHash,
+    selection: membership::MembershipConflictSelection,
+    created_at: &str,
 ) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
+    let database = operation.database.clone();
+    let signer = operation.writer.identity.clone();
+    let _mutation = database.membership_mutation_permit().await;
+    let (mut plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
+        Some(row) => {
+            let intent_hash = row.intent_hash;
+            let (pending, progress) = decode_membership_mutation(row)?;
+            let MembershipMutationPlan::Resolve(plan) = pending else {
+                return Err(InviteError::PendingMutation(
+                    "another membership mutation is pending".to_string(),
+                ));
+            };
+            if plan.resolution.conflict_hash != conflict_hash
+                || plan.resolution.resolver_pubkey != keys::public_key_hex(&signer)
+                || plan.resolution.selection != selection
+            {
+                return Err(InviteError::PendingMutation(
+                    "the pending resolution has different immutable inputs".to_string(),
+                ));
+            }
+            (plan, progress, intent_hash)
+        }
+        None => {
+            let plan = operation
+                .build_resolution_mutation(chain, conflict_hash, selection, created_at)
+                .await?;
+            let bytes = encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
+            let progress = MembershipMutationProgress::Pending;
+            let intent_hash = database
+                .stage_membership_candidate_mutation(
+                    bytes,
+                    encode_membership_progress(&progress)?,
+                    plan.remote_objects()?,
+                    None,
+                )
+                .await?;
+            (plan, progress, intent_hash)
+        }
+    };
+    let mut persistence = MutationPersistence::new(
+        &database,
+        std::sync::Arc::clone(operation.storage),
+        intent_hash,
+    );
     plan.validate_closed_shape()?;
     if let MembershipMutationProgress::ResolutionCandidateNonactivating { nonactivation } =
         &progress
@@ -434,65 +404,4 @@ async fn execute_resolution_mutation(
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn resolve_membership_conflict(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    chain: &mut MembershipChain,
-    conflict_hash: store_commit::ObjectHash,
-    selection: membership::MembershipConflictSelection,
-    created_at: &str,
-) -> Result<membership::StoreMembershipConflictResolutionRef, InviteError> {
-    let database = operation.database.clone();
-    let signer = operation.writer.identity.clone();
-    let _mutation = database.membership_mutation_permit().await;
-    let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
-        Some(row) => {
-            let intent_hash = row.intent_hash;
-            let (pending, progress) = decode_membership_mutation(row)?;
-            let MembershipMutationPlan::Resolve(plan) = pending else {
-                return Err(InviteError::PendingMutation(
-                    "another membership mutation is pending".to_string(),
-                ));
-            };
-            if plan.resolution.conflict_hash != conflict_hash
-                || plan.resolution.resolver_pubkey != keys::public_key_hex(&signer)
-                || plan.resolution.selection != selection
-            {
-                return Err(InviteError::PendingMutation(
-                    "the pending resolution has different immutable inputs".to_string(),
-                ));
-            }
-            (plan, progress, intent_hash)
-        }
-        None => {
-            let plan = operation
-                .build_resolution_mutation(chain, conflict_hash, selection, created_at)
-                .await?;
-            let bytes = encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
-            let progress = MembershipMutationProgress::Pending;
-            let intent_hash = database
-                .stage_membership_candidate_mutation(
-                    bytes,
-                    encode_membership_progress(&progress)?,
-                    plan.remote_objects()?,
-                    None,
-                )
-                .await?;
-            (plan, progress, intent_hash)
-        }
-    };
-    execute_resolution_mutation(
-        operation,
-        chain,
-        plan,
-        progress,
-        MutationPersistence::new(
-            &database,
-            std::sync::Arc::clone(operation.storage),
-            intent_hash,
-        ),
-    )
-    .await
 }

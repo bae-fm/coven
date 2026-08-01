@@ -59,15 +59,15 @@ impl PreparedStoreOperationCommit {
 
     pub(crate) fn merge_membership_activation_remote_objects(
         &self,
-        transition: &super::invite::PreparedMembershipTransition,
-        publication: &super::invite::PreparedMembershipPublication,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        super::invite::validate_prepared_transition(transition)
+        validate_prepared_transition(transition)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        super::invite::validate_prepared_publication(publication)
+        validate_prepared_publication(publication)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -110,17 +110,17 @@ impl PreparedStoreOperationCommit {
 
     pub(crate) fn merge_membership_resolution_remote_objects(
         &self,
-        transition: &super::invite::PreparedMembershipTransition,
-        publication: &super::invite::PreparedMembershipPublication,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
         resolution: &super::membership::StoreMembershipConflictResolution,
         reference: &super::membership::StoreMembershipConflictResolutionRef,
         prepared: &PreparedExactObject,
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        super::invite::validate_prepared_transition(transition)
+        validate_prepared_transition(transition)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        super::invite::validate_prepared_publication(publication)
+        validate_prepared_publication(publication)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -173,15 +173,15 @@ impl PreparedStoreOperationCommit {
 
     pub(crate) fn merge_owner_promotion_remote_objects(
         &self,
-        transition: &super::invite::PreparedMembershipTransition,
-        publication: &super::invite::PreparedMembershipPublication,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
         wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        super::invite::validate_prepared_transition(transition)
+        validate_prepared_transition(transition)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        super::invite::validate_prepared_publication(publication)
+        validate_prepared_publication(publication)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -216,8 +216,8 @@ impl PreparedStoreOperationCommit {
 
     fn close_merge_membership_remote_objects(
         &self,
-        transition: &super::invite::PreparedMembershipTransition,
-        publication: &super::invite::PreparedMembershipPublication,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
         authorities: Vec<super::remote_object::RemoteObjectRecord>,
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
@@ -464,11 +464,11 @@ impl PreparedStoreOperationCommit {
     pub(crate) fn attach_merge_membership_proof(
         &mut self,
         storage: &dyn SyncStorage,
-        publication: &super::invite::PreparedMembershipPublication,
+        publication: &PreparedMembershipPublication,
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
         identity_signer: &UserKeypair,
     ) -> Result<(), StoreError> {
-        super::invite::validate_prepared_publication(publication)
+        validate_prepared_publication(publication)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();

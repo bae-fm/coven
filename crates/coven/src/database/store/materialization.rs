@@ -117,8 +117,7 @@ impl StoreDatabase {
                         .collect::<Result<BTreeSet<_>, _>>()?;
                     if !retractions.is_empty() {
                         applied.write_status_notifications =
-                            Self::retract_verified_merge_materializations_on(
-                                &tx,
+                            merge_transaction.retract_verified_merge_materializations(
                                 &root,
                                 &mut transaction_cache,
                                 retractions,

@@ -14,7 +14,8 @@ use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, Clo
 use crate::storage::{ExactObjectRef, PreparedExactObject, SyncStorage};
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
-use super::{validate_prepared_publication, validate_prepared_transition, InviteError};
+use super::membership_mutation::{validate_prepared_publication, validate_prepared_transition};
+use crate::sync::store::membership::InviteError;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(
@@ -295,6 +296,74 @@ pub(super) struct ResolveMutationPlan {
     pub(super) transition: Box<PreparedMembershipTransition>,
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
     pub(super) publication: Box<PreparedMembershipPublication>,
+}
+
+impl ResolveMutationPlan {
+    pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
+        (
+            vec![
+                self.candidate.reference.object.clone(),
+                self.transition.entry_ref.object.clone(),
+                self.publication.head_ref.object.clone(),
+            ],
+            vec![
+                self.reference.object.clone(),
+                self.candidate.head_ref().object,
+            ],
+        )
+    }
+
+    pub(super) fn remote_objects(&self) -> Result<Vec<RemoteObjectRecord>, InviteError> {
+        self.candidate
+            .merge_membership_resolution_remote_objects(
+                &self.transition,
+                &self.publication,
+                &self.resolution,
+                &self.reference,
+                &self.resolution_object,
+            )
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+    }
+
+    pub(super) fn validate_closed_shape(&self) -> Result<(), InviteError> {
+        validate_prepared_transition(&self.transition)?;
+        validate_prepared_publication(&self.publication)?;
+        if !self.resolution.verify_signature()
+            || self.reference
+                != self
+                    .resolution
+                    .resolution_ref(self.resolution_object.reference().clone())
+            || self.resolution_object.stored_bytes()
+                != serde_json::to_vec(&self.resolution).map_err(|error| {
+                    InviteError::InvalidDurableMutation(format!(
+                        "serialize membership resolution: {error}"
+                    ))
+                })?
+            || self.transition.entry != self.publication.entry
+            || self.transition.entry_ref != self.publication.entry_ref
+            || self.transition.entry_object != self.publication.entry_object
+            || self.candidate.commit.control()
+                != Some(&store_commit::StoreControl {
+                    transition: self.transition.transition.clone(),
+                })
+            || !matches!(
+                &self.publication.entry.change,
+                MembershipChange::ResolutionActivation { resolution }
+                    if resolution == &self.reference
+            )
+            || !matches!(
+                &self.publication.head.activation,
+                membership::MembershipHeadActivation::StoreCommit { commit }
+                    if commit == &self.candidate.reference
+            )
+        {
+            return Err(InviteError::InvalidDurableMutation(
+                "membership resolution plan violates its exact activation graph".to_string(),
+            ));
+        }
+        self.remote_objects()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

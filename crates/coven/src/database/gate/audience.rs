@@ -1136,7 +1136,7 @@ unsafe fn partition_outbound_raw(
     routing: &RoutingChanges,
     gates: &Gates,
 ) -> Result<PartitionedAudienceWrite, GateError> {
-    let mut groups = AudiencePartitionGroups::new(conn);
+    let mut groups = AudiencePartitionGroups::new(conn, gates);
     let audience_moves = audience_moves(conn, changeset, gates)?;
     let mut ancestor_inserts = HashSet::new();
     let mut ancestor_deletes = HashSet::new();
@@ -1220,31 +1220,25 @@ unsafe fn partition_outbound_raw(
             }
         }
         if audience_move.destination != Audience::Local {
-            add_materialization(
-                conn,
-                gates,
+            groups.add_materialization(
                 &component,
                 FullStateDirection::Inserts,
-                groups.group(audience_move.destination.clone())?,
+                audience_move.destination.clone(),
             )?;
         }
     }
     if !ancestor_inserts.is_empty() {
-        add_materialization(
-            conn,
-            gates,
+        groups.add_materialization(
             &ancestor_inserts,
             FullStateDirection::Inserts,
-            groups.group(Audience::Store)?,
+            Audience::Store,
         )?;
     }
     if !ancestor_deletes.is_empty() {
-        add_materialization(
-            conn,
-            gates,
+        groups.add_materialization(
             &ancestor_deletes,
             FullStateDirection::Deletes,
-            groups.group(Audience::Store)?,
+            Audience::Store,
         )?;
     }
     for_each_change(&routing.store_mirror, |iter, row| {
@@ -1807,15 +1801,36 @@ fn stored_route_audience(
 
 struct AudiencePartitionGroups<'connection> {
     connection: &'connection Connection,
+    gates: &'connection Gates,
     groups: BTreeMap<Audience, PartitionGroup>,
 }
 
 impl<'connection> AudiencePartitionGroups<'connection> {
-    fn new(connection: &'connection Connection) -> Self {
+    fn new(connection: &'connection Connection, gates: &'connection Gates) -> Self {
         Self {
             connection,
+            gates,
             groups: BTreeMap::new(),
         }
+    }
+
+    unsafe fn add_materialization(
+        &mut self,
+        component: &HashSet<(String, String)>,
+        direction: FullStateDirection,
+        audience: Audience,
+    ) -> Result<(), GateError> {
+        let materialization = full_state_diff(self.connection, self.gates, direction)?;
+        let partition = self.group(audience)?;
+        for_each_change(&materialization, |iter, row| {
+            if row
+                .pk()
+                .is_some_and(|id| component.contains(&(row.table.clone(), id.to_string())))
+            {
+                partition.group.add_change(iter)?;
+            }
+            Ok(())
+        })
     }
 
     unsafe fn group(&mut self, audience: Audience) -> Result<&mut PartitionGroup, GateError> {
@@ -1921,25 +1936,6 @@ fn row_audience_move(
         None | Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => return Ok(None),
     };
     Ok((source != destination).then_some((source, destination)))
-}
-
-unsafe fn add_materialization(
-    conn: &Connection,
-    gates: &Gates,
-    component: &HashSet<(String, String)>,
-    direction: FullStateDirection,
-    partition: &mut PartitionGroup,
-) -> Result<(), GateError> {
-    let materialization = full_state_diff(conn, gates, direction)?;
-    for_each_change(&materialization, |iter, row| {
-        if row
-            .pk()
-            .is_some_and(|id| component.contains(&(row.table.clone(), id.to_string())))
-        {
-            partition.group.add_change(iter)?;
-        }
-        Ok(())
-    })
 }
 
 fn change_audience(

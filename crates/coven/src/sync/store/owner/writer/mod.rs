@@ -5,6 +5,7 @@ mod acknowledgements;
 mod blob_lifecycle;
 pub(crate) mod blob_preparation;
 mod membership_mutation;
+mod membership_mutation_journal;
 mod operation;
 pub(crate) mod operations;
 mod preparation;
@@ -12,9 +13,15 @@ pub(crate) mod reclaim;
 pub(crate) mod snapshot;
 
 pub(crate) use acknowledgements::StoreAckError;
-pub(super) use membership_mutation::{
-    validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
-    PreparedMembershipTransition,
+pub(super) use membership_mutation::{validate_prepared_publication, validate_prepared_transition};
+use membership_mutation_journal::{
+    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
+    exact_owned_remote, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
+    MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan, RevokeMembershipPublication,
+    RevokeMutationPlan,
+};
+pub(super) use membership_mutation_journal::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
 };
 pub(crate) use operation::AuthorizedWriterOperation;
 pub(super) use operation::StoreWriterAuthorizationError;

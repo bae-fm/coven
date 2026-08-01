@@ -8,9 +8,10 @@ use super::{
     MergeMaterializationTransaction, StoreDatabase,
 };
 use crate::database::{
-    load_activated_registration_on, load_remote_object_on, required_store_root_authority_on,
-    update_remote_object_on, CompletePreparedStoreWriteOutcome, Database, DbError,
-    RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
+    candidate_graph_exact_objects, load_activated_registration_on,
+    load_prepared_audience_objects_on, load_remote_object_on, required_store_root_authority_on,
+    update_remote_object_on, BlobActivation, CloudOutboxRecords, CompletePreparedStoreWriteOutcome,
+    Database, DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
 use crate::protocol::remote_object::remote_object_id;
 use crate::protocol::store_commit::{
@@ -316,15 +317,161 @@ impl StoreDatabase {
                 }
                 let write_id = commit_value.write_id.clone();
                 let head_object_id = remote_object_id(head.prepared().reference());
-                let retained_packages = Self::activate_prepared_write_on(
-                    &tx,
-                    &gates,
-                    &synced_tables,
-                    &write_id,
-                    &commit_value,
-                    local_cleanup,
-                    &[head_object_id],
-                )?;
+                let commit = commit_value.value();
+                let commit_ref = commit_value.reference();
+                let remaining_spools: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM store_write_blobs
+                         WHERE write_id = ?1 AND spool_path IS NOT NULL",
+                        [write_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if remaining_spools != 0 {
+                    return Err(DbError::Message(format!(
+                        "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
+                    )));
+                }
+                let audiences = load_prepared_audience_objects_on(&tx, &write_id)?;
+                let retained_packages = audiences
+                    .packages
+                    .iter()
+                    .map(|package| package.package().clone())
+                    .collect::<Vec<_>>();
+                for package in &audiences.packages {
+                    package
+                        .package()
+                        .validate_blob_uploader(&commit.author_registration)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                }
+                let mut object_ids = std::collections::BTreeSet::new();
+                object_ids.insert(remote_object_id(&commit_ref.object));
+                object_ids.extend(
+                    candidate_graph_exact_objects(commit)?
+                        .iter()
+                        .map(remote_object_id),
+                );
+                object_ids.extend(
+                    audiences
+                        .blobs
+                        .iter()
+                        .map(PreparedAudienceBlob::remote_object_id),
+                );
+                object_ids.insert(head_object_id);
+                for object_id in object_ids {
+                    let remote = load_remote_object_on(&tx, object_id)?
+                        .into_activated(commit_ref)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "activate remote object {object_id}: {error}"
+                            ))
+                        })?;
+                    let state = serde_json::to_string(&remote).map_err(|error| {
+                        DbError::Message(format!("serialize activated remote object: {error}"))
+                    })?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                            (object_id.to_string(), state),
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError::Message(format!(
+                            "remote object {object_id} disappeared during activation"
+                        )));
+                    }
+                }
+                let activation = BlobActivation {
+                    coord: commit_ref.coord.clone(),
+                };
+                let apply_schema =
+                    crate::database::TableSchema::for_apply(&tx, &synced_tables, &gates)?;
+                let store_transaction = MergeMaterializationTransaction::new(&tx);
+                let cloud_outbox = CloudOutboxRecords::new(&tx);
+                let mut consumed_uploads = 0;
+                for package in &audiences.packages {
+                    let winning_rows = store_transaction
+                        .current_winning_rows(&apply_schema, package.package().changeset())?;
+                    store_transaction.install_winning_blob_bindings(
+                        &gates,
+                        &synced_tables,
+                        package.package(),
+                        &activation,
+                        &winning_rows,
+                    )?;
+                    for binding in package.package().blob_bindings() {
+                        if cloud_outbox.consume_created_upload_handoff(package.package(), binding)? {
+                            consumed_uploads += 1;
+                        }
+                    }
+                }
+                match Database::make_remote_publication_root_on(&tx, &write_id)? {
+                    Some((root_table, root_id)) => {
+                        if consumed_uploads == 0 {
+                            return Err(DbError::Message(format!(
+                                "make_remote publication {write_id} for {root_table:?}/{root_id:?} contains no Created upload handoff"
+                            )));
+                        }
+                        let remaining: i64 = tx
+                            .query_row(
+                                "SELECT COUNT(*) FROM cloud_outbox
+                                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                                (&root_table, &root_id),
+                                |row| row.get(0),
+                            )
+                            .map_err(DbError::from)?;
+                        if remaining != 0 {
+                            return Err(DbError::Message(format!(
+                                "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
+                            )));
+                        }
+                        Database::complete_make_remote_publication_on(&tx, &write_id)?;
+                    }
+                    None if consumed_uploads != 0 => {
+                        return Err(DbError::Message(format!(
+                            "Store write {write_id} consumed Created upload handoffs without a make_remote publication intent"
+                        )));
+                    }
+                    None => {}
+                }
+                for drop in local_cleanup.drops {
+                    tx.execute(
+                        "INSERT INTO published_blob_drop_intents
+                         (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         ON CONFLICT(seq, namespace, blob_id, locator_hash) DO NOTHING",
+                        rusqlite::params![
+                            Database::sequence_to_sqlite(
+                                &commit_ref.coord.stream_id.to_string(),
+                                commit_ref.coord.sequence(),
+                            )?,
+                            drop.namespace,
+                            drop.id,
+                            i64::try_from(drop.size).map_err(|_| DbError::Message(
+                                "outbound local cleanup size exceeds SQLite integer".to_string()
+                            ))?,
+                            drop.plaintext_hash.to_string(),
+                            drop.locator_hash.to_string(),
+                            drop.disposition.as_db(),
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                }
+                tx.execute(
+                    "DELETE FROM store_write_packages WHERE write_id = ?1",
+                    [write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                tx.execute(
+                    "DELETE FROM store_write_blobs WHERE write_id = ?1",
+                    [write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                tx.execute(
+                    "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                    [write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
                 MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
                     &root,
                     &commit_value,

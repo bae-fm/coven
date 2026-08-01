@@ -460,30 +460,22 @@ impl StoreDatabase {
     ) -> Result<Option<crate::protocol::circle::CirclePublicationBlocked>, DbError> {
         self.connection
             .call(move |conn| {
-                Self::circle_publication_rotation_block_on(conn, circle_id, &active_store_members)
+                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                    return Ok(None);
+                };
+                Ok(state
+                    .rotation_required(&active_store_members)
+                    .map(|rotation| {
+                        crate::protocol::circle::CirclePublicationBlocked::RotationRequired {
+                            circle_id,
+                            removed_members: rotation.removed_members,
+                        }
+                    }))
             })
             .await
     }
 
-    pub(crate) fn circle_publication_rotation_block_on(
-        conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        active_store_members: &std::collections::BTreeSet<String>,
-    ) -> Result<Option<crate::protocol::circle::CirclePublicationBlocked>, DbError> {
-        let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-            return Ok(None);
-        };
-        Ok(state
-            .rotation_required(active_store_members)
-            .map(
-                |rotation| crate::protocol::circle::CirclePublicationBlocked::RotationRequired {
-                    circle_id,
-                    removed_members: rotation.removed_members,
-                },
-            ))
-    }
-
-    pub(crate) fn circle_publication_context_on(
+    pub(super) fn circle_publication_context_on(
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
@@ -1170,7 +1162,7 @@ impl StoreDatabase {
         Ok(state)
     }
 
-    pub(crate) fn circle_current_state_is_deleted_on(
+    pub(super) fn circle_current_state_is_deleted_on(
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
@@ -1217,28 +1209,5 @@ impl StoreDatabase {
         conn.execute_batch("DELETE FROM circle_access_cache;")
             .map_err(DbError::from)?;
         Ok(())
-    }
-
-    pub(crate) fn reduce_circle_current_state_on(
-        conn: &Connection,
-        candidate_family: crate::protocol::store_commit::CandidateFamilyId,
-        activation: &crate::sync::VerifiedCircleReference,
-    ) -> Result<Vec<u8>, DbError> {
-        let next_state =
-            crate::sync::CircleCurrentState::from_verified(candidate_family, activation)
-                .map_err(DbError::Message)?;
-        let current_state = Self::circle_current_state_on(conn, activation.circle_id)?;
-        let current_state = match current_state {
-            Some(current) => current.advance(next_state).map_err(DbError::Message)?,
-            None if activation.control.value.is_founder() => next_state,
-            None => {
-                return Err(DbError::Message(format!(
-                    "circle {} current state is absent for a successor control",
-                    activation.circle_id
-                )))
-            }
-        };
-        serde_json::to_vec(&current_state)
-            .map_err(|error| DbError::Message(format!("serialize Circle current state: {error}")))
     }
 }

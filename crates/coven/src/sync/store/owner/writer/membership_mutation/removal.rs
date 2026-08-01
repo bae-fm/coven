@@ -21,7 +21,7 @@ use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, Rev
 /// released with the plan, and the publication below takes its own. A writer that
 /// takes the position in between is not a lost operation: publication reads the
 /// occupant, verifies it, and returns a nonactivated candidate, which
-/// `execute_revoke_mutation` ends on — restoring provider access, deleting what
+/// `revoke_member_durable` ends on — restoring provider access, deleting what
 /// the candidate published, and clearing the staged mutation, so the next removal
 /// composes at the position that follows.
 impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
@@ -178,15 +178,142 @@ impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
     }
 }
 
-async fn execute_revoke_mutation(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revoke_member_durable(
     operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
-    mut plan: RevokeMutationPlan,
-    mut progress: MembershipMutationProgress,
-    mut persistence: MutationPersistence<'_>,
+    revokee_pubkey: &str,
+    store_id: &str,
+    timestamp: &str,
+    current_encryption: &EncryptionService,
     pending_rotation: &cloud_storage::PendingRotation,
 ) -> Result<EncryptionService, InviteError> {
+    let database = operation.database.clone();
+    let owner_keypair = operation.writer.identity.clone();
+    let _mutation = database.membership_mutation_permit().await;
+    let (mut plan, mut progress, intent_hash) = match database
+        .outbound_membership_mutation()
+        .await?
+    {
+        Some(row) => {
+            let intent_hash = row.intent_hash;
+            let (pending, progress) = decode_membership_mutation(row)?;
+            let MembershipMutationPlan::Revoke(plan) = pending else {
+                return Err(InviteError::PendingMutation(
+                    "an invitation is pending".to_string(),
+                ));
+            };
+            if !plan.matches_request(&owner_keypair, revokee_pubkey, store_id) {
+                return Err(InviteError::PendingMutation(
+                    "the pending removal has different immutable inputs".to_string(),
+                ));
+            }
+            (plan, progress, intent_hash)
+        }
+        None => {
+            let is_current = chain
+                .current_members()
+                .iter()
+                .any(|(pubkey, _)| pubkey == revokee_pubkey);
+            let was_removed = chain.entries().iter().any(|entry| {
+                matches!(
+                    &entry.change,
+                    MembershipChange::RemoveMember { user_pubkey, .. }
+                        if user_pubkey == revokee_pubkey
+                )
+            });
+            if !is_current && was_removed {
+                if !chain
+                    .current_members()
+                    .into_iter()
+                    .any(|(_, role)| role == MemberRole::Owner)
+                {
+                    return Err(InviteError::LastOwner);
+                }
+                let keyring = operation.open_keyring_for_membership(chain).await?;
+                match cloud_home
+                    .set_access(CloudAccessState::Absent {
+                        member_pubkey: revokee_pubkey.to_string(),
+                        provider_account_email: None,
+                    })
+                    .await?
+                {
+                    CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => {}
+                    CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
+                        tracing::info!(
+                                "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
+                            );
+                    }
+                    CloudAccessOutcome::Present(_) => {
+                        return Err(InviteError::Crypto(
+                            "provider returned present outcome for absent access request"
+                                .to_string(),
+                        ));
+                    }
+                }
+                return Ok(keyring);
+            }
+            let stream_id = operation.select_membership_author_stream(chain).await?;
+            let plan = Box::pin(operation.build_revoke_mutation(
+                chain,
+                stream_id,
+                revokee_pubkey,
+                store_id,
+                timestamp,
+                current_encryption,
+            ))
+            .await?;
+            plan.validate_closed_shape()?;
+            let encoded =
+                encode_membership_mutation(&MembershipMutationPlan::Revoke(plan.clone()))?;
+            let progress = MembershipMutationProgress::Pending;
+            let progress_bytes = encode_membership_progress(&progress)?;
+            let pending_generation =
+                EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
+                    .map_err(|error| {
+                        InviteError::Crypto(format!("parse rotated keyring: {error}"))
+                    })?
+                    .current_generation();
+            let intent_hash = match plan.candidate_remote_objects()? {
+                Some(remotes) => {
+                    database
+                        .stage_membership_candidate_mutation(
+                            encoded,
+                            progress_bytes,
+                            remotes,
+                            Some(pending_generation),
+                        )
+                        .await?
+                }
+                None => {
+                    database
+                        .stage_membership_mutation(
+                            encoded,
+                            progress_bytes,
+                            Some(pending_generation),
+                        )
+                        .await?
+                }
+            };
+            (plan, progress, intent_hash)
+        }
+    };
+    let pending_generation = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
+        .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
+        .current_generation();
+    match &progress {
+        MembershipMutationProgress::RevokeActivated { .. } => {
+            pending_rotation.mark_committed_mutation(pending_generation, intent_hash)
+        }
+        _ => pending_rotation.mark_candidate(pending_generation, intent_hash),
+    }
+    .map_err(InviteError::InvalidDurableMutation)?;
+    let mut persistence = MutationPersistence::new(
+        &database,
+        std::sync::Arc::clone(operation.storage),
+        intent_hash,
+    );
     let store_root_hash = operation.store_root().store_root_hash;
     plan.validate_closed_shape()?;
     if matches!(progress, MembershipMutationProgress::InviteGranted { .. }) {
@@ -571,148 +698,4 @@ async fn execute_revoke_mutation(
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn revoke_member_durable(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    cloud_home: &dyn CloudHome,
-    chain: &mut MembershipChain,
-    revokee_pubkey: &str,
-    store_id: &str,
-    timestamp: &str,
-    current_encryption: &EncryptionService,
-    pending_rotation: &cloud_storage::PendingRotation,
-) -> Result<EncryptionService, InviteError> {
-    let database = operation.database.clone();
-    let owner_keypair = operation.writer.identity.clone();
-    let _mutation = database.membership_mutation_permit().await;
-    let (plan, progress, intent_hash) = match database.outbound_membership_mutation().await? {
-        Some(row) => {
-            let intent_hash = row.intent_hash;
-            let (pending, progress) = decode_membership_mutation(row)?;
-            let MembershipMutationPlan::Revoke(plan) = pending else {
-                return Err(InviteError::PendingMutation(
-                    "an invitation is pending".to_string(),
-                ));
-            };
-            if !plan.matches_request(&owner_keypair, revokee_pubkey, store_id) {
-                return Err(InviteError::PendingMutation(
-                    "the pending removal has different immutable inputs".to_string(),
-                ));
-            }
-            (plan, progress, intent_hash)
-        }
-        None => {
-            let is_current = chain
-                .current_members()
-                .iter()
-                .any(|(pubkey, _)| pubkey == revokee_pubkey);
-            let was_removed = chain.entries().iter().any(|entry| {
-                matches!(
-                    &entry.change,
-                    MembershipChange::RemoveMember { user_pubkey, .. }
-                        if user_pubkey == revokee_pubkey
-                )
-            });
-            if !is_current && was_removed {
-                if !chain
-                    .current_members()
-                    .into_iter()
-                    .any(|(_, role)| role == MemberRole::Owner)
-                {
-                    return Err(InviteError::LastOwner);
-                }
-                let keyring = operation.open_keyring_for_membership(chain).await?;
-                match cloud_home
-                    .set_access(CloudAccessState::Absent {
-                        member_pubkey: revokee_pubkey.to_string(),
-                        provider_account_email: None,
-                    })
-                    .await?
-                {
-                    CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => {}
-                    CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
-                        tracing::info!(
-                            "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
-                        );
-                    }
-                    CloudAccessOutcome::Present(_) => {
-                        return Err(InviteError::Crypto(
-                            "provider returned present outcome for absent access request"
-                                .to_string(),
-                        ));
-                    }
-                }
-                return Ok(keyring);
-            }
-            let stream_id = operation.select_membership_author_stream(chain).await?;
-            let plan = Box::pin(operation.build_revoke_mutation(
-                chain,
-                stream_id,
-                revokee_pubkey,
-                store_id,
-                timestamp,
-                current_encryption,
-            ))
-            .await?;
-            plan.validate_closed_shape()?;
-            let encoded =
-                encode_membership_mutation(&MembershipMutationPlan::Revoke(plan.clone()))?;
-            let progress = MembershipMutationProgress::Pending;
-            let progress_bytes = encode_membership_progress(&progress)?;
-            let pending_generation =
-                EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                    .map_err(|error| {
-                        InviteError::Crypto(format!("parse rotated keyring: {error}"))
-                    })?
-                    .current_generation();
-            let intent_hash = match plan.candidate_remote_objects()? {
-                Some(remotes) => {
-                    database
-                        .stage_membership_candidate_mutation(
-                            encoded,
-                            progress_bytes,
-                            remotes,
-                            Some(pending_generation),
-                        )
-                        .await?
-                }
-                None => {
-                    database
-                        .stage_membership_mutation(
-                            encoded,
-                            progress_bytes,
-                            Some(pending_generation),
-                        )
-                        .await?
-                }
-            };
-            (plan, progress, intent_hash)
-        }
-    };
-    let pending_generation = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-        .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
-        .current_generation();
-    match &progress {
-        MembershipMutationProgress::RevokeActivated { .. } => {
-            pending_rotation.mark_committed_mutation(pending_generation, intent_hash)
-        }
-        _ => pending_rotation.mark_candidate(pending_generation, intent_hash),
-    }
-    .map_err(InviteError::InvalidDurableMutation)?;
-    Box::pin(execute_revoke_mutation(
-        operation,
-        cloud_home,
-        chain,
-        plan,
-        progress,
-        MutationPersistence::new(
-            &database,
-            std::sync::Arc::clone(operation.storage),
-            intent_hash,
-        ),
-        pending_rotation,
-    ))
-    .await
 }

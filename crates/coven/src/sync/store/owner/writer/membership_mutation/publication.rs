@@ -333,27 +333,6 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
     }
 }
 
-pub(super) fn chain_with_exact_entry(
-    chain: &MembershipChain,
-    entry: &MembershipEntry,
-) -> Result<MembershipChain, InviteError> {
-    let coord = entry.coord();
-    if let Some((_, stored)) = chain
-        .entries_with_coords()
-        .find(|(stored_coord, _)| **stored_coord == coord)
-    {
-        if stored != entry {
-            return Err(InviteError::InvalidDurableMutation(format!(
-                "committed entry at {coord:?} differs from the durable plan"
-            )));
-        }
-        return Ok(chain.clone());
-    }
-    let mut validated = chain.clone();
-    validated.add_entry_at(coord, entry.clone())?;
-    Ok(validated)
-}
-
 pub(crate) fn validate_prepared_publication(
     publication: &PreparedMembershipPublication,
 ) -> Result<(), InviteError> {

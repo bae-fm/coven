@@ -1700,7 +1700,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         commit_ref: &StoreBatchCommitRef,
         commit: &crate::protocol::store_commit::StoreBatchCommit,
-    ) -> Result<Option<pull::VerifiedMergeMembershipClosure>, pull::StorePullError> {
+    ) -> Result<Option<super::verification::VerifiedMergeMembershipClosure>, pull::StorePullError>
+    {
         self.history_verifier
             .verified_membership_objects(commit_ref, commit)
             .await

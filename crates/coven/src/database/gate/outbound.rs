@@ -184,15 +184,17 @@ unsafe fn gate_outbound_raw(
         Ok(())
     })?;
 
+    let reemission = OutboundReemission::new(conn, gates, &group, scope);
+
     // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
     if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
-        reemit_subtrees(conn, gates, &flipped_roots, &reparent_seeds, &group, scope)?;
+        reemission.reemit_subtrees(&flipped_roots, &reparent_seeds)?;
     }
 
     // Pass 2 (retract): emit DELETEs for the rows leaving the shared set of any
     // root that flipped true→false this cycle. The mirror of reemit_subtrees.
     if !retracted_roots.is_empty() {
-        reemit_retract_deletes(conn, gates, &retracted_roots, &group, scope)?;
+        reemission.reemit_retract_deletes(&retracted_roots)?;
     }
 
     group.output()
@@ -249,139 +251,164 @@ fn reparent_targets(
     Ok(out)
 }
 
-/// Re-emit the whole connected component of currently-kept gated rows reachable
-/// from each flipped root as full-state INSERTs: the root's *descendants* (rows
-/// whose gated-ancestor root is a flipped root) AND the transitive closure of the
-/// kept rows around it — its always-shared *ancestors* up the FK chain (album,
-/// artist), the kept *children* of those ancestors (album_artists, sibling
-/// already-managed releases), the *ancestors of those kept children* (a featured
-/// artist credited via a join row, off the flipped row's own lineage), and so on
-/// to a fixpoint. A peer that never saw the now-public root needs the entire
-/// component to land, exactly the row set the snapshot `keep_clause` would keep.
-///
-/// Over-emitting is safe: the apply conflict handler resolves a duplicate-PK
-/// INSERT by `_updated_at` LWW (never aborts), so re-sending a row a peer already
-/// has is idempotent. Under-emitting is the only failure, so the closure is
-/// computed in full rather than as a fixed up-then-one-level-down pass.
-unsafe fn reemit_subtrees(
-    conn: &Connection,
-    gates: &Gates,
-    flipped_roots: &HashSet<(String, String)>,
-    reparent_seeds: &HashSet<(String, String)>,
-    group: &Changegroup,
+struct OutboundReemission<'a> {
+    connection: &'a Connection,
+    gates: &'a Gates,
+    group: &'a Changegroup,
     scope: OutboundScope,
-) -> Result<(), GateError> {
-    // Compute the whole connected kept component of every flipped root: its
-    // ancestors (album, artist), the kept children of those ancestors
-    // (album_artists, sibling releases), and — transitively — the ancestors of
-    // those kept children (a featured artist credited via a join row) and so on.
-    // These are re-emitted by explicit `(table, id)` membership; the flipped
-    // root's own descendants are re-emitted by the scoping test below. Both feed
-    // the same diff. The reparent targets seed the walk too, so a newly-referenced
-    // parent's whole kept component lands on peers.
-    let mut seeds = flipped_roots.clone();
-    seeds.extend(reparent_seeds.iter().cloned());
-    let component = connected_component(conn, gates, &seeds, true, scope)?;
-
-    // Filter the component by the live kept-state, mirroring the retract path's
-    // symmetric `!row_kept` filter. `connected_component` inserts every seed
-    // unconditionally, so a root whose gate was captured flipping false→true but
-    // flipped back false before this runs (a host write landing between the
-    // batch load and the gate) would otherwise re-emit its now-private row (and
-    // any now-childless kept ancestor) as a full-state INSERT to every peer.
-    // Over-emitting a kept row is safe (LWW dedup on apply); emitting an unkept
-    // row is the leak this closes.
-    let mut reemit_ids: HashSet<(String, String)> = HashSet::new();
-    for (table, id) in component {
-        if gates.row_kept(conn, &table, &id)? {
-            reemit_ids.insert((table, id));
-        }
-    }
-
-    let diff_bytes = full_state_diff(conn, gates, FullStateDirection::Inserts)?;
-    if diff_bytes.is_empty() {
-        return Ok(());
-    }
-
-    for_each_change(&diff_bytes, |iter, row| {
-        if !scope.contains(gates, &row.table) {
-            return Ok(());
-        }
-        let in_descendants =
-            gated_root_id(conn, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
-        let in_kept_component = row
-            .pk()
-            .is_some_and(|pk| reemit_ids.contains(&(row.table.clone(), pk.to_string())));
-        if in_descendants || in_kept_component {
-            group.add_change(iter)?;
-        }
-        Ok(())
-    })
 }
 
-/// Emit DELETEs for the rows that leave the shared set when each retracted root's
-/// gate flips true→false this cycle — the exact mirror of [`reemit_subtrees`].
-///
-/// The candidate set is the *structural* connected component of the retracted
-/// roots ([`connected_component`] with `restrict_to_kept = false`): the same
-/// bidirectional FK closure the re-emit path walks, except the down-walk follows
-/// live FK edges WITHOUT a kept-filter. The rows still physically exist locally —
-/// only the root's gate column changed — so a kept-filter would wrongly exclude
-/// the root's own descendants (they inherit the now-false gate).
-///
-/// From that candidate set we keep only the rows NO LONGER kept under the
-/// post-flip live state (`!gates.row_kept`). That single filter does both jobs:
-/// it SPARES a sibling still held by another managed root sharing an album/artist
-/// ancestor (that sibling is still kept), and it INCLUDES a now-childless
-/// `gated_by_descendants` ancestor (album/artist) so it is DELETEd too (it is no
-/// longer kept).
-///
-/// The DELETEs are synthesized by [`full_state_diff`] with
-/// [`FullStateDirection::Deletes`] (a DELETE per live gated row, scoped here to
-/// the to-delete set). The changegroup dedups by primary key, so a row both
-/// locally deleted this cycle and synthetically retracted resolves to a single
-/// DELETE. That diff only carries rows still present in `main`, so a row the
-/// captured changeset already removed never collides here.
-unsafe fn reemit_retract_deletes(
-    conn: &Connection,
-    gates: &Gates,
-    retracted_roots: &HashSet<(String, String)>,
-    group: &Changegroup,
-    scope: OutboundScope,
-) -> Result<(), GateError> {
-    let component = connected_component(conn, gates, retracted_roots, false, scope)?;
-
-    // Keep only the rows no longer kept under the post-flip live state. The live db
-    // already reflects the gate flip when gate_outbound runs, so the retracted
-    // root and its now-orphaned descendants/ancestors read not-kept, while a
-    // sibling still held by another managed root reads kept and is spared.
-    let mut to_delete: HashSet<(String, String)> = HashSet::new();
-    for (table, id) in component {
-        if !gates.row_kept(conn, &table, &id)? {
-            to_delete.insert((table, id));
+impl<'a> OutboundReemission<'a> {
+    fn new(
+        connection: &'a Connection,
+        gates: &'a Gates,
+        group: &'a Changegroup,
+        scope: OutboundScope,
+    ) -> Self {
+        Self {
+            connection,
+            gates,
+            group,
+            scope,
         }
     }
-    if to_delete.is_empty() {
-        return Ok(());
-    }
 
-    let delete_bytes = full_state_diff(conn, gates, FullStateDirection::Deletes)?;
-    if delete_bytes.is_empty() {
-        return Ok(());
-    }
+    /// Re-emit the whole connected component of currently-kept gated rows reachable
+    /// from each flipped root as full-state INSERTs: the root's *descendants* (rows
+    /// whose gated-ancestor root is a flipped root) AND the transitive closure of the
+    /// kept rows around it — its always-shared *ancestors* up the FK chain (album,
+    /// artist), the kept *children* of those ancestors (album_artists, sibling
+    /// already-managed releases), the *ancestors of those kept children* (a featured
+    /// artist credited via a join row, off the flipped row's own lineage), and so on
+    /// to a fixpoint. A peer that never saw the now-public root needs the entire
+    /// component to land, exactly the row set the snapshot `keep_clause` would keep.
+    ///
+    /// Over-emitting is safe: the apply conflict handler resolves a duplicate-PK
+    /// INSERT by `_updated_at` LWW (never aborts), so re-sending a row a peer already
+    /// has is idempotent. Under-emitting is the only failure, so the closure is
+    /// computed in full rather than as a fixed up-then-one-level-down pass.
+    unsafe fn reemit_subtrees(
+        &self,
+        flipped_roots: &HashSet<(String, String)>,
+        reparent_seeds: &HashSet<(String, String)>,
+    ) -> Result<(), GateError> {
+        let conn = self.connection;
+        let gates = self.gates;
+        let group = self.group;
+        let scope = self.scope;
+        // Compute the whole connected kept component of every flipped root: its
+        // ancestors (album, artist), the kept children of those ancestors
+        // (album_artists, sibling releases), and — transitively — the ancestors of
+        // those kept children (a featured artist credited via a join row) and so on.
+        // These are re-emitted by explicit `(table, id)` membership; the flipped
+        // root's own descendants are re-emitted by the scoping test below. Both feed
+        // the same diff. The reparent targets seed the walk too, so a newly-referenced
+        // parent's whole kept component lands on peers.
+        let mut seeds = flipped_roots.clone();
+        seeds.extend(reparent_seeds.iter().cloned());
+        let component = connected_component(conn, gates, &seeds, true, scope)?;
 
-    for_each_change(&delete_bytes, |iter, row| {
-        if !scope.contains(gates, &row.table) {
+        // Filter the component by the live kept-state, mirroring the retract path's
+        // symmetric `!row_kept` filter. `connected_component` inserts every seed
+        // unconditionally, so a root whose gate was captured flipping false→true but
+        // flipped back false before this runs (a host write landing between the
+        // batch load and the gate) would otherwise re-emit its now-private row (and
+        // any now-childless kept ancestor) as a full-state INSERT to every peer.
+        // Over-emitting a kept row is safe (LWW dedup on apply); emitting an unkept
+        // row is the leak this closes.
+        let mut reemit_ids: HashSet<(String, String)> = HashSet::new();
+        for (table, id) in component {
+            if gates.row_kept(conn, &table, &id)? {
+                reemit_ids.insert((table, id));
+            }
+        }
+
+        let diff_bytes = full_state_diff(conn, gates, FullStateDirection::Inserts)?;
+        if diff_bytes.is_empty() {
             return Ok(());
         }
-        let in_to_delete = row
-            .pk()
-            .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
-        if in_to_delete {
-            group.add_change(iter)?;
+
+        for_each_change(&diff_bytes, |iter, row| {
+            if !scope.contains(gates, &row.table) {
+                return Ok(());
+            }
+            let in_descendants =
+                gated_root_id(conn, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
+            let in_kept_component = row
+                .pk()
+                .is_some_and(|pk| reemit_ids.contains(&(row.table.clone(), pk.to_string())));
+            if in_descendants || in_kept_component {
+                group.add_change(iter)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Emit DELETEs for the rows that leave the shared set when each retracted root's
+    /// gate flips true→false this cycle — the exact mirror of [`reemit_subtrees`].
+    ///
+    /// The candidate set is the *structural* connected component of the retracted
+    /// roots ([`connected_component`] with `restrict_to_kept = false`): the same
+    /// bidirectional FK closure the re-emit path walks, except the down-walk follows
+    /// live FK edges WITHOUT a kept-filter. The rows still physically exist locally —
+    /// only the root's gate column changed — so a kept-filter would wrongly exclude
+    /// the root's own descendants (they inherit the now-false gate).
+    ///
+    /// From that candidate set we keep only the rows NO LONGER kept under the
+    /// post-flip live state (`!gates.row_kept`). That single filter does both jobs:
+    /// it SPARES a sibling still held by another managed root sharing an album/artist
+    /// ancestor (that sibling is still kept), and it INCLUDES a now-childless
+    /// `gated_by_descendants` ancestor (album/artist) so it is DELETEd too (it is no
+    /// longer kept).
+    ///
+    /// The DELETEs are synthesized by [`full_state_diff`] with
+    /// [`FullStateDirection::Deletes`] (a DELETE per live gated row, scoped here to
+    /// the to-delete set). The changegroup dedups by primary key, so a row both
+    /// locally deleted this cycle and synthetically retracted resolves to a single
+    /// DELETE. That diff only carries rows still present in `main`, so a row the
+    /// captured changeset already removed never collides here.
+    unsafe fn reemit_retract_deletes(
+        &self,
+        retracted_roots: &HashSet<(String, String)>,
+    ) -> Result<(), GateError> {
+        let conn = self.connection;
+        let gates = self.gates;
+        let group = self.group;
+        let scope = self.scope;
+        let component = connected_component(conn, gates, retracted_roots, false, scope)?;
+
+        // Keep only the rows no longer kept under the post-flip live state. The live db
+        // already reflects the gate flip when gate_outbound runs, so the retracted
+        // root and its now-orphaned descendants/ancestors read not-kept, while a
+        // sibling still held by another managed root reads kept and is spared.
+        let mut to_delete: HashSet<(String, String)> = HashSet::new();
+        for (table, id) in component {
+            if !gates.row_kept(conn, &table, &id)? {
+                to_delete.insert((table, id));
+            }
         }
-        Ok(())
-    })
+        if to_delete.is_empty() {
+            return Ok(());
+        }
+
+        let delete_bytes = full_state_diff(conn, gates, FullStateDirection::Deletes)?;
+        if delete_bytes.is_empty() {
+            return Ok(());
+        }
+
+        for_each_change(&delete_bytes, |iter, row| {
+            if !scope.contains(gates, &row.table) {
+                return Ok(());
+            }
+            let in_to_delete = row
+                .pk()
+                .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
+            if in_to_delete {
+                group.add_change(iter)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 /// The whole connected component of gated rows reachable from `seeds`, walking the

@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
+use super::verification::VerifiedMergeMembershipClosure;
 use super::verified_history::registration::*;
 use super::verified_history::*;
 use super::*;
@@ -23,7 +24,6 @@ use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
-use crate::sync::store::StoreError;
 pub(super) use authorized::AuthorizedPull;
 
 mod device_lifecycle_state;
@@ -32,7 +32,6 @@ mod join_activation;
 mod materialization;
 mod membership_control;
 mod model;
-mod owner_promotion;
 mod root_validation;
 mod snapshot_evidence;
 mod support;
@@ -97,7 +96,6 @@ pub(crate) use model::{
     LoadedCirclePackage, LocalStoreMembership, StorePullError, StorePullMembershipError,
     StorePullResult, VerifiedStoreDeviceHead,
 };
-pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_history;
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
 pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};

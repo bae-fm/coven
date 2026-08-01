@@ -757,19 +757,224 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let root = self.store_root().clone();
         let protocol_store_id = root.store_root_id.to_string();
         let invite_timestamp = hlc.now().to_string();
-        let storage = self.storage.clone();
-        let (join_info, wrapped_key) =
-            membership_mutation::create_invitation_with_encryption_durable(
-                self,
-                storage.cloud_home(),
-                public_key_hex,
-                invitee_email,
-                role,
-                encryption,
-                &protocol_store_id,
-                &invite_timestamp,
-            )
+        let (join_info, wrapped_key, validated_chain) = async {
+            let storage = self.storage.clone();
+            let cloud_home = storage.cloud_home();
+            let database = self.database.clone();
+            let owner_keypair = self.writer.identity.clone();
+            let chain = self.membership.clone();
+            let _mutation = database.membership_mutation_permit().await;
+            let (plan, mut progress, intent_hash) =
+                match database.outbound_membership_mutation().await? {
+                Some(row) => {
+                    let intent_hash = row.intent_hash;
+                    let (pending, progress) = decode_membership_mutation(row)?;
+                    let MembershipMutationPlan::Invite(plan) = pending else {
+                        return Err(crate::sync::store::membership::InviteError::PendingMutation(
+                            "a member removal is pending".to_string(),
+                        ));
+                    };
+                    if !plan.matches_request(
+                        &owner_keypair,
+                        public_key_hex,
+                        invitee_email,
+                        &role,
+                        &protocol_store_id,
+                    ) {
+                        return Err(crate::sync::store::membership::InviteError::PendingMutation(
+                            "the pending invitation has different immutable inputs".to_string(),
+                        ));
+                    }
+                    (plan, progress, intent_hash)
+                }
+                None => {
+                    let stream_id = self.select_membership_author_stream(&chain).await?;
+                    let invitee_x25519_pk =
+                        crate::keys::ed25519_hex_to_x25519_public_key(public_key_hex)?;
+                    let authorized_keyring = self
+                        .open_keyring_or_for_membership(&chain, encryption)
+                        .await?;
+                    let signing_store_id = protocol_store_id.clone();
+                    let signing_recipient = public_key_hex.to_string();
+                    let signing_keyring = authorized_keyring.clone();
+                    let signing_owner = owner_keypair.clone();
+                    let signed = crate::sync::blocking::run(move || {
+                        crate::protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
+                            &signing_store_id,
+                            &signing_recipient,
+                            &invitee_x25519_pk,
+                            &signing_keyring,
+                            &signing_owner,
+                        )
+                        .map_err(|error| {
+                            crate::sync::store::membership::InviteError::Crypto(format!(
+                                "serialize invited member keyring: {error}"
+                            ))
+                        })
+                    })
+                    .await
+                    .map_err(|error| {
+                        crate::sync::store::membership::InviteError::Crypto(format!(
+                            "seal invited member Store key: {error}"
+                        ))
+                    })??;
+                    let wrapped_key = self.prepare_wrapped_key(public_key_hex, signed).await?;
+                    let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+                        &owner_keypair,
+                        stream_id,
+                        public_key_hex.to_string(),
+                        invitee_email.map(str::to_string),
+                        role.clone(),
+                        None,
+                        wrapped_key.reference.clone(),
+                        invite_timestamp.clone(),
+                    )?;
+                    let publication =
+                        membership_mutation::AuthorizedMembershipPublication::new(self)
+                            .prepare_publication(&chain, entry)
+                            .await?;
+                    let plan = InviteMutationPlan {
+                        publication,
+                        invitee_pubkey: public_key_hex.to_string(),
+                        invitee_email: invitee_email.map(str::to_string),
+                        role,
+                        desired_access: crate::storage::cloud::CloudAccessState::Present {
+                            member_pubkey: public_key_hex.to_string(),
+                            provider_account_email: invitee_email.map(str::to_string),
+                        },
+                        wrapped_key,
+                    };
+                    let encoded = encode_membership_mutation(&MembershipMutationPlan::Invite(
+                        plan.clone(),
+                    ))?;
+                    let progress = MembershipMutationProgress::Pending;
+                    let intent_hash = database
+                        .stage_membership_mutation(
+                            encoded,
+                            encode_membership_progress(&progress)?,
+                            None,
+                        )
+                        .await?;
+                    (plan, progress, intent_hash)
+                }
+                };
+        membership_mutation::validate_prepared_publication(&plan.publication)?;
+        let mut validated_chain =
+            membership_mutation::chain_with_exact_entry(&chain, &plan.publication.entry)?;
+        let author = self
+            .verify_membership_publication_author(&plan.publication)
             .await?;
+        let wrapped = plan.wrapped_key.validate()?;
+        let authority_matches = matches!(
+            &plan.publication.entry.change,
+            crate::protocol::membership::MembershipChange::SetMember { wrapped_key, .. }
+                if wrapped_key == &plan.wrapped_key.reference
+        );
+        if !authority_matches
+            || wrapped.author_pubkey != plan.publication.entry.author_pubkey
+            || wrapped
+                .verify_and_unwrap(
+                    &plan.publication.entry.store_id,
+                    &plan.invitee_pubkey,
+                    std::iter::once(plan.publication.entry.author_pubkey.as_str()),
+                )
+                .is_err()
+        {
+            return Err(
+                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                    "planned invitation wrap is not bound to its exact entry, recipient, and author"
+                        .to_string(),
+                ),
+            );
+        }
+        let outcome = cloud_home.set_access(plan.desired_access.clone()).await?;
+        let crate::storage::cloud::CloudAccessOutcome::Present(observed_join_info) = outcome else {
+            return Err(
+                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                    "provider returned absent outcome for present access request".to_string(),
+                ),
+            );
+        };
+        let persistence = MutationPersistence::new(
+            &database,
+            std::sync::Arc::clone(self.storage),
+            intent_hash,
+        );
+        let join_info = match progress {
+            MembershipMutationProgress::Pending => {
+                progress = MembershipMutationProgress::InviteGranted {
+                    join_info: observed_join_info.clone(),
+                };
+                persistence.record_progress(&progress).await?;
+                observed_join_info
+            }
+            MembershipMutationProgress::InviteGranted { join_info } => {
+                if join_info != observed_join_info {
+                    return Err(
+                        crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                            "provider returned different join information while verifying persisted access"
+                                .to_string(),
+                        ),
+                    );
+                }
+                join_info
+            }
+            MembershipMutationProgress::RevokeAccessRemoved
+            | MembershipMutationProgress::RevokeCandidateNonactivating { .. }
+            | MembershipMutationProgress::ResolutionCandidateNonactivating { .. }
+            | MembershipMutationProgress::RevokeActivated { .. }
+            | MembershipMutationProgress::ResolutionActivated { .. } => {
+                return Err(
+                    crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                        "invitation carries member-removal progress".to_string(),
+                    ),
+                );
+            }
+        };
+        storage
+            .as_ref()
+            .create_protocol_object(&plan.wrapped_key.object)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?;
+        storage
+            .as_ref()
+            .create_protocol_object(&plan.publication.entry_object)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?;
+        self.membership_objects()
+            .load_entry(&plan.publication.entry_ref)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?;
+        storage
+            .as_ref()
+            .create_protocol_object(&plan.publication.head_object)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?;
+        self.membership_objects()
+            .load_head_for_registration(&plan.publication.head_ref, &author)
+            .await
+            .map_err(|error| {
+                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+            })?;
+        validated_chain.activate_head_ref(plan.publication.head_ref.clone())?;
+        persistence.complete().await?;
+        let wrapped_key = plan.wrapped_key.reference;
+        Ok::<_, crate::sync::store::membership::InviteError>((
+            join_info,
+            wrapped_key,
+            validated_chain,
+        ))
+        }
+        .await?;
+        self.membership = validated_chain;
         let owner_pubkey = self
             .membership
             .founder_pubkey()

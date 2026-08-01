@@ -1343,115 +1343,120 @@ fn resolve_identity_access_leaf(
     }))
 }
 
-/// Download and verify the Circle image named by an access leaf's bootstrap: the
-/// recipient's own baseline for a Circle whose accessible content predates their
-/// join, which no forward replay reconstructs. Shared by pull activation and
-/// snapshot-restore selection so both verify the image against the retained
-/// control and routing key identically.
-#[allow(clippy::too_many_arguments)]
-async fn build_verified_leaf_bootstrap_image(
-    database: &StoreDatabase,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    leaf: &CircleAccessLeaf,
-    control: &PreparedCircleControl,
-    bootstrap: &crate::protocol::circle::CircleBootstrapRef,
-    epoch_encryption: EncryptionService,
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-) -> Result<VerifiedCircleImage, CircleOperationError> {
-    if bootstrap.schema_version != database.schema_version()
-        || bootstrap.sync_routing_hash != database.sync_routing_hash()
-    {
-        return Err(CircleOperationError::InvalidState(
-            "Circle bootstrap schema or routing contract differs from the local Store".to_string(),
-        ));
-    }
-    let image_prefix = crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
-        leaf.circle_id,
-        leaf.candidate_family,
-        &leaf.owner_pubkey,
-        leaf.epoch_id,
-        &leaf.recipient_slot,
-        bootstrap.image.image_hash,
-    );
-    let image_bytes = read_exact_circle_object(
-        storage,
-        &ProtocolObjectContext::circle(
-            root.store_root_hash,
-            ProtocolObjectDomain::CircleBootstrapImage,
-            epoch_encryption,
-        ),
-        &bootstrap.image.object,
-        &image_prefix,
-    )
-    .await?;
-    crate::database::verify_circle_bootstrap_image(
-        &image_bytes,
-        bootstrap,
-        leaf.circle_id,
-        database.synced_tables(),
-        routing_key,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    for binding in &bootstrap.blobs {
-        let crate::blob::RowBlobAuthority::Remote(
-            crate::protocol::audience_package::PackageAudience::Circle {
-                circle_id,
-                control: blob_control,
-                key_fingerprint,
-            },
-        ) = binding.authority()
-        else {
-            return Err(CircleOperationError::InvalidState(
-                "Circle bootstrap row blob lacks Circle package authority".to_string(),
-            ));
-        };
-        let blob_activation = database
-            .verified_circle_activation(root.clone(), *circle_id, blob_control.clone())
-            .await?
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Circle bootstrap blob authority is not retained".to_string(),
-                )
-            })?;
-        let current_control = control.clone();
-        let historical_control = blob_control.clone();
-        let lineage_circle_id = *circle_id;
-        let lineage_root = root.clone();
-        let is_in_control_history = database
-            .verified_circle_control_covers(
-                lineage_root,
-                lineage_circle_id,
-                current_control,
-                historical_control,
-            )
-            .await?;
-        if *key_fingerprint != blob_activation.control.value.key_fingerprint()
-            || !is_in_control_history
+impl CircleActivationVerifier<'_, '_> {
+    /// Download and verify the Circle image named by an access leaf's bootstrap:
+    /// the recipient's own baseline for a Circle whose accessible content predates
+    /// their join, which no forward replay reconstructs. Shared by pull activation
+    /// and snapshot-restore selection so both verify the image against the retained
+    /// control and routing key identically.
+    async fn build_verified_leaf_bootstrap_image(
+        &self,
+        leaf: &CircleAccessLeaf,
+        control: &PreparedCircleControl,
+        bootstrap: &crate::protocol::circle::CircleBootstrapRef,
+        epoch_encryption: EncryptionService,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    ) -> Result<VerifiedCircleImage, CircleOperationError> {
+        if bootstrap.schema_version != self.database.schema_version()
+            || bootstrap.sync_routing_hash != self.database.sync_routing_hash()
         {
             return Err(CircleOperationError::InvalidState(
-                "Circle bootstrap blob authority is outside its control history".to_string(),
+                "Circle bootstrap schema or routing contract differs from the local Store"
+                    .to_string(),
             ));
         }
-        let stored = binding.stored().ok_or_else(|| {
-            CircleOperationError::InvalidState(
-                "Circle bootstrap row blob has no exact locator".to_string(),
-            )
-        })?;
-        storage.verify_blob_object(stored).await.map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "verify Circle bootstrap blob {}: {error}",
-                crate::protocol::remote_object::remote_object_id(stored.object())
-            ))
-        })?;
+        let image_prefix = crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
+            leaf.circle_id,
+            leaf.candidate_family,
+            &leaf.owner_pubkey,
+            leaf.epoch_id,
+            &leaf.recipient_slot,
+            bootstrap.image.image_hash,
+        );
+        let image_bytes = read_exact_circle_object(
+            self.storage,
+            &ProtocolObjectContext::circle(
+                self.root.store_root_hash,
+                ProtocolObjectDomain::CircleBootstrapImage,
+                epoch_encryption,
+            ),
+            &bootstrap.image.object,
+            &image_prefix,
+        )
+        .await?;
+        crate::database::verify_circle_bootstrap_image(
+            &image_bytes,
+            bootstrap,
+            leaf.circle_id,
+            self.database.synced_tables(),
+            routing_key,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        for binding in &bootstrap.blobs {
+            let crate::blob::RowBlobAuthority::Remote(
+                crate::protocol::audience_package::PackageAudience::Circle {
+                    circle_id,
+                    control: blob_control,
+                    key_fingerprint,
+                },
+            ) = binding.authority()
+            else {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle bootstrap row blob lacks Circle package authority".to_string(),
+                ));
+            };
+            let blob_activation = self
+                .database
+                .verified_circle_activation(self.root.clone(), *circle_id, blob_control.clone())
+                .await?
+                .ok_or_else(|| {
+                    CircleOperationError::InvalidState(
+                        "Circle bootstrap blob authority is not retained".to_string(),
+                    )
+                })?;
+            let current_control = control.clone();
+            let historical_control = blob_control.clone();
+            let lineage_circle_id = *circle_id;
+            let lineage_root = self.root.clone();
+            let is_in_control_history = self
+                .database
+                .verified_circle_control_covers(
+                    lineage_root,
+                    lineage_circle_id,
+                    current_control,
+                    historical_control,
+                )
+                .await?;
+            if *key_fingerprint != blob_activation.control.value.key_fingerprint()
+                || !is_in_control_history
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle bootstrap blob authority is outside its control history".to_string(),
+                ));
+            }
+            let stored = binding.stored().ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle bootstrap row blob has no exact locator".to_string(),
+                )
+            })?;
+            self.storage
+                .verify_blob_object(stored)
+                .await
+                .map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "verify Circle bootstrap blob {}: {error}",
+                        crate::protocol::remote_object::remote_object_id(stored.object())
+                    ))
+                })?;
+        }
+        VerifiedCircleImage::new(
+            leaf.circle_id,
+            control.coord.clone(),
+            leaf,
+            bootstrap.clone(),
+            image_bytes,
+        )
     }
-    VerifiedCircleImage::new(
-        leaf.circle_id,
-        control.coord.clone(),
-        leaf,
-        bootstrap.clone(),
-        image_bytes,
-    )
 }
 
 /// The restoring identity's own access at a Circle's head control: no access (the
@@ -1482,7 +1487,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         identity: &UserKeypair,
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<LocalCircleAccess, CircleOperationError> {
-        let database = self.database;
         let verified_access = self
             .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
             .await?;
@@ -1510,10 +1514,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             })?);
         let leaf_bootstrap = match bootstrap {
             Some(bootstrap) => Some(
-                build_verified_leaf_bootstrap_image(
-                    database,
-                    self.storage,
-                    self.root,
+                self.build_verified_leaf_bootstrap_image(
                     &resolved.prepared_leaf.value,
                     control,
                     bootstrap,
@@ -1592,7 +1593,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let database = self.database;
-        let root = self.root.clone();
         let commit_ref = verified.reference();
         let commit = verified.value();
         let author = verified.author();
@@ -1923,17 +1923,15 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         // until a later pull reads the image and the reseed records
                         // coverage. The image read is the only source of a `CircleObject`
                         // error here — verification and blob checks fail as `InvalidState`.
-                        match build_verified_leaf_bootstrap_image(
-                            database,
-                            self.storage,
-                            &root,
-                            leaf,
-                            &control,
-                            bootstrap,
-                            encryption,
-                            routing_key,
-                        )
-                        .await
+                        match self
+                            .build_verified_leaf_bootstrap_image(
+                                leaf,
+                                &control,
+                                bootstrap,
+                                encryption,
+                                routing_key,
+                            )
+                            .await
                         {
                             Ok(image) => bootstraps.push(image),
                             Err(error @ CircleOperationError::Object(_)) => {

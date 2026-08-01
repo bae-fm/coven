@@ -1,4 +1,4 @@
-use super::verification::StoreMembershipObjectVerifier;
+use super::verification::{StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure};
 use super::*;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
@@ -35,44 +35,10 @@ use super::{device_join, reclaim as store_reclaim};
 
 pub(super) mod join_validation;
 mod membership;
+pub(super) use membership::VerifiedPrefixMembershipActivation;
 pub(super) mod registration;
 use join_validation::*;
 use registration::*;
-
-pub(crate) async fn load_membership_at_exact_heads_with_verified_activations(
-    root: &super::super::protocol_root::VerifiedStoreRoot,
-    commit_verifier: &StoreCommitVerifier<'_>,
-    heads: &[protocol_membership::MembershipHeadRef],
-    resolutions: &[protocol_membership::StoreMembershipConflictResolutionRef],
-    verified_activations: &VerifiedMergeMembershipPrefix,
-    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
-) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-    membership::load_anchored_chain_at_exact_heads_with_root_and_verified_activations(
-        root,
-        commit_verifier,
-        heads,
-        resolutions,
-        verified_activations,
-        pending_resolution,
-    )
-    .await
-}
-
-pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    state: &StoreMembershipStateRef,
-    verified_activations: &VerifiedMergeMembershipPrefix,
-    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
-) -> Result<MembershipChain, RegistrationLoadError> {
-    Box::pin(commit_verifier.load_membership_at_verified_prefix(
-        &state.heads,
-        &state.resolutions,
-        verified_activations,
-        pending_resolution,
-    ))
-    .await
-    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
-}
 
 pub(crate) fn verify_merge_membership_state_ref(
     state: &StoreMembershipStateRef,
@@ -761,17 +727,273 @@ impl<'a> MergeHistoryVerifier<'a> {
         ),
         String,
     > {
-        verify_merge_membership_control_with_history(
-            self.root.reference(),
-            &mut self.commit_verifier,
-            commit_ref,
-            commit,
-            predecessor_membership,
-            predecessor_state,
+        let Some(store_commit::StoreControl { transition }) = commit.control() else {
+            return Err("Merge membership verifier received another Store control".to_string());
+        };
+        let root = self.root.reference().clone();
+        let state = &commit.membership_state;
+        let commit_author = self
+            .commit_verifier
+            .load_registration(&commit.author_registration)
+            .await
+            .map_err(|error| error.to_string())?;
+        if transition.body.author_registration != commit.author_registration
+            || transition.body.entry.coord.author_pubkey != commit_author.value.author_pubkey
+            || transition.body.resolutions != state.resolutions
+            || transition.body.successor.predecessor
+                != transition
+                    .body
+                    .predecessor
+                    .as_ref()
+                    .map(|reference| reference.object.clone())
+        {
+            return Err("Merge membership transition differs from its Store authority".to_string());
+        }
+        match &transition.body.predecessor {
+            Some(predecessor) if state.heads.binary_search(predecessor).is_err() => {
+                return Err(
+                    "Merge membership transition predecessor is absent from its signed state"
+                        .to_string(),
+                );
+            }
+            None if state.heads.iter().any(|head| {
+                head.coord.stream_key() == transition.body.entry.coord.stream_key()
+            }) =>
+            {
+                return Err(
+                    "first Merge membership transition has an existing signed predecessor"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+        let opened_entry = self
+            .commit_verifier
+            .membership_objects()
+            .load_entry(&transition.body.entry)
+            .await
+            .map_err(|error| error.to_string())?;
+        if opened_entry.value.coord() != transition.body.entry.coord
+            || opened_entry.value.dependencies != predecessor_membership.effective_frontier()
+            || opened_entry.value.resolution_dependencies != transition.body.resolutions
+        {
+            return Err("Merge membership transition differs from its exact entry".to_string());
+        }
+        if let protocol_membership::MembershipChange::RemoveMember {
+            user_pubkey,
+            removes,
+            retirement_device_state,
+            ..
+        } = &opened_entry.value.change
+        {
+            let removes_exact_member =
+                removes == &predecessor_membership.active_grant_ids(user_pubkey);
+            let retires_owner = removes.iter().any(|grant| {
+                predecessor_membership
+                    .active_grant(grant)
+                    .is_some_and(|record| {
+                        matches!(
+                            record.role,
+                            protocol_membership::StoreMembershipRoleGrant::Owner { .. }
+                        )
+                    })
+            });
+            if !removes_exact_member
+                || !retires_owner
+                || retirement_device_state.as_ref() != Some(&commit.device_state)
+                || !commit.stream_activations().is_empty()
+            {
+                return Err(
+                    "Merge Owner-removal control differs from its exact membership entry"
+                        .to_string(),
+                );
+            }
+            let mut successor_membership = predecessor_membership.clone();
+            successor_membership
+                .add_entry(opened_entry.value)
+                .map_err(|error| error.to_string())?;
+            return VerifiedCircleActivations::membership_control(commit, commit_ref)
+                .map(|activations| (activations, None))
+                .map_err(|error| error.to_string());
+        }
+        if let protocol_membership::MembershipChange::ResolutionActivation { resolution } =
+            &opened_entry.value.change
+        {
+            let resolution = resolution.clone();
+            let resolution_proof = pending_resolution
+                .filter(|proof| proof.verifies(&resolution))
+                .ok_or_else(|| {
+                    "Merge conflict resolution lacks its verified Store activation".to_string()
+                })?
+                .clone();
+            let opened_resolution = self
+                .commit_verifier
+                .membership_objects()
+                .load_resolution(&resolution)
+                .await
+                .map_err(|error| error.to_string())?;
+            let acceptance = &opened_resolution.value.replacement_acceptance;
+            let mut expected = vec![
+                store_commit::StreamActivation::grant_authorized(
+                    root.store_root_hash,
+                    acceptance.owner_registration.clone(),
+                    opened_resolution.value.replacement_grant.clone(),
+                    acceptance.membership.clone(),
+                ),
+                store_commit::StreamActivation::grant_authorized(
+                    root.store_root_hash,
+                    acceptance.owner_registration.clone(),
+                    opened_resolution.value.replacement_grant.clone(),
+                    acceptance.recovery.clone(),
+                ),
+            ];
+            expected.sort();
+            if transition.body.predecessor.is_some()
+                || transition
+                    .body
+                    .resolutions
+                    .binary_search(&resolution)
+                    .is_err()
+                || commit.stream_activations() != expected
+            {
+                return Err(
+                    "Merge conflict-resolution control differs from its exact membership entry"
+                        .to_string(),
+                );
+            }
+            let mut successor_membership = predecessor_membership.clone();
+            successor_membership
+                .add_entry(opened_entry.value)
+                .map_err(|error| error.to_string())?;
+            return VerifiedCircleActivations::membership_control(commit, commit_ref)
+                .map(|activations| (activations, Some(resolution_proof)))
+                .map_err(|error| error.to_string());
+        }
+        let protocol_membership::MembershipChange::SetMember {
+            user_pubkey,
+            role:
+                protocol_membership::StoreMembershipRoleGrant::Owner {
+                    recovery: protocol_membership::OwnerRecoveryAnchorRef::Promotion { acceptance },
+                },
+            grant_id,
+            membership: Some(membership_anchor),
+            replaces,
+            retirement_device_state,
+            ..
+        } = &opened_entry.value.change
+        else {
+            return Err(
+                "Merge membership control does not activate one Owner promotion".to_string(),
+            );
+        };
+        if retirement_device_state.is_some()
+            || user_pubkey != &acceptance.request.member_pubkey
+            || grant_id != &acceptance.request.intended_owner_grant
+            || replaces != &BTreeSet::from([acceptance.request.member_grant.clone()])
+            || acceptance.request.promoter_registration != commit.author_registration
+        {
+            return Err(
+                "Merge Owner-promotion control differs from its exact membership entry".to_string(),
+            );
+        }
+        self.verify_owner_promotion_acceptance_in_loaded_history(acceptance)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request_activation = acceptance.activation.commit();
+        let request_commit = self
+            .history
+            .commits
+            .get(request_activation)
+            .ok_or_else(|| {
+                "Merge Owner-promotion request activation is absent from its verified history"
+                    .to_string()
+            })?;
+        let verified_membership_activations = verified_merge_membership_prefix(
             &self.history.commits,
-            pending_resolution,
+            commit_predecessor_references(request_commit.verified.value()),
         )
-        .await
+        .map_err(|error| error.to_string())?;
+        let request_membership = self
+            .commit_verifier
+            .load_membership_at_verified_prefix(
+                &acceptance.request.predecessor_membership.heads,
+                &acceptance.request.predecessor_membership.resolutions,
+                &verified_membership_activations,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let predecessor_cut = commit
+            .order
+            .predecessor_cut()
+            .map_err(|error| error.to_string())?;
+        let predecessor_frontier = predecessor_cut.commits();
+        let request_stream = request_activation.coord.stream_id;
+        let activation_is_covered = predecessor_frontier
+            .get(&request_stream)
+            .is_some_and(|head| head.coord.sequence() >= request_activation.coord.sequence());
+        let promoter_is_active = device_state_has_active_registration(
+            predecessor_state,
+            &acceptance.request.promoter_registration,
+        );
+        let candidate_is_active = device_state_has_active_registration(
+            predecessor_state,
+            &acceptance.request.member_registration,
+        );
+        let promoter_grant_is_active = predecessor_membership
+            .active_owner_grant(&commit_author.value.author_pubkey)
+            .as_ref()
+            == Some(&acceptance.request.promoter_owner_grant);
+        let candidate_grant_is_active = predecessor_membership
+            .active_grant(&acceptance.request.member_grant)
+            .is_some_and(|record| {
+                record.member_pubkey == acceptance.request.member_pubkey
+                    && record.role == protocol_membership::StoreMembershipRoleGrant::Member
+            });
+        if !predecessor_membership.causally_includes(&request_membership)
+            || !activation_is_covered
+            || !promoter_is_active
+            || !candidate_is_active
+            || !promoter_grant_is_active
+            || !candidate_grant_is_active
+        {
+            return Err(
+                "Merge Owner-promotion transition does not include its accepted authority"
+                    .to_string(),
+            );
+        }
+        let store_commit::OwnerPromotionAnchors {
+            membership,
+            recovery,
+        } = &acceptance.anchors;
+        if membership != membership_anchor {
+            return Err(
+                "Merge Owner-promotion entry carries another membership anchor".to_string(),
+            );
+        }
+        let mut expected = vec![
+            store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.request.member_registration.clone(),
+                acceptance.request.intended_owner_grant.clone(),
+                membership.clone(),
+            ),
+            store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.request.member_registration.clone(),
+                acceptance.request.intended_owner_grant.clone(),
+                recovery.clone(),
+            ),
+        ];
+        expected.sort();
+        if commit.stream_activations() != expected {
+            return Err(
+                "Merge Owner-promotion control carries different stream activations".to_string(),
+            );
+        }
+        VerifiedCircleActivations::membership_control(commit, commit_ref)
+            .map(|activations| (activations, None))
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn verified_membership_objects(
@@ -779,7 +1001,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
     ) -> Result<Option<VerifiedMergeMembershipClosure>, StorePullError> {
-        verified_merge_membership_objects(&self.commit_verifier, commit_ref, commit).await
+        self.commit_verifier
+            .verified_merge_membership_objects(commit_ref, commit)
+            .await
     }
 
     pub(crate) async fn verify_owner_recovery_activation(
@@ -1206,15 +1430,8 @@ impl<'a> MergeHistoryVerifier<'a> {
             ..
         } = &acceptance.activation;
         self.verify_refs([activation_commit.clone()]).await?;
-        let commit_verifier = &mut self.commit_verifier;
-        let history = &self.history;
-        verify_merge_owner_promotion_acceptance_with_history(
-            self.root.reference(),
-            commit_verifier,
-            acceptance,
-            &history.commits,
-        )
-        .await
+        self.verify_owner_promotion_acceptance_in_loaded_history(acceptance)
+            .await
     }
 
     pub(crate) async fn verify_owner_promotion_acceptance_from_request_activation(
@@ -1227,15 +1444,124 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "Owner-promotion acceptance names another request activation".to_string(),
             ));
         }
-        let commit_verifier = &mut self.commit_verifier;
-        let history = &self.history;
-        verify_merge_owner_promotion_acceptance_with_history(
-            self.root.reference(),
-            commit_verifier,
-            acceptance,
-            &history.commits,
-        )
-        .await
+        self.verify_owner_promotion_acceptance_in_loaded_history(acceptance)
+            .await
+    }
+
+    async fn verify_owner_promotion_acceptance_in_loaded_history(
+        &mut self,
+        acceptance: &store_commit::OwnerPromotionAcceptance,
+    ) -> Result<(), StorePullError> {
+        let root = self.root.reference().clone();
+        let request = &acceptance.request;
+        let store_commit::OwnerPromotionRequestActivation {
+            commit: activation_commit,
+            head: activation_head,
+        } = &acceptance.activation;
+        let promoter = self
+            .commit_verifier
+            .load_registration(&request.promoter_registration)
+            .await?;
+        let candidate = self
+            .commit_verifier
+            .load_registration(&request.member_registration)
+            .await?;
+        request
+            .verify(&root, &promoter.value)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        acceptance
+            .verify(&candidate.value)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+
+        let opened = self
+            .commit_verifier
+            .load_head(activation_head, &promoter.value, activation_commit)
+            .await?;
+        let verified = self.history.commits.get(activation_commit).ok_or_else(|| {
+            StorePullError::Database(
+                "Owner-promotion request activation is absent from its verified history"
+                    .to_string(),
+            )
+        })?;
+        let (_, exact_head) = self
+            .commit_verifier
+            .exact_next_announcement_slot(
+                &request.promoter_registration,
+                &promoter.value,
+                Some(&verified.verified),
+            )
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        if opened.value.head_hash() != activation_head.head_hash
+            || opened.value.commit != *activation_commit
+            || exact_head.as_ref() != Some(activation_head)
+        {
+            return Err(StorePullError::Database(
+                "Owner-promotion request is not activated by its exact Merge head".to_string(),
+            ));
+        }
+        let verified_commit = verified.verified.value();
+        if verified_commit.owner_promotion_request() != Some(request)
+            || verified_commit.membership_state != request.predecessor_membership
+            || verified_commit.device_state != request.predecessor_devices
+            || verified_commit.author_registration != request.promoter_registration
+        {
+            return Err(StorePullError::Database(
+                "Owner-promotion request commit differs from its signed predecessor authority"
+                    .to_string(),
+            ));
+        }
+        let verified_membership_activations = verified_merge_membership_prefix(
+            &self.history.commits,
+            commit_predecessor_references(verified_commit),
+        )?;
+        let membership = self
+            .commit_verifier
+            .load_membership_at_verified_prefix(
+                &request.predecessor_membership.heads,
+                &request.predecessor_membership.resolutions,
+                &verified_membership_activations,
+                None,
+            )
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        verify_merge_membership_state_ref(
+            &request.predecessor_membership,
+            &membership,
+            &verified.predecessor_state,
+        )?;
+        if !device_state_has_active_registration(
+            &verified.predecessor_state,
+            &request.promoter_registration,
+        ) || !device_state_has_active_registration(
+            &verified.predecessor_state,
+            &request.member_registration,
+        ) {
+            return Err(StorePullError::Database(
+                "Owner-promotion request registrations are not active at its exact predecessor"
+                    .to_string(),
+            ));
+        }
+        if membership
+            .active_owner_grant(&promoter.value.author_pubkey)
+            .as_ref()
+            != Some(&request.promoter_owner_grant)
+            || membership.active_grant_ids(&request.member_pubkey)
+                != BTreeSet::from([request.member_grant.clone()])
+            || membership
+                .active_grant(&request.member_grant)
+                .is_none_or(|record| {
+                    record.member_pubkey != request.member_pubkey
+                        || record.role != protocol_membership::StoreMembershipRoleGrant::Member
+                })
+            || candidate.value.author_pubkey != request.member_pubkey
+        {
+            return Err(StorePullError::Database(
+                "Owner-promotion request does not name the exact active Owner and Member grants"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn verify_accepted_provider_access_activation(
@@ -2158,7 +2484,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
         owner: Option<&str>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        membership::load_exact_anchored_chain_with_history(self, heads, owner).await
+        membership::HistoryMembershipActivation::new(self)
+            .load_exact_anchored_chain(heads, owner)
+            .await
     }
 
     pub(crate) async fn load_membership_at_exact_heads(
@@ -2166,7 +2494,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
         resolutions: &[protocol_membership::StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        membership::load_anchored_chain_at_exact_heads_with_history(self, heads, resolutions).await
+        membership::HistoryMembershipActivation::new(self)
+            .load_at_exact_heads(heads, resolutions)
+            .await
     }
 
     pub(crate) async fn load_membership_at_verified_prefix(
@@ -2229,13 +2559,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         candidate_heads: &[protocol_membership::MembershipHeadRef],
         prefix: &VerifiedMergeMembershipPrefix,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        membership::project_anchored_chain_to_verified_store_prefix(
-            &self.root,
-            &self.commit_verifier,
-            candidate_heads,
-            prefix,
-        )
-        .await
+        VerifiedPrefixMembershipActivation::new(&self.root, &self.commit_verifier, prefix)
+            .project(candidate_heads)
+            .await
     }
 
     #[cfg(test)]
@@ -2243,7 +2569,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         heads: &[protocol_membership::MembershipHeadRef],
     ) {
-        membership::assert_deep_valid_predecessor_path_is_iterative(self, heads).await;
+        membership::HistoryMembershipActivation::new(self)
+            .assert_deep_valid_predecessor_path_is_iterative(heads)
+            .await;
     }
 
     pub(super) async fn from_commit_verifier(
@@ -2870,6 +3198,55 @@ impl<'a> MergeHistoryVerifier<'a> {
             .is_some_and(|control| control.verifies_head_activation(reference, head, activation))
     }
 
+    pub(super) async fn verify_membership_head_activation(
+        &mut self,
+        reference: &protocol_membership::MembershipHeadRef,
+        head: &protocol_membership::AuthorHead,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<bool, String> {
+        let verified = self
+            .load_ref(activation)
+            .await
+            .map_err(|error| error.to_string())?;
+        let commit = verified.value();
+        let author = verified.author();
+        let transition = commit
+            .control()
+            .map(|control| &control.transition)
+            .ok_or_else(|| {
+                "membership head activation commit has no Merge membership transition".to_string()
+            })?;
+        if !transition.matches_head(head, reference)
+            || transition.body.author_registration != commit.author_registration
+        {
+            return Err(
+                "membership head differs from its exact activating Store transition".to_string(),
+            );
+        }
+        let activation_observation = self
+            .exact_next_announcement_slot(&commit.author_registration, author, Some(&verified))
+            .await;
+        match activation_observation {
+            Ok((_, Some(_))) => {}
+            Ok((_, None)) => return Ok(false),
+            Err(StoreError::MergeAnnouncementOccupied { .. })
+            | Err(StoreError::Object(crate::storage::StoreObjectError::Storage(
+                StorageError::NotFound(_),
+            ))) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        }
+        self.verify_refs([activation.clone()])
+            .await
+            .map_err(|error| error.to_string())?;
+        if !self.verifies_membership_head_activation(reference, head, activation) {
+            return Err(
+                "membership head activation differs from its verified Merge membership control"
+                    .to_string(),
+            );
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn load_verified_device_join_attempt(
         &mut self,
         reference: &store_commit::DeviceJoinAttemptRef,
@@ -3116,17 +3493,16 @@ impl<'a> MergeHistoryVerifier<'a> {
         };
         let verified_membership_activations =
             verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
-        let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
-            &self.commit_verifier,
-            membership_state,
-            &verified_membership_activations,
-            None,
-        ))
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+        let membership = self
+            .commit_verifier
+            .load_membership_at_verified_prefix(
+                &membership_state.heads,
+                &membership_state.resolutions,
+                &verified_membership_activations,
+                None,
+            )
+            .await
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         verified_membership_activations
             .validate_complete_membership(&membership)
             .map_err(StorePullError::Database)?;
@@ -4160,17 +4536,16 @@ impl<'a> MergeHistoryVerifier<'a> {
             )?;
             let pending_resolution =
                 Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
-            let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
-                &self.commit_verifier,
-                &commit.membership_state,
-                &verified_membership_prefix,
-                pending_resolution.as_ref(),
-            ))
-            .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-            })?;
+            let membership = self
+                .commit_verifier
+                .load_membership_at_verified_prefix(
+                    &commit.membership_state.heads,
+                    &commit.membership_state.resolutions,
+                    &verified_membership_prefix,
+                    pending_resolution.as_ref(),
+                )
+                .await
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
             verified_membership_prefix
                 .validate_complete_membership(&membership)
                 .map_err(StorePullError::Database)?;
@@ -4281,11 +4656,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let membership_closure = Box::pin(verified_merge_membership_objects(
-                &self.commit_verifier,
-                &reference,
-                &commit,
-            ))
+            let membership_closure = Box::pin(
+                self.commit_verifier
+                    .verified_merge_membership_objects(&reference, &commit),
+            )
             .await?;
             let retained_registrations = commit
                 .device_registrations()
