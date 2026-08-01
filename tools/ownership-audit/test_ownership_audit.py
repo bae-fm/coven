@@ -1415,6 +1415,34 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertEqual(workflow["effects"], ["database-read"])
         self.assertEqual(graph["summary"]["ready"], 1)
 
+    def test_verified_parent_disposition_covers_its_lexical_closure(self):
+        parent = self.graph_record("sample::run")
+        closure = self.graph_record(
+            "sample::run::<closure@1:1>",
+            kind="closure",
+            enclosing_callable=parent["symbol"],
+            effects=["database-read"],
+        )
+        decisions = {
+            (parent["symbol"], parent["signature"]): {
+                "classification": "boundary",
+                "status": "verified",
+            }
+        }
+
+        graph = ownership_audit.build_graph_data(
+            {"callables": [parent, closure], "reach_throughs": {}},
+            decisions,
+        )
+
+        workflow = next(
+            node
+            for node in graph["nodes"]
+            if node["kind"] != "capability"
+        )
+        self.assertEqual(workflow["kind"], "resolved")
+        self.assertEqual(workflow["classifications"], ["boundary"])
+
     def test_ready_group_keeps_adjacent_receiver_as_candidate_not_owner(self):
         owner = self.graph_record(
             "sample::store::<Store>::sync",

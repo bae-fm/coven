@@ -4091,6 +4091,8 @@ def verified_free_workflow(
     }
     classifications = []
     for record in records:
+        if record["kind"] in {"closure", "async-block"}:
+            continue
         decision = decisions.get((record["symbol"], record["signature"]))
         if (
             decision is None
