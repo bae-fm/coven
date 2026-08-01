@@ -223,6 +223,80 @@ impl CloudKitCloudHome {
             },
         }
     }
+
+    async fn begin_atomic_create(&self) -> Result<Arc<CloudKitStagingCleanup>, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        tokio::task::spawn_blocking(move || {
+            let batch = ops.begin_atomic_create(&scope)?;
+            Ok(Arc::new(CloudKitStagingCleanup {
+                ops,
+                scope,
+                batch,
+                armed: std::sync::atomic::AtomicBool::new(true),
+            }))
+        })
+        .await
+        .map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "CloudKit atomic-create staging task failed: {error}"
+            ))
+        })?
+    }
+
+    async fn authoritative_created_records(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        blocking(move || {
+            keys.into_iter()
+                .map(|key| {
+                    let record = ops.read_versioned_record(&scope, &key).map_err(|error| {
+                        CloudHomeError::Transport(format!(
+                            "read committed CloudKit atomic-create record {key:?}: {error}"
+                        ))
+                    })?;
+                    Ok(CloudKitRecordVersion {
+                        key,
+                        version: record.version,
+                    })
+                })
+                .collect()
+        })
+        .await
+    }
+
+    async fn settle_atomic_create_response_loss(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<AtomicCreateReadback, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        blocking(move || {
+            let mut created = Vec::with_capacity(keys.len());
+            let mut missing = 0usize;
+            for key in keys {
+                match ops.read_versioned_record(&scope, &key) {
+                    Ok(record) => created.push(CloudKitRecordVersion {
+                        key,
+                        version: record.version,
+                    }),
+                    Err(CloudHomeError::NotFound(_)) => missing += 1,
+                    Err(error) => return Err(error),
+                }
+            }
+            match (created.is_empty(), missing) {
+                (true, _) => Ok(AtomicCreateReadback::Absent),
+                (false, 0) => Ok(AtomicCreateReadback::Created(created)),
+                (false, _) => Err(CloudHomeError::Transport(
+                    "CloudKit atomic create exposed only part of its record batch".to_string(),
+                )),
+            }
+        })
+        .await
+    }
 }
 
 pub(crate) async fn accept_share(
@@ -447,27 +521,6 @@ struct CloudKitStagingCleanup {
 }
 
 impl CloudKitStagingCleanup {
-    async fn begin(
-        ops: Arc<dyn CloudKitOps>,
-        scope: CloudKitScope,
-    ) -> Result<Arc<Self>, CloudHomeError> {
-        tokio::task::spawn_blocking(move || {
-            let batch = ops.begin_atomic_create(&scope)?;
-            Ok(Arc::new(Self {
-                ops,
-                scope,
-                batch,
-                armed: std::sync::atomic::AtomicBool::new(true),
-            }))
-        })
-        .await
-        .map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "CloudKit atomic-create staging task failed: {error}"
-            ))
-        })?
-    }
-
     fn disarm(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -484,6 +537,43 @@ impl CloudKitStagingCleanup {
                 ))),
             },
         }
+    }
+
+    async fn stage_record(
+        self: Arc<Self>,
+        record: CloudKitRecordCreate,
+    ) -> Result<(), CloudHomeError> {
+        if record.data.len() > CHUNK_SIZE {
+            return Err(CloudHomeError::Configuration(format!(
+                "CloudKit staged record {:?} has {} bytes, above the {CHUNK_SIZE}-byte bound",
+                record.key,
+                record.data.len()
+            )));
+        }
+        tokio::task::spawn_blocking(move || {
+            self.ops
+                .stage_atomic_create_record(&self.scope, &self.batch, record)
+        })
+        .await
+        .map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "CloudKit atomic-create staging task failed: {error}"
+            ))
+        })?
+    }
+
+    async fn commit(self: Arc<Self>) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+        tokio::task::spawn_blocking(move || {
+            let created = self.ops.commit_atomic_create(&self.scope, &self.batch)?;
+            self.disarm();
+            Ok(created)
+        })
+        .await
+        .map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "CloudKit atomic-create commit task failed: {error}"
+            ))
+        })?
     }
 }
 
@@ -503,103 +593,9 @@ impl Drop for CloudKitStagingCleanup {
     }
 }
 
-async fn stage_atomic_create_record(
-    staging: Arc<CloudKitStagingCleanup>,
-    record: CloudKitRecordCreate,
-) -> Result<(), CloudHomeError> {
-    if record.data.len() > CHUNK_SIZE {
-        return Err(CloudHomeError::Configuration(format!(
-            "CloudKit staged record {:?} has {} bytes, above the {CHUNK_SIZE}-byte bound",
-            record.key,
-            record.data.len()
-        )));
-    }
-    tokio::task::spawn_blocking(move || {
-        staging
-            .ops
-            .stage_atomic_create_record(&staging.scope, &staging.batch, record)
-    })
-    .await
-    .map_err(|error| {
-        CloudHomeError::Transport(format!(
-            "CloudKit atomic-create staging task failed: {error}"
-        ))
-    })?
-}
-
-async fn commit_atomic_create(
-    staging: Arc<CloudKitStagingCleanup>,
-) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
-    tokio::task::spawn_blocking(move || {
-        let created = staging
-            .ops
-            .commit_atomic_create(&staging.scope, &staging.batch)?;
-        staging.disarm();
-        Ok(created)
-    })
-    .await
-    .map_err(|error| {
-        CloudHomeError::Transport(format!(
-            "CloudKit atomic-create commit task failed: {error}"
-        ))
-    })?
-}
-
-async fn authoritative_created_records(
-    ops: Arc<dyn CloudKitOps>,
-    scope: CloudKitScope,
-    keys: Vec<String>,
-) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
-    blocking(move || {
-        keys.into_iter()
-            .map(|key| {
-                let record = ops.read_versioned_record(&scope, &key).map_err(|error| {
-                    CloudHomeError::Transport(format!(
-                        "read committed CloudKit atomic-create record {key:?}: {error}"
-                    ))
-                })?;
-                Ok(CloudKitRecordVersion {
-                    key,
-                    version: record.version,
-                })
-            })
-            .collect()
-    })
-    .await
-}
-
 enum AtomicCreateReadback {
     Created(Vec<CloudKitRecordVersion>),
     Absent,
-}
-
-async fn settle_atomic_create_response_loss(
-    ops: Arc<dyn CloudKitOps>,
-    scope: CloudKitScope,
-    keys: Vec<String>,
-) -> Result<AtomicCreateReadback, CloudHomeError> {
-    blocking(move || {
-        let mut created = Vec::with_capacity(keys.len());
-        let mut missing = 0usize;
-        for key in keys {
-            match ops.read_versioned_record(&scope, &key) {
-                Ok(record) => created.push(CloudKitRecordVersion {
-                    key,
-                    version: record.version,
-                }),
-                Err(CloudHomeError::NotFound(_)) => missing += 1,
-                Err(error) => return Err(error),
-            }
-        }
-        match (created.is_empty(), missing) {
-            (true, _) => Ok(AtomicCreateReadback::Absent),
-            (false, 0) => Ok(AtomicCreateReadback::Created(created)),
-            (false, _) => Err(CloudHomeError::Transport(
-                "CloudKit atomic create exposed only part of its record batch".to_string(),
-            )),
-        }
-    })
-    .await
 }
 
 fn parse_chunk_key(key: &str, upload_id: &str) -> Result<Option<usize>, CloudHomeError> {
@@ -1442,7 +1438,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
             ))
         })?;
         let part_count = total_len.div_ceil(CHUNK_SIZE);
-        let staging = CloudKitStagingCleanup::begin(self.ops.clone(), self.scope.clone()).await?;
+        let staging = self.begin_atomic_create().await?;
         let mut requested_keys = Vec::with_capacity(part_count + 1);
         let mut written_len = 0usize;
         for index in 0..part_count {
@@ -1458,14 +1454,13 @@ impl ExactSlotStorage for CloudKitCloudHome {
             };
             written_len += part.len();
             let key = exact_part_key(slot.logical_key(), index);
-            if let Err(error) = stage_atomic_create_record(
-                staging.clone(),
-                CloudKitRecordCreate {
+            if let Err(error) = staging
+                .clone()
+                .stage_record(CloudKitRecordCreate {
                     key: key.clone(),
                     data: part.to_vec(),
-                },
-            )
-            .await
+                })
+                .await
             {
                 return Err(staging.cleanup_failure(error));
             }
@@ -1488,19 +1483,18 @@ impl ExactSlotStorage for CloudKitCloudHome {
             }
             Err(error) => return Err(staging.cleanup_failure(error)),
         }
-        if let Err(error) = stage_atomic_create_record(
-            staging.clone(),
-            CloudKitRecordCreate {
+        if let Err(error) = staging
+            .clone()
+            .stage_record(CloudKitRecordCreate {
                 key: slot.logical_key().to_string(),
                 data: encode_exact_manifest(part_count, total_len),
-            },
-        )
-        .await
+            })
+            .await
         {
             return Err(staging.cleanup_failure(error));
         }
         requested_keys.push(slot.logical_key().to_string());
-        let created = match commit_atomic_create(staging.clone()).await {
+        let created = match staging.clone().commit().await {
             Ok(created) => created,
             Err(CloudHomeError::AlreadyExists(_)) => {
                 return Err(staging.cleanup_failure(CloudHomeError::AlreadyExists(
@@ -1508,12 +1502,9 @@ impl ExactSlotStorage for CloudKitCloudHome {
                 )));
             }
             Err(operation) => {
-                match settle_atomic_create_response_loss(
-                    self.ops.clone(),
-                    self.scope.clone(),
-                    requested_keys.clone(),
-                )
-                .await
+                match self
+                    .settle_atomic_create_response_loss(requested_keys.clone())
+                    .await
                 {
                     Ok(AtomicCreateReadback::Created(created)) => {
                         staging.disarm();
@@ -1538,8 +1529,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
                 .zip(&requested_keys)
                 .any(|(record, requested)| &record.key != requested)
         {
-            authoritative_created_records(self.ops.clone(), self.scope.clone(), requested_keys)
-                .await?;
+            self.authoritative_created_records(requested_keys).await?;
         }
         progress(total_len as u64);
         Ok(())
@@ -3273,19 +3263,16 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_an_uncommitted_staging_batch_discards_host_local_payloads() {
-        let (_home, ops) = make_cloud_home_with_ops();
-        let staging = CloudKitStagingCleanup::begin(ops.clone(), CloudKitScope::Private)
-            .await
-            .unwrap();
-        stage_atomic_create_record(
-            staging.clone(),
-            CloudKitRecordCreate {
+        let (home, ops) = make_cloud_home_with_ops();
+        let staging = home.begin_atomic_create().await.unwrap();
+        staging
+            .clone()
+            .stage_record(CloudKitRecordCreate {
                 key: "copies/cancelled.part0.upload".to_string(),
                 data: vec![8u8; CHUNK_SIZE],
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         drop(staging);
 
@@ -3303,18 +3290,16 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let ops = Arc::new(MockCloudKitOps::new());
-                let staging = CloudKitStagingCleanup::begin(ops.clone(), CloudKitScope::Private)
-                    .await
-                    .unwrap();
-                stage_atomic_create_record(
-                    staging.clone(),
-                    CloudKitRecordCreate {
+                let home = CloudKitCloudHome::new_private(ops.clone());
+                let staging = home.begin_atomic_create().await.unwrap();
+                staging
+                    .clone()
+                    .stage_record(CloudKitRecordCreate {
                         key: "copies/cancelled.part0.upload".to_string(),
                         data: vec![8u8; CHUNK_SIZE],
-                    },
-                )
-                .await
-                .unwrap();
+                    })
+                    .await
+                    .unwrap();
                 ops.fail_discard();
                 let started = Arc::new(std::sync::Barrier::new(2));
                 let release = Arc::new(std::sync::Barrier::new(2));
