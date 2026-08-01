@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use rusqlite::Connection;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -31,7 +29,6 @@ pub(crate) struct RestoringStore<'storage> {
     protocol: StoreProtocolRoot,
     membership: crate::protocol::membership::MembershipChain,
     identity: UserKeypair,
-    target_path: PathBuf,
 }
 
 impl<'storage> RestoringStore<'storage> {
@@ -1047,7 +1044,6 @@ impl<'storage> RestoringStore<'storage> {
         protocol: StoreProtocolRoot,
         membership: crate::protocol::membership::MembershipChain,
         identity: UserKeypair,
-        target_path: PathBuf,
     ) -> Self {
         Self {
             history,
@@ -1057,7 +1053,6 @@ impl<'storage> RestoringStore<'storage> {
             protocol,
             membership,
             identity,
-            target_path,
         }
     }
 
@@ -1336,41 +1331,14 @@ impl<'storage> RestoringStore<'storage> {
         store_dir: &crate::store_dir::StoreDir,
         cancel: &watch::Receiver<bool>,
     ) -> Result<super::writer::snapshot::SnapshotBlobReconcile, crate::database::DbError> {
-        let db = &self.database;
-        let row_ids: Vec<(String, String)> = {
-            let conn =
-                Connection::open(&self.target_path).map_err(crate::database::DbError::from)?;
-            let mut row_ids = Vec::new();
-            for table in db.synced_tables() {
-                let Some(declaration) = table.blob() else {
-                    continue;
-                };
-                if declaration.fill != crate::blob::CacheFill::CacheEager {
-                    continue;
-                }
-                let sql = format!(
-                    "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
-                    crate::database::quote_ident(table.name()),
-                    crate::database::quote_ident(&declaration.id_column),
-                );
-                let mut statement = conn.prepare(&sql).map_err(crate::database::DbError::from)?;
-                let ids = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(crate::database::DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(crate::database::DbError::from)?;
-                row_ids.extend(ids.into_iter().map(|id| (table.name().to_string(), id)));
-            }
-            row_ids
-        };
-
-        let mut blobs = Vec::with_capacity(row_ids.len());
-        for (table, row_id) in row_ids {
-            let reference = db.row_blob_ref(&table, &row_id).await?;
-            blobs.push(
-                BlobDownload::from_row(reference).map_err(crate::database::DbError::Message)?,
-            );
-        }
+        let blobs = self
+            .database
+            .eager_row_blob_refs()
+            .await?
+            .into_iter()
+            .map(BlobDownload::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::database::DbError::Message)?;
 
         if blobs.is_empty() {
             return Ok(super::writer::snapshot::SnapshotBlobReconcile::Complete);

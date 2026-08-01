@@ -483,7 +483,7 @@ impl<'storage> BootstrapResult<'storage> {
                     blob_source,
                     keyrings,
                 )
-                .bind_restore(storage, membership, restorer_identity, requested),
+                .bind_restore(storage, membership, restorer_identity),
             )
         }
         .await;

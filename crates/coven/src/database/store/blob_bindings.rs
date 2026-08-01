@@ -17,6 +17,44 @@ pub struct ExternalBlob {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn eager_row_blob_refs(
+        &self,
+    ) -> Result<Vec<crate::blob::RowBlobRef>, DbError> {
+        let tables = self.synced_tables().to_vec();
+        let gates = self.gates();
+        self.connection
+            .call(move |connection| {
+                let mut references = Vec::new();
+                for table in &tables {
+                    let Some(declaration) = table.blob() else {
+                        continue;
+                    };
+                    if declaration.fill != crate::blob::CacheFill::CacheEager {
+                        continue;
+                    }
+                    let sql = format!(
+                        "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
+                        crate::database::quote_ident(table.name()),
+                        crate::database::quote_ident(&declaration.id_column),
+                    );
+                    let mut statement = connection.prepare(&sql).map_err(DbError::from)?;
+                    let row_ids = statement
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .map_err(DbError::from)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(DbError::from)?;
+                    drop(statement);
+                    for row_id in row_ids {
+                        references.push(Database::row_blob_ref_on(
+                            connection, &gates, table, &row_id,
+                        )?);
+                    }
+                }
+                Ok(references)
+            })
+            .await
+    }
+
     pub(crate) async fn stored_blob_reference_state(
         &self,
         stored: crate::blob::locator::StoredBlobRef,

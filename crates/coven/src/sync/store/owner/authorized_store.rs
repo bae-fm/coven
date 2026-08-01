@@ -277,7 +277,6 @@ impl<'storage> AuthorizedStore<'storage> {
             self.storage.as_ref(),
             self.membership,
             self.identity.clone(),
-            std::path::PathBuf::new(),
         )
     }
 

@@ -400,20 +400,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         storage: &'storage dyn SyncStorage,
         membership: crate::protocol::membership::MembershipChain,
         identity: UserKeypair,
-        target_path: std::path::PathBuf,
     ) -> super::RestoringStore<'storage> {
         let database = self.database.clone();
         let root = self.root.reference().clone();
         let protocol = self.root.object().value.clone();
         super::RestoringStore::from_parts(
-            self,
-            database,
-            storage,
-            root,
-            protocol,
-            membership,
-            identity,
-            target_path,
+            self, database, storage, root, protocol, membership, identity,
         )
     }
 
