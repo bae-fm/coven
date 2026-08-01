@@ -924,12 +924,12 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
 
 #[tokio::test]
 async fn blob_reads_reuse_schema_models_built_at_open() {
-    crate::sync::gate::reset_from_tables_call_count();
+    crate::database::reset_gate_from_tables_call_count();
     crate::database::reset_from_tables_call_count();
 
     let db = read_test_db("audio");
     assert_eq!(
-        crate::sync::gate::from_tables_call_count(),
+        crate::database::gate_from_tables_call_count(),
         1,
         "database open builds the gate model once",
     );
@@ -948,7 +948,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let reference =
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
             .await;
-    let gate_models_before_reads = crate::sync::gate::from_tables_call_count();
+    let gate_models_before_reads = crate::database::gate_from_tables_call_count();
     let blob_models_before_reads = crate::database::from_tables_call_count();
 
     assert_eq!(
@@ -980,7 +980,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     );
 
     assert_eq!(
-        crate::sync::gate::from_tables_call_count(),
+        crate::database::gate_from_tables_call_count(),
         gate_models_before_reads,
         "blob reads reuse the database's gate model",
     );

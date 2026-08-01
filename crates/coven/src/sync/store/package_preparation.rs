@@ -1,12 +1,12 @@
 //! Audience-package and blob preparation for Store commits.
 
+use crate::database::CirclePartitionControl;
 use crate::protocol::circle;
 use crate::storage::PreparedExactObject;
-use crate::sync::gate;
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: circle::Audience,
-    pub(crate) control: Option<gate::CirclePartitionControl>,
+    pub(crate) control: Option<CirclePartitionControl>,
     pub(crate) key_fingerprint: Option<crate::KeyFingerprint>,
     pub(crate) semantic_bytes: Vec<u8>,
     pub(crate) prepared: PreparedExactObject,

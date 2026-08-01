@@ -24,7 +24,7 @@ impl StoreDatabase {
         let root_id = root_id.to_string();
         self.connection
             .call(move |connection| {
-                crate::sync::gate::query_truth(connection, &root_table, &gate_column, &root_id)
+                crate::database::query_truth(connection, &root_table, &gate_column, &root_id)
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .await
@@ -47,7 +47,7 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 let transaction = connection.unchecked_transaction()?;
-                let locality = crate::sync::gate::query_truth(
+                let locality = crate::database::query_truth(
                     &transaction,
                     &root_table,
                     &gate_column,

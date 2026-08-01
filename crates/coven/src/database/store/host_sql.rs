@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use crate::database::Gates;
 use crate::database::{CloudOutboxRecords, Database, DbError};
-use crate::sync::gate::Gates;
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::{Provenance, SyncedTable};
 

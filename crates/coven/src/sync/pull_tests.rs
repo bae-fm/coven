@@ -3180,13 +3180,13 @@ async fn push_stamps_the_dbs_schema_version() {
 
 #[tokio::test]
 async fn sync_reuses_opened_schema_models() {
-    crate::sync::gate::reset_from_tables_call_count();
+    crate::database::reset_gate_from_tables_call_count();
     crate::database::reset_from_tables_call_count();
 
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
-    assert_eq!(crate::database::from_tables_call_count(), 1);
+    assert_eq!(crate::database::gate_from_tables_call_count(), 1);
+    assert_eq!(crate::database::gate_from_tables_call_count(), 1);
 
     let outgoing = capture_bytes(
         &db,
@@ -3212,7 +3212,7 @@ async fn sync_reuses_opened_schema_models() {
     .await
     .expect("sync");
 
-    assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
+    assert_eq!(crate::database::from_tables_call_count(), 1);
     assert_eq!(crate::database::from_tables_call_count(), 1);
 }
 
@@ -4065,7 +4065,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         result
             .row_changes
             .iter()
-            .all(|change| !crate::sync::gate::is_routing_table(&change.table)),
+            .all(|change| !crate::database::is_routing_table(&change.table)),
         "host-visible row changes must not expose Coven routing tables"
     );
     assert!(

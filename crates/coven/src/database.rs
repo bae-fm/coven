@@ -87,7 +87,6 @@ use crate::protocol::store_commit::{
     StoreSnapshotRef,
 };
 use crate::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 use crate::sync::store::{
@@ -119,6 +118,7 @@ pub(crate) use coven_schema::{
 mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
+mod gate;
 mod local_state;
 mod local_store_identity;
 mod make_remote;
@@ -152,6 +152,21 @@ pub(crate) use circle_operation_records::{
 };
 pub(crate) use database_connection::DatabaseConnection;
 use database_open::CovenMetadataOpen;
+pub(crate) use gate::query_truth;
+pub(crate) use gate::{
+    active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
+    capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
+    is_routing_table, live_row_audience, normalize_inbound_store_changeset, partition_outbound,
+    prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
+    store_audience_transitions, validate_scoped_foreign_key_audiences,
+    validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
+    GateError, Gates, PartitionedAudienceWrite, RoutingChanges, StoreAudienceTransitions,
+};
+#[cfg(test)]
+pub(crate) use gate::{
+    from_tables_call_count as gate_from_tables_call_count,
+    reset_from_tables_call_count as reset_gate_from_tables_call_count,
+};
 pub(crate) use local_store_identity::local_merge_stream_id_on;
 pub(crate) use local_store_identity::{
     local_activated_registration_ref_on, local_store_authority_on,

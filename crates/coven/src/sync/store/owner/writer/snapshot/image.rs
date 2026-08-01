@@ -33,7 +33,7 @@ pub(crate) enum SnapshotBlobAudience {
     Store,
     Circle {
         circle_id: crate::protocol::circle::CircleId,
-        control: crate::sync::gate::CirclePartitionControl,
+        control: crate::database::CirclePartitionControl,
     },
 }
 
@@ -650,7 +650,7 @@ fn create_snapshot_for_audience_with_host_blobs(
         return Err(SnapshotError::NoSyncedTables);
     }
 
-    let gates = crate::sync::gate::Gates::from_tables(conn, tables)
+    let gates = crate::database::Gates::from_tables(conn, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let routing_key = if gates.has_scoped_graph() {
         let encryption = routing_encryption.ok_or_else(|| {
@@ -723,7 +723,7 @@ fn snapshot_blob_facts(
     let publications = declarations
         .publication_blobs_in_db(&snapshot)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-    let gates = crate::sync::gate::Gates::from_tables(live, tables)
+    let gates = crate::database::Gates::from_tables(live, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let mut facts = Vec::with_capacity(publications.len());
     for publication in publications {
@@ -766,7 +766,7 @@ fn snapshot_blob_facts(
             plaintext_hash,
         )
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-        let audience = match crate::sync::gate::live_row_audience(
+        let audience = match crate::database::live_row_audience(
             live,
             &gates,
             &publication.table,
@@ -777,7 +777,7 @@ fn snapshot_blob_facts(
             crate::protocol::circle::Audience::Store => SnapshotBlobAudience::Store,
             crate::protocol::circle::Audience::Circle(circle_id) => SnapshotBlobAudience::Circle {
                 circle_id,
-                control: crate::sync::gate::active_circle_control(live, circle_id)
+                control: crate::database::active_circle_control(live, circle_id)
                     .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
             },
             crate::protocol::circle::Audience::Local => {
@@ -888,7 +888,7 @@ pub(crate) fn verify_circle_bootstrap_image(
             "Circle bootstrap routing contract differs from its signed hash".to_string(),
         ));
     }
-    let gates = crate::sync::gate::Gates::from_tables(&connection, tables)
+    let gates = crate::database::Gates::from_tables(&connection, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     if gates.has_scoped_graph() {
         let routing_key = routing_key.ok_or_else(|| {
@@ -897,7 +897,7 @@ pub(crate) fn verify_circle_bootstrap_image(
                     .to_string(),
             )
         })?;
-        crate::sync::gate::validate_snapshot_routing_state(
+        crate::database::validate_snapshot_routing_state(
             &connection,
             &gates,
             routing_key,
@@ -1047,7 +1047,7 @@ const CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
 /// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
 ///    (gated-false roots and their FK-descendants), so a private subtree does
 ///    not ride the snapshot to a restoring peer. This is the same exclusion the
-///    outbound changeset gate applies; both reuse [`crate::sync::gate::Gates`].
+///    outbound changeset gate applies; both reuse [`crate::database::Gates`].
 fn clear_non_synced(
     conn: &Connection,
     root: &crate::protocol::store_commit::StoreRootRef,
@@ -1055,7 +1055,7 @@ fn clear_non_synced(
     routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     audience: &crate::protocol::circle::Audience,
 ) -> Result<(), SnapshotError> {
-    let gates = crate::sync::gate::Gates::from_tables(conn, synced)
+    let gates = crate::database::Gates::from_tables(conn, synced)
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
     if gates.has_scoped_graph() && routing_key.is_none() {
         return Err(SnapshotError::ClearFailed(
@@ -1120,7 +1120,7 @@ fn clear_non_synced(
             .delete_gated_false(&tx)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
         crate::protocol::circle::Audience::Circle(_) => {
-            crate::sync::gate::retain_snapshot_audience_rows(&tx, &gates, audience)
+            crate::database::retain_snapshot_audience_rows(&tx, &gates, audience)
                 .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
         }
         crate::protocol::circle::Audience::Local => {
@@ -1130,9 +1130,9 @@ fn clear_non_synced(
         }
     }
     if let Some(routing_key) = routing_key {
-        crate::sync::gate::prune_private_routes_without_rows(&tx, &gates)
+        crate::database::prune_private_routes_without_rows(&tx, &gates)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
-        crate::sync::gate::validate_snapshot_routing_state(&tx, &gates, routing_key, audience)
+        crate::database::validate_snapshot_routing_state(&tx, &gates, routing_key, audience)
             .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     }
 

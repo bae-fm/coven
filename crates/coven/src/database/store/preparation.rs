@@ -47,7 +47,7 @@ impl StoreDatabase {
                     )?,
                 };
                 let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
-                let partitions = vec![crate::sync::gate::AudiencePartition {
+                let partitions = vec![crate::database::AudiencePartition {
                     audience: crate::protocol::circle::Audience::Store,
                     control: None,
                     changeset,

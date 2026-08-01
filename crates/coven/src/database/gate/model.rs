@@ -391,7 +391,7 @@ impl Gates {
     /// `DELETE`s over the live tables rather than as a changeset filter.
     ///
     /// Both channels a row can use to cross devices — the changeset
-    /// ([`gate_outbound`](crate::sync::gate::gate_outbound)) and the snapshot — must honor the same gate, so the
+    /// ([`gate_outbound`](super::outbound::gate_outbound)) and the snapshot — must honor the same gate, so the
     /// snapshot calls this on its VACUUM'd copy to strip gated-false subtrees
     /// before the bytes leave the device. Sharing this method (not a parallel
     /// FK model) keeps a single definition of what the gate excludes.

@@ -100,7 +100,7 @@ pub(crate) fn validate_row_identity(
 /// schema and drift the moment a new foreign key is added.
 ///
 /// A table is *either* a remote root, a gated root, a gated-by-descendants
-/// ancestor, or plain — never two of these. See [`super::gate`] for the gating
+/// ancestor, or plain — never two of these. See [`crate::database::Gates`] for the gating
 /// mechanics.
 /// Orthogonally, any table may *carry a blob* ([`SyncedTable::carries_blob`]):
 /// blob-bearing-ness is a property of the row's columns, not of its gate role.

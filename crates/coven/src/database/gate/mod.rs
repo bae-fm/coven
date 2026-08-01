@@ -1,17 +1,17 @@
 //! Row-level sync gating.
 //!
 //! A host declares a boolean **gate** column on a *root* synced table (via
-//! [`SyncedTable::gated_by`](super::session::SyncedTable::gated_by)). A root row
+//! [`SyncedTable::gated_by`](crate::sync::session::SyncedTable::gated_by)). A root row
 //! is shared — i.e. it syncs to peers — iff its gate column is true. The gate
 //! flows down *declared foreign keys*: a child row is shared iff the row at the
 //! top of its FK chain (its gated-ancestor root) is shared. A
-//! [`SyncedTable::remote_root`](super::session::SyncedTable::remote_root) is a
+//! [`SyncedTable::remote_root`](crate::sync::session::SyncedTable::remote_root) is a
 //! root whose rows and FK descendants always sync, and whose blobs are always
 //! Remote. Rows that are not gated and not FK-descendants of a gated or remote root
 //! always sync.
 //!
 //! The gate also flows **up** for declared *ancestors*
-//! ([`SyncedTable::gated_by_descendants`](super::session::SyncedTable::gated_by_descendants)).
+//! ([`SyncedTable::gated_by_descendants`](crate::sync::session::SyncedTable::gated_by_descendants)).
 //! An ancestor is an always-shared FK *parent* of gated rows (e.g. an album is
 //! the FK parent of releases). Left alone it would sync even when its whole gated
 //! subtree is cut, landing on peers as an orphan with zero children. A
@@ -19,7 +19,7 @@
 //! holds a kept row referencing it; the keep composes recursively up the FK chain
 //! to the gated roots at the bottom. The keep-children are inferred from the live
 //! FK graph, never declared — except a child the host marks an *asset*
-//! ([`SyncedTable::asset`](super::session::SyncedTable::asset)), a decoration
+//! ([`SyncedTable::asset`](crate::sync::session::SyncedTable::asset)), a decoration
 //! (cover, artist image) that rides its subject's gate but never grants keep, so
 //! it is excluded from the subject's keep-children. An asset is typically a
 //! host-provided blob; see the [blob concept tree](crate::blob) for the blob-side

@@ -439,10 +439,10 @@ impl StoreDatabase {
     pub(crate) async fn current_circle_partition_control(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<crate::sync::gate::CirclePartitionControl, DbError> {
+    ) -> Result<crate::database::CirclePartitionControl, DbError> {
         self.connection
             .call(move |conn| {
-                crate::sync::gate::active_circle_control(conn, circle_id)
+                crate::database::active_circle_control(conn, circle_id)
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .await

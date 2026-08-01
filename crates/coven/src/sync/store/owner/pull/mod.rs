@@ -28,13 +28,13 @@ use crate::protocol::store_commit::{
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
+use crate::sync::hlc;
 use crate::sync::session::SyncedTable;
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
-use crate::sync::{gate, hlc};
 pub(super) use authorized::AuthorizedPull;
 
 mod device_lifecycle_state;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::AudiencePartition;
 use crate::database::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
     StoreWriteBlobFacts,
@@ -12,7 +13,6 @@ use crate::storage;
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::store_dir::StoreDir;
-use crate::sync::gate;
 use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 
 impl AuthorizedWriterOperation<'_> {
@@ -25,7 +25,7 @@ impl AuthorizedWriterOperation<'_> {
         schema_version: u32,
         stream_id: String,
         seq: u64,
-        partition: gate::AudiencePartition,
+        partition: AudiencePartition,
         blob_facts: &StoreWriteBlobFacts,
         store_dir: &StoreDir,
         active_store_members: &std::collections::BTreeSet<String>,
@@ -47,7 +47,7 @@ impl AuthorizedWriterOperation<'_> {
             // between capture and publication retires the control the write was
             // captured under; its rows belong to the successor epoch that is live now.
             let control = database.current_circle_partition_control(circle_id).await?;
-            gate::AudiencePartition {
+            AudiencePartition {
                 control: Some(control),
                 ..partition
             }

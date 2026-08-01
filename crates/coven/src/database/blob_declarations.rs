@@ -1,7 +1,7 @@
 //! The resolved blob-declaration model: coven's own derivation of which rows
 //! carry blobs and where each blob's columns live.
 //!
-//! The gate-sibling of [`Gates`](crate::sync::gate::Gates). A host declares per
+//! The gate-sibling of [`Gates`](crate::database::Gates). A host declares per
 //! table, via [`SyncedTable::carries_blob`], the columns that locate a blob (its
 //! id, optional readable cloud path, and encryption-scope column) plus the
 //! namespace and retention class. [`BlobDecls::from_tables`] resolves those column
@@ -312,7 +312,7 @@ pub(crate) fn from_tables_call_count() -> usize {
 impl BlobDecls {
     /// Resolve every [`SyncedTable::carries_blob`] declaration's column names to
     /// indices against the live schema, mirroring
-    /// [`Gates::from_tables`](crate::sync::gate::Gates::from_tables). A declared
+    /// [`Gates::from_tables`](crate::database::Gates::from_tables). A declared
     /// column absent from the table is a host error surfaced here, never a silent
     /// drop.
     pub(crate) fn from_tables(

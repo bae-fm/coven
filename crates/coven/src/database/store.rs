@@ -201,7 +201,7 @@ pub(crate) struct StoreDatabase {
     synced_tables: std::sync::Arc<Vec<crate::SyncedTable>>,
     schema_version: u32,
     sync_routing_hash: crate::protocol::store_commit::ObjectHash,
-    gates: std::sync::Arc<crate::sync::gate::Gates>,
+    gates: std::sync::Arc<crate::database::Gates>,
     blob_decls: std::sync::Arc<crate::database::BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::blob::TransferLimits,
@@ -280,7 +280,7 @@ impl StoreDatabase {
         self.blob_tombstone_grace
     }
 
-    pub(crate) fn gates(&self) -> std::sync::Arc<crate::sync::gate::Gates> {
+    pub(crate) fn gates(&self) -> std::sync::Arc<crate::database::Gates> {
         self.gates.clone()
     }
 

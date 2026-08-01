@@ -5,7 +5,7 @@ pub(crate) fn replay_retained_merge_projection_on(
     root: &StoreRootRef,
     retained_merge_materializations: &mut crate::database::store::RetainedMergeMaterializationCache,
     blob_decls: &BlobDecls,
-    gates: &super::gate::Gates,
+    gates: &crate::database::Gates,
     synced_tables: &[SyncedTable],
     routing_key: Option<&super::circle::RowRoutingKey>,
     retracted: &BTreeSet<StoreBatchCommitRef>,

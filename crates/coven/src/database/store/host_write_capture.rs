@@ -7,8 +7,12 @@ use tracing::warn;
 use crate::database::BlobDecls;
 use crate::database::PublicationBlob;
 use crate::database::{attach_session, capture_changeset, local_merge_stream_id_on, *};
+use crate::database::{
+    audience_moves, capture_routing_changes, is_routing_table, partition_outbound,
+    validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
+    Gates, PartitionedAudienceWrite, RoutingChanges,
+};
 use crate::encryption::EncryptionService;
-use crate::sync::gate::{self, Gates};
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
 
 use super::host_sql_transaction::HostSqlTransaction;
@@ -241,7 +245,7 @@ impl StoreDatabase {
 
     fn capture_audience_move_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
-        moves: &[gate::AudienceMove],
+        moves: &[AudienceMove],
         blob_decls: &BlobDecls,
         captured: StoreWriteBlobFacts,
     ) -> Result<StoreWriteBlobFacts, DbError> {
@@ -294,7 +298,7 @@ impl StoreDatabase {
     /// caller's own writes.
     fn advance_moved_blob_row_stamps_on(
         tx: &rusqlite::Transaction<'_>,
-        moves: &[gate::AudienceMove],
+        moves: &[AudienceMove],
         blob_decls: &BlobDecls,
     ) -> Result<bool, DbError> {
         let mut advanced = false;
@@ -329,7 +333,7 @@ impl StoreDatabase {
 
     pub(crate) fn capture_partition_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
-        partitions: &[gate::AudiencePartition],
+        partitions: &[AudiencePartition],
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let mut facts = BTreeMap::new();
@@ -361,7 +365,7 @@ impl StoreDatabase {
         captured: &[u8],
         gates: &Gates,
         routing: StoreWriteRouting<'_>,
-    ) -> Result<gate::PartitionedAudienceWrite, DbError> {
+    ) -> Result<PartitionedAudienceWrite, DbError> {
         match routing {
             StoreWriteRouting::MergeScoped(encryption) => {
                 let store_root_hash = required_store_root_authority_on(tx)?.store_root_hash;
@@ -370,19 +374,18 @@ impl StoreDatabase {
                         .map_err(|error| {
                             DbError::Message(format!("derive row routing key: {error}"))
                         })?;
-                let routing_changeset = gate::capture_routing_changes(tx, captured, gates, &key)
+                let routing_changeset = capture_routing_changes(tx, captured, gates, &key)
                     .map_err(|error| {
                         DbError::Message(format!("capture scoped routing changes: {error}"))
                     })?;
-                gate::partition_outbound(tx, captured, &routing_changeset, gates).map_err(|error| {
+                partition_outbound(tx, captured, &routing_changeset, gates).map_err(|error| {
                     DbError::Message(format!("partition scoped host transaction: {error}"))
                 })
             }
             StoreWriteRouting::Unscoped => {
-                gate::partition_outbound(tx, captured, &gate::RoutingChanges::empty(), gates)
-                    .map_err(|error| {
-                        DbError::Message(format!("partition gated host transaction: {error}"))
-                    })
+                partition_outbound(tx, captured, &RoutingChanges::empty(), gates).map_err(|error| {
+                    DbError::Message(format!("partition gated host transaction: {error}"))
+                })
             }
         }
     }
@@ -413,7 +416,7 @@ impl StoreDatabase {
     pub(crate) fn insert_store_write_on(
         tx: &rusqlite::Transaction<'_>,
         write_id: &WriteId,
-        partitions: &[gate::AudiencePartition],
+        partitions: &[AudiencePartition],
         inverse_changeset: &[u8],
         base: &StoreWriteBase,
         blob_facts: &StoreWriteBlobFacts,
@@ -455,7 +458,7 @@ impl StoreDatabase {
                             DbError::Message(format!("read affected write rows: {error}"))
                         })?
                         .into_iter()
-                        .filter(|row| !gate::is_routing_table(&row.table))
+                        .filter(|row| !is_routing_table(&row.table))
                         .map(|row| {
                             let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
                                 DbError::Message(format!(
@@ -518,7 +521,7 @@ impl StoreDatabase {
             let control = partition
                 .control
                 .as_ref()
-                .map(gate::CirclePartitionControl::stored_json);
+                .map(CirclePartitionControl::stored_json);
             tx.execute(
                 "INSERT INTO store_write_partitions
                  (write_id, audience, control_coord, changeset)
@@ -599,7 +602,7 @@ impl StoreDatabase {
             };
             let mut captured =
                 Self::drain_host_change_journal(&mut journal, synced_tables).map_err(E::from)?;
-            gate::validate_scoped_foreign_key_audiences(&tx, gates)
+            validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(|error| DbError::Message(error.to_string()))
                 .map_err(E::from)?;
             // A move whose blobs get re-sealed owes those rows new stamps, and the
@@ -614,7 +617,7 @@ impl StoreDatabase {
                 blob_materialization,
                 Some(AudienceBlobMoveMaterialization::Host(_))
             ) {
-                let moves = gate::audience_moves(&tx, &captured, gates)
+                let moves = audience_moves(&tx, &captured, gates)
                     .map_err(|error| DbError::Message(error.to_string()))
                     .map_err(E::from)?;
                 if Self::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
@@ -876,7 +879,7 @@ impl StoreDatabase {
                         "pending write {write_id} carries more than one Store partition"
                     )));
                 }
-                store = Some(gate::AudiencePartition {
+                store = Some(AudiencePartition {
                     audience: crate::protocol::circle::Audience::Store,
                     control: None,
                     changeset,
@@ -894,7 +897,7 @@ impl StoreDatabase {
                         "pending write {write_id} carries more than one Local partition"
                     )));
                 }
-                local = Some(gate::AudiencePartition {
+                local = Some(AudiencePartition {
                     audience: crate::protocol::circle::Audience::Local,
                     control: None,
                     changeset,
@@ -914,12 +917,12 @@ impl StoreDatabase {
                 ))
             })?;
             let control =
-                gate::CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
+                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
                     DbError::Message(format!(
                         "pending write {write_id} Circle {circle_id} control coordinate: {error}"
                     ))
                 })?;
-            circles.push(gate::AudiencePartition {
+            circles.push(AudiencePartition {
                 audience: crate::protocol::circle::Audience::Circle(circle_id),
                 control: Some(control),
                 changeset,

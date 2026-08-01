@@ -76,7 +76,7 @@ impl TableSchema {
     pub(crate) fn for_apply(
         conn: &Connection,
         synced_tables: &[SyncedTable],
-        gates: &crate::sync::gate::Gates,
+        gates: &crate::database::Gates,
     ) -> Result<Self, DbError> {
         let mut tables = synced_tables.to_vec();
         if gates.has_scoped_graph() {

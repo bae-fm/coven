@@ -1,3 +1,4 @@
+use crate::database::Gates;
 use crate::database::*;
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::circle::Audience;
@@ -5,7 +6,6 @@ use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommit, StoreBatchCommitRef};
 #[cfg(test)]
 use crate::storage::ExactObjectRef;
-use crate::sync::gate::Gates;
 use crate::sync::session::SyncedTable;
 use crate::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};

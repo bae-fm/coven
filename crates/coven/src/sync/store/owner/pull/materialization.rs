@@ -103,7 +103,7 @@ impl MergeSubsetOutcome {
 fn apply_merge_subset_on(
     conn: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
-    gates: &super::gate::Gates,
+    gates: &crate::database::Gates,
     routing_key: Option<&super::circle::RowRoutingKey>,
     source: &ValidatedChangeset<Vec<u8>>,
     bytes: Vec<u8>,
@@ -128,7 +128,7 @@ fn apply_merge_subset_on(
     returned_changes.extend(
         actual_changes
             .iter()
-            .filter(|change| !super::gate::is_routing_table(&change.table))
+            .filter(|change| !crate::database::is_routing_table(&change.table))
             .cloned(),
     );
     let store_transaction = MergeMaterializationTransaction::new(conn);
@@ -140,7 +140,7 @@ fn apply_merge_subset_on(
     }
     *package_reported_fk_violation |= apply.had_fk_violations;
     if let Some(package_audience) = package_audience {
-        super::gate::align_inbound_scoped_root_audiences(
+        crate::database::align_inbound_scoped_root_audiences(
             conn,
             &bytes,
             package_audience,
@@ -167,11 +167,11 @@ fn apply_merge_subset_on(
 fn apply_merge_package_on(
     conn: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
-    gates: &super::gate::Gates,
+    gates: &crate::database::Gates,
     routing_key: Option<&super::circle::RowRoutingKey>,
     package: &AudiencePackage,
     changeset: &ValidatedChangeset<Vec<u8>>,
-    store_audience_transitions: &super::gate::StoreAudienceTransitions,
+    store_audience_transitions: &crate::database::StoreAudienceTransitions,
     timestamp_policy: IncomingTimestampPolicy,
     changeset_max: &mut Option<super::hlc::Timestamp>,
     returned_changes: &mut Vec<RowChange>,
@@ -185,7 +185,7 @@ fn apply_merge_package_on(
                     "scoped Store package application requires a row-routing key".to_string(),
                 )
             })?;
-            let inbound = super::gate::normalize_inbound_store_changeset(
+            let inbound = crate::database::normalize_inbound_store_changeset(
                 conn,
                 package.changeset(),
                 gates,
@@ -210,7 +210,7 @@ fn apply_merge_package_on(
                 return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
             }
             let rows =
-                super::gate::filter_inbound_store_rows(conn, &inbound.rows, gates, routing_key)
+                crate::database::filter_inbound_store_rows(conn, &inbound.rows, gates, routing_key)
                     .map_err(|error| DbError::Message(error.to_string()))?;
             if let Err(tables) = apply_merge_subset_on(
                 conn,
@@ -251,7 +251,7 @@ fn apply_merge_package_on(
                     "Circle package application requires a row-routing key".to_string(),
                 )
             })?;
-            let rows = super::gate::filter_inbound_circle_changeset(
+            let rows = crate::database::filter_inbound_circle_changeset(
                 conn,
                 package.changeset(),
                 *circle_id,
@@ -281,7 +281,7 @@ fn apply_merge_package_on(
 pub(crate) fn apply_prepared_merge_materialization_on(
     conn: &rusqlite::Transaction<'_>,
     blob_decls: &BlobDecls,
-    gates: &super::gate::Gates,
+    gates: &crate::database::Gates,
     synced_tables: &[SyncedTable],
     routing_key: Option<&super::circle::RowRoutingKey>,
     local_store_membership: LocalStoreMembership,
@@ -356,7 +356,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
     let store_audience_transitions = packages
         .iter()
         .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
-        .map(|prepared| super::gate::store_audience_transitions(prepared.package.changeset()))
+        .map(|prepared| crate::database::store_audience_transitions(prepared.package.changeset()))
         .transpose()
         .map_err(|error| DbError::Message(error.to_string()))?
         .unwrap_or_default();
@@ -438,9 +438,9 @@ pub(crate) fn apply_prepared_merge_materialization_on(
             .attach(Some(table.name()))
             .map_err(DbError::from)?;
     }
-    super::gate::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
+    crate::database::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
         .map_err(|error| DbError::Message(error.to_string()))?;
-    super::gate::validate_scoped_foreign_key_audiences(conn, gates)
+    crate::database::validate_scoped_foreign_key_audiences(conn, gates)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let mut removal_changeset = Vec::new();
     removal_session

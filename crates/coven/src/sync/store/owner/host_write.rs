@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 
 use crate::blob::locator::RemoteAudience;
 use crate::blob::{Provenance, RowBlobAuthority};
+use crate::database::{AudienceMove, AudiencePartition};
 use crate::database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteBlobMoveDestination,
 };
 use crate::storage::{BlobSpoolProtection, BlobWriteAuthority, SyncStorage};
 use crate::store_dir::StoreDir;
-use crate::sync::gate::{AudienceMove, AudiencePartition};
 
 #[doc(hidden)]
 pub(crate) struct HostWriteBlobStaging {

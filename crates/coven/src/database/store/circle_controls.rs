@@ -510,7 +510,7 @@ impl StoreDatabase {
                 // Recording the verified activation above already removed its
                 // live access cache while retaining the control activation spine.
                 if StoreDatabase::circle_current_state_is_deleted_on(&tx, creation.circle_id)? {
-                    crate::sync::gate::prune_ineligible_scoped_rows(
+                    crate::database::prune_ineligible_scoped_rows(
                         &tx,
                         &gates,
                         &std::collections::BTreeSet::from([creation.circle_id]),

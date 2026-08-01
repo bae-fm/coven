@@ -6,7 +6,6 @@ mod blob_content_hash_tests;
 pub(crate) mod backoff;
 pub(crate) mod blocking;
 pub(crate) mod cycle;
-pub(crate) mod gate;
 pub(crate) mod hlc;
 pub(crate) mod store;
 // Exercises the register clock through `Database::hlc()`.

@@ -392,11 +392,11 @@ impl Database {
                 .root_kept_of(conn, table, row_id)
                 .map_err(|error| DbError::Message(error.to_string()));
         }
-        match crate::sync::gate::live_row_audience(conn, gates, table, row_id) {
+        match crate::database::live_row_audience(conn, gates, table, row_id) {
             Ok(audience) => Ok(Some(audience != crate::protocol::circle::Audience::Local)),
             Err(
-                crate::sync::gate::GateError::MissingAudienceRow { .. }
-                | crate::sync::gate::GateError::MissingAudienceParent { .. },
+                crate::database::GateError::MissingAudienceRow { .. }
+                | crate::database::GateError::MissingAudienceParent { .. },
             ) => Ok(None),
             Err(error) => Err(DbError::Message(error.to_string())),
         }
