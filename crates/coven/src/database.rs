@@ -61,8 +61,7 @@ pub(crate) use crate::database::store_ack_records::{
 pub(crate) use crate::database::store_authority_records::install_store_founder_state_on;
 pub(crate) use crate::database::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
-    parse_store_reclaim_operation, record_store_reclaim_activation_on, store_reclaim_journal_error,
-    update_store_reclaim_operation_on,
+    parse_store_reclaim_operation, store_reclaim_journal_error, update_store_reclaim_operation_on,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

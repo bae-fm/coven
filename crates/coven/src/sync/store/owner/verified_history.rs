@@ -1,3 +1,4 @@
+use super::verification::StoreMembershipObjectVerifier;
 use super::*;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
@@ -638,18 +639,112 @@ impl VerifiedOwnerPromotionRequestActivation {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
+    pub(crate) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'a> {
+        self.commit_verifier.membership_objects()
+    }
+
     pub(crate) async fn verify_resolution_activation_acceptance(
         &self,
         commit: &StoreBatchCommit,
     ) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
-        verify_merge_resolution_activation_acceptance_with_history(
-            &self.root,
-            &self.commit_verifier,
-            commit,
+        let root = self.root.reference();
+        let Some(store_commit::StoreControl { transition }) = commit.control() else {
+            return Ok(None);
+        };
+        let entry = self
+            .commit_verifier
+            .membership_objects()
+            .load_entry(&transition.body.entry)
+            .await?;
+        let protocol_membership::MembershipChange::ResolutionActivation { resolution } =
+            &entry.value.change
+        else {
+            return Ok(None);
+        };
+        if entry.value.coord() != transition.body.entry.coord {
+            return Err(StorePullError::Database(
+                "Merge resolution activation differs from its exact transition".to_string(),
+            ));
+        }
+        let value = self
+            .commit_verifier
+            .membership_objects()
+            .load_resolution(resolution)
+            .await?;
+        let registration = self
+            .commit_verifier
+            .load_registration(&commit.author_registration)
+            .await?;
+        let acceptance = &value.value.replacement_acceptance;
+        let mut expected_activations = vec![
+            store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.owner_registration.clone(),
+                value.value.replacement_grant.clone(),
+                acceptance.membership.clone(),
+            ),
+            store_commit::StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.owner_registration.clone(),
+                value.value.replacement_grant.clone(),
+                acceptance.recovery.clone(),
+            ),
+        ];
+        expected_activations.sort();
+        if acceptance.owner_registration != commit.author_registration
+            || registration.value.author_pubkey != value.value.resolver_pubkey
+            || entry.value.author_pubkey != value.value.resolver_pubkey
+            || transition.body.author_registration != commit.author_registration
+            || commit.stream_activations() != expected_activations
+        {
+            return Err(StorePullError::Database(
+                "Merge resolution activation differs from its accepted Owner authority".to_string(),
+            ));
+        }
+        self.verify_owner_conflict_acceptance_at_tips(
+            acceptance,
+            &value.value.resolver_pubkey,
+            commit_predecessor_references(commit),
+        )
+        .await?;
+        Ok(Some(VerifiedMergeConflictResolutionActivation {
+            reference: resolution.clone(),
+        }))
+    }
+
+    async fn verify_owner_conflict_acceptance_at_tips(
+        &self,
+        acceptance: &store_commit::OwnerConflictResolutionAcceptance,
+        resolver_pubkey: &str,
+        allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
+    ) -> Result<(), StorePullError> {
+        let registration = self
+            .commit_verifier
+            .load_registration(&acceptance.owner_registration)
+            .await?;
+        acceptance
+            .verify(&registration.value)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let state = merge_device_state_from_verified_history(
+            &acceptance.device_state,
             &self.history.genesis,
             &self.history.commits,
-        )
-        .await
+            allowed_tips,
+        )?;
+        if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
+            return Err(StorePullError::Database(
+                "conflict-resolution Owner registration is not active at its exact device state"
+                    .to_string(),
+            ));
+        }
+        self.commit_verifier
+            .verify_canonical_owner_registration(
+                &state,
+                resolver_pubkey,
+                &acceptance.owner_registration,
+            )
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn verify_membership_control_with_retained_history(
@@ -1500,114 +1595,6 @@ fn merge_device_state_from_verified_history(
         ));
     }
     Ok(state)
-}
-
-async fn verify_merge_owner_conflict_acceptance_with_history(
-    commit_verifier: &StoreCommitVerifier<'_>,
-    acceptance: &store_commit::OwnerConflictResolutionAcceptance,
-    resolver_pubkey: &str,
-    genesis: &ResolvedStoreDeviceState,
-    commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
-    allowed_tips: impl IntoIterator<Item = StoreBatchCommitRef>,
-) -> Result<(), StorePullError> {
-    let registration = commit_verifier
-        .load_registration(&acceptance.owner_registration)
-        .await?;
-    acceptance
-        .verify(&registration.value)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let state = merge_device_state_from_verified_history(
-        &acceptance.device_state,
-        genesis,
-        commits,
-        allowed_tips,
-    )?;
-    if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
-        return Err(StorePullError::Database(
-            "conflict-resolution Owner registration is not active at its exact device state"
-                .to_string(),
-        ));
-    }
-    commit_verifier
-        .verify_canonical_owner_registration(
-            &state,
-            resolver_pubkey,
-            &acceptance.owner_registration,
-        )
-        .await?;
-    Ok(())
-}
-
-pub(crate) async fn verify_merge_resolution_activation_acceptance_with_history(
-    root: &super::super::protocol_root::VerifiedStoreRoot,
-    commit_verifier: &StoreCommitVerifier<'_>,
-    commit: &StoreBatchCommit,
-    genesis: &ResolvedStoreDeviceState,
-    commits: &BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
-) -> Result<Option<VerifiedMergeConflictResolutionActivation>, StorePullError> {
-    let root = root.reference();
-    let Some(store_commit::StoreControl { transition }) = commit.control() else {
-        return Ok(None);
-    };
-    let entry = commit_verifier
-        .membership_objects()
-        .load_entry(&transition.body.entry)
-        .await?;
-    let protocol_membership::MembershipChange::ResolutionActivation { resolution } =
-        &entry.value.change
-    else {
-        return Ok(None);
-    };
-    if entry.value.coord() != transition.body.entry.coord {
-        return Err(StorePullError::Database(
-            "Merge resolution activation differs from its exact transition".to_string(),
-        ));
-    }
-    let value = commit_verifier
-        .membership_objects()
-        .load_resolution(resolution)
-        .await?;
-    let registration = commit_verifier
-        .load_registration(&commit.author_registration)
-        .await?;
-    let acceptance = &value.value.replacement_acceptance;
-    let mut expected_activations = vec![
-        store_commit::StreamActivation::grant_authorized(
-            root.store_root_hash,
-            acceptance.owner_registration.clone(),
-            value.value.replacement_grant.clone(),
-            acceptance.membership.clone(),
-        ),
-        store_commit::StreamActivation::grant_authorized(
-            root.store_root_hash,
-            acceptance.owner_registration.clone(),
-            value.value.replacement_grant.clone(),
-            acceptance.recovery.clone(),
-        ),
-    ];
-    expected_activations.sort();
-    if acceptance.owner_registration != commit.author_registration
-        || registration.value.author_pubkey != value.value.resolver_pubkey
-        || entry.value.author_pubkey != value.value.resolver_pubkey
-        || transition.body.author_registration != commit.author_registration
-        || commit.stream_activations() != expected_activations
-    {
-        return Err(StorePullError::Database(
-            "Merge resolution activation differs from its accepted Owner authority".to_string(),
-        ));
-    }
-    verify_merge_owner_conflict_acceptance_with_history(
-        commit_verifier,
-        acceptance,
-        &value.value.resolver_pubkey,
-        genesis,
-        commits,
-        commit_predecessor_references(commit),
-    )
-    .await?;
-    Ok(Some(VerifiedMergeConflictResolutionActivation {
-        reference: resolution.clone(),
-    }))
 }
 
 pub(crate) struct VerifiedMergeHistory {
@@ -4110,15 +4097,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         let frontier = acceptance.device_state.frontier();
         let tips = frontier.commits().values().cloned().collect::<Vec<_>>();
         self.verify_refs(tips.clone()).await?;
-        verify_merge_owner_conflict_acceptance_with_history(
-            &self.commit_verifier,
-            acceptance,
-            resolver_pubkey,
-            &self.history.genesis,
-            &self.history.commits,
-            tips,
-        )
-        .await
+        self.verify_owner_conflict_acceptance_at_tips(acceptance, resolver_pubkey, tips)
+            .await
     }
 
     pub(crate) async fn verify_refs(
@@ -4179,14 +4159,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 commit_predecessor_references(&commit),
             )?;
             let pending_resolution =
-                Box::pin(verify_merge_resolution_activation_acceptance_with_history(
-                    &self.root,
-                    &self.commit_verifier,
-                    &commit,
-                    &self.history.genesis,
-                    &self.history.commits,
-                ))
-                .await?;
+                Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
             let membership = Box::pin(load_merge_predecessor_membership_with_verified_activations(
                 &self.commit_verifier,
                 &commit.membership_state,

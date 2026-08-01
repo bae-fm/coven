@@ -370,38 +370,6 @@ impl Database {
             .collect()
     }
 
-    /// Whether a row's blobs live remotely, or `None` when the row's locality
-    /// cannot be established. A row reaches the cloud two different ways: a gated
-    /// root is kept, or an audience-scoped root is addressed to anyone but this
-    /// device. Only the second shape can carry a Circle's blobs, and asking a
-    /// scoped row whether it is "kept" has no answer, so the question dispatches
-    /// on which gate the row's root actually is.
-    ///
-    /// A row whose locality cannot be resolved answers `None`, never `false`: an
-    /// absent row or an unreachable audience parent means the caller cannot
-    /// establish that nothing references the blob, and every caller here decides
-    /// whether to delete data.
-    fn row_is_remote_on(
-        conn: &Connection,
-        gates: &Gates,
-        table: &str,
-        row_id: &str,
-    ) -> Result<Option<bool>, DbError> {
-        if !gates.table_is_scoped(table) {
-            return gates
-                .root_kept_of(conn, table, row_id)
-                .map_err(|error| DbError::Message(error.to_string()));
-        }
-        match crate::database::live_row_audience(conn, gates, table, row_id) {
-            Ok(audience) => Ok(Some(audience != crate::protocol::circle::Audience::Local)),
-            Err(
-                crate::database::GateError::MissingAudienceRow { .. }
-                | crate::database::GateError::MissingAudienceParent { .. },
-            ) => Ok(None),
-            Err(error) => Err(DbError::Message(error.to_string())),
-        }
-    }
-
     pub(crate) fn stored_blob_reference_state_on(
         conn: &Connection,
         gates: &Gates,
@@ -448,7 +416,25 @@ impl Database {
             if live.stamp != row_stamp {
                 continue;
             }
-            match Self::row_is_remote_on(conn, gates, &table_name, &row_id)? {
+            // A row reaches the cloud in two different ways: a gated root is
+            // kept, while an audience-scoped root is addressed to a non-Local
+            // audience. An absent row or unreachable audience parent leaves the
+            // locality unresolved; it cannot prove that the blob is unreferenced.
+            let remote = if !gates.table_is_scoped(&table_name) {
+                gates
+                    .root_kept_of(conn, &table_name, &row_id)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+            } else {
+                match crate::database::live_row_audience(conn, gates, &table_name, &row_id) {
+                    Ok(audience) => Some(audience != crate::protocol::circle::Audience::Local),
+                    Err(
+                        crate::database::GateError::MissingAudienceRow { .. }
+                        | crate::database::GateError::MissingAudienceParent { .. },
+                    ) => None,
+                    Err(error) => return Err(DbError::Message(error.to_string())),
+                }
+            };
+            match remote {
                 Some(false) => continue,
                 None => {
                     unresolved = true;

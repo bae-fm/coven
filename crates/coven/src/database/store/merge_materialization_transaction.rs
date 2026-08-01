@@ -13,6 +13,10 @@ pub(crate) use changeset_application::{
 pub(crate) use changeset_application::{ValidatedChangeset, WinningRow};
 pub(crate) use conflict::{IncomingTimestampPolicy, TableSchema};
 
+use super::store_device_state::{
+    load_store_device_exclusion_freezes_on, replace_store_device_exclusion_freezes_on,
+    store_device_state_for_history_cut_on,
+};
 use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on, StoreDatabase,
 };
@@ -20,17 +24,19 @@ use crate::blob::local_cleanup::intents_from_changes as local_blob_cleanup_inten
 use crate::changeset::RowChange;
 use crate::database::ReclaimCommitActivation;
 use crate::database::{
-    load_activated_registration_on, load_remote_object_on, record_store_reclaim_activation_on,
+    insert_store_reclaim_operation_on, load_activated_registration_on, load_remote_object_on,
+    load_store_reclaim_operation_on, record_reclaimed_store_package_on,
     required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
-    BlobActivation, BlobDecls, Database, DbError, OwnedVerifiedMergeMaterialization,
+    update_store_reclaim_operation_on, BlobActivation, BlobDecls, Database, DbError,
+    DurableStoreReclaimOperation, OwnedVerifiedMergeMaterialization, ReclaimedStorePackage,
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::{
     CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
-    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreHistoryCut, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::storage::ExactObjectRef;
 use crate::sync::{
@@ -141,6 +147,174 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 }
 
 impl MergeMaterializationTransaction<'_, '_> {
+    fn record_store_reclaim_activation(
+        &self,
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        activation: &ReclaimCommitActivation,
+    ) -> Result<(), DbError> {
+        activation.validate().map_err(store_reclaim_journal_error)?;
+        if activation.commit() != commit_ref {
+            return Err(DbError::Message(
+                "Store reclaim activation evidence names another commit".to_string(),
+            ));
+        }
+        if let Some(authorization) = commit.reclaim_authorization() {
+            let operation_id = authorization.authorization_hash;
+            let next = DurableStoreReclaimOperation::Authorized {
+                authorization: authorization.clone(),
+                activation: activation.clone(),
+            };
+            next.validate().map_err(store_reclaim_journal_error)?;
+            match load_store_reclaim_operation_on(self.transaction, operation_id)? {
+                Some(expected)
+                    if matches!(
+                        &expected,
+                        DurableStoreReclaimOperation::AuthorizationCandidate { object, .. }
+                            | DurableStoreReclaimOperation::AuthorizationReplacing { object, .. }
+                            if object.authorization_ref() == authorization
+                    ) =>
+                {
+                    update_store_reclaim_operation_on(self.transaction, &expected, &next)?;
+                }
+                Some(existing) if existing == next => {}
+                Some(_) => {
+                    return Err(DbError::Message(
+                        "reclaim authorization conflicts with its durable operation".to_string(),
+                    ));
+                }
+                None => insert_store_reclaim_operation_on(self.transaction, &next)?,
+            }
+        }
+        if let Some(receipt) = commit.reclaim_receipt() {
+            let operation_id = receipt.authorization.authorization_hash;
+            let expected = load_store_reclaim_operation_on(self.transaction, operation_id)?
+                .ok_or_else(|| {
+                    DbError::Message("reclaim receipt has no durable authorization".to_string())
+                })?;
+            let (authorization, authorization_activation) = match &expected {
+                DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
+                    return Err(DbError::Message(
+                        "reclaim receipt precedes authorization activation".to_string(),
+                    ));
+                }
+                DurableStoreReclaimOperation::AuthorizationReplacing { .. } => {
+                    return Err(DbError::Message(
+                        "reclaim receipt precedes replacement authorization activation".to_string(),
+                    ));
+                }
+                DurableStoreReclaimOperation::Authorized {
+                    authorization,
+                    activation,
+                } => (authorization.clone(), activation.clone()),
+                DurableStoreReclaimOperation::AbsentVerified {
+                    authorization,
+                    authorization_activation,
+                    ..
+                } => (authorization.clone(), authorization_activation.clone()),
+                DurableStoreReclaimOperation::ReceiptCandidate {
+                    authorization,
+                    authorization_activation,
+                    object,
+                    ..
+                } if matches!(
+                    &**object,
+                    crate::sync::store::DurableStoreReclaimObject::Receipt {
+                        receipt_ref,
+                        ..
+                    } if receipt_ref == receipt
+                ) =>
+                {
+                    (authorization.clone(), authorization_activation.clone())
+                }
+                DurableStoreReclaimOperation::ReceiptReplacing {
+                    authorization,
+                    authorization_activation,
+                    object,
+                    ..
+                } if matches!(
+                    &**object,
+                    crate::sync::store::DurableStoreReclaimObject::Receipt {
+                        receipt_ref,
+                        ..
+                    } if receipt_ref == receipt
+                ) =>
+                {
+                    (authorization.clone(), authorization_activation.clone())
+                }
+                DurableStoreReclaimOperation::ReceiptCandidate { .. } => {
+                    return Err(DbError::Message(
+                        "reclaim receipt differs from its durable candidate".to_string(),
+                    ));
+                }
+                DurableStoreReclaimOperation::ReceiptReplacing { .. } => {
+                    return Err(DbError::Message(
+                        "reclaim receipt differs from its replacement candidate".to_string(),
+                    ));
+                }
+                DurableStoreReclaimOperation::Completed { .. } => {
+                    return Err(DbError::Message(
+                        "reclaim authorization already has a receipt".to_string(),
+                    ));
+                }
+            };
+            let next = DurableStoreReclaimOperation::Completed {
+                authorization: authorization.clone(),
+                authorization_activation: authorization_activation.clone(),
+                receipt: receipt.clone(),
+                receipt_activation: activation.clone(),
+            };
+            let reclaimed = ReclaimedStorePackage::receipted(
+                authorization,
+                authorization_activation,
+                receipt.clone(),
+                activation.clone(),
+            )
+            .map_err(store_reclaim_journal_error)?;
+            record_reclaimed_store_package_on(self.transaction, &reclaimed)?;
+            update_store_reclaim_operation_on(self.transaction, &expected, &next)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_store_device_exclusion_freezes_from_replay(&self) -> Result<(), DbError> {
+        let root = required_store_root_authority_on(self.transaction)?;
+        let existing = load_store_device_exclusion_freezes_on(self.transaction, &root)?;
+        let frontier = StoreDatabase::materialized_frontier_on(self.transaction, None)?
+            .into_values()
+            .map(|reference| (reference.coord.stream_id, reference))
+            .collect::<BTreeMap<_, _>>();
+        let (_, state) =
+            store_device_state_for_history_cut_on(self.transaction, &StoreHistoryCut(frontier))?;
+        let mut retained = Vec::new();
+        for freeze in existing.into_values() {
+            let proposal_state = state
+                .devices
+                .get(&freeze.proposal.target.device_id)
+                .and_then(|record| record.proposals.get(&freeze.proposal.proposal_id));
+            match proposal_state {
+                Some(StoreDeviceProposalState::Pending { proposal })
+                    if proposal == &freeze.proposal =>
+                {
+                    retained.push(freeze);
+                }
+                Some(StoreDeviceProposalState::Cancelled { outcome })
+                    if outcome.proposal == freeze.proposal => {}
+                Some(StoreDeviceProposalState::Superseded { proposal, .. })
+                    if proposal == &freeze.proposal => {}
+                None => {}
+                Some(_) => {
+                    return Err(DbError::Message(
+                        "stored device exclusion freeze differs from replayed device state"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        retained.sort_by_key(|freeze| freeze.proposal.proposal_id);
+        replace_store_device_exclusion_freezes_on(self.transaction, &retained)
+    }
+
     pub(crate) fn complete_membership_journal(
         &self,
         completion: crate::sync::StoreMembershipJournalCompletion,
@@ -602,7 +776,7 @@ impl MergeMaterializationTransaction<'_, '_> {
             &commit_ref_json,
         )?;
         apply_store_device_exclusion_freezes_on(conn, &root, &device_state, device_operations)?;
-        record_store_reclaim_activation_on(conn, commit, commit_ref, activation)
+        self.record_store_reclaim_activation(commit, commit_ref, activation)
     }
 
     fn record_activated_store_ack(

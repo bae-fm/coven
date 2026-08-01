@@ -11,7 +11,6 @@ use crate::protocol::membership::{
 };
 use crate::protocol::wrapped_store_key::{load_wrapped_store_key, WrappedStoreKey};
 use crate::storage as cloud_storage;
-use crate::storage as store_objects;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, RevokeOutcome};
 
 /// Build a removal that revokes provider access, rotates the Store key, and
@@ -337,13 +336,11 @@ async fn execute_revoke_mutation(
                 .create_protocol_object(&publication.entry_object)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
-            store_objects::load_membership_entry_ref(
-                operation.storage.as_ref(),
-                store_root_hash,
-                &publication.entry_ref,
-            )
-            .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            operation
+                .membership_objects()
+                .load_entry(&publication.entry_ref)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
         }
         RevokeMembershipPublication::StoreActivated { transition, .. } => {
             AuthorizedMembershipPublication::new(operation)
@@ -382,14 +379,11 @@ async fn execute_revoke_mutation(
                 .create_protocol_object(&publication.head_object)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
-            store_objects::load_membership_head_ref(
-                operation.storage.as_ref(),
-                store_root_hash,
-                &publication.head_ref,
-                &author,
-            )
-            .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            operation
+                .membership_objects()
+                .load_head_for_registration(&publication.head_ref, &author)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
             validated_chain.activate_head_ref(publication.head_ref.clone())?;
             persistence
                 .record_direct_revoke_activation(keyring.current_generation())

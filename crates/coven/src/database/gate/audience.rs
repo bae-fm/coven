@@ -6,7 +6,7 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
-use super::model::{foreign_keys, rows_referencing, truthy, GateColumn, Gates, TableGate};
+use super::model::{foreign_keys, rows_referencing, truthy, Gates, TableGate};
 use super::outbound::{
     full_state_diff, gate_store_outbound, query_column_text, row_id_for_column_value,
     FullStateDirection,
@@ -122,35 +122,17 @@ pub(crate) fn filter_inbound_circle_changeset(
     routing_key: &RowRoutingKey,
 ) -> Result<Vec<u8>, GateError> {
     unsafe {
-        filter_inbound_circle_changeset_raw(
+        let package_audience = Audience::Circle(circle_id);
+        let (normalized, _) = normalize_inbound_private_routes_raw(
             conn,
             changeset,
-            circle_id,
+            &package_audience,
             store_transitions,
             gates,
             routing_key,
-        )
+        )?;
+        filter_inbound_audience_rows_raw(conn, &normalized, &package_audience, gates, routing_key)
     }
-}
-
-unsafe fn filter_inbound_circle_changeset_raw(
-    conn: &Connection,
-    changeset: &[u8],
-    circle_id: CircleId,
-    store_transitions: &StoreAudienceTransitions,
-    gates: &Gates,
-    routing_key: &RowRoutingKey,
-) -> Result<Vec<u8>, GateError> {
-    let package_audience = Audience::Circle(circle_id);
-    let (normalized, _) = normalize_inbound_private_routes_raw(
-        conn,
-        changeset,
-        &package_audience,
-        store_transitions,
-        gates,
-        routing_key,
-    )?;
-    filter_inbound_audience_rows_raw(conn, &normalized, &package_audience, gates, routing_key)
 }
 
 pub(crate) fn filter_inbound_store_rows(
@@ -2017,7 +1999,20 @@ fn change_audience(
             parent,
             parent_col,
         }) => {
-            let parent_key = change_parent_key(conn, row, fk_col)?;
+            let parent_key = if let Some(value) = row.fk_value(fk_col.index) {
+                value.to_string()
+            } else {
+                let id = row
+                    .pk()
+                    .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+                query_column_text(conn, &row.table, &fk_col.name, id)?.ok_or_else(|| {
+                    GateError::MissingAudienceParent {
+                        table: row.table.clone(),
+                        row_id: Some(id.to_string()),
+                        parent: fk_col.name.clone(),
+                    }
+                })?
+            };
             let parent_id = row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
                 .ok_or_else(|| GateError::MissingAudienceParent {
                 table: row.table.clone(),
@@ -2037,26 +2032,6 @@ fn change_audience(
             })
         }
     }
-}
-
-fn change_parent_key(
-    conn: &Connection,
-    row: &ChangeRow,
-    fk_col: &GateColumn,
-) -> Result<String, GateError> {
-    if let Some(value) = row.fk_value(fk_col.index) {
-        return Ok(value.to_string());
-    }
-    let id = row
-        .pk()
-        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-    query_column_text(conn, &row.table, &fk_col.name, id)?.ok_or_else(|| {
-        GateError::MissingAudienceParent {
-            table: row.table.clone(),
-            row_id: Some(id.to_string()),
-            parent: fk_col.name.clone(),
-        }
-    })
 }
 
 pub(crate) fn live_row_audience(

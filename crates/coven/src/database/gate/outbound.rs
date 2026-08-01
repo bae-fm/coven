@@ -775,16 +775,25 @@ unsafe fn was_shared(
         }) => {
             let parent_key = match deleted.get(&key) {
                 Some(row) => row.fk_value(fk_col.index).map(str::to_string),
-                None => lookup_fk_in_db(conn, table, &fk_col.name, id)?,
+                None => query_column_text(conn, table, &fk_col.name, id)?,
             };
             let parent_id = match parent_key {
-                Some(parent_key) => deleted_parent_id_for_column_value(
-                    conn,
-                    deleted,
-                    parent,
-                    parent_col,
-                    &parent_key,
-                )?,
+                Some(parent_key) => {
+                    if let Some(((_, id), _)) =
+                        deleted.iter().find(|((candidate_table, _), row)| {
+                            candidate_table == parent
+                                && row
+                                    .old
+                                    .get(parent_col.index)
+                                    .and_then(|value| value.as_deref())
+                                    == Some(parent_key.as_str())
+                        })
+                    {
+                        Some(id.clone())
+                    } else {
+                        row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
+                    }
+                }
                 None => None,
             };
             match parent_id {
@@ -958,7 +967,7 @@ fn changeset_child_parent_id(
         return Ok(None);
     };
 
-    match lookup_fk_in_db(conn, &row.table, &fk_col.name, pk)? {
+    match query_column_text(conn, &row.table, &fk_col.name, pk)? {
         Some(id) => Ok(Some(id)),
         None => {
             match resolution {
@@ -1084,22 +1093,6 @@ pub(super) fn row_id_for_column_value(
         .map(|row| row.flatten())
 }
 
-fn deleted_parent_id_for_column_value(
-    conn: &Connection,
-    deleted: &HashMap<(String, String), ChangeRow>,
-    table: &str,
-    column: &GateColumn,
-    value: &str,
-) -> Result<Option<String>, GateError> {
-    if let Some(((_, id), _)) = deleted.iter().find(|((candidate_table, _), row)| {
-        candidate_table == table
-            && row.old.get(column.index).and_then(|value| value.as_deref()) == Some(value)
-    }) {
-        return Ok(Some(id.clone()));
-    }
-    row_id_for_column_value(conn, table, &column.name, value)
-}
-
 /// Query a single boolean gate column for the row with id `id`. `Some` is the
 /// column's [`truthy`] reading; `None` when the row is absent or the gate column is
 /// NULL — an unresolvable locality the caller fails loud on rather than guessing.
@@ -1113,14 +1106,4 @@ pub(crate) fn query_truth(
     id: &str,
 ) -> Result<Option<bool>, GateError> {
     Ok(query_column_text(conn, table, column, id)?.map(|s| truthy(&s)))
-}
-
-/// Read the FK value (`column`) for the live row `pk`.
-fn lookup_fk_in_db(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    pk: &str,
-) -> Result<Option<String>, GateError> {
-    query_column_text(conn, table, column, pk)
 }

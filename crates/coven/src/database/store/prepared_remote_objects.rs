@@ -3,7 +3,7 @@ use crate::database::*;
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::circle::Audience;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommit, StoreBatchCommitRef};
+use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 #[cfg(test)]
 use crate::storage::ExactObjectRef;
 use crate::sync::session::SyncedTable;
@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 
 use super::candidate_records::parse_prepared_merge_candidate_on;
-use super::publication_state::PreparedStoreWriteState;
+use super::publication_state::{PreparedStoreWriteState, StoreWritePreparation};
 use super::*;
 
 struct UploadedBlobSpool {
@@ -129,15 +129,16 @@ impl StoreDatabase {
 
     pub(crate) fn persist_closed_write_objects_on(
         conn: &Connection,
-        write_id: &WriteId,
-        store_root_hash: ObjectHash,
-        commit_ref: &StoreBatchCommitRef,
-        commit: &StoreBatchCommit,
-        commit_stored_bytes: &[u8],
+        stage: &StoreWritePreparation,
         partitions: &PreparedStoreWritePartitions,
-        remote_objects: &[RemoteObjectRecord],
-        audiences: &PreparedAudienceObjects,
     ) -> Result<(), DbError> {
+        let write_id = &stage.write_id;
+        let store_root_hash = stage.root.store_root_hash;
+        let commit_ref = stage.commit.value.reference();
+        let commit = stage.commit.value.value();
+        let commit_stored_bytes = stage.commit.prepared.stored_bytes();
+        let remote_objects = &stage.remote_objects;
+        let audiences = &stage.audiences;
         let mut object_ids = std::collections::BTreeSet::new();
         for remote in remote_objects {
             remote

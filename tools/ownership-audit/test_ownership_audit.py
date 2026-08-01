@@ -648,6 +648,135 @@ status = "verified"
 
 
 class SemanticCacheTests(unittest.TestCase):
+    def test_semantic_workspace_cache_only_globally_tracks_analyzer_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            crate = root / "crates" / "sample"
+            manifest = crate / "Cargo.toml"
+            library_path = crate / "src" / "lib.rs"
+            build_path = crate / "build.rs"
+            library_path.parent.mkdir(parents=True)
+            manifest.write_text("[package]\nname = \"sample\"\n")
+            library_path.write_text("struct Model { value: u8 }\n")
+            build_path.write_text("fn main() { first(); }\n")
+            metadata = {
+                "packages": [
+                    {
+                        "manifest_path": str(manifest),
+                        "targets": [
+                            {
+                                "kind": ["lib"],
+                                "src_path": str(library_path),
+                            },
+                            {
+                                "kind": ["custom-build"],
+                                "src_path": str(build_path),
+                            },
+                        ],
+                    }
+                ]
+            }
+
+            def fingerprint() -> str:
+                sources = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (library_path, build_path)
+                }
+                return ownership_audit.semantic_workspace_cache_fingerprint(
+                    metadata,
+                    sources,
+                    "rust-analyzer 1",
+                )
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprint()
+                library_path.write_text("struct Model { value: u16 }\n")
+                changed_library = fingerprint()
+                build_path.write_text("fn main() { second(); }\n")
+                changed_build = fingerprint()
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(baseline, changed_library)
+        self.assertNotEqual(changed_library, changed_build)
+
+    def test_semantic_entry_tracks_referenced_declaration_surfaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "lib.rs"
+            model_path = source_root / "model.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text(
+                "use crate::model::Wrapper;\n"
+                "fn caller(value: &Wrapper) { value.child.read(); }\n"
+                "fn stable() { same_target(); }\n"
+            )
+            model_path.write_text(
+                "struct Wrapper { child: Alias }\n"
+                "type Alias = First;\n"
+                "struct Unrelated { value: u8 }\n"
+            )
+
+            def fingerprints() -> dict[str, str]:
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, model_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                declaration_surfaces = (
+                    ownership_audit.semantic_declaration_surfaces(source_files)
+                )
+                source_fingerprints = (
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        records,
+                        records,
+                        source_files,
+                        declaration_surfaces,
+                    )
+                )
+                return {
+                    record["name"]: source_fingerprints[record["symbol"]]
+                    for record in records
+                    if record["path"] == "crates/sample/src/lib.rs"
+                }
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprints()
+                model_path.write_text(
+                    "struct Wrapper { child: Alias }\n"
+                    "type Alias = Second;\n"
+                    "struct Unrelated { value: u8 }\n"
+                )
+                changed_dependency = fingerprints()
+                model_path.write_text(
+                    "struct Wrapper { child: Alias }\n"
+                    "type Alias = Second;\n"
+                    "struct Unrelated { value: u16 }\n"
+                )
+                changed_unrelated = fingerprints()
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertNotEqual(baseline["caller"], changed_dependency["caller"])
+        self.assertEqual(baseline["stable"], changed_dependency["stable"])
+        self.assertEqual(
+            changed_dependency["caller"],
+            changed_unrelated["caller"],
+        )
+        self.assertEqual(
+            changed_dependency["stable"],
+            changed_unrelated["stable"],
+        )
+
     def test_semantic_cache_invalidates_only_the_callable_whose_body_changed(self):
         def fingerprints(root: Path, path: Path, source: str):
             source_file = ownership_audit.parse_source(path, source)
@@ -659,18 +788,28 @@ class SemanticCacheTests(unittest.TestCase):
             )
             view = ownership_audit.SEMANTIC_VIEWS[0]
             view_fingerprint = ownership_audit.view_cache_fingerprint(surface, view)
+            declaration_surfaces = ownership_audit.semantic_declaration_surfaces(
+                {path: source_file}
+            )
+            source_fingerprints = (
+                ownership_audit.semantic_entry_source_fingerprints(
+                    records,
+                    records,
+                    {path: source_file},
+                    declaration_surfaces,
+                )
+            )
             return surface, {
                 record["name"]: ownership_audit.semantic_entry_cache_fingerprint(
                     view_fingerprint,
-                    record,
-                    source_file,
+                    source_fingerprints[record["symbol"]],
                 )
                 for record in records
             }
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "crates" / "sample" / "src" / "lib.rs"
+            root = Path(directory).resolve()
+            path = (root / "crates" / "sample" / "src" / "lib.rs").resolve()
             path.parent.mkdir(parents=True)
             original_root = ownership_audit.ROOT
             ownership_audit.ROOT = root
@@ -801,6 +940,11 @@ class SemanticCacheTests(unittest.TestCase):
             def collect(source: str):
                 source_file = ownership_audit.parse_source(path, source)
                 records = ownership_audit.inventory_file(source_file)
+                declaration_surfaces = (
+                    ownership_audit.semantic_declaration_surfaces(
+                        {path: source_file}
+                    )
+                )
                 entries = ownership_audit.collect_semantic_view_calls(
                     view,
                     records,
@@ -808,6 +952,12 @@ class SemanticCacheTests(unittest.TestCase):
                     {path: records},
                     {path: source_file},
                     "workspace",
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        records,
+                        records,
+                        {path: source_file},
+                        declaration_surfaces,
+                    ),
                 )
                 return records, entries
 
@@ -945,15 +1095,21 @@ class SemanticCacheTests(unittest.TestCase):
                 )
                 named = ownership_audit.inventory_file(source_file)
                 by_name = {record["name"]: record for record in named}
-                candidate_surfaces = (
-                    ownership_audit.semantic_callable_candidate_surfaces(named)
+                declaration_surfaces = ownership_audit.semantic_declaration_surfaces(
+                    {path: source_file}
+                )
+                source_fingerprints = (
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        named,
+                        named,
+                        {path: source_file},
+                        declaration_surfaces,
+                    )
                 )
                 entry_fingerprints = {
                     record["symbol"]: ownership_audit.semantic_entry_cache_fingerprint(
                         fingerprint,
-                        record,
-                        source_file,
-                        candidate_surfaces,
+                        source_fingerprints[record["symbol"]],
                     )
                     for record in named
                 }
@@ -976,6 +1132,7 @@ class SemanticCacheTests(unittest.TestCase):
                     {path: named},
                     {path: source_file},
                     "workspace",
+                    source_fingerprints,
                 )
             finally:
                 ownership_audit.RustAnalyzer = original_analyzer
@@ -2185,6 +2342,40 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertEqual(recursive["members"], ["left", "right"])
         self.assertEqual(records[0]["bottom_up_rank"], 1)
         self.assertEqual(records[3]["bottom_up_rank"], 0)
+
+    def test_collapsed_callbacks_do_not_make_the_executor_and_caller_recursive(self):
+        records = [
+            {
+                "symbol": "caller",
+                "kind": "free",
+                "callees": [
+                    {"symbol": "executor", "sites": []},
+                    {"symbol": "caller::<closure>", "sites": []},
+                ],
+            },
+            {
+                "symbol": "caller::<closure>",
+                "kind": "closure",
+                "enclosing_callable": "caller",
+                "callees": [],
+            },
+            {
+                "symbol": "executor",
+                "kind": "free",
+                "callees": [
+                    {
+                        "symbol": "caller::<closure>",
+                        "sites": [{"role": "callable-argument"}],
+                    }
+                ],
+            },
+        ]
+
+        components = ownership_audit.call_components(records, collapse_nested=True)
+
+        self.assertFalse(any(component["recursive"] for component in components))
+        self.assertEqual(records[0]["bottom_up_rank"], 1)
+        self.assertEqual(records[2]["bottom_up_rank"], 0)
 
     def test_bottom_up_order_handles_deep_call_graphs_iteratively(self):
         records = [

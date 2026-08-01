@@ -8,8 +8,7 @@ use crate::protocol::remote_object::{
 };
 use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
-    StoreDeviceRegistrationRef, StoreHistoryCut,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
 use crate::storage::PreparedExactObject;
 use crate::sync::VerifiedCircleActivations;
@@ -22,10 +21,7 @@ use super::materialization_models::{
     MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedCommitActivationInput,
     RetainedMergeMaterializationInput,
 };
-use super::store_device_state::{
-    load_store_device_exclusion_freezes_on, load_store_device_snapshot_on,
-    replace_store_device_exclusion_freezes_on, store_device_state_for_history_cut_on,
-};
+use super::store_device_state::load_store_device_snapshot_on;
 use super::*;
 use crate::database::store::candidate_records::{
     author_exclusion_activation_for_candidate_on, load_author_exclusion_activation_locator_on,
@@ -2091,45 +2087,6 @@ impl StoreDatabase {
                 )
             })
             .collect()
-    }
-
-    pub(crate) fn replace_store_device_exclusion_freezes_from_replay_on(
-        conn: &rusqlite::Transaction<'_>,
-    ) -> Result<(), DbError> {
-        let root = required_store_root_authority_on(conn)?;
-        let existing = load_store_device_exclusion_freezes_on(conn, &root)?;
-        let frontier = Self::materialized_frontier_on(conn, None)?
-            .into_values()
-            .map(|reference| (reference.coord.stream_id, reference))
-            .collect::<BTreeMap<_, _>>();
-        let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
-        let mut retained = Vec::new();
-        for freeze in existing.into_values() {
-            let proposal_state = state
-                .devices
-                .get(&freeze.proposal.target.device_id)
-                .and_then(|record| record.proposals.get(&freeze.proposal.proposal_id));
-            match proposal_state {
-                Some(StoreDeviceProposalState::Pending { proposal })
-                    if proposal == &freeze.proposal =>
-                {
-                    retained.push(freeze);
-                }
-                Some(StoreDeviceProposalState::Cancelled { outcome })
-                    if outcome.proposal == freeze.proposal => {}
-                Some(StoreDeviceProposalState::Superseded { proposal, .. })
-                    if proposal == &freeze.proposal => {}
-                None => {}
-                Some(_) => {
-                    return Err(DbError::Message(
-                        "stored device exclusion freeze differs from replayed device state"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-        retained.sort_by_key(|freeze| freeze.proposal.proposal_id);
-        replace_store_device_exclusion_freezes_on(conn, &retained)
     }
 
     pub(crate) fn load_merge_replay_write_overlays_on(

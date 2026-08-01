@@ -3,7 +3,6 @@ use crate::keys;
 use crate::protocol::membership::{MemberRole, MembershipChain, MembershipChange, MembershipError};
 use crate::protocol::wrapped_store_key::WrappedStoreKey;
 use crate::protocol::wrapped_store_key::WrappedStoreKeyRef;
-use crate::storage as store_objects;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeJoinInfo};
 use crate::sync::blocking;
 
@@ -22,7 +21,6 @@ async fn execute_invite_mutation(
     mut progress: MembershipMutationProgress,
     persistence: MutationPersistence<'_>,
 ) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
-    let store_root_hash = operation.store_root().store_root_hash;
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let author = operation
@@ -91,21 +89,20 @@ async fn execute_invite_mutation(
         .create_protocol_object(&plan.publication.entry_object)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    store_objects::load_membership_entry_ref(storage, store_root_hash, &plan.publication.entry_ref)
+    operation
+        .membership_objects()
+        .load_entry(&plan.publication.entry_ref)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
     storage
         .create_protocol_object(&plan.publication.head_object)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    store_objects::load_membership_head_ref(
-        storage,
-        store_root_hash,
-        &plan.publication.head_ref,
-        &author,
-    )
-    .await
-    .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    operation
+        .membership_objects()
+        .load_head_for_registration(&plan.publication.head_ref, &author)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
     validated_chain.activate_head_ref(plan.publication.head_ref.clone())?;
     *chain = validated_chain;
     persistence.complete().await?;

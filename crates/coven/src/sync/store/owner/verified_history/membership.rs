@@ -48,6 +48,14 @@ struct ExactMembershipStream {
     resolutions: BTreeMap<StoreMembershipConflictResolutionRef, StoreMembershipConflictResolution>,
 }
 
+type LoadedMembershipGraphFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<graph::LoadedExactMembershipGraph, AnchoredChainError>>
+            + Send
+            + 'a,
+    >,
+>;
+
 pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
     History {
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -64,6 +72,70 @@ pub(super) enum MembershipActivationAuthority<'operation, 'storage> {
 }
 
 impl<'storage> MembershipActivationAuthority<'_, 'storage> {
+    fn load_exact_membership_graph_objects<'a>(
+        &'a mut self,
+        exact_heads: &'a [MembershipHeadRef],
+    ) -> LoadedMembershipGraphFuture<'a> {
+        Box::pin(async move {
+            let mut entries = BTreeMap::new();
+            let mut heads = Vec::with_capacity(exact_heads.len());
+            let mut path_heads =
+                BTreeMap::<MembershipCoord, graph::LoadedExactMembershipHead>::new();
+            for requested in exact_heads {
+                let mut current = Some(requested.clone());
+                let mut requested_head = None;
+                while let Some(reference) = current {
+                    let node = self.load_exact_membership_head_node(&reference).await?;
+                    if reference == *requested {
+                        requested_head = Some((reference.clone(), node.head.clone()));
+                    }
+                    match entries.entry(reference.coord.clone()) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(node.entry.clone());
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot) => {
+                            if slot.get() != &node.entry {
+                                return Err(AnchoredChainError::LoadFailed(
+                                    "membership coordinate selects different exact entries"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    match path_heads.entry(reference.coord.clone()) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(node.clone());
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot) => {
+                            if slot.get().reference != node.reference
+                                || slot.get().head != node.head
+                                || slot.get().entry != node.entry
+                            {
+                                return Err(AnchoredChainError::LoadFailed(
+                                    "membership coordinate selects different exact head paths"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    current = node.head.body.predecessor.clone();
+                }
+                heads.push(requested_head.ok_or_else(|| {
+                    AnchoredChainError::LoadFailed(
+                        "requested exact membership head was not loaded".to_string(),
+                    )
+                })?);
+            }
+            let graph = graph::LoadedExactMembershipGraph {
+                entries,
+                heads,
+                path_heads,
+            };
+            graph::validate_exact_membership_head_paths(&graph)?;
+            Ok(graph)
+        })
+    }
+
     fn commit_verifier(&self) -> &crate::sync::store::owner::StoreCommitVerifier<'storage> {
         match self {
             Self::History { history, .. } => &history.commit_verifier,
@@ -151,6 +223,27 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             .await
             .map(|loaded| loaded.value)
             .map_err(map_membership_object_error)
+    }
+
+    async fn load_exact_membership_head_node(
+        &self,
+        reference: &MembershipHeadRef,
+    ) -> Result<graph::LoadedExactMembershipHead, AnchoredChainError> {
+        let head = self.load_exact_membership_head(reference).await?;
+        let loaded_entry = self
+            .load_membership_entry(&head.body.entry)
+            .await
+            .map_err(map_membership_object_error)?;
+        if loaded_entry.value.resolution_dependencies != head.body.resolutions {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership head and selected entry carry different resolution cuts".to_string(),
+            ));
+        }
+        Ok(graph::LoadedExactMembershipHead {
+            reference: reference.clone(),
+            head,
+            entry: loaded_entry.value,
+        })
     }
 
     async fn load_membership_entry(

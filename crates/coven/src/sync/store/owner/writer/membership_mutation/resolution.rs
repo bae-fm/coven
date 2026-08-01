@@ -3,7 +3,6 @@ use crate::protocol::membership::{self, MembershipChain, MembershipChange, Membe
 use crate::protocol::remote_object;
 use crate::protocol::store_commit;
 use crate::protocol::store_commit::membership_head_slot_prefix;
-use crate::storage as store_objects;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations;
 
@@ -336,7 +335,6 @@ async fn execute_resolution_mutation(
         &[(plan.reference.clone(), plan.resolution.clone())],
     )?;
     successor.add_entry(plan.publication.entry.clone())?;
-    let store_root_hash = operation.store_root().store_root_hash;
     let remotes = plan.remote_objects()?;
     operation
         .storage
@@ -344,13 +342,11 @@ async fn execute_resolution_mutation(
         .create_protocol_object(&plan.resolution_object)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    store_objects::load_membership_resolution_ref(
-        operation.storage.as_ref(),
-        store_root_hash,
-        &plan.reference,
-    )
-    .await
-    .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    operation
+        .membership_objects()
+        .load_resolution(&plan.reference)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
     persistence
         .mark_remote_object_uploaded(exact_owned_remote(&remotes, &plan.reference.object)?)
         .await?;

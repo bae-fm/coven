@@ -3,7 +3,9 @@ use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipGrantId, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
-use crate::protocol::store_commit::StoreProtocolError;
+use crate::protocol::store_commit::{
+    membership_entry_semantic_prefix, membership_resolution_semantic_prefix, StoreProtocolError,
+};
 use crate::storage::{
     run_blocking_object_verification, ProtocolObjectContext, ProtocolObjectDomain,
     StoreObjectError, VerifiedObject,
@@ -22,24 +24,122 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         &self,
         reference: &MembershipEntryRef,
     ) -> Result<VerifiedObject<MembershipEntry>, StoreObjectError> {
-        crate::storage::load_membership_entry_ref(
-            self.commit_verifier.storage,
+        let coord = &reference.coord;
+        let semantic_prefix = membership_entry_semantic_prefix(
+            &coord.author_pubkey,
+            &coord.author_owner_grant,
+            coord.stream_id,
+            coord.seq,
+            coord.entry_hash,
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
             self.commit_verifier.root.reference().store_root_hash,
-            reference,
-        )
-        .await
+            ProtocolObjectDomain::StoreMembershipEntry,
+        );
+        let expected_coord = coord.clone();
+        self.commit_verifier
+            .load_exact_object(
+                &context,
+                &reference.object,
+                &semantic_prefix,
+                coord.entry_hash,
+                move |bytes| {
+                    let entry: MembershipEntry = crate::storage::decode_protocol_object(bytes)?;
+                    if entry.coord() != expected_coord
+                        || !crate::protocol::membership::verify_membership_entry(&entry)
+                    {
+                        return Err(StoreProtocolError::Malformed(
+                            "exact membership entry differs from its reference".to_string(),
+                        ));
+                    }
+                    Ok(entry)
+                },
+            )
+            .await
     }
 
     pub(crate) async fn load_resolution(
         &self,
         reference: &StoreMembershipConflictResolutionRef,
     ) -> Result<VerifiedObject<StoreMembershipConflictResolution>, StoreObjectError> {
-        crate::storage::load_membership_resolution_ref(
-            self.commit_verifier.storage,
+        let semantic_prefix = membership_resolution_semantic_prefix(
+            reference.conflict_hash,
+            &reference.resolver_pubkey,
+            reference.resolution_hash,
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
             self.commit_verifier.root.reference().store_root_hash,
-            reference,
-        )
-        .await
+            ProtocolObjectDomain::StoreMembershipResolution,
+        );
+        let expected = reference.clone();
+        let store_root_hash = self.commit_verifier.root.reference().store_root_hash;
+        self.commit_verifier
+            .load_exact_object(
+                &context,
+                &reference.object,
+                &semantic_prefix,
+                reference.resolution_hash,
+                move |bytes| {
+                    let resolution: StoreMembershipConflictResolution =
+                        crate::storage::decode_protocol_object(bytes)?;
+                    if resolution.store_root_hash != store_root_hash
+                        || resolution.conflict_hash != expected.conflict_hash
+                        || resolution.resolver_pubkey != expected.resolver_pubkey
+                        || resolution.resolution_hash() != expected.resolution_hash
+                        || !resolution.verify_signature()
+                    {
+                        return Err(StoreProtocolError::Malformed(
+                            "exact membership resolution differs from its reference".to_string(),
+                        ));
+                    }
+                    Ok(resolution)
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn load_head_for_registration(
+        &self,
+        reference: &MembershipHeadRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<VerifiedObject<AuthorHead>, StoreObjectError> {
+        let semantic_prefix = reference
+            .object
+            .slot()
+            .logical_key()
+            .strip_suffix(".json")
+            .ok_or_else(|| StoreObjectError::InvalidObject {
+                semantic_prefix: reference.object.slot().logical_key().to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(StoreProtocolError::Malformed(
+                    "membership head slot has no .json suffix".to_string(),
+                )),
+            })?;
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.commit_verifier.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let expected_coord = reference.coord.clone();
+        let expected_head_hash = reference.head_hash;
+        let expected_registration = registration.clone();
+        self.commit_verifier
+            .load_exact_object(
+                &context,
+                &reference.object,
+                semantic_prefix,
+                reference.head_hash,
+                move |bytes| {
+                    let head: AuthorHead = crate::storage::decode_protocol_object(bytes)?;
+                    crate::storage::verify_membership_head_reference(
+                        &head,
+                        &expected_coord,
+                        expected_head_hash,
+                        &expected_registration,
+                    )?;
+                    Ok(head)
+                },
+            )
+            .await
     }
 
     pub(crate) async fn load_head(

@@ -29,6 +29,64 @@ CACHE_DIR = INDEX_PATH.parent / "cache"
 CACHE_SCHEMA = 2
 CACHE_CHECKPOINT_INTERVAL = 100
 
+SEMANTIC_DECLARATION_KINDS = {
+    "CONST",
+    "ENUM",
+    "EXTERN_BLOCK",
+    "EXTERN_CRATE",
+    "IMPL",
+    "MACRO_RULES",
+    "MODULE",
+    "STATIC",
+    "STRUCT",
+    "TRAIT",
+    "TYPE_ALIAS",
+    "UNION",
+    "USE",
+}
+RUST_KEYWORDS = {
+    "Self",
+    "as",
+    "async",
+    "await",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "macro_rules",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "type",
+    "union",
+    "unsafe",
+    "use",
+    "where",
+    "while",
+}
+
 NODE_PATTERN = re.compile(r"^(?P<indent> *)(?P<kind>[A-Z_]+)@(?P<start>\d+)\.\.(?P<end>\d+)")
 STATEFUL_TYPE_PATTERNS = {
     "database": re.compile(
@@ -399,21 +457,26 @@ def semantic_source_surface(source_file: SourceFile) -> bytes:
     return re.sub(rb"\s+", b" ", bytes(output)).strip()
 
 
-def full_semantic_source_roots(metadata: dict[str, Any]) -> tuple[Path, ...]:
-    return tuple(
-        sorted(
-            {
-                Path(package["manifest_path"]).resolve().parent
-                for package in metadata["packages"]
-                if any(
-                    set(target["kind"]).intersection(
-                        {"proc-macro", "custom-build"}
-                    )
-                    for target in package["targets"]
-                )
-            }
-        )
-    )
+def full_semantic_source_paths(
+    metadata: dict[str, Any],
+    source_files: dict[Path, SourceFile],
+) -> tuple[Path, ...]:
+    pending = [
+        Path(target["src_path"]).resolve()
+        for package in metadata["packages"]
+        for target in package["targets"]
+        if set(target["kind"]).intersection({"proc-macro", "custom-build"})
+    ]
+    paths: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in paths:
+            continue
+        paths.add(path)
+        source_file = source_files.get(path)
+        if source_file is not None:
+            pending.extend(external_module_paths(source_file))
+    return tuple(sorted(paths))
 
 
 def semantic_workspace_cache_fingerprint(
@@ -432,35 +495,187 @@ def semantic_workspace_cache_fingerprint(
     )
     digest.update(b"\0tool\0")
     digest.update(Path(__file__).read_bytes())
-    full_source_roots = full_semantic_source_roots(metadata)
-    for path, source_file in sorted(source_files.items()):
+    for path in full_semantic_source_paths(metadata, source_files):
         digest.update(b"\0path\0")
         digest.update(path.relative_to(ROOT).as_posix().encode())
-        digest.update(b"\0surface\0")
+        digest.update(b"\0content\0")
+        source_file = source_files.get(path)
         digest.update(
-            source_file.data
-            if any(path.is_relative_to(root) for root in full_source_roots)
-            else semantic_source_surface(source_file)
+            source_file.data if source_file is not None else path.read_bytes()
         )
     return digest.hexdigest()
 
 
-def semantic_entry_cache_fingerprint(
-    view_fingerprint: str,
+def semantic_range_surface(
+    source_file: SourceFile,
+    start: int,
+    end: int,
+    replacements: list[tuple[int, int, bytes]] | None = None,
+) -> bytes:
+    spans = replacements or [
+        (span_start, span_end, replacement)
+        for span_start, span_end, replacement in callable_erasure_spans(source_file)
+        if start <= span_start and span_end <= end
+    ]
+    output = bytearray()
+    cursor = start
+    for span_start, span_end, replacement in sorted(spans):
+        output.extend(source_file.data[cursor:span_start])
+        output.extend(replacement)
+        cursor = span_end
+    output.extend(source_file.data[cursor:end])
+    return re.sub(rb"\s+", b" ", bytes(output)).strip()
+
+
+def semantic_identifiers(source: bytes) -> set[str]:
+    return {
+        value.decode().removeprefix("r#")
+        for value in re.findall(rb"(?:r#)?[A-Za-z_][A-Za-z0-9_]*", source)
+        if value.decode().removeprefix("r#") not in RUST_KEYWORDS
+    }
+
+
+def semantic_declaration_surfaces(
+    source_files: dict[Path, SourceFile],
+) -> dict[str, list[dict[str, Any]]]:
+    surfaces: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
+    for path, source_file in sorted(source_files.items()):
+        relative_path = path.relative_to(ROOT).as_posix()
+        erased_spans = callable_erasure_spans(source_file)
+        for index, node in enumerate(source_file.nodes):
+            if node.kind not in SEMANTIC_DECLARATION_KINDS:
+                continue
+            if nearest_callable_ancestor(source_file, index) is not None:
+                continue
+            if node.kind == "MODULE" and (
+                item_list := direct_child(source_file, index, "ITEM_LIST")
+            ) is not None:
+                surface = semantic_range_surface(
+                    source_file,
+                    node.start,
+                    node.end,
+                    [(item_list.start, item_list.end, b"{/* module items */}")],
+                )
+            else:
+                surface = semantic_range_surface(
+                    source_file,
+                    node.start,
+                    node.end,
+                )
+            name = direct_name(source_file, index)
+            names = {name[0]} if name is not None else set()
+            if node.kind in {"EXTERN_BLOCK", "EXTERN_CRATE", "IMPL", "USE"}:
+                header_end = next(
+                    (
+                        source_file.nodes[child].start
+                        for child in node.children
+                        if source_file.nodes[child].kind
+                        in {"ASSOC_ITEM_LIST", "ITEM_LIST"}
+                    ),
+                    node.end,
+                )
+                names.update(
+                    semantic_identifiers(
+                        source_file.data[node.start:header_end]
+                    )
+                )
+            rendered = surface.decode()
+            references = {
+                source_file.text(candidate).removeprefix("r#")
+                for _, candidate in descendants(source_file, index)
+                if candidate.kind == "NAME_REF"
+                and not any(
+                    start <= candidate.start and candidate.end <= end
+                    for start, end, _ in erased_spans
+                )
+            }
+            if node.kind == "MACRO_RULES":
+                references.update(semantic_identifiers(surface))
+            references.difference_update(names)
+            declaration = {
+                "path": relative_path,
+                "surface": rendered,
+                "references": sorted(references),
+            }
+            for declaration_name in names:
+                surfaces.setdefault(declaration_name, {})[
+                    (relative_path, rendered)
+                ] = declaration
+    return {
+        name: [values[key] for key in sorted(values)]
+        for name, values in sorted(surfaces.items())
+    }
+
+
+def semantic_declaration_fingerprints(
+    declaration_surfaces: dict[str, list[dict[str, Any]]],
+) -> dict[str, str]:
+    records = [
+        {
+            "symbol": name,
+            "callees": [
+                {"symbol": reference, "sites": []}
+                for reference in sorted(
+                    {
+                        reference
+                        for declaration in declarations
+                        for reference in declaration["references"]
+                        if reference in declaration_surfaces
+                    }
+                )
+            ],
+        }
+        for name, declarations in sorted(declaration_surfaces.items())
+    ]
+    components = call_components(records)
+    component_hashes: dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
+    for component in components:
+        digest = hashlib.sha256()
+        digest.update(
+            f"ownership-audit-declaration-component-v{CACHE_SCHEMA}\0".encode()
+        )
+        for name in component["members"]:
+            digest.update(b"\0name\0")
+            digest.update(name.encode())
+            digest.update(b"\0declarations\0")
+            digest.update(
+                json.dumps(
+                    declaration_surfaces[name],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+        for dependency in component["callees"]:
+            digest.update(b"\0dependency\0")
+            digest.update(dependency.encode())
+            digest.update(component_hashes[dependency].encode())
+        component_hash = digest.hexdigest()
+        component_hashes[component["id"]] = component_hash
+        for name in component["members"]:
+            fingerprints[name] = component_hash
+    return fingerprints
+
+
+def semantic_entry_source_fingerprint(
     record: dict[str, Any],
     source_file: SourceFile,
-    candidate_surfaces: dict[str, list[dict[str, Any]]] | None = None,
+    source_surface: bytes,
+    candidate_fingerprints: dict[str, str],
+    candidate_declaration_fingerprints: dict[str, str],
+    declaration_fingerprints: dict[str, str],
 ) -> str:
     start = source_file.offset(record["range"]["start"])
     end = source_file.offset(record["range"]["end"])
     digest = hashlib.sha256()
-    digest.update(f"ownership-audit-semantic-entry-v{CACHE_SCHEMA}\0".encode())
-    digest.update(view_fingerprint.encode())
+    digest.update(f"ownership-audit-semantic-source-v{CACHE_SCHEMA}\0".encode())
     digest.update(b"\0symbol\0")
     digest.update(record["symbol"].encode())
     digest.update(b"\0callable\0")
-    digest.update(source_file.data[start:end])
-    candidate_surfaces = candidate_surfaces or {}
+    callable_source = source_file.data[start:end]
+    digest.update(callable_source)
+    digest.update(b"\0file-surface\0")
+    digest.update(source_surface)
     referenced_names = sorted(
         {
             name
@@ -468,17 +683,106 @@ def semantic_entry_cache_fingerprint(
             if (name := call_name(call.get("callee_text", ""))) is not None
         }
     )
+    relevant_candidate_fingerprints = {
+        name: candidate_fingerprints.get(name)
+        for name in referenced_names
+    }
+    candidate_fingerprint_source = json.dumps(
+        relevant_candidate_fingerprints,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
     digest.update(b"\0candidates\0")
+    digest.update(candidate_fingerprint_source)
+    declaration_source = b"\0".join(
+        (
+            callable_source,
+            record["signature"].encode(),
+            (record.get("receiver_type") or "").encode(),
+        )
+    )
+    digest.update(b"\0direct-declarations\0")
     digest.update(
         json.dumps(
             {
-                name: candidate_surfaces.get(name, [])
+                name: declaration_fingerprints[name]
+                for name in sorted(semantic_identifiers(declaration_source))
+                if name in declaration_fingerprints
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    digest.update(b"\0candidate-declarations\0")
+    digest.update(
+        json.dumps(
+            {
+                name: candidate_declaration_fingerprints.get(name)
                 for name in referenced_names
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
     )
+    return digest.hexdigest()
+
+
+def semantic_entry_source_fingerprints(
+    named: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    source_files: dict[Path, SourceFile],
+    declaration_surfaces: dict[str, list[dict[str, Any]]],
+) -> dict[str, str]:
+    candidate_surfaces = semantic_callable_candidate_surfaces(records)
+    declaration_fingerprints = semantic_declaration_fingerprints(
+        declaration_surfaces
+    )
+    candidate_fingerprints: dict[str, str] = {}
+    candidate_declaration_fingerprints: dict[str, str] = {}
+    for name, candidates in candidate_surfaces.items():
+        candidate_source = json.dumps(
+            candidates,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        candidate_fingerprints[name] = hashlib.sha256(candidate_source).hexdigest()
+        candidate_declaration_fingerprints[name] = hashlib.sha256(
+            json.dumps(
+                {
+                    identifier: declaration_fingerprints[identifier]
+                    for identifier in sorted(semantic_identifiers(candidate_source))
+                    if identifier in declaration_fingerprints
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    source_surfaces = {
+        path: semantic_source_surface(source_file)
+        for path, source_file in source_files.items()
+    }
+    return {
+        record["symbol"]: semantic_entry_source_fingerprint(
+            record,
+            source_files[(ROOT / record["path"]).resolve()],
+            source_surfaces[(ROOT / record["path"]).resolve()],
+            candidate_fingerprints,
+            candidate_declaration_fingerprints,
+            declaration_fingerprints,
+        )
+        for record in named
+    }
+
+
+def semantic_entry_cache_fingerprint(
+    view_fingerprint: str,
+    source_fingerprint: str,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"ownership-audit-semantic-entry-v{CACHE_SCHEMA}\0".encode())
+    digest.update(view_fingerprint.encode())
+    digest.update(b"\0source\0")
+    digest.update(source_fingerprint.encode())
     return digest.hexdigest()
 
 
@@ -2694,6 +2998,18 @@ def call_components(
             if edge["symbol"] not in symbols:
                 continue
             target = anchor_by_symbol[edge["symbol"]]
+            target_record = records_by_symbol[edge["symbol"]]
+            if (
+                collapse_nested
+                and target_record.get("kind") in {"closure", "async-block"}
+                and source != target
+                and edge.get("sites")
+                and all(
+                    site.get("role") == "callable-argument"
+                    for site in edge["sites"]
+                )
+            ):
+                continue
             if source == target:
                 if record["symbol"] == edge["symbol"]:
                     directly_recursive.add(source)
@@ -3309,15 +3625,13 @@ def collect_semantic_view_calls(
     records_by_path: dict[Path, list[dict[str, Any]]],
     source_files: dict[Path, SourceFile],
     semantic_workspace_fingerprint: str,
+    entry_source_fingerprints: dict[str, str],
 ) -> dict[str, Any]:
     fingerprint = view_cache_fingerprint(semantic_workspace_fingerprint, view)
-    candidate_surfaces = semantic_callable_candidate_surfaces(records)
     entry_fingerprints = {
         record["symbol"]: semantic_entry_cache_fingerprint(
             fingerprint,
-            record,
-            source_files[(ROOT / record["path"]).resolve()],
-            candidate_surfaces,
+            entry_source_fingerprints[record["symbol"]],
         )
         for record in named
     }
@@ -3498,17 +3812,24 @@ def build_index(
         source_files,
         analyzer_tool_identity,
     )
-
-    matched_sites: dict[str, list[dict[str, Any]]] = {
-        record["symbol"]: []
-        for record in records
-    }
     named = [
         record
         for record in records
         if record["kind"] not in {"closure", "async-block"}
         and "macro_origin" not in record
     ]
+    declaration_surfaces = semantic_declaration_surfaces(source_files)
+    entry_source_fingerprints = semantic_entry_source_fingerprints(
+        named,
+        records,
+        source_files,
+        declaration_surfaces,
+    )
+
+    matched_sites: dict[str, list[dict[str, Any]]] = {
+        record["symbol"]: []
+        for record in records
+    }
     with ThreadPoolExecutor(max_workers=len(SEMANTIC_VIEWS)) as executor:
         futures = {
             view: executor.submit(
@@ -3519,6 +3840,7 @@ def build_index(
                 records_by_path,
                 source_files,
                 semantic_fingerprint,
+                entry_source_fingerprints,
             )
             for view in SEMANTIC_VIEWS
         }

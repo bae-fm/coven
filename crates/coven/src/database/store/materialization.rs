@@ -66,8 +66,8 @@ impl StoreDatabase {
                     .frontier();
                 let requires_canonical_replay =
                     !candidate_predecessors.covers(&materialized_frontier);
-                let mut applied = MergeMaterializationTransaction::new(&tx)
-                    .apply_prepared_merge_materialization(
+                let merge_transaction = MergeMaterializationTransaction::new(&tx);
+                let mut applied = merge_transaction.apply_prepared_merge_materialization(
                         &blob_decls,
                         &gates,
                         &synced_tables,
@@ -214,7 +214,7 @@ impl StoreDatabase {
                                 "injected failure after Merge projection replacement".to_string(),
                             ));
                         }
-                        Self::replace_store_device_exclusion_freezes_from_replay_on(&tx)?;
+                        merge_transaction.replace_store_device_exclusion_freezes_from_replay()?;
                         let old_projection = crate::database::walk_old_changeset(&projection_changeset)
                             .map_err(DbError::Message)?;
                         let new_projection = crate::database::walk_changeset(&projection_changeset)

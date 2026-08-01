@@ -8,7 +8,6 @@ mod membership_mutation;
 mod operation;
 pub(crate) mod operations;
 mod preparation;
-mod publication;
 pub(crate) mod reclaim;
 pub(crate) mod snapshot;
 

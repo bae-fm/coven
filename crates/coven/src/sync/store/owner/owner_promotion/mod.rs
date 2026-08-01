@@ -45,6 +45,52 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         }
     }
 
+    pub(crate) async fn finalize(
+        &mut self,
+        encryption: &crate::encryption::EncryptionService,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+    ) -> Result<crate::protocol::circle_control::StoreMembershipStateRef, OwnerPromotionError> {
+        finalization::OwnerPromotionFinalization::new(self, encryption, acceptance)
+            .run()
+            .await
+    }
+
+    async fn delete_candidate_objects(
+        &self,
+        targets: Vec<crate::database::CandidateCleanupObject>,
+    ) -> Result<(), OwnerPromotionError> {
+        for target in targets {
+            self.storage
+                .delete_protocol_object(&target.object)
+                .await
+                .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+            self.database
+                .mark_candidate_cleanup_absent(target.object)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_stale_cleanup(
+        &self,
+        evidence: &journal::OwnerPromotionStaleEvidence,
+    ) -> Result<(), OwnerPromotionError> {
+        let journal::OwnerPromotionStaleEvidence::Candidate {
+            receipt, published, ..
+        } = evidence
+        else {
+            return Ok(());
+        };
+        let targets = self
+            .database
+            .owner_promotion_candidate_cleanup_targets(
+                receipt.candidate.reference.clone(),
+                published.clone(),
+            )
+            .await?;
+        self.delete_candidate_objects(targets).await
+    }
+
     fn exact_member_grant(
         &self,
         member_pubkey: &str,

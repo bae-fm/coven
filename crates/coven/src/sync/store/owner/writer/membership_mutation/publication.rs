@@ -9,7 +9,7 @@ use crate::protocol::wrapped_store_key::{
     load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKeyRef,
 };
 use crate::storage as store_objects;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations;
 
 use super::{InviteError, PreparedMembershipPublication, PreparedMembershipTransition};
@@ -64,14 +64,12 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
             .cloned();
         let current_slot = match predecessor.as_ref() {
             Some(reference) => {
-                let loaded = store_objects::load_membership_head_ref(
-                    storage,
-                    root.store_root_hash,
-                    reference,
-                    &registration,
-                )
-                .await
-                .map_err(|error| InviteError::Crypto(error.to_string()))?;
+                let loaded = self
+                    .writer
+                    .membership_objects()
+                    .load_head_for_registration(reference, &registration)
+                    .await
+                    .map_err(|error| InviteError::Crypto(error.to_string()))?;
                 loaded.value.body.successor.next_slot.clone()
             }
             None => match chain.membership_anchor(&coord.author_owner_grant) {
@@ -216,13 +214,51 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
         transition: &PreparedMembershipTransition,
         wraps: &[PreparedWrappedStoreKey],
     ) -> Result<(), InviteError> {
-        publish_prepared_merge_membership_authority(
-            self.writer.storage.as_ref(),
-            self.writer.store_root().store_root_hash,
-            transition,
-            wraps,
-        )
-        .await
+        validate_prepared_transition(transition)?;
+        let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
+            MembershipChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
+            MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.iter().collect(),
+            MembershipChange::Founder { .. }
+            | MembershipChange::ProviderAdmin
+            | MembershipChange::ResolutionActivation { .. } => Vec::new(),
+        };
+        if expected_wraps.len() != wraps.len()
+            || expected_wraps
+                .iter()
+                .zip(wraps)
+                .any(|(expected, prepared)| **expected != prepared.reference)
+        {
+            return Err(InviteError::InvalidDurableMutation(
+                "prepared Merge membership wraps differ from their exact transition".to_string(),
+            ));
+        }
+        for prepared in wraps {
+            prepared.validate()?;
+            self.writer
+                .storage
+                .as_ref()
+                .create_protocol_object(&prepared.object)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            load_wrapped_store_key(
+                self.writer.storage.as_ref(),
+                self.writer.store_root().store_root_hash,
+                &prepared.reference,
+            )
+            .await?;
+        }
+        self.writer
+            .storage
+            .as_ref()
+            .create_protocol_object(&transition.entry_object)
+            .await
+            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+        self.writer
+            .membership_objects()
+            .load_entry(&transition.entry_ref)
+            .await
+            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+        Ok(())
     }
 
     pub(crate) async fn publish_activation(
@@ -259,19 +295,15 @@ impl<'writer, 'storage> AuthorizedMembershipPublication<'writer, 'storage> {
         }
         {
             let storage = self.writer.storage.as_ref();
-            let root = self.writer.store_root();
             storage
                 .create_protocol_object(&publication.head_object)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
-            store_objects::load_membership_head_ref(
-                storage,
-                root.store_root_hash,
-                &publication.head_ref,
-                author,
-            )
-            .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            self.writer
+                .membership_objects()
+                .load_head_for_registration(&publication.head_ref, author)
+                .await
+                .map_err(|error| InviteError::Crypto(error.to_string()))?;
         }
         let database = self.writer.database.clone();
         database
@@ -403,47 +435,5 @@ pub(crate) fn validate_prepared_transition(
             "prepared membership transition does not bind its exact entry".to_string(),
         ));
     }
-    Ok(())
-}
-
-async fn publish_prepared_merge_membership_authority(
-    storage: &dyn SyncStorage,
-    store_root_hash: store_commit::ObjectHash,
-    transition: &PreparedMembershipTransition,
-    wraps: &[PreparedWrappedStoreKey],
-) -> Result<(), InviteError> {
-    validate_prepared_transition(transition)?;
-    let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
-        MembershipChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
-        MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.iter().collect(),
-        MembershipChange::Founder { .. }
-        | MembershipChange::ProviderAdmin
-        | MembershipChange::ResolutionActivation { .. } => Vec::new(),
-    };
-    if expected_wraps.len() != wraps.len()
-        || expected_wraps
-            .iter()
-            .zip(wraps)
-            .any(|(expected, prepared)| **expected != prepared.reference)
-    {
-        return Err(InviteError::InvalidDurableMutation(
-            "prepared Merge membership wraps differ from their exact transition".to_string(),
-        ));
-    }
-    for prepared in wraps {
-        prepared.validate()?;
-        storage
-            .create_protocol_object(&prepared.object)
-            .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
-        load_wrapped_store_key(storage, store_root_hash, &prepared.reference).await?;
-    }
-    storage
-        .create_protocol_object(&transition.entry_object)
-        .await
-        .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    store_objects::load_membership_entry_ref(storage, store_root_hash, &transition.entry_ref)
-        .await
-        .map_err(|error| InviteError::Crypto(error.to_string()))?;
     Ok(())
 }

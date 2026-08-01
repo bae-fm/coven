@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::authorized_store::LocalStoreDevice;
 use super::history::{abandonment, OwnerPromotionHistory, ReclaimHistory, RestoreHistory};
 use super::pull;
+use super::verification::StoreMembershipObjectVerifier;
 use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
 use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
@@ -18,6 +19,10 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
+        self.history_verifier.membership_objects()
+    }
+
     fn new(
         database: StoreDatabase,
         storage: &'storage dyn SyncStorage,
@@ -592,13 +597,11 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
             .create_protocol_object(&membership.entry.prepared)
             .await
             .map_err(crate::storage::StoreObjectError::from)?;
-        let loaded_entry = crate::storage::load_membership_entry_ref(
-            self.storage,
-            root.store_root_hash,
-            &membership.entry_ref,
-        )
-        .await?
-        .value;
+        let loaded_entry = commit_verifier
+            .membership_objects()
+            .load_entry(&membership.entry_ref)
+            .await?
+            .value;
         if loaded_entry != membership.entry.value {
             return Err(protocol_root::StoreProtocolRootError::Database(
                 "founder membership entry readback differs from durable bytes".to_string(),
@@ -608,14 +611,11 @@ impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
             .create_protocol_object(&membership.head.prepared)
             .await
             .map_err(crate::storage::StoreObjectError::from)?;
-        let loaded_head = crate::storage::load_membership_head_ref(
-            self.storage,
-            root.store_root_hash,
-            &membership.head_ref,
-            &registration,
-        )
-        .await?
-        .value;
+        let loaded_head = commit_verifier
+            .membership_objects()
+            .load_head_for_registration(&membership.head_ref, &registration)
+            .await?
+            .value;
         if loaded_head != membership.head.value {
             return Err(protocol_root::StoreProtocolRootError::Database(
                 "founder membership head readback differs from durable bytes".to_string(),

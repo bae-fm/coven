@@ -217,14 +217,8 @@ impl StoreDatabase {
 
             Self::persist_closed_write_objects_on(
                 &tx,
-                &stage.write_id,
-                stage.root.store_root_hash,
-                &commit_ref,
-                stage.commit.value.value(),
-                stage.commit.prepared.stored_bytes(),
+                &stage,
                 &partitions,
-                &stage.remote_objects,
-                &stage.audiences,
             )?;
             let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: stage.head.value.head_hash(),
