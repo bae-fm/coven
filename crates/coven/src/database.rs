@@ -88,7 +88,6 @@ use crate::protocol::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
 };
-use crate::protocol::routing_contract::SyncRoutingContract;
 use crate::protocol::store_commit::{
     ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
     SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
@@ -126,6 +125,7 @@ mod make_remote;
 mod operation_models;
 mod prepared_audience_objects;
 mod remote_object_records;
+mod routing_contract;
 mod schema_contract;
 mod schema_introspection;
 mod snapshot_objects;
@@ -165,6 +165,7 @@ pub(crate) use prepared_audience_objects::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, PreparedRemoteObject,
     StoredBlobReferenceState,
 };
+pub(crate) use routing_contract::SyncRoutingContract;
 use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};

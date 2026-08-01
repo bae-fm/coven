@@ -6,7 +6,6 @@ pub(crate) mod circle_roster;
 pub(crate) mod membership;
 pub(crate) mod provider;
 pub(crate) mod remote_object;
-pub(crate) mod routing_contract;
 pub(crate) mod store_commit;
 pub(crate) mod wrapped_store_key;
 

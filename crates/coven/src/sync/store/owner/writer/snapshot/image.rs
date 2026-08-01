@@ -880,11 +880,9 @@ pub(crate) fn verify_circle_bootstrap_image(
             reference.schema_version
         )));
     }
-    let routing_contract = crate::protocol::routing_contract::SyncRoutingContract::from_connection(
-        &connection,
-        tables,
-    )
-    .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let routing_contract =
+        crate::database::SyncRoutingContract::from_connection(&connection, tables)
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     if routing_contract.hash() != reference.sync_routing_hash {
         return Err(SnapshotError::ClearFailed(
             "Circle bootstrap routing contract differs from its signed hash".to_string(),

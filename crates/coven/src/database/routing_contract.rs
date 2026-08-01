@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::store_commit::ObjectHash;
 use crate::database::foreign_key_edges;
+use crate::protocol::store_commit::ObjectHash;
 use crate::sync::session::{GateRole, RowIdentity, SyncedTable};
 
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
