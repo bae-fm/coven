@@ -581,7 +581,7 @@ impl Gates {
     /// album. Structural (no kept-filter): a managed or managing root's whole
     /// subtree is returned whatever its gate currently reads.
     ///
-    /// [`crate::blob::decl::BlobDecls::refs_for_root`] maps these rows to the blobs
+    /// [`crate::database::BlobDecls::refs_for_root`] maps these rows to the blobs
     /// a transition uploads (make_remote) or materializes (make_local).
     pub(crate) fn subtree_rows(
         &self,

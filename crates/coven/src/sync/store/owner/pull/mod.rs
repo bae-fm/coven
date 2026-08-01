@@ -8,8 +8,8 @@ use super::verified_history::*;
 use super::*;
 
 mod authorized;
-use crate::blob::decl::BlobDecls;
 use crate::changeset::RowChange;
+use crate::database::BlobDecls;
 use crate::database::{
     BlobActivation, Database, DbError, MergeMaterializationTransaction, ValidatedChangeset,
     VerifiedMergeMaterialization,

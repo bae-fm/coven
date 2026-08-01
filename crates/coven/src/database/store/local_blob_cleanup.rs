@@ -1,8 +1,8 @@
 use tracing::debug;
 
 use super::*;
-use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::{LocalBlobCleanupIdentity, LocalBlobCleanupIntent};
+use crate::database::BlobDecls;
 
 /// Record cleanup obligations for each copy identity no live row needs in this
 /// transaction. The transaction mutating the carrying rows must also record the

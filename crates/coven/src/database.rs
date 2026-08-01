@@ -68,7 +68,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::blob::decl::BlobDecls;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::encryption::EncryptionService;
@@ -100,6 +99,7 @@ use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 
 mod blob_bindings;
+mod blob_declarations;
 mod blob_records;
 mod changeset;
 mod changeset_identity;
@@ -139,6 +139,9 @@ mod store_reclaim_records;
 mod write_lifecycle;
 mod write_models;
 
+#[cfg(test)]
+pub(crate) use blob_declarations::{from_tables_call_count, reset_from_tables_call_count};
+pub(crate) use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
 pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
 pub(crate) use changeset::{
     value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset,

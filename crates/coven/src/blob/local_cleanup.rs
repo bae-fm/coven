@@ -3,12 +3,12 @@
 use crate::database::DbError;
 
 pub(crate) fn intents_from_changes(
-    blob_decls: &crate::blob::decl::BlobDecls,
+    blob_decls: &crate::database::BlobDecls,
     old_changes: &[crate::changeset::RowChange],
     new_changes: &[crate::changeset::RowChange],
-) -> Result<Vec<LocalBlobCleanupIntent>, crate::blob::decl::BlobDeclError> {
+) -> Result<Vec<LocalBlobCleanupIntent>, crate::database::BlobDeclError> {
     if old_changes.len() != new_changes.len() {
-        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
+        return Err(crate::database::BlobDeclError::ChangesetWalkMismatch {
             old_count: old_changes.len(),
             new_count: new_changes.len(),
         });
@@ -33,7 +33,7 @@ pub(crate) fn intents_from_changes(
         };
         if let Some(blob) = old_blob_to_drop {
             let row_id = old.pk().ok_or_else(|| {
-                crate::blob::decl::BlobDeclError::MissingPublicationPrimaryKey {
+                crate::database::BlobDeclError::MissingPublicationPrimaryKey {
                     table: old.table.clone(),
                 }
             })?;

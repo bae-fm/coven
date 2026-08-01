@@ -3181,12 +3181,12 @@ async fn push_stamps_the_dbs_schema_version() {
 #[tokio::test]
 async fn sync_reuses_opened_schema_models() {
     crate::sync::gate::reset_from_tables_call_count();
-    crate::blob::decl::reset_from_tables_call_count();
+    crate::database::reset_from_tables_call_count();
 
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
     assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
-    assert_eq!(crate::blob::decl::from_tables_call_count(), 1);
+    assert_eq!(crate::database::from_tables_call_count(), 1);
 
     let outgoing = capture_bytes(
         &db,
@@ -3213,7 +3213,7 @@ async fn sync_reuses_opened_schema_models() {
     .expect("sync");
 
     assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
-    assert_eq!(crate::blob::decl::from_tables_call_count(), 1);
+    assert_eq!(crate::database::from_tables_call_count(), 1);
 }
 
 #[tokio::test]

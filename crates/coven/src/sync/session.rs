@@ -216,7 +216,7 @@ impl SyncedTable {
 
     /// Declare that rows of this table carry a blob, located by the columns in
     /// `decl`. coven derives the blob set itself from these columns + the live
-    /// schema (see [`crate::blob::decl::BlobDecls`]); it never calls back to the
+    /// schema (see [`crate::database::BlobDecls`]); it never calls back to the
     /// host to discover blobs. Independent of the gate role.
     pub fn carries_blob(mut self, decl: BlobDecl) -> Self {
         self.blob = Some(decl);
@@ -304,7 +304,7 @@ impl SyncedTable {
 
 /// Where a blob-bearing table's blob columns live, declared by the host so coven
 /// can derive every blob a row references without a runtime callback. Resolved
-/// against the live schema into a [`crate::blob::decl::BlobDecls`] each cycle.
+/// against the live schema into a [`crate::database::BlobDecls`] each cycle.
 ///
 /// A blob declares two orthogonal properties: [`provenance`](BlobDecl::provenance)
 /// (its Local story) and [`fill`](BlobDecl::fill) (its Remote story).

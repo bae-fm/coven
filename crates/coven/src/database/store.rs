@@ -202,7 +202,7 @@ pub(crate) struct StoreDatabase {
     schema_version: u32,
     sync_routing_hash: crate::protocol::store_commit::ObjectHash,
     gates: std::sync::Arc<crate::sync::gate::Gates>,
-    blob_decls: std::sync::Arc<crate::blob::decl::BlobDecls>,
+    blob_decls: std::sync::Arc<crate::database::BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::blob::TransferLimits,
     ids: crate::id_provider::IdRef,
@@ -288,7 +288,7 @@ impl StoreDatabase {
         self.gates.has_scoped_graph()
     }
 
-    pub(crate) fn blob_decls(&self) -> std::sync::Arc<crate::blob::decl::BlobDecls> {
+    pub(crate) fn blob_decls(&self) -> std::sync::Arc<crate::database::BlobDecls> {
         self.blob_decls.clone()
     }
 

@@ -91,7 +91,7 @@
 //! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary both halves and
 //! the host speak. Which rows carry blobs is not a runtime callback but a per-table
 //! declaration ([`crate::sync::session::BlobDecl`]) coven resolves into a
-//! [`decl::BlobDecls`] each cycle to derive the blob set itself.
+//! [`crate::database::BlobDecls`] each cycle to derive the blob set itself.
 //!
 //! coven also owns the two locality transitions ([`transition`]): `make_remote`
 //! (Local → Remote: upload the bytes, then flip the gate) and `make_local`
@@ -100,7 +100,6 @@
 //! upload lands — lives in the [`upload`] drain, the one place that knows an upload
 //! just succeeded.
 
-pub(crate) mod decl;
 pub(crate) mod delete;
 #[doc(hidden)]
 pub(crate) mod local_cleanup;
@@ -317,10 +316,43 @@ pub enum BlobReplacement {
     WriteOnce,
 }
 
+/// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
+/// coven requires of a [`Replaceable`](BlobReplacement::Replaceable) blob's key on a
+/// browsable home, and what a hashed key gets for free by carrying the id itself.
+///
+/// The path's file name (its last `/`-segment), with any extension stripped, must be the
+/// blob id or end with `-{blob_id}`:
+///
+/// ```text
+/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem `cover-0ef7a1c9` ends with -0ef7a1c9
+/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem is the blob id
+/// covers/Live at Leeds/cover.jpg            ✗   names no blob
+/// ```
+///
+/// A blob id names one immutable byte-string and is minted fresh for every stored blob, so
+/// a path carrying it moves whenever the bytes do — which is what leaves a replaced blob's
+/// object standing at its own key instead of overwritten.
+///
+/// The `-` delimiter is what makes this a near-injective mapping where a bare substring
+/// test would not be: without it, blob `1` would satisfy blob `11`'s path and the two could
+/// be keyed at one object. Two ids can still collide if one is a `-`-suffix of the other
+/// AND the consumer builds paths that land on the same file name — which ids drawn from any
+/// of the usual generators do not do.
+pub(crate) fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
+    let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
+    let stem = file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _extension)| stem);
+    stem == blob_id
+        || stem
+            .strip_suffix(blob_id)
+            .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
 /// A blob a row references: its cloud identity, encryption scope, and the two
 /// declared properties ([`provenance`](BlobRef::provenance) +
 /// [`fill`](BlobRef::fill)). coven derives it from the row's declared columns
-/// ([`crate::sync::session::BlobDecl`]) via [`decl::BlobDecls`]. Where its bytes
+/// ([`crate::sync::session::BlobDecl`]) via [`crate::database::BlobDecls`]. Where its bytes
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
@@ -743,5 +775,56 @@ pub trait BlobTransitionObserver: Send + Sync {
         total: u64,
     ) {
         let _ = (root_table, root_id, blob_id, done, total);
+    }
+}
+
+#[cfg(test)]
+mod cloud_path_tests {
+    use super::cloud_path_names_blob;
+
+    /// A replaceable blob's readable path must name the blob standing at it, so that
+    /// repointing the row moves its cloud key instead of overwriting the object it
+    /// replaced. A path naming no blob — the natural-looking `cover.jpg` — is what makes a
+    /// replacement rewrite the object its predecessor holds.
+    #[test]
+    fn a_cloud_path_names_the_blob_whose_id_ends_its_file_name() {
+        assert!(cloud_path_names_blob(
+            "Live at Leeds/cover-0ef7a1c9.jpg",
+            "0ef7a1c9"
+        ));
+        assert!(cloud_path_names_blob(
+            "Live at Leeds/0ef7a1c9.jpg",
+            "0ef7a1c9"
+        ));
+        assert!(
+            cloud_path_names_blob("0ef7a1c9", "0ef7a1c9"),
+            "no directory and no extension: the whole path is the blob id",
+        );
+
+        assert!(
+            !cloud_path_names_blob("Live at Leeds/cover.jpg", "0ef7a1c9"),
+            "names no blob — the next cover would take this same name",
+        );
+        assert!(
+            !cloud_path_names_blob("0ef7a1c9/cover.jpg", "0ef7a1c9"),
+            "the id must name the OBJECT, not a directory above it — two blobs under one \
+             directory would still collide on the file",
+        );
+        assert!(
+            !cloud_path_names_blob("Live at Leeds/cover-0ef7a1c9-thumb.jpg", "0ef7a1c9"),
+            "the id must END the file name's stem, not sit inside it",
+        );
+    }
+
+    /// The `-` delimiter is what makes the path→blob mapping unambiguous. A bare substring
+    /// test would let one blob satisfy another's path, and the two would be keyed at one
+    /// cloud object — the exact collision the rule exists to prevent.
+    #[test]
+    fn one_blob_id_cannot_satisfy_another_s_path_by_being_a_tail_of_it() {
+        assert!(cloud_path_names_blob("cover-10ef7a1c9.jpg", "10ef7a1c9"));
+        assert!(
+            !cloud_path_names_blob("cover-10ef7a1c9.jpg", "0ef7a1c9"),
+            "blob 0ef7a1c9 must not claim blob 10ef7a1c9's object",
+        );
     }
 }

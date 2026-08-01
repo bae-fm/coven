@@ -718,7 +718,7 @@ fn snapshot_blob_facts(
 ) -> Result<Vec<SnapshotBlobFact>, SnapshotError> {
     let snapshot = Connection::open(snapshot_path)
         .map_err(|error| SnapshotError::ClearFailed(format!("open scoped snapshot: {error}")))?;
-    let declarations = crate::blob::decl::BlobDecls::from_tables(&snapshot, tables)
+    let declarations = crate::database::BlobDecls::from_tables(&snapshot, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let publications = declarations
         .publication_blobs_in_db(&snapshot)
@@ -905,7 +905,7 @@ pub(crate) fn verify_circle_bootstrap_image(
         )
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     }
-    let declarations = crate::blob::decl::BlobDecls::from_tables(&connection, tables)
+    let declarations = crate::database::BlobDecls::from_tables(&connection, tables)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     let rows = declarations
         .publication_blobs_in_db(&connection)

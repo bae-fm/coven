@@ -30,7 +30,9 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance};
+use crate::blob::{
+    cloud_path_names_blob, BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance,
+};
 use crate::changeset::{ChangeOp, RowChange};
 use crate::database::{quote_ident, table_columns as session_table_columns};
 use crate::sync::session::SyncedTable;
@@ -284,39 +286,6 @@ impl TableBlob {
     fn hash_from_row(&self, row: &rusqlite::Row<'_>) -> Result<String, BlobDeclError> {
         row.get(self.hash_col).map_err(BlobDeclError::from)
     }
-}
-
-/// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
-/// coven requires of a [`Replaceable`](BlobReplacement::Replaceable) blob's key on a
-/// browsable home, and what a hashed key gets for free by carrying the id itself.
-///
-/// The path's file name (its last `/`-segment), with any extension stripped, must be the
-/// blob id or end with `-{blob_id}`:
-///
-/// ```text
-/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem `cover-0ef7a1c9` ends with -0ef7a1c9
-/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem is the blob id
-/// covers/Live at Leeds/cover.jpg            ✗   names no blob
-/// ```
-///
-/// A blob id names one immutable byte-string and is minted fresh for every stored blob, so
-/// a path carrying it moves whenever the bytes do — which is what leaves a replaced blob's
-/// object standing at its own key instead of overwritten.
-///
-/// The `-` delimiter is what makes this a near-injective mapping where a bare substring
-/// test would not be: without it, blob `1` would satisfy blob `11`'s path and the two could
-/// be keyed at one object. Two ids can still collide if one is a `-`-suffix of the other
-/// AND the consumer builds paths that land on the same file name — which ids drawn from any
-/// of the usual generators do not do.
-pub(crate) fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
-    let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
-    let stem = file_name
-        .rsplit_once('.')
-        .map_or(file_name, |(stem, _extension)| stem);
-    stem == blob_id
-        || stem
-            .strip_suffix(blob_id)
-            .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
 /// The blob declarations for a database handle, resolved from the declared set +
@@ -705,55 +674,4 @@ fn publication_blob_from_row(
         plaintext_size: blob.size_from_row(table, row)?,
         plaintext_hash: blob.hash_from_row(row)?,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::cloud_path_names_blob;
-
-    /// A replaceable blob's readable path must name the blob standing at it, so that
-    /// repointing the row moves its cloud key instead of overwriting the object it
-    /// replaced. A path naming no blob — the natural-looking `cover.jpg` — is what makes a
-    /// replacement rewrite the object its predecessor holds.
-    #[test]
-    fn a_cloud_path_names_the_blob_whose_id_ends_its_file_name() {
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/cover-0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(
-            cloud_path_names_blob("0ef7a1c9", "0ef7a1c9"),
-            "no directory and no extension: the whole path is the blob id",
-        );
-
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover.jpg", "0ef7a1c9"),
-            "names no blob — the next cover would take this same name",
-        );
-        assert!(
-            !cloud_path_names_blob("0ef7a1c9/cover.jpg", "0ef7a1c9"),
-            "the id must name the OBJECT, not a directory above it — two blobs under one \
-             directory would still collide on the file",
-        );
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover-0ef7a1c9-thumb.jpg", "0ef7a1c9"),
-            "the id must END the file name's stem, not sit inside it",
-        );
-    }
-
-    /// The `-` delimiter is what makes the path→blob mapping unambiguous. A bare substring
-    /// test would let one blob satisfy another's path, and the two would be keyed at one
-    /// cloud object — the exact collision the rule exists to prevent.
-    #[test]
-    fn one_blob_id_cannot_satisfy_another_s_path_by_being_a_tail_of_it() {
-        assert!(cloud_path_names_blob("cover-10ef7a1c9.jpg", "10ef7a1c9"));
-        assert!(
-            !cloud_path_names_blob("cover-10ef7a1c9.jpg", "0ef7a1c9"),
-            "blob 0ef7a1c9 must not claim blob 10ef7a1c9's object",
-        );
-    }
 }

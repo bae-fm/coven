@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OptionalExtension};
 use tracing::warn;
 
-use crate::blob::decl::BlobDecls;
-use crate::blob::decl::PublicationBlob;
+use crate::database::BlobDecls;
+use crate::database::PublicationBlob;
 use crate::database::{attach_session, capture_changeset, local_merge_stream_id_on, *};
 use crate::encryption::EncryptionService;
 use crate::sync::gate::{self, Gates};
