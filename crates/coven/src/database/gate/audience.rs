@@ -449,7 +449,7 @@ unsafe fn validate_inbound_private_routes_raw(
                 "private route names undeclared table {table}"
             ))
         })?;
-        crate::sync::session::validate_row_identity(table, identity, row_id).map_err(|error| {
+        identity.validate(table, row_id).map_err(|error| {
             GateError::InvalidInboundAudiencePackage(format!(
                 "private route row identity is invalid: {error}"
             ))
@@ -814,13 +814,11 @@ pub(crate) fn validate_snapshot_routing_state(
         );
         let rows = query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))?;
         for row_id in rows {
-            crate::sync::session::validate_row_identity(&table, identity, &row_id).map_err(
-                |error| {
-                    GateError::InvalidMaterializedRouting(format!(
-                        "row identity {table}.{row_id} is invalid: {error}"
-                    ))
-                },
-            )?;
+            identity.validate(&table, &row_id).map_err(|error| {
+                GateError::InvalidMaterializedRouting(format!(
+                    "row identity {table}.{row_id} is invalid: {error}"
+                ))
+            })?;
             let (routing_id, route_stamp) = query_row_optional(
                 conn,
                 "SELECT routing_id, _updated_at

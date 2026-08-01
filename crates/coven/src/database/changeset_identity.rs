@@ -3,7 +3,7 @@ use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ChangesetIter};
 use rusqlite::types::ValueRef;
 
-use crate::sync::session::{validate_row_identity, RowIdentityError, SyncedTable};
+use crate::sync::session::{RowIdentityError, SyncedTable};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChangesetIdentityError {
@@ -41,17 +41,17 @@ pub(super) fn validate_changeset_row_identities(
         match op.code() {
             Action::SQLITE_INSERT => {
                 let id = required_changeset_id(item, table_name, "new", ChangesetSide::New)?;
-                validate_row_identity(table_name, table.row_identity(), &id)?;
+                table.row_identity().validate(table_name, &id)?;
             }
             Action::SQLITE_DELETE => {
                 let id = required_changeset_id(item, table_name, "old", ChangesetSide::Old)?;
-                validate_row_identity(table_name, table.row_identity(), &id)?;
+                table.row_identity().validate(table_name, &id)?;
             }
             Action::SQLITE_UPDATE => {
                 let old = required_changeset_id(item, table_name, "old", ChangesetSide::Old)?;
                 let id = optional_changeset_id(item, table_name, "new", ChangesetSide::New)?
                     .unwrap_or(old);
-                validate_row_identity(table_name, table.row_identity(), &id)?;
+                table.row_identity().validate(table_name, &id)?;
             }
             _ => {}
         }

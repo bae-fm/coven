@@ -119,7 +119,9 @@ pub(super) fn validate_existing_row_identities(
         .map_err(DbError::from)?;
     for id in ids {
         let id = id.map_err(DbError::from)?;
-        crate::sync::session::validate_row_identity(table.name(), table.row_identity(), &id)
+        table
+            .row_identity()
+            .validate(table.name(), &id)
             .map_err(|error| DbError::Message(error.to_string()))?;
     }
     Ok(())

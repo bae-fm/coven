@@ -23,6 +23,31 @@ pub enum RowIdentity {
     SharedKey,
 }
 
+impl RowIdentity {
+    pub(crate) fn validate(self, table: &str, value: &str) -> Result<(), RowIdentityError> {
+        if self == Self::SharedKey {
+            return Ok(());
+        }
+
+        let valid = uuid::Uuid::parse_str(value).is_ok_and(|parsed| {
+            parsed.get_variant() == uuid::Variant::RFC4122
+                && matches!(
+                    parsed.get_version(),
+                    Some(uuid::Version::Random | uuid::Version::SortRand)
+                )
+                && parsed.hyphenated().to_string() == value
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err(RowIdentityError::InvalidIndependentUuid {
+                table: table.to_string(),
+                value: value.to_string(),
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum RowIdentityError {
     #[error(
@@ -45,33 +70,6 @@ impl RowIdentityError {
             | Self::NonTextPrimaryKey { table, .. }
             | Self::NonUtf8PrimaryKey { table, .. } => table,
         }
-    }
-}
-
-pub(crate) fn validate_row_identity(
-    table: &str,
-    identity: RowIdentity,
-    value: &str,
-) -> Result<(), RowIdentityError> {
-    if identity == RowIdentity::SharedKey {
-        return Ok(());
-    }
-
-    let valid = uuid::Uuid::parse_str(value).is_ok_and(|parsed| {
-        parsed.get_variant() == uuid::Variant::RFC4122
-            && matches!(
-                parsed.get_version(),
-                Some(uuid::Version::Random | uuid::Version::SortRand)
-            )
-            && parsed.hyphenated().to_string() == value
-    });
-    if valid {
-        Ok(())
-    } else {
-        Err(RowIdentityError::InvalidIndependentUuid {
-            table: table.to_string(),
-            value: value.to_string(),
-        })
     }
 }
 
@@ -421,7 +419,8 @@ mod row_identity_tests {
             "f47ac10b-58cc-4372-a567-0e02b2c3d479",
             "01890a5d-ac96-774b-bcce-b302099c3f74",
         ] {
-            validate_row_identity("things", RowIdentity::IndependentUuid, valid)
+            RowIdentity::IndependentUuid
+                .validate("things", valid)
                 .unwrap_or_else(|error| panic!("{valid} must be accepted: {error}"));
         }
 
@@ -441,12 +440,15 @@ mod row_identity_tests {
             "not-a-uuid",
         ] {
             assert!(
-                validate_row_identity("things", RowIdentity::IndependentUuid, invalid).is_err(),
+                RowIdentity::IndependentUuid
+                    .validate("things", invalid)
+                    .is_err(),
                 "{invalid} must be rejected",
             );
         }
 
-        validate_row_identity("settings", RowIdentity::SharedKey, "preferences")
+        RowIdentity::SharedKey
+            .validate("settings", "preferences")
             .expect("shared keys accept application-assigned ids");
     }
 }
