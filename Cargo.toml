@@ -19,6 +19,12 @@ too_many_arguments = "allow"
 new_without_default = "allow"
 large_enum_variant = "allow"
 
+[profile.dev]
+incremental = true
+
+[profile.test]
+incremental = true
+
 # Debug builds of the async Circle/membership operations reserve more stack per
 # `poll` frame than optimized builds. Optimize Coven's test build so the complete
 # composed flows fit within the test runner's thread stack.
