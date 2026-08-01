@@ -26,7 +26,7 @@ GRAPH_PATH = ROOT / "target" / "ownership-audit" / "graph.html"
 ANALYZER_LOG_PATH = ROOT / "target" / "ownership-audit" / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
 CACHE_DIR = INDEX_PATH.parent / "cache"
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2
 CACHE_CHECKPOINT_INTERVAL = 100
 
 NODE_PATTERN = re.compile(r"^(?P<indent> *)(?P<kind>[A-Z_]+)@(?P<start>\d+)\.\.(?P<end>\d+)")
@@ -353,6 +353,155 @@ def view_cache_fingerprint(workspace_fingerprint: str, view: SemanticView) -> st
     return digest.hexdigest()
 
 
+def trait_callable(source_file: SourceFile, index: int) -> bool:
+    for ancestor_index, ancestor in ancestors(source_file, index):
+        if is_callable_node(source_file, ancestor_index):
+            return False
+        if ancestor.kind == "TRAIT":
+            return True
+        if ancestor.kind == "IMPL":
+            return any(
+                source_file.nodes[child].kind == "FOR_KW"
+                for child in ancestor.children
+            )
+    return False
+
+
+def callable_erasure_spans(source_file: SourceFile) -> list[tuple[int, int, bytes]]:
+    spans: list[tuple[int, int, bytes]] = []
+    for index, node in enumerate(source_file.nodes):
+        if node.kind != "FN":
+            continue
+        body = direct_child(source_file, index, "BLOCK_EXPR")
+        if trait_callable(source_file, index):
+            if body is not None:
+                spans.append(
+                    (body.start, body.end, b"{/* callable body */}")
+                )
+        else:
+            spans.append((node.start, node.end, b""))
+    outermost: list[tuple[int, int, bytes]] = []
+    for start, end, replacement in sorted(spans):
+        if outermost and start < outermost[-1][1]:
+            continue
+        outermost.append((start, end, replacement))
+    return outermost
+
+
+def semantic_source_surface(source_file: SourceFile) -> bytes:
+    output = bytearray()
+    cursor = 0
+    for start, end, replacement in callable_erasure_spans(source_file):
+        output.extend(source_file.data[cursor:start])
+        output.extend(replacement)
+        cursor = end
+    output.extend(source_file.data[cursor:])
+    return re.sub(rb"\s+", b" ", bytes(output)).strip()
+
+
+def full_semantic_source_roots(metadata: dict[str, Any]) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            {
+                Path(package["manifest_path"]).resolve().parent
+                for package in metadata["packages"]
+                if any(
+                    set(target["kind"]).intersection(
+                        {"proc-macro", "custom-build"}
+                    )
+                    for target in package["targets"]
+                )
+            }
+        )
+    )
+
+
+def semantic_workspace_cache_fingerprint(
+    metadata: dict[str, Any],
+    source_files: dict[Path, SourceFile],
+    tool_identity: str | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"ownership-audit-semantic-surface-v{CACHE_SCHEMA}\0".encode())
+    digest.update(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    )
+    digest.update(b"\0analyzer\0")
+    digest.update(
+        (analyzer_identity() if tool_identity is None else tool_identity).encode()
+    )
+    digest.update(b"\0tool\0")
+    digest.update(Path(__file__).read_bytes())
+    full_source_roots = full_semantic_source_roots(metadata)
+    for path, source_file in sorted(source_files.items()):
+        digest.update(b"\0path\0")
+        digest.update(path.relative_to(ROOT).as_posix().encode())
+        digest.update(b"\0surface\0")
+        digest.update(
+            source_file.data
+            if any(path.is_relative_to(root) for root in full_source_roots)
+            else semantic_source_surface(source_file)
+        )
+    return digest.hexdigest()
+
+
+def semantic_entry_cache_fingerprint(
+    view_fingerprint: str,
+    record: dict[str, Any],
+    source_file: SourceFile,
+    candidate_surfaces: dict[str, list[dict[str, Any]]] | None = None,
+) -> str:
+    start = source_file.offset(record["range"]["start"])
+    end = source_file.offset(record["range"]["end"])
+    digest = hashlib.sha256()
+    digest.update(f"ownership-audit-semantic-entry-v{CACHE_SCHEMA}\0".encode())
+    digest.update(view_fingerprint.encode())
+    digest.update(b"\0symbol\0")
+    digest.update(record["symbol"].encode())
+    digest.update(b"\0callable\0")
+    digest.update(source_file.data[start:end])
+    candidate_surfaces = candidate_surfaces or {}
+    referenced_names = sorted(
+        {
+            name
+            for call in record.get("calls", [])
+            if (name := call_name(call.get("callee_text", ""))) is not None
+        }
+    )
+    digest.update(b"\0candidates\0")
+    digest.update(
+        json.dumps(
+            {
+                name: candidate_surfaces.get(name, [])
+                for name in referenced_names
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    return digest.hexdigest()
+
+
+def semantic_callable_candidate_surfaces(
+    records: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    surfaces: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if record["kind"] in {"closure", "async-block"}:
+            continue
+        surfaces.setdefault(record["name"], []).append(
+            {
+                "symbol": record["symbol"],
+                "signature": record["signature"],
+                "receiver": record.get("receiver_type"),
+                "cfg": record.get("cfg", []),
+            }
+        )
+    for candidates in surfaces.values():
+        candidates.sort(key=lambda candidate: candidate["symbol"])
+    return surfaces
+
+
 def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -382,36 +531,45 @@ def open_semantic_view_cache(
     connection.execute(
         "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS entries (symbol TEXT PRIMARY KEY, calls TEXT)"
-    )
     metadata = dict(connection.execute("SELECT key, value FROM metadata"))
     expected = {
         "schema": str(CACHE_SCHEMA),
         "fingerprint": fingerprint,
     }
     if metadata != expected:
-        connection.execute("DELETE FROM entries")
+        connection.execute("DROP TABLE IF EXISTS entries")
         connection.execute("DELETE FROM metadata")
         connection.executemany(
             "INSERT INTO metadata (key, value) VALUES (?, ?)",
             expected.items(),
         )
-        connection.commit()
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS entries ("
+        "symbol TEXT PRIMARY KEY, "
+        "fingerprint TEXT NOT NULL, "
+        "calls TEXT"
+        ")"
+    )
+    connection.commit()
     return connection
 
 
 def read_semantic_view_cache(
     view: SemanticView,
     fingerprint: str,
+    entry_fingerprints: dict[str, str],
 ) -> dict[str, Any]:
     connection = open_semantic_view_cache(view, fingerprint)
     try:
         return {
-            symbol: {"calls": json.loads(calls) if calls is not None else None}
-            for symbol, calls in connection.execute(
-                "SELECT symbol, calls FROM entries"
+            symbol: {
+                "fingerprint": entry_fingerprint,
+                "calls": json.loads(calls) if calls is not None else None,
+            }
+            for symbol, entry_fingerprint, calls in connection.execute(
+                "SELECT symbol, fingerprint, calls FROM entries"
             )
+            if entry_fingerprints.get(symbol) == entry_fingerprint
         }
     finally:
         connection.close()
@@ -427,10 +585,12 @@ def write_semantic_view_cache(
     connection = open_semantic_view_cache(view, fingerprint)
     try:
         connection.executemany(
-            "INSERT OR REPLACE INTO entries (symbol, calls) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO entries (symbol, fingerprint, calls) "
+            "VALUES (?, ?, ?)",
             (
                 (
                     symbol,
+                    entry["fingerprint"],
                     json.dumps(entry["calls"], separators=(",", ":"))
                     if entry["calls"] is not None
                     else None,
@@ -3044,14 +3204,78 @@ def build_reach_through_reports(
     }
 
 
+def normalize_semantic_calls(
+    record: dict[str, Any],
+    calls: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    records_by_path: dict[Path, list[dict[str, Any]]],
+    source_files: dict[Path, SourceFile],
+) -> list[dict[str, Any]]:
+    path = (ROOT / record["path"]).resolve()
+    callable_start = source_files[path].offset(record["range"]["start"])
+    normalized = []
+    for call in calls:
+        target_item = call["to"]
+        internal_target = internal_symbol(records_by_path, target_item)
+        for range_value in call.get("fromRanges", []):
+            site = {
+                "range": range_value,
+                **source_call_site(source_files, path, range_value),
+            }
+            target = internal_target or macro_generated_target(
+                records,
+                target_item,
+                site,
+            )
+            if target is None:
+                target = (
+                    f"external::{target_item.get('detail', '')}::"
+                    f"{target_item.get('name', '<unknown>')}"
+                )
+            normalized.append(
+                {
+                    "target": target,
+                    "relativeRanges": [
+                        {
+                            "start": source_files[path].offset(
+                                range_value["start"]
+                            )
+                            - callable_start,
+                            "end": source_files[path].offset(
+                                range_value["end"]
+                            )
+                            - callable_start,
+                        }
+                    ],
+                }
+            )
+    return normalized
+
+
 def collect_semantic_view_calls(
     view: SemanticView,
     named: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    records_by_path: dict[Path, list[dict[str, Any]]],
     source_files: dict[Path, SourceFile],
-    workspace_fingerprint: str,
+    semantic_workspace_fingerprint: str,
 ) -> dict[str, Any]:
-    fingerprint = view_cache_fingerprint(workspace_fingerprint, view)
-    entries = read_semantic_view_cache(view, fingerprint)
+    fingerprint = view_cache_fingerprint(semantic_workspace_fingerprint, view)
+    candidate_surfaces = semantic_callable_candidate_surfaces(records)
+    entry_fingerprints = {
+        record["symbol"]: semantic_entry_cache_fingerprint(
+            fingerprint,
+            record,
+            source_files[(ROOT / record["path"]).resolve()],
+            candidate_surfaces,
+        )
+        for record in named
+    }
+    entries = read_semantic_view_cache(
+        view,
+        fingerprint,
+        entry_fingerprints,
+    )
     missing = [record for record in named if record["symbol"] not in entries]
     if not missing:
         print(
@@ -3077,8 +3301,20 @@ def collect_semantic_view_calls(
             if path not in opened_paths:
                 analyzer.open_document(path, source_files[path].source)
                 opened_paths.add(path)
+            calls = analyzer.outgoing(path, record["name_range"]["start"])
             entry = {
-                "calls": analyzer.outgoing(path, record["name_range"]["start"])
+                "fingerprint": entry_fingerprints[record["symbol"]],
+                "calls": (
+                    normalize_semantic_calls(
+                        record,
+                        calls,
+                        records,
+                        records_by_path,
+                        source_files,
+                    )
+                    if calls is not None
+                    else None
+                ),
             }
             entries[record["symbol"]] = entry
             pending[record["symbol"]] = entry
@@ -3126,9 +3362,17 @@ def attach_semantic_view_calls(
                 f"invalid calls for {record['symbol']} in {view.name} cache"
             )
         for call in calls:
-            target_item = call["to"]
-            target = internal_symbol(records_by_path, target_item)
-            for range_value in call.get("fromRanges", []):
+            resolved_target = call["target"]
+            callable_start = source_files[path].offset(record["range"]["start"])
+            for relative_range in call.get("relativeRanges", []):
+                range_value = {
+                    "start": source_files[path].position(
+                        callable_start + relative_range["start"]
+                    ),
+                    "end": source_files[path].position(
+                        callable_start + relative_range["end"]
+                    ),
+                }
                 source_record = record_containing_position(
                     records_by_path[path],
                     range_value["start"],
@@ -3143,16 +3387,6 @@ def attach_semantic_view_calls(
                     "views": [view.name],
                     **source_call_site(source_files, path, range_value),
                 }
-                resolved_target = target or macro_generated_target(
-                    records,
-                    target_item,
-                    site,
-                )
-                if resolved_target is None:
-                    resolved_target = (
-                        f"external::{target_item.get('detail', '')}::"
-                        f"{target_item.get('name', '<unknown>')}"
-                    )
                 matched_sites[source_record["symbol"]].append(
                     {
                         "position": range_value["start"],
@@ -3167,10 +3401,16 @@ def build_index(
     metadata: dict[str, Any] | None = None,
     workspace_fingerprint: str | None = None,
     index_fingerprint: str | None = None,
+    analyzer_tool_identity: str | None = None,
 ) -> dict[str, Any]:
     metadata = cargo_metadata() if metadata is None else metadata
+    analyzer_tool_identity = (
+        analyzer_identity()
+        if analyzer_tool_identity is None
+        else analyzer_tool_identity
+    )
     workspace_fingerprint = (
-        workspace_cache_fingerprint(metadata)
+        workspace_cache_fingerprint(metadata, analyzer_tool_identity)
         if workspace_fingerprint is None
         else workspace_fingerprint
     )
@@ -3203,6 +3443,12 @@ def build_index(
             raise RuntimeError(f"duplicate callable identity: {record['symbol']}")
         records_by_symbol[record["symbol"]] = record
 
+    semantic_fingerprint = semantic_workspace_cache_fingerprint(
+        metadata,
+        source_files,
+        analyzer_tool_identity,
+    )
+
     matched_sites: dict[str, list[dict[str, Any]]] = {
         record["symbol"]: []
         for record in records
@@ -3219,8 +3465,10 @@ def build_index(
                 collect_semantic_view_calls,
                 view,
                 named,
+                records,
+                records_by_path,
                 source_files,
-                workspace_fingerprint,
+                semantic_fingerprint,
             )
             for view in SEMANTIC_VIEWS
         }
@@ -4937,11 +5185,17 @@ def print_record(record: dict[str, Any]) -> None:
 
 def command_inventory(_: argparse.Namespace) -> None:
     metadata = cargo_metadata()
-    workspace_fingerprint = workspace_cache_fingerprint(metadata)
+    tool_identity = analyzer_identity()
+    workspace_fingerprint = workspace_cache_fingerprint(metadata, tool_identity)
     index_fingerprint = index_cache_fingerprint(workspace_fingerprint)
     index = read_cached_index(index_fingerprint)
     if index is None:
-        index = build_index(metadata, workspace_fingerprint, index_fingerprint)
+        index = build_index(
+            metadata,
+            workspace_fingerprint,
+            index_fingerprint,
+            tool_identity,
+        )
         write_index(index)
         disposition = "wrote"
     else:
