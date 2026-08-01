@@ -1,7 +1,8 @@
 use super::membership_mutation as invite;
 use super::reclaim as store_reclaim;
 use super::*;
-use crate::database::{MergeMaterializationTransaction, StoreDatabase};
+#[cfg(test)]
+use crate::database::StoreDatabase;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     head_slot_prefix, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttemptRef,

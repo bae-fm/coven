@@ -302,9 +302,11 @@ impl StoreDatabase {
                     None,
                 )?;
                 if let Some(completion) = membership_completion {
-                    completion.complete_on(&tx, &reference).map_err(|error| {
-                        DbError::Message(format!("complete exact membership journal: {error}"))
-                    })?;
+                    store_transaction
+                        .complete_membership_journal(completion, &reference)
+                        .map_err(|error| {
+                            DbError::Message(format!("complete exact membership journal: {error}"))
+                        })?;
                 }
                 store_transaction
                     .record_verified_merge_materialization(materialization)

@@ -41,6 +41,82 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 }
 
 impl MergeMaterializationTransaction<'_, '_> {
+    pub(crate) fn complete_membership_journal(
+        &self,
+        completion: crate::sync::StoreMembershipJournalCompletion,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        match completion {
+            crate::sync::StoreMembershipJournalCompletion::Mutation {
+                intent_hash,
+                progress_bytes,
+                remote_objects,
+            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
+                self.transaction,
+                intent_hash,
+                candidate,
+                &remote_objects
+                    .iter()
+                    .map(|remote| remote.object().clone())
+                    .collect::<Vec<_>>(),
+                progress_bytes,
+                crate::database::MembershipMutationActivation::WithoutRotation,
+            ),
+            crate::sync::StoreMembershipJournalCompletion::RotationMutation {
+                intent_hash,
+                progress_bytes,
+                generation,
+                remote_objects,
+            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
+                self.transaction,
+                intent_hash,
+                candidate,
+                &remote_objects
+                    .iter()
+                    .map(|remote| remote.object().clone())
+                    .collect::<Vec<_>>(),
+                progress_bytes,
+                crate::database::MembershipMutationActivation::Rotation { generation },
+            ),
+            crate::sync::StoreMembershipJournalCompletion::OwnerPromotion {
+                transition,
+                remote_objects,
+            } => {
+                let mut unique = std::collections::BTreeSet::new();
+                let object_ids = remote_objects
+                    .iter()
+                    .map(|remote| remote.object_id())
+                    .map(|object_id| {
+                        if unique.insert(object_id) {
+                            Ok(object_id)
+                        } else {
+                            Err(DbError::Message(
+                                "activated Owner-promotion graph repeats an exact object"
+                                    .to_string(),
+                            ))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if object_ids.is_empty() {
+                    return Err(DbError::Message(
+                        "activated Owner-promotion graph is empty".to_string(),
+                    ));
+                }
+                self.activate_store_operation_remote_objects(candidate, &object_ids)?;
+                let (journal_key, target_key, previous_value, next_value, remote_objects) =
+                    transition.into_values();
+                StoreDatabase::advance_owner_promotion_journal_on(
+                    self.transaction,
+                    journal_key,
+                    target_key,
+                    previous_value,
+                    next_value,
+                    remote_objects,
+                )
+            }
+        }
+    }
+
     pub(crate) fn record_obsolete_blob_cleanup_intent(
         &self,
         declarations: &crate::database::BlobDecls,
