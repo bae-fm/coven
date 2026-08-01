@@ -80,40 +80,79 @@ impl From<crate::sync::store::MembershipOpsError> for SyncError {
     }
 }
 
+/// Who runs sync cycles for a connected cloud.
+///
+/// Production always connects under `Loop`: a background thread runs cycles on a
+/// timer and on trigger, and an operation that queues work for a cycle to carry
+/// out refuses once that thread is gone. `Caller` is the test-only alternative —
+/// no thread exists and the host drives sync itself, so its own `drain_uploads`
+/// is the only drain that runs and cannot lose a race with a cycle's.
+enum SyncDriver {
+    Loop,
+    #[cfg(any(test, feature = "test-utils"))]
+    Caller,
+}
+
+/// The store's sync connection.
+///
+/// Three questions that used to travel as one: whether a connection is installed
+/// at all, whether it has a cloud to talk to, and — within `WithCloud` — who runs
+/// its cycles. Each capability asks for exactly the state it needs. Reading the
+/// connected cloud's path scheme needs only a cloud. Queueing a blob transition
+/// needs a driver that will carry it out. A Circle write command needs the loop
+/// *thread* itself, because that thread services the command channel.
 enum SyncConnection {
+    /// No connection installed: none was ever made, or the last was discarded.
     Disconnected,
-    Connected {
-        loop_handle: Option<Arc<SyncLoopHandle>>,
-        storage: Option<Arc<dyn SyncStorage>>,
+    /// Connected with no cloud attached — either no provider is configured, or
+    /// `stop_sync` released the one that was. `start_sync` rebuilds from config.
+    WithoutCloud,
+    /// Connected over a cloud provider.
+    WithCloud {
+        sync: Arc<SyncLoopHandle>,
+        storage: Arc<dyn SyncStorage>,
+        driver: SyncDriver,
     },
 }
 
 impl SyncConnection {
-    fn active_loop(&self) -> Option<Arc<SyncLoopHandle>> {
+    /// The connected cloud's sync, whether or not anything is currently driving
+    /// it. For reads and lookups that only need the connection's own facts.
+    fn cloud_sync(&self) -> Option<Arc<SyncLoopHandle>> {
         match self {
-            Self::Disconnected => None,
-            Self::Connected { loop_handle, .. } => loop_handle.clone(),
+            Self::WithCloud { sync, .. } => Some(Arc::clone(sync)),
+            _ => None,
+        }
+    }
+
+    /// The connected cloud's sync, when something is driving it. A connection
+    /// whose loop thread has gone has nothing to carry out the work an operation
+    /// would queue, so it is not driven and every such operation refuses.
+    fn driven_sync(&self) -> Option<Arc<SyncLoopHandle>> {
+        match self {
+            Self::WithCloud { sync, driver, .. } => match driver {
+                SyncDriver::Loop => sync.is_running().then(|| Arc::clone(sync)),
+                #[cfg(any(test, feature = "test-utils"))]
+                SyncDriver::Caller => Some(Arc::clone(sync)),
+            },
+            _ => None,
         }
     }
 
     fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
         match self {
-            Self::Disconnected => None,
-            Self::Connected { storage, .. } => storage.clone(),
+            Self::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+            _ => None,
         }
     }
 
     fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected { .. })
+        !matches!(self, Self::Disconnected)
     }
 
     fn stop(self) -> Result<(), SyncError> {
-        if let Self::Connected {
-            loop_handle: Some(handle),
-            ..
-        } = self
-        {
-            handle.stop().map_err(SyncError::Loop)?;
+        if let Self::WithCloud { sync, .. } = self {
+            sync.stop().map_err(SyncError::Loop)?;
         }
         Ok(())
     }
@@ -174,32 +213,38 @@ impl StoreSync {
         (self.config_provider)()
     }
 
-    fn active_loop(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.connection.read().unwrap().active_loop()
+    fn cloud_sync(&self) -> Option<Arc<SyncLoopHandle>> {
+        self.connection.read().unwrap().cloud_sync()
     }
 
-    fn running_loop(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.active_loop().filter(|handle| handle.is_running())
+    fn driven_sync(&self) -> Option<Arc<SyncLoopHandle>> {
+        self.connection.read().unwrap().driven_sync()
     }
 
     #[cfg(test)]
-    pub(crate) fn active_loop_for_test(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.active_loop()
+    pub(crate) fn cloud_sync_for_test(&self) -> Option<Arc<SyncLoopHandle>> {
+        self.cloud_sync()
     }
 
     fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
         self.connection.read().unwrap().storage()
     }
 
-    fn install_connection(
+    fn install_cloud(
         &self,
-        loop_handle: Option<Arc<SyncLoopHandle>>,
-        storage: Option<Arc<dyn SyncStorage>>,
+        sync: Arc<SyncLoopHandle>,
+        storage: Arc<dyn SyncStorage>,
+        driver: SyncDriver,
     ) {
-        *self.connection.write().unwrap() = SyncConnection::Connected {
-            loop_handle,
+        *self.connection.write().unwrap() = SyncConnection::WithCloud {
+            sync,
             storage,
+            driver,
         };
+    }
+
+    fn install_without_cloud(&self) {
+        *self.connection.write().unwrap() = SyncConnection::WithoutCloud;
     }
 
     fn take_connection(&self) -> SyncConnection {
@@ -215,7 +260,7 @@ impl StoreSync {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<(), SyncError> {
         if config.cloud_home.provider.is_none() {
-            self.install_connection(None, None);
+            self.install_without_cloud();
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
         }
@@ -252,9 +297,10 @@ impl StoreSync {
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
         let storage: Arc<dyn SyncStorage> = storage;
-        let loop_handle =
-            self.start_loop(components, config, storage.clone(), routing_encryption)?;
-        self.install_connection(Some(loop_handle), Some(storage));
+        let sync = self.build_sync(components, config, storage.clone(), routing_encryption);
+        sync.start().map_err(SyncError::Loop)?;
+        info!("Sync loop started");
+        self.install_cloud(sync, storage, SyncDriver::Loop);
         Ok(())
     }
 
@@ -280,20 +326,23 @@ impl StoreSync {
         .map_err(SyncError::from)
     }
 
-    fn start_loop(
+    /// Assemble the connected sync over `storage`. The loop thread is a separate
+    /// decision the caller makes: production starts it, a caller-driven test
+    /// connection leaves it unstarted.
+    fn build_sync(
         &self,
         components: SyncComponents,
         config: Config,
         storage: Arc<dyn SyncStorage>,
         routing_encryption: Option<EncryptionService>,
-    ) -> Result<Arc<SyncLoopHandle>, SyncError> {
+    ) -> Arc<SyncLoopHandle> {
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
             self.local_blob_access.connect(storage),
             routing_encryption,
             self.observer.clone(),
         );
-        let handle = Arc::new(SyncLoopHandle::new(
+        Arc::new(SyncLoopHandle::new(
             components,
             blob_transitions,
             self.security.clone(),
@@ -302,10 +351,7 @@ impl StoreSync {
             self.observer.clone(),
             self.open_guard.clone(),
             self.status_tx.clone(),
-        ));
-        handle.start().map_err(SyncError::Loop)?;
-        info!("Sync loop started");
-        Ok(handle)
+        ))
     }
 
     async fn replace_connection(
@@ -339,12 +385,16 @@ impl StoreSync {
         Ok(())
     }
 
+    /// Build a connection over an injected cloud home, replacing whatever was
+    /// connected before. The returned sync is assembled but unstarted; the caller
+    /// decides whether a loop thread or the caller itself drives it, and installs
+    /// it accordingly.
     #[cfg(any(test, feature = "test-utils"))]
-    async fn replace_with_test_home(
+    async fn build_test_connection(
         &self,
         home: Arc<dyn CloudHome>,
         cipher: crate::storage::CloudCipher,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(Arc<SyncLoopHandle>, Arc<dyn SyncStorage>), SyncError> {
         let config = self.config();
         crate::storage::cloud::setup::require_exact_slot_capabilities_home(
             home.clone(),
@@ -375,9 +425,20 @@ impl StoreSync {
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
         let storage: Arc<dyn SyncStorage> = storage;
-        let loop_handle =
-            self.start_loop(components, config, storage.clone(), routing_encryption)?;
-        self.install_connection(Some(loop_handle), Some(storage));
+        let sync = self.build_sync(components, config, storage.clone(), routing_encryption);
+        Ok((sync, storage))
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn replace_with_test_home(
+        &self,
+        home: Arc<dyn CloudHome>,
+        cipher: crate::storage::CloudCipher,
+    ) -> Result<(), SyncError> {
+        let (sync, storage) = self.build_test_connection(home, cipher).await?;
+        sync.start().map_err(SyncError::Loop)?;
+        info!("Sync loop started");
+        self.install_cloud(sync, storage, SyncDriver::Loop);
         Ok(())
     }
 
@@ -390,6 +451,21 @@ impl StoreSync {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher).await?;
         info!("store sync connected over an injected test cloud home");
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn connect_with_test_home_caller_driven(
+        &self,
+        home: Arc<dyn CloudHome>,
+        cipher: crate::storage::CloudCipher,
+    ) -> Result<(), SyncError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let (sync, storage) = self.build_test_connection(home, cipher).await?;
+        self.install_cloud(sync, storage, SyncDriver::Caller);
+        info!(
+            "store sync connected over an injected test cloud home; the caller drives its cycles"
+        );
         Ok(())
     }
 
@@ -423,7 +499,7 @@ impl StoreSync {
             error!("stop_sync failed: {stop_error}");
         }
         if was_connected {
-            self.install_connection(None, None);
+            self.install_without_cloud();
         } else {
             debug!("stop_sync: no provider connected; nothing to stop");
         }
@@ -438,14 +514,14 @@ impl StoreSync {
     }
 
     pub(crate) fn trigger(&self) {
-        match self.active_loop() {
+        match self.cloud_sync() {
             Some(sync_loop) => sync_loop.trigger(),
-            None => debug!("sync_now: no running sync loop; sync wake ignored"),
+            None => debug!("sync_now: no cloud connection; sync wake ignored"),
         }
     }
 
     pub(crate) fn is_syncing(&self) -> bool {
-        self.active_loop().is_some_and(|handle| handle.is_running())
+        self.cloud_sync().is_some_and(|handle| handle.is_running())
     }
 
     pub(crate) fn is_connected(&self) -> bool {
@@ -459,7 +535,7 @@ impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        let store = self.active_loop()?.store();
+        let store = self.cloud_sync()?.store();
         Some(
             store
                 .host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir.clone()),
@@ -583,7 +659,7 @@ impl StoreSync {
     }
 
     pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let (scheme, uploader) = match self.active_loop() {
+        let (scheme, uploader) = match self.cloud_sync() {
             Some(sync_loop) => (
                 sync_loop.blob_path_scheme(),
                 Some(sync_loop.self_uploader()),
@@ -615,7 +691,7 @@ impl StoreSync {
         root_id: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        let sync_loop = self.running_loop().ok_or(MakeRemoteError::SyncNotReady)?;
+        let sync_loop = self.driven_sync().ok_or(MakeRemoteError::SyncNotReady)?;
         sync_loop.make_remote(root_table, root_id, pin).await?;
         self.trigger();
         Ok(())
@@ -626,7 +702,7 @@ impl StoreSync {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        let sync_loop = self.running_loop().ok_or(MakeRemoteError::SyncNotReady)?;
+        let sync_loop = self.driven_sync().ok_or(MakeRemoteError::SyncNotReady)?;
         sync_loop.cancel_make_remote(root_table, root_id).await?;
         self.trigger();
         Ok(())
@@ -639,7 +715,7 @@ impl StoreSync {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        let sync_loop = self.running_loop().ok_or(MakeLocalError::SyncNotReady)?;
+        let sync_loop = self.driven_sync().ok_or(MakeLocalError::SyncNotReady)?;
         sync_loop
             .make_local(root_table, root_id, dest, cancel)
             .await?;
@@ -650,7 +726,7 @@ impl StoreSync {
     pub(crate) async fn drain_uploads(
         &self,
     ) -> Result<crate::blob::upload::DrainOutcome, SyncError> {
-        self.running_loop()
+        self.driven_sync()
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()
             .await
@@ -661,7 +737,7 @@ impl StoreSync {
         &self,
         write_id: crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, SyncError> {
-        self.running_loop()
+        self.driven_sync()
             .ok_or(SyncError::LoopNotRunning)?
             .discard_blocked_write(write_id)
             .await
@@ -669,11 +745,11 @@ impl StoreSync {
     }
 
     pub(crate) fn is_command_configured(&self) -> bool {
-        self.active_loop().is_some() || self.config().cloud_home.provider.is_some()
+        self.cloud_sync().is_some() || self.config().cloud_home.provider.is_some()
     }
 
     pub(crate) fn command_config(&self) -> Config {
-        self.active_loop()
+        self.cloud_sync()
             .map(|handle| handle.config().clone())
             .unwrap_or_else(|| self.config())
     }
@@ -707,7 +783,7 @@ impl StoreSync {
 
     #[cfg(test)]
     pub(crate) fn loop_uses_connected_storage_for_test(&self) -> bool {
-        match (self.storage(), self.active_loop()) {
+        match (self.storage(), self.cloud_sync()) {
             (Some(storage), Some(sync_loop)) => sync_loop.uses_storage_for_test(&storage),
             _ => false,
         }
@@ -719,24 +795,24 @@ impl StoreSync {
     }
 
     pub(crate) fn active_store(&self) -> Result<Arc<Store>, SyncError> {
-        Ok(self
-            .running_loop()
-            .ok_or(SyncError::LoopNotRunning)?
-            .store())
+        Ok(self.driven_sync().ok_or(SyncError::LoopNotRunning)?.store())
     }
 
     pub(crate) fn active_membership(&self) -> Result<ActiveMembershipSync, SyncError> {
         Ok(ActiveMembershipSync {
-            loop_handle: self.running_loop().ok_or(SyncError::LoopNotRunning)?,
+            loop_handle: self.driven_sync().ok_or(SyncError::LoopNotRunning)?,
         })
     }
 
+    /// Circle *writes* are dispatched to the loop thread and executed there, so
+    /// this is the one capability that needs the thread itself rather than a
+    /// driven connection — and it says which of the two is missing.
     pub(crate) fn active_circles(&self) -> Result<ActiveCircleSync, crate::CircleError> {
-        Ok(ActiveCircleSync {
-            loop_handle: self
-                .running_loop()
-                .ok_or(crate::CircleError::LoopNotRunning)?,
-        })
+        let sync = self.cloud_sync().ok_or(crate::CircleError::NotConfigured)?;
+        if !sync.is_running() {
+            return Err(crate::CircleError::LoopNotRunning);
+        }
+        Ok(ActiveCircleSync { loop_handle: sync })
     }
 }
 

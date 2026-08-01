@@ -555,6 +555,56 @@ impl BlobTransitionObserver for PausingObserver {
     }
 }
 
+/// An empty queue is its own answer, not a zero count. This is the disposition
+/// that separates "there was nothing to do" from "the work was done" — the two a
+/// caller cannot tell apart from `uploaded: 0` alone, and the pair that made an
+/// explicit drain racing a sync cycle's drain look like a success to the loser.
+#[tokio::test]
+async fn empty_queue_reports_itself_rather_than_a_zero_count() {
+    let fixture = upload_fixture(1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DrainOutcome::QueueEmpty));
+    assert_eq!(fixture.home.create_calls(), 0);
+}
+
+/// A pass that finishes what an earlier pass created counts no upload — the
+/// object was already written — but it is a `Drained` pass, not an empty one:
+/// the entry was attempted and retired here.
+#[tokio::test]
+async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
+    let fixture = upload_fixture(1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("twice001", b"bytes")], false).await;
+
+    assert_eq!(
+        run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+            .await
+            .unwrap()
+            .uploaded(),
+        1
+    );
+    assert!(is_created(&journal(&fixture, "twice001").await));
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.uploaded(),
+        0,
+        "the object was created by the first pass, so this one creates none",
+    );
+    assert!(outcome.failures().failures().is_empty());
+    assert_eq!(
+        fixture.home.create_calls(),
+        1,
+        "and no second object was written for it",
+    );
+}
+
 #[tokio::test]
 async fn provider_upload_failure_remains_typed() {
     let fixture = upload_fixture(1).await;
@@ -571,11 +621,11 @@ async fn provider_upload_failure_remains_typed() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.failures.failures().len(), 1);
-    assert!(outcome.failures.has_transport_failure());
+    assert_eq!(outcome.failures().failures().len(), 1);
+    assert!(outcome.failures().has_transport_failure());
     assert!(crate::sync::cycle::SyncCycleFailure::operation(
         "upload queued blob",
-        outcome.failures,
+        outcome.into_failures(),
     )
     .is_offline());
 }
@@ -596,10 +646,10 @@ async fn bad_item_does_not_block_good_later_item() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 1);
-    assert_eq!(outcome.failures.failures().len(), 1);
+    assert_eq!(outcome.uploaded(), 1);
+    assert_eq!(outcome.failures().failures().len(), 1);
     assert!(matches!(
-        outcome.failures.failures()[0].cause,
+        outcome.failures().failures()[0].cause,
         super::upload::UploadFailureCause::Storage(_)
     ));
     assert_eq!(journal_attempt(&fixture, "bad00001").await.0, 1);
@@ -620,7 +670,7 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 0);
+    assert_eq!(outcome.uploaded(), 0);
     assert_eq!(fixture.home.create_calls(), 0);
     let (_, error, _) = journal_attempt(&fixture, "rotate01").await;
     assert!(error.unwrap().contains("PeerCommitted { generation: 2 }"));
@@ -666,7 +716,7 @@ async fn backoff_skips_item_inside_window() {
         .unwrap();
 
     let observer = RecordingObserver::new();
-    run_drain(
+    let outcome = run_drain(
         &fixture,
         &store_dir,
         &fixed_clock("2024-06-01T00:00:10Z"),
@@ -674,6 +724,9 @@ async fn backoff_skips_item_inside_window() {
     )
     .await
     .unwrap();
+    // The entry is still queued, just not due — reported as its own disposition
+    // so a caller cannot read the skipped pass as a drained queue.
+    assert!(matches!(outcome, DrainOutcome::AllInBackoff));
     assert_eq!(fixture.home.create_calls(), 0);
     assert!(observer.events().is_empty());
     assert_eq!(journal_attempt(&fixture, "backoff1").await.0, 1);
@@ -927,7 +980,7 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
         run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
             .await
             .unwrap()
-            .uploaded,
+            .uploaded(),
         1
     );
     let entry = journal(&fixture, "pinaaaa1").await;
@@ -980,8 +1033,8 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 0);
-    assert_eq!(outcome.failures.failures().len(), 1);
+    assert_eq!(outcome.uploaded(), 0);
+    assert_eq!(outcome.failures().failures().len(), 1);
     let entry = journal(&fixture, "pinfail1").await;
     assert!(is_created(&entry));
     assert!(
@@ -1018,7 +1071,7 @@ async fn limit_one_drains_every_entry_in_order() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 3);
+    assert_eq!(outcome.uploaded(), 3);
     for id in &ids {
         assert!(is_created(&journal(&fixture, id).await));
     }
@@ -1055,7 +1108,7 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 4);
+    assert_eq!(outcome.uploaded(), 4);
     assert_eq!(home.max_inflight(), 2);
     assert_eq!(home.keys().len(), 4);
     for id in ids {
@@ -1083,8 +1136,8 @@ async fn concurrent_drain_isolates_a_failed_upload() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 2);
-    assert_eq!(outcome.failures.failures().len(), 1);
+    assert_eq!(outcome.uploaded(), 2);
+    assert_eq!(outcome.failures().failures().len(), 1);
     assert!(is_created(&journal(&fixture, "good000a").await));
     assert!(is_created(&journal(&fixture, "good000c").await));
     assert_eq!(journal_attempt(&fixture, "bad0000b").await.0, 1);
@@ -1100,7 +1153,9 @@ async fn paused_queue_admits_nothing_under_concurrency() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 0);
+    // The pass reports the pause rather than a zero count, so a caller cannot
+    // read "the host has uploads held" as "the queue is drained".
+    assert!(matches!(outcome, DrainOutcome::Paused));
     assert_eq!(fixture.home.create_calls(), 0);
     assert!(observer.started().is_empty());
     for id in ids {
@@ -1118,7 +1173,7 @@ async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
-    assert_eq!(outcome.uploaded, 1);
+    assert_eq!(outcome.uploaded(), 1);
     assert_eq!(observer.started(), vec![ids[0].clone()]);
     assert!(is_created(&journal(&fixture, &ids[0]).await));
     assert!(!is_created(&journal(&fixture, &ids[1]).await));

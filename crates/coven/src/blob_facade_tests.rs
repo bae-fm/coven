@@ -360,15 +360,23 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         "so did the transition state",
     );
 
-    // Draining performs the transfers the queue was holding.
+    // Draining performs the transfers the queue was holding. The reconnect starts
+    // no loop, so this drain is the only one — what it reports is what moved.
     reopened
-        .connect_sync_with_test_home(
+        .connect_sync_with_test_home_caller_driven(
             store.home.clone(),
             crate::storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
         )
         .await
         .expect("reconnect the relaunched store");
-    reopened.drain_uploads().await.expect("drain the queue");
+    let outcome = reopened.drain_uploads().await.expect("drain the queue");
+    assert!(
+        matches!(
+            outcome,
+            crate::blob::upload::DrainOutcome::Drained { uploaded: 1, .. }
+        ),
+        "the drain uploaded the queued photo: {outcome:?}",
+    );
 
     // The upload has landed, so the transition has left the uploading stage.
     let after_drain = reopened

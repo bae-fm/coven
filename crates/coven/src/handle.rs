@@ -527,6 +527,35 @@ impl CovenHandle {
         self.sync.connect_with_test_home(home, cipher).await
     }
 
+    /// Test-only: connect over an injected [`CloudHome`] exactly as
+    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) does,
+    /// but start no background loop — the caller drives sync itself.
+    ///
+    /// The loop-started connect and an explicit
+    /// [`drain_uploads`](Self::drain_uploads) are two drainers of one queue. Both
+    /// see the same rows, both succeed, and whichever loses reports an empty
+    /// queue — a host asserting on its own drain's count reads that as "nothing
+    /// was queued" and fails intermittently. Here no cycle exists to race: the
+    /// host's `drain_uploads` is the only drain, its count is the whole truth,
+    /// and [`is_syncing`](Self::is_syncing) stays `false` for the connection's
+    /// whole life.
+    ///
+    /// Everything a connected store can do is available — `make_remote`,
+    /// `make_local`, the drain, membership — because none of it needs the loop
+    /// thread. Circle *writes* are the exception: they are dispatched to that
+    /// thread, so they refuse with
+    /// [`CircleError::LoopNotRunning`](crate::CircleError::LoopNotRunning) here.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn connect_sync_with_test_home_caller_driven(
+        &self,
+        home: Arc<dyn CloudHome>,
+        cipher: CloudCipher,
+    ) -> Result<(), SyncError> {
+        self.sync
+            .connect_with_test_home_caller_driven(home, cipher)
+            .await
+    }
+
     /// Test-only: connect over an injected [`CloudHome`] while resolving the
     /// at-rest cipher from custody the way production
     /// [`connect_sync`](Self::connect_sync) does, instead of taking an explicit
@@ -839,14 +868,6 @@ impl CovenHandle {
             .await
     }
 
-    /// Drain pending blob uploads now: read each local file, seal it under its
-    /// scope, write it to the cloud, and keep a `retain_pinned` entry's plaintext
-    /// in the protected cache. Returns the [`DrainOutcome`].
-    ///
-    /// The sync loop drains each cycle; this drives a drain directly off the
-    /// connected home, against coven's own register clock and the handle's
-    /// observer. Errors when no provider is connected (there is no cloud to write
-    /// to).
     /// Every upload the durable queue is holding, oldest first.
     ///
     /// An upload appears here the moment [`make_remote`](Self::make_remote)
@@ -930,6 +951,22 @@ impl CovenHandle {
         self.blobs.make_remote_progress(root_table, root_id).await
     }
 
+    /// Drain pending blob uploads now: read each local file, seal it under its
+    /// scope, write it to the cloud, and keep a `retain_pinned` entry's plaintext
+    /// in the protected cache.
+    ///
+    /// The sync loop drains each cycle; this drives a drain directly off the
+    /// connected home, against coven's own register clock and the handle's
+    /// observer. Errors when no provider is connected (there is no cloud to write
+    /// to).
+    ///
+    /// The [`DrainOutcome`] says what the pass found, not just how much it moved:
+    /// an empty queue, a queue held entirely in retry backoff, and a paused one
+    /// are each their own answer rather than a zero count. A host that connects
+    /// with a running loop has *two* drainers of one queue and gets whichever
+    /// answer the race leaves it; `connect_sync_with_test_home_caller_driven`
+    /// (test builds only) connects without a loop, so this call is the only
+    /// drain.
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
         self.blobs.drain_uploads().await
     }
@@ -1872,9 +1909,9 @@ mod tests {
             .drain_uploads()
             .await
             .expect("drain the prepared exact blob through the public handle");
-        assert_eq!(outcome.uploaded, 1);
-        assert!(outcome.yielded_for_publish);
-        assert!(outcome.failures.failures().is_empty());
+        assert_eq!(outcome.uploaded(), 1);
+        assert!(outcome.yielded_for_publish());
+        assert!(outcome.failures().failures().is_empty());
 
         let blob = handle
             .row_blob_ref("note_photos", "cover-1")
@@ -1906,6 +1943,156 @@ mod tests {
         assert_eq!(
             read, plaintext,
             "read_blob fetched the blob's plaintext from the injected test home",
+        );
+    }
+
+    /// `connect_sync_with_test_home_caller_driven` installs the same connection
+    /// its loop-starting sibling does, minus the loop thread — so the host's own
+    /// `drain_uploads` is the only drain of the queue, and its count is the whole
+    /// truth about what went to the cloud.
+    ///
+    /// The loop-started connect cannot promise that. Its cycle drains the same
+    /// queue the host does; both succeed, and whichever runs second finds the
+    /// rows gone and reports an empty queue. A host asserting "my drain uploaded
+    /// one blob" therefore fails intermittently, which is what sent this test
+    /// here. Nothing below waits for a window to elapse: with no thread there is
+    /// no second drainer to wait for, and every assertion holds by construction.
+    #[tokio::test]
+    async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_caller_driven_connect_leaves_the_only_drain())
+                    .await
+                    .expect("caller-driven connect task");
+            })
+            .await;
+    }
+
+    async fn run_caller_driven_connect_leaves_the_only_drain() {
+        test_keyring::install();
+
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = host_blob_test_db("images");
+
+        let mut config = Config::with_defaults(
+            "lib-caller-driven".to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        config.cloud_home.storage = HomeStorage::Opaque;
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let signer = crate::keys::UserKeypair::generate();
+        let store = TestStore::create(&db, "lib-caller-driven", signer.clone())
+            .await
+            .expect("create exact test Store");
+        let store_keys = test_store_keys("lib-caller-driven");
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            .resolve(&store_keys, &store_dir);
+
+        let handle = CovenHandle::new(
+            db.clone(),
+            // `read_db`: this test never calls `sql_read`, and the test db is
+            // `:memory:` (no shareable read-only companion), so the writer clone
+            // stands in.
+            db.clone(),
+            db.stamper(),
+            store_dir.clone(),
+            config_provider,
+            store_keys,
+            test_key_custody(),
+            identity_custody,
+            crate::oauth::OAuthClients::empty(),
+            Arc::new(SystemClock),
+            None,
+            // No paused-drain observer: holding a running loop off the queue is
+            // the dance this connect exists to remove.
+            None,
+            StoreOpenGuard::acquire_for_test(&store_dir),
+            crate::storage::BlobChunking::DEFAULT,
+        );
+
+        let home = store.home.clone();
+        handle
+            .connect_sync_with_test_home_caller_driven(
+                home.clone(),
+                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            )
+            .await
+            .expect("connect over the injected test home without a loop");
+        let sync = handle
+            .sync
+            .cloud_sync_for_test()
+            .expect("the cloud connection is installed");
+        assert!(
+            !sync.is_running(),
+            "the connect started no loop thread, so none can drain the queue",
+        );
+        assert!(!handle.is_syncing());
+
+        let plaintext = b"caller-driven-cover-art".to_vec();
+        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .make_remote("notes", "note-cover-1", false)
+            .await
+            .expect("queue the exact row/blob transition");
+
+        // The queue still holds the upload. No cycle exists to have taken it, so
+        // this is a fact about the connection rather than a race this test won.
+        assert_eq!(
+            handle
+                .queued_uploads()
+                .await
+                .expect("read the durable upload queue")
+                .len(),
+            1,
+        );
+        let local = handle
+            .row_blob_ref("note_photos", "cover-1")
+            .await
+            .expect("capture Local row before the drain");
+        assert!(matches!(
+            local.authority(),
+            crate::blob::RowBlobAuthority::Local
+        ));
+
+        let outcome = handle
+            .drain_uploads()
+            .await
+            .expect("drain the queue through the public handle");
+        assert!(
+            matches!(
+                outcome,
+                DrainOutcome::Drained {
+                    uploaded: 1,
+                    yielded_for_publish: true,
+                    ..
+                }
+            ),
+            "the caller's drain uploaded the blob and reported it: {outcome:?}",
+        );
+
+        // The blob's bytes are in the injected home, read back through the row's
+        // own published locator.
+        let blob = handle
+            .row_blob_ref("note_photos", "cover-1")
+            .await
+            .expect("capture Remote row after the drain");
+        assert_eq!(
+            handle
+                .read_blob(&blob)
+                .await
+                .expect("read through the handle"),
+            plaintext,
+        );
+
+        assert!(
+            !handle.is_syncing(),
+            "no loop thread appeared over the connection's life",
         );
     }
 
@@ -2014,8 +2201,8 @@ mod tests {
             .drain_uploads()
             .await
             .expect("drain the prepared exact blob through the public handle");
-        assert_eq!(outcome.uploaded, 1);
-        assert!(outcome.failures.failures().is_empty());
+        assert_eq!(outcome.uploaded(), 1);
+        assert!(outcome.failures().failures().is_empty());
 
         let blob = handle
             .row_blob_ref("note_photos", "cover-1")
@@ -3024,7 +3211,7 @@ mod tests {
             .expect("first connect over injected home");
         let first_loop = handle
             .sync
-            .active_loop_for_test()
+            .cloud_sync_for_test()
             .expect("first loop installed");
         assert!(first_loop.is_running(), "first loop starts running");
 
@@ -3034,7 +3221,7 @@ mod tests {
             .expect("second connect over injected home");
         let replacement_loop = handle
             .sync
-            .active_loop_for_test()
+            .cloud_sync_for_test()
             .expect("replacement loop installed");
 
         assert!(
@@ -3099,7 +3286,7 @@ mod tests {
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
-        let loop_handle = handle.sync.active_loop_for_test().expect("loop installed");
+        let loop_handle = handle.sync.cloud_sync_for_test().expect("loop installed");
 
         loop_handle.stop().expect("stop installed loop");
 
@@ -3180,7 +3367,7 @@ mod tests {
             .expect("connect encrypted injected home");
         let loop_handle = handle
             .sync
-            .active_loop_for_test()
+            .cloud_sync_for_test()
             .expect("sync loop installed");
 
         {

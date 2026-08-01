@@ -8,8 +8,9 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use crate::blob::upload::DrainOutcome;
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::database::DbError;
@@ -441,15 +442,27 @@ impl AuthorizedSyncCycle<'_, '_> {
                 )
                 .await
                 .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
-            if outcome.failures.has_transport_failure() {
-                return Err(SyncCycleFailure::operation(
-                    "upload queued blobs",
-                    outcome.failures,
-                ));
-            }
-            resume_drain_promptly = outcome.yielded_for_publish;
-            if outcome.uploaded > 0 {
-                info!(count = outcome.uploaded, "Drained blob uploads");
+            match outcome {
+                DrainOutcome::Drained {
+                    uploaded,
+                    yielded_for_publish,
+                    failures,
+                } => {
+                    if failures.has_transport_failure() {
+                        return Err(SyncCycleFailure::operation("upload queued blobs", failures));
+                    }
+                    resume_drain_promptly = yielded_for_publish;
+                    if uploaded > 0 {
+                        info!(count = uploaded, "Drained blob uploads");
+                    }
+                }
+                DrainOutcome::QueueEmpty => {}
+                DrainOutcome::AllInBackoff => {
+                    debug!("Every queued blob upload is inside its retry backoff");
+                }
+                DrainOutcome::Paused => {
+                    debug!("Blob uploads are paused by the host; nothing was admitted");
+                }
             }
         }
 

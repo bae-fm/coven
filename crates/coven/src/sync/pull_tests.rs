@@ -547,8 +547,8 @@ async fn make_test_root_remote(
     )
     .await
     .expect("upload exact blob fixture");
-    assert!(outcome.uploaded > 0);
-    assert!(outcome.yielded_for_publish);
+    assert!(outcome.uploaded() > 0);
+    assert!(outcome.yielded_for_publish());
     assert!(storage
         .publish_pending(db, store_dir)
         .await

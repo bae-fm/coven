@@ -113,6 +113,7 @@ pub(crate) mod upload;
 #[cfg(test)]
 pub(crate) use delete::BLOB_TOMBSTONE_GRACE;
 pub use transition::{MakeLocalError, MakeRemoteError};
+pub use upload::{DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures};
 
 use sha2::{Digest, Sha256};
 

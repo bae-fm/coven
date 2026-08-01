@@ -483,8 +483,8 @@ async fn seed_remote_release(
     )
     .await
     .expect("create exact remote fixture blob");
-    assert_eq!(outcome.uploaded, 1);
-    assert!(outcome.yielded_for_publish);
+    assert_eq!(outcome.uploaded(), 1);
+    assert!(outcome.yielded_for_publish());
     assert!(
         storage
             .publish_pending(db, store_dir)
@@ -1403,8 +1403,8 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     )
     .await
     .expect("retry scoped upload completion with routing encryption");
-    assert_eq!(outcome.uploaded, 1);
-    assert!(outcome.yielded_for_publish);
+    assert_eq!(outcome.uploaded(), 1);
+    assert!(outcome.yielded_for_publish());
     assert_eq!(shared_flag(&db, "n-user-scoped").await, 1);
     assert_eq!(pending_uploads(&db).await, 1);
     assert!(has_intent(&db, "notes", "n-user-scoped").await);
@@ -1520,8 +1520,8 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     )
     .await
     .expect("retry scoped host completion with routing encryption");
-    assert_eq!(completed.uploaded, 1);
-    assert!(completed.yielded_for_publish);
+    assert_eq!(completed.uploaded(), 1);
+    assert!(completed.yielded_for_publish());
     assert_eq!(storage.home.exact_create_count(), exact_creates_before + 1);
     assert_eq!(shared_flag(&db, "n-host-scoped").await, 1);
     assert!(
@@ -2733,9 +2733,9 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
         .await
         .expect("drain");
 
-    assert_eq!(outcome.failures.failures().len(), 1);
+    assert_eq!(outcome.failures().failures().len(), 1);
     assert!(
-        outcome.failures.failures()[0]
+        outcome.failures().failures()[0]
             .cause
             .to_string()
             .contains("make_remote intent"),

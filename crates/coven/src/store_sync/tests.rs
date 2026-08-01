@@ -274,7 +274,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     )
     .await
     .expect("install active loop");
-    let active_loop = sync.active_loop().expect("active loop");
+    let active_loop = sync.cloud_sync().expect("active loop");
 
     {
         let mut config = config.write().expect("write config");
@@ -335,11 +335,11 @@ async fn test_home_replacement_stops_the_previous_loop() {
     connect_test_home(sync.clone(), home.clone(), CloudCipher::Plaintext)
         .await
         .expect("first test home starts");
-    let first_loop = sync.active_loop().expect("first loop installed");
+    let first_loop = sync.cloud_sync().expect("first loop installed");
     connect_test_home(sync.clone(), home, CloudCipher::Plaintext)
         .await
         .expect("replacement test home starts");
-    let replacement = sync.active_loop().expect("replacement loop installed");
+    let replacement = sync.cloud_sync().expect("replacement loop installed");
 
     assert!(!first_loop.is_running());
     assert!(replacement.is_running());
@@ -385,7 +385,7 @@ async fn failed_restart_leaves_no_stale_connection() {
         .await
         .expect_err("invalid configured provider fails restart");
     assert!(error.to_string().contains("failed to build cloud home"));
-    assert!(sync.active_loop().is_none());
+    assert!(sync.cloud_sync().is_none());
     assert!(!sync.has_remote_storage_for_test());
 }
 
@@ -424,7 +424,7 @@ async fn connect_rejects_a_missing_device_identity() {
         .await
         .expect_err("missing device identity must fail the connect");
     assert!(matches!(error, SyncError::Key(KeyError::NoDeviceIdentity)));
-    assert!(sync.active_loop().is_none());
+    assert!(sync.cloud_sync().is_none());
     assert!(!sync.has_remote_storage_for_test());
 }
 
@@ -483,7 +483,7 @@ async fn foreign_founder_installs_no_connection() {
         error,
         SyncError::Init(crate::sync::cycle::InitSyncError::StoreProtocolRoot(_))
     ));
-    assert!(sync.active_loop().is_none());
+    assert!(sync.cloud_sync().is_none());
     assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database

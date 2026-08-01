@@ -52,7 +52,8 @@ pub use database::rusqlite;
 pub use atomic_file::{write_atomic, WriteError};
 pub use blob::{
     content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    ContentHasher, MakeLocalError, MakeRemoteError, Provenance, RowBlobAuthority, RowBlobRef,
+    ContentHasher, DrainOutcome, MakeLocalError, MakeRemoteError, Provenance, RowBlobAuthority,
+    RowBlobRef, UploadFailure, UploadFailureCause, UploadFailures,
 };
 pub use changeset::{ChangeOp, RowChange};
 pub use circles::{CircleError, Circles};

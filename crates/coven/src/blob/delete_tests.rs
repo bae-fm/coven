@@ -381,7 +381,7 @@ async fn publish_exact_remote_blob_binding(
     )
     .await
     .expect("drain exact blob upload");
-    assert_eq!(outcome.uploaded, 1);
+    assert_eq!(outcome.uploaded(), 1);
     assert!(storage
         .publish_pending(db, store_dir)
         .await

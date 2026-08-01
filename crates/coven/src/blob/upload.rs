@@ -21,20 +21,87 @@ use crate::sync::hlc::Hlc;
 
 const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
-/// The result of one upload-queue drain pass.
-pub struct DrainOutcome {
-    /// Number of successful uploads this pass.
-    pub uploaded: usize,
-    /// The drain stopped early because an upload just *completed a make_remote*: the
-    /// last of a gated root's user-provided blobs landed, so coven flipped the gate true
-    /// and broke the drain so this cycle publishes the now-shareable subtree (and
-    /// the loop runs the next cycle promptly to drain any other root's blobs).
-    /// `false` when the queue drained in one pass (or stopped on a pause / left
-    /// only backed-off entries), so the loop waits its normal interval.
-    pub yielded_for_publish: bool,
-    /// Exact failed queue entries. Provider failures remain typed so the sync
-    /// loop can report Offline; local/semantic failures stay per-entry warnings.
-    pub failures: UploadFailures,
+/// What one upload-queue drain pass did.
+///
+/// A pass that uploads nothing does so for one of four unlike reasons, and the
+/// variant names which: the queue was empty, every entry was still inside its
+/// retry backoff, the host had uploads paused, or entries were attempted and
+/// none produced a new cloud object. Only [`Drained`](Self::Drained) carries a
+/// count, so "nothing happened" can never be read as "the work is done".
+#[derive(Debug)]
+pub enum DrainOutcome {
+    /// At least one queued entry was attempted.
+    Drained {
+        /// Cloud objects this pass created.
+        ///
+        /// Zero is a real answer here: an entry another pass had already created
+        /// but not finished — a drain that died between the cloud write and its
+        /// durable finalization — is finished by this pass and leaves the queue
+        /// without a new object being written, so it is not counted. The count
+        /// reports objects newly written to the cloud, not entries retired.
+        uploaded: usize,
+        /// The drain stopped early because an upload just *completed a make_remote*: the
+        /// last of a gated root's user-provided blobs landed, so coven flipped the gate true
+        /// and broke the drain so this cycle publishes the now-shareable subtree (and
+        /// the loop runs the next cycle promptly to drain any other root's blobs).
+        /// `false` when the queue drained in one pass, so the loop waits its
+        /// normal interval.
+        yielded_for_publish: bool,
+        /// Exact failed queue entries. Provider failures remain typed so the sync
+        /// loop can report Offline; local/semantic failures stay per-entry warnings.
+        failures: UploadFailures,
+    },
+    /// The queue held no entries at all.
+    QueueEmpty,
+    /// The queue held entries and every one of them is still inside its retry
+    /// backoff window, so none was attempted.
+    AllInBackoff,
+    /// The host's observer has uploads paused, so nothing was admitted. Entries
+    /// eligible to run are still queued and the next pass after a resume takes
+    /// them.
+    Paused,
+}
+
+/// Readers for a test that planted work and expects the pass to have attempted
+/// it. Each panics on any other disposition, so a drain that found an empty
+/// queue — the shape a lost race produces — fails the test where it happened
+/// instead of quietly reading as a zero count.
+#[cfg(test)]
+impl DrainOutcome {
+    #[track_caller]
+    fn drained(&self) -> (usize, bool, &UploadFailures) {
+        match self {
+            Self::Drained {
+                uploaded,
+                yielded_for_publish,
+                failures,
+            } => (*uploaded, *yielded_for_publish, failures),
+            other => panic!("expected a drain that attempted queued entries, got {other:?}"),
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn uploaded(&self) -> usize {
+        self.drained().0
+    }
+
+    #[track_caller]
+    pub(crate) fn yielded_for_publish(&self) -> bool {
+        self.drained().1
+    }
+
+    #[track_caller]
+    pub(crate) fn failures(&self) -> &UploadFailures {
+        self.drained().2
+    }
+
+    #[track_caller]
+    pub(crate) fn into_failures(self) -> UploadFailures {
+        match self {
+            Self::Drained { failures, .. } => failures,
+            other => panic!("expected a drain that attempted queued entries, got {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -59,7 +126,7 @@ pub struct UploadFailure {
     pub cause: UploadFailureCause,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UploadFailures(Vec<UploadFailure>);
 
 impl UploadFailures {
@@ -160,26 +227,15 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
     /// restarting during cleanup resets that exact journal to Pending.
     pub(crate) async fn drain(&self) -> Result<DrainOutcome, DbError> {
         let uploads = self.database.pending_blob_uploads().await?;
+        if uploads.is_empty() {
+            return Ok(DrainOutcome::QueueEmpty);
+        }
 
         let now = self.clock.now();
         let mut count = 0;
         let mut yielded_for_publish = false;
 
-        if uploads.is_empty() {
-            return Ok(DrainOutcome {
-                uploaded: 0,
-                yielded_for_publish: false,
-                failures: UploadFailures::default(),
-            });
-        }
-        // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
-        // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
-        // one, await it fully, then the next — same order-observable effects and error
-        // semantics. Prepared and Created handoffs are exact compare-and-set updates;
-        // the finalizer reads every row-version journal in one transaction and flips
-        // only when all are Created.
-        let limit = self.database.transfer_limits().uploads.get();
-        let mut pending = uploads
+        let eligible = uploads
             .into_iter()
             .map(|entry| {
                 crate::blob::retry::entry_in_backoff(&entry, now)
@@ -187,11 +243,28 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
             })
             .collect::<Result<Vec<_>, DbError>>()?
             .into_iter()
-            .filter_map(|(entry, in_backoff)| (!in_backoff).then_some(entry));
+            .filter_map(|(entry, in_backoff)| (!in_backoff).then_some(entry))
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            return Ok(DrainOutcome::AllInBackoff);
+        }
+
+        // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
+        // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
+        // one, await it fully, then the next — same order-observable effects and error
+        // semantics. Prepared and Created handoffs are exact compare-and-set updates;
+        // the finalizer reads every row-version journal in one transaction and flips
+        // only when all are Created.
+        let limit = self.database.transfer_limits().uploads.get();
+        let mut pending = eligible.into_iter();
         let mut inflight = FuturesUnordered::new();
         // Set once a pause is seen or a make_remote completes: stop admitting new
         // uploads while letting those already in flight finish (never aborting them).
         let mut stop_admitting = false;
+        // Entries this pass handed to an upload attempt. Zero means the pause was
+        // seen on the very first admission check, since eligible entries exist and
+        // nothing else stops admission before one is taken.
+        let mut admitted = 0usize;
         let mut failures = Vec::new();
 
         loop {
@@ -208,6 +281,7 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
                 let Some(entry) = pending.next() else {
                     break;
                 };
+                admitted += 1;
                 inflight.push(
                     BlobUploadAttempt::new(
                         self.database,
@@ -247,7 +321,10 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
             }
         }
 
-        Ok(DrainOutcome {
+        if admitted == 0 {
+            return Ok(DrainOutcome::Paused);
+        }
+        Ok(DrainOutcome::Drained {
             uploaded: count,
             yielded_for_publish,
             failures: UploadFailures(failures),
@@ -284,9 +361,10 @@ pub(crate) async fn drain_uploads(
 /// What one entry's upload attempt did, for [`BlobUploadQueue::drain`] to aggregate.
 enum EntryOutcome {
     /// The cloud write failed; the failure was recorded and the entry left queued.
-    /// Not counted toward [`DrainOutcome::uploaded`].
+    /// Not counted toward the drained pass's `uploaded`.
     NotUploaded(UploadFailure),
-    /// The cloud write succeeded (counts toward [`DrainOutcome::uploaded`]).
+    /// The cloud write succeeded. It counts toward the drained pass's `uploaded`
+    /// only when this pass is the one that created the object.
     /// `made_remote` is true iff the post-upload commit completed a make_remote, so
     /// the drain yields to publish and stops admitting new uploads.
     Uploaded {
