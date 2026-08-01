@@ -69,56 +69,15 @@ pub(crate) async fn open_pending_device_join_authority<'storage>(
     })
 }
 
-async fn joining_store_from_observation<'storage>(
-    observation: PendingDeviceJoinObservation<'storage>,
-    database: StoreDatabase,
-    identity: UserKeypair,
-) -> Result<JoiningStore<'storage>, DeviceJoinError> {
-    let PendingDeviceJoinObservation {
-        journal,
-        storage,
-        root,
-        history_verifier,
-    } = observation;
-    let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
-        database.clone(),
-        storage,
-        root.reference().clone(),
-    );
-    let keyrings = super::super::keyring::StoreKeyrings::new(storage, root.reference().clone());
-    let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
-        PendingDeviceJoinHistoryConstruction,
-        database,
-        storage,
-        root.clone(),
-        history_verifier,
-        blob_source,
-        keyrings,
-    );
-    let founder_pubkey = root.protocol().descriptor.founder_pubkey.clone();
-    let membership = history
-        .load_and_install_owner_membership(&founder_pubkey)
-        .await
-        .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-    history
-        .device_join()
-        .validate_store_owner()
-        .await
-        .map_err(database_error)?;
-    Ok(JoiningStore {
-        journal,
-        history,
-        membership,
-        identity,
-    })
-}
-
 #[cfg(test)]
 pub(crate) async fn begin_joining_store_from_pending<'storage>(
     pending: PendingDeviceJoinAuthority<'storage>,
     database: StoreDatabase,
 ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
-    joining_store_from_observation(pending.observation, database, pending.identity).await
+    pending
+        .observation
+        .into_joining_store(database, pending.identity)
+        .await
 }
 
 pub(crate) async fn resume_joining_store<'storage>(
@@ -130,7 +89,9 @@ pub(crate) async fn resume_joining_store<'storage>(
     attempt_id: DeviceJoinAttemptId,
 ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
     let observation = observe_pending_device_join(pending, storage, store_root, attempt_id).await?;
-    joining_store_from_observation(observation, database, identity.clone()).await
+    observation
+        .into_joining_store(database, identity.clone())
+        .await
 }
 
 #[derive(Clone)]
@@ -331,6 +292,50 @@ impl<'storage> JoiningStore<'storage> {
 }
 
 impl<'storage> PendingDeviceJoinObservation<'storage> {
+    async fn into_joining_store(
+        self,
+        database: StoreDatabase,
+        identity: UserKeypair,
+    ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
+        let Self {
+            journal,
+            storage,
+            root,
+            history_verifier,
+        } = self;
+        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+            database.clone(),
+            storage,
+            root.reference().clone(),
+        );
+        let keyrings = super::super::keyring::StoreKeyrings::new(storage, root.reference().clone());
+        let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
+            PendingDeviceJoinHistoryConstruction,
+            database,
+            storage,
+            root.clone(),
+            history_verifier,
+            blob_source,
+            keyrings,
+        );
+        let founder_pubkey = root.protocol().descriptor.founder_pubkey.clone();
+        let membership = history
+            .load_and_install_owner_membership(&founder_pubkey)
+            .await
+            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+        history
+            .device_join()
+            .validate_store_owner()
+            .await
+            .map_err(database_error)?;
+        Ok(JoiningStore {
+            journal,
+            history,
+            membership,
+            identity,
+        })
+    }
+
     async fn verify_offer(
         &mut self,
         identity: &UserKeypair,

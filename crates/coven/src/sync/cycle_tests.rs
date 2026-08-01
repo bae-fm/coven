@@ -2399,9 +2399,14 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         "test-lib",
         owner.clone(),
     );
+    let (_store_temp, store_dir) = temp_store_dir();
 
     cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir,
+        ),
         storage,
         cycle::StoreInitialization::CreateStore,
         None,
@@ -2457,9 +2462,14 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         "test-lib",
         owner,
     );
+    let (_store_temp, store_dir) = temp_store_dir();
 
     let error = match cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir,
+        ),
         storage,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
@@ -2519,8 +2529,13 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         owner,
     );
     let db = open_test_db();
+    let (_store_temp, store_dir) = temp_store_dir();
     let error = match cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir,
+        ),
         storage,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
@@ -2570,8 +2585,13 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         "test-lib",
         owner,
     );
+    let (_store_temp, store_dir) = temp_store_dir();
     cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir,
+        ),
         storage,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
@@ -2629,10 +2649,15 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
         "test-lib",
         victim.clone(),
     );
+    let (_store_temp, store_dir) = temp_store_dir();
 
     assert!(
         cycle::init_sync_over_storage(
             &crate::database::StoreDatabase::new(&db),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&db),
+                store_dir,
+            ),
             victim_storage,
             cycle::StoreInitialization::OpenStore {
                 expected_store_root: root,
@@ -2689,6 +2714,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "test-lib",
             owner.clone(),
         );
+        let (_store_temp, store_dir) = temp_store_dir();
         db.set_protocol_state(
             crate::storage::ROTATION_GATE_STATE_KEY,
             "invalid rotation gate",
@@ -2700,6 +2726,10 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         assert!(
             cycle::init_sync_over_storage(
                 &crate::database::StoreDatabase::new(&db),
+                crate::sync::test_owner_graph::local_blob_access(
+                    crate::database::StoreDatabase::new(&db),
+                    store_dir,
+                ),
                 storage,
                 cycle::StoreInitialization::CreateStore,
                 None,

@@ -271,6 +271,7 @@ impl StoreSync {
         };
         crate::sync::cycle::init_sync_over_storage(
             &self.database,
+            self.local_blob_access.clone(),
             storage,
             initialization,
             routing_encryption,

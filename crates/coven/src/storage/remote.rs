@@ -54,9 +54,9 @@ macro_rules! define_cloud_cipher {
     };
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 define_cloud_cipher!(pub);
-#[cfg(not(feature = "test-utils"))]
+#[cfg(not(any(test, feature = "test-utils")))]
 define_cloud_cipher!(pub(crate));
 
 /// A sync session's fixed at-rest representation. The mode is selected once at
@@ -3764,6 +3764,7 @@ mod tests {
         let encryption = EncryptionService::from_key([17; 32]);
         let db = open();
         let store_database = crate::database::StoreDatabase::new(&db);
+        let (_blob_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
             CloudCipher::Encrypted(encryption.clone()),
@@ -3774,6 +3775,10 @@ mod tests {
         .expect("construct pending-rotation storage");
         let components = crate::sync::cycle::init_sync_over_storage(
             &store_database,
+            crate::sync::test_owner_graph::local_blob_access(
+                store_database.clone(),
+                store_dir.clone(),
+            ),
             storage,
             crate::sync::cycle::StoreInitialization::CreateStore,
             None,
@@ -3802,6 +3807,10 @@ mod tests {
         .expect("reconstruct pending-rotation storage");
         let result = crate::sync::cycle::init_sync_over_storage(
             &crate::database::StoreDatabase::new(&reopened),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&reopened),
+                store_dir,
+            ),
             storage,
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: root,

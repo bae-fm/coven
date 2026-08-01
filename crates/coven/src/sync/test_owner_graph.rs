@@ -15,11 +15,25 @@ pub(crate) struct TestOwnerGraph {
     local_transitions: LocalBlobTransitions,
 }
 
+fn blob_owners(
+    database: StoreDatabase,
+    store_dir: StoreDir,
+) -> (StoreBlobCache, LocalStoreBlobAccess) {
+    let cache = StoreBlobCache::new(database.clone(), store_dir.clone());
+    let local_access = LocalStoreBlobAccess::new(database, store_dir, cache.clone());
+    (cache, local_access)
+}
+
+pub(crate) fn local_blob_access(
+    database: StoreDatabase,
+    store_dir: StoreDir,
+) -> LocalStoreBlobAccess {
+    blob_owners(database, store_dir).1
+}
+
 impl TestOwnerGraph {
     pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
-        let cache = StoreBlobCache::new(database.clone(), store_dir.clone());
-        let local_access =
-            LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), cache.clone());
+        let (cache, local_access) = blob_owners(database.clone(), store_dir.clone());
         let local_transitions = LocalBlobTransitions::new(
             BlobTransitionJournal::new(database.clone()),
             store_dir.clone(),

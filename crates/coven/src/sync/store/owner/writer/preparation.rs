@@ -1,4 +1,4 @@
-use super::blob_preparation::{close_prepared_packages, prepare_partition_package};
+use super::blob_preparation::close_prepared_packages;
 use crate::database::{
     PreparedProtocolObject, PreparedStoreWrite, StoreDatabase, StoreWritePreparation,
 };
@@ -139,38 +139,38 @@ pub(super) async fn prepare_store_write(
         let mut prepared_packages = Vec::new();
         if let Some(partition) = partitions.store {
             prepared_packages.push(
-                prepare_partition_package(
-                    operation,
-                    candidate_family,
-                    &write_id,
-                    &coord,
-                    db.schema_version(),
-                    stream_id.to_string(),
-                    seq,
-                    partition,
-                    &blob_facts,
-                    store_dir,
-                    &active_store_members,
-                )
-                .await?,
+                operation
+                    .prepare_partition_package(
+                        candidate_family,
+                        &write_id,
+                        &coord,
+                        db.schema_version(),
+                        stream_id.to_string(),
+                        seq,
+                        partition,
+                        &blob_facts,
+                        store_dir,
+                        &active_store_members,
+                    )
+                    .await?,
             );
         }
         for partition in partitions.circles {
             prepared_packages.push(
-                prepare_partition_package(
-                    operation,
-                    candidate_family,
-                    &write_id,
-                    &coord,
-                    db.schema_version(),
-                    stream_id.to_string(),
-                    seq,
-                    partition,
-                    &blob_facts,
-                    store_dir,
-                    &active_store_members,
-                )
-                .await?,
+                operation
+                    .prepare_partition_package(
+                        candidate_family,
+                        &write_id,
+                        &coord,
+                        db.schema_version(),
+                        stream_id.to_string(),
+                        seq,
+                        partition,
+                        &blob_facts,
+                        store_dir,
+                        &active_store_members,
+                    )
+                    .await?,
             );
         }
         let storage = operation.storage.as_ref();

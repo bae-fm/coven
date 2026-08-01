@@ -471,6 +471,10 @@ async fn effective_access_fixture(
     .expect("open effective-access owner storage");
     let components = crate::sync::cycle::init_sync_over_storage(
         &StoreDatabase::new(&owner_database),
+        crate::sync::test_owner_graph::local_blob_access(
+            StoreDatabase::new(&owner_database),
+            owner_store_dir.clone(),
+        ),
         owner_storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),

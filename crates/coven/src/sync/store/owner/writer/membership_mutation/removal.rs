@@ -25,94 +25,97 @@ use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHome, Rev
 /// `execute_revoke_mutation` ends on — restoring provider access, deleting what
 /// the candidate published, and clearing the staged mutation, so the next removal
 /// composes at the position that follows.
-async fn build_revoke_mutation(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    chain: &MembershipChain,
-    stream_id: AuthorStreamId,
-    revokee_pubkey: &str,
-    store_id: &str,
-    timestamp: &str,
-    current_encryption: &EncryptionService,
-) -> Result<RevokeMutationPlan, InviteError> {
-    let owner_keypair = operation.writer.identity.clone();
-    if chain.store_id() != Some(store_id) {
-        return Err(InviteError::InvalidDurableMutation(format!(
-            "membership chain store {:?} differs from requested store {store_id:?}",
-            chain.store_id()
-        )));
-    }
-    let members = chain.current_members();
-    if !members.iter().any(|(pubkey, _)| pubkey == revokee_pubkey) {
-        return Err(InviteError::NotAMember(revokee_pubkey.to_string()));
-    }
-    let current_owners = members
-        .iter()
-        .filter(|(pubkey, role)| pubkey != revokee_pubkey && *role == MemberRole::Owner)
-        .map(|(pubkey, _)| pubkey.clone())
-        .collect::<Vec<_>>();
-    if current_owners.is_empty() {
-        return Err(InviteError::LastOwner);
-    }
-    let current_keyring = operation
-        .open_keyring_or_for_membership(chain, current_encryption)
-        .await?;
-    let new_keyring = current_keyring
-        .with_appended_generation(
-            current_keyring
-                .current_generation()
-                .checked_add(1)
-                .ok_or_else(|| InviteError::Crypto("store key generation overflow".to_string()))?,
-            encryption::generate_random_key(),
-        )
-        .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?;
-    let remaining_members = members
-        .iter()
-        .filter(|(pubkey, _)| pubkey != revokee_pubkey)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut wraps = Vec::with_capacity(remaining_members.len());
-    for (recipient, _) in remaining_members {
-        let recipient_key = keys::ed25519_hex_to_x25519_public_key(&recipient)?;
-        wraps.push(ReplacementWrappedKey {
-            prepared: operation
-                .prepare_wrapped_key(
-                    &recipient,
-                    WrappedStoreKey::seal_keyring(
-                        store_id,
-                        &recipient,
-                        &recipient_key,
-                        &new_keyring,
-                        &owner_keypair,
-                    )
-                    .map_err(|error| {
-                        InviteError::Crypto(format!("serialize rotated keyring: {error}"))
-                    })?,
-                )
-                .await?,
-        });
-    }
-    wraps.sort_by(|left, right| left.prepared.reference.cmp(&right.prepared.reference));
-    let wrapped_keys = wraps
-        .iter()
-        .map(|wrap| wrap.prepared.reference.clone())
-        .collect();
-    let publication = if chain.is_owner_now(revokee_pubkey) {
-        let plan = operation
-            .prepare_plan()
-            .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-        let entry = chain.signed_remove_member_with_owner_barrier_state(
-            &owner_keypair,
-            stream_id,
-            revokee_pubkey.to_string(),
-            wrapped_keys,
-            plan.device_state().clone(),
-            timestamp.to_string(),
-        )?;
-        let transition = AuthorizedMembershipPublication::new(operation)
-            .prepare_transition(chain, entry)
+impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
+    async fn build_revoke_mutation(
+        &mut self,
+        chain: &MembershipChain,
+        stream_id: AuthorStreamId,
+        revokee_pubkey: &str,
+        store_id: &str,
+        timestamp: &str,
+        current_encryption: &EncryptionService,
+    ) -> Result<RevokeMutationPlan, InviteError> {
+        let owner_keypair = self.writer.identity.clone();
+        if chain.store_id() != Some(store_id) {
+            return Err(InviteError::InvalidDurableMutation(format!(
+                "membership chain store {:?} differs from requested store {store_id:?}",
+                chain.store_id()
+            )));
+        }
+        let members = chain.current_members();
+        if !members.iter().any(|(pubkey, _)| pubkey == revokee_pubkey) {
+            return Err(InviteError::NotAMember(revokee_pubkey.to_string()));
+        }
+        let current_owners = members
+            .iter()
+            .filter(|(pubkey, role)| pubkey != revokee_pubkey && *role == MemberRole::Owner)
+            .map(|(pubkey, _)| pubkey.clone())
+            .collect::<Vec<_>>();
+        if current_owners.is_empty() {
+            return Err(InviteError::LastOwner);
+        }
+        let current_keyring = self
+            .open_keyring_or_for_membership(chain, current_encryption)
             .await?;
-        let mut candidate = operation
+        let new_keyring = current_keyring
+            .with_appended_generation(
+                current_keyring
+                    .current_generation()
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        InviteError::Crypto("store key generation overflow".to_string())
+                    })?,
+                encryption::generate_random_key(),
+            )
+            .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?;
+        let remaining_members = members
+            .iter()
+            .filter(|(pubkey, _)| pubkey != revokee_pubkey)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut wraps = Vec::with_capacity(remaining_members.len());
+        for (recipient, _) in remaining_members {
+            let recipient_key = keys::ed25519_hex_to_x25519_public_key(&recipient)?;
+            wraps.push(ReplacementWrappedKey {
+                prepared: self
+                    .prepare_wrapped_key(
+                        &recipient,
+                        WrappedStoreKey::seal_keyring(
+                            store_id,
+                            &recipient,
+                            &recipient_key,
+                            &new_keyring,
+                            &owner_keypair,
+                        )
+                        .map_err(|error| {
+                            InviteError::Crypto(format!("serialize rotated keyring: {error}"))
+                        })?,
+                    )
+                    .await?,
+            });
+        }
+        wraps.sort_by(|left, right| left.prepared.reference.cmp(&right.prepared.reference));
+        let wrapped_keys = wraps
+            .iter()
+            .map(|wrap| wrap.prepared.reference.clone())
+            .collect();
+        let publication = if chain.is_owner_now(revokee_pubkey) {
+            let plan = self
+                .prepare_plan()
+                .await
+                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            let entry = chain.signed_remove_member_with_owner_barrier_state(
+                &owner_keypair,
+                stream_id,
+                revokee_pubkey.to_string(),
+                wrapped_keys,
+                plan.device_state().clone(),
+                timestamp.to_string(),
+            )?;
+            let transition = AuthorizedMembershipPublication::new(self)
+                .prepare_transition(chain, entry)
+                .await?;
+            let mut candidate = self
             .prepare_candidate(
                 plan,
                 crate::sync::store::operations::StoreOperationBatch::MergeMembershipActivation {
@@ -122,57 +125,58 @@ async fn build_revoke_mutation(
             )
             .await
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-        let head = AuthorizedMembershipPublication::new(operation)
-            .finish_transition(
-                transition.clone(),
-                membership::MembershipHeadActivation::StoreCommit {
-                    commit: candidate.reference.clone(),
-                },
-            )
-            .await?;
-        candidate
-            .attach_merge_membership_proof(operation.storage.as_ref(), &head, None, &owner_keypair)
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-        RevokeMembershipPublication::StoreActivated {
-            transition: Box::new(transition),
-            candidate: Box::new(candidate),
-            publication: Box::new(head),
-        }
-    } else {
-        let entry = chain.signed_remove_member_with_wrapped_keys_in_stream(
-            &owner_keypair,
-            stream_id,
-            revokee_pubkey.to_string(),
-            wrapped_keys,
-            timestamp.to_string(),
-        )?;
-        RevokeMembershipPublication::Direct {
-            publication: Box::new(
-                AuthorizedMembershipPublication::new(operation)
-                    .prepare_publication(chain, entry)
-                    .await?,
-            ),
-        }
-    };
-    let provider_account_email = chain
-        .current_member_provider_email(revokee_pubkey)
-        .map(str::to_string);
-    Ok(RevokeMutationPlan {
-        publication,
-        revokee_pubkey: revokee_pubkey.to_string(),
-        desired_access: CloudAccessState::Absent {
-            member_pubkey: revokee_pubkey.to_string(),
-            provider_account_email: provider_account_email.clone(),
-        },
-        prior_access: CloudAccessState::Present {
-            member_pubkey: revokee_pubkey.to_string(),
-            provider_account_email,
-        },
-        wraps,
-        keyring_payload: new_keyring
-            .to_keyring_payload()
-            .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?,
-    })
+            let head = AuthorizedMembershipPublication::new(self)
+                .finish_transition(
+                    transition.clone(),
+                    membership::MembershipHeadActivation::StoreCommit {
+                        commit: candidate.reference.clone(),
+                    },
+                )
+                .await?;
+            candidate
+                .attach_merge_membership_proof(self.storage.as_ref(), &head, None, &owner_keypair)
+                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            RevokeMembershipPublication::StoreActivated {
+                transition: Box::new(transition),
+                candidate: Box::new(candidate),
+                publication: Box::new(head),
+            }
+        } else {
+            let entry = chain.signed_remove_member_with_wrapped_keys_in_stream(
+                &owner_keypair,
+                stream_id,
+                revokee_pubkey.to_string(),
+                wrapped_keys,
+                timestamp.to_string(),
+            )?;
+            RevokeMembershipPublication::Direct {
+                publication: Box::new(
+                    AuthorizedMembershipPublication::new(self)
+                        .prepare_publication(chain, entry)
+                        .await?,
+                ),
+            }
+        };
+        let provider_account_email = chain
+            .current_member_provider_email(revokee_pubkey)
+            .map(str::to_string);
+        Ok(RevokeMutationPlan {
+            publication,
+            revokee_pubkey: revokee_pubkey.to_string(),
+            desired_access: CloudAccessState::Absent {
+                member_pubkey: revokee_pubkey.to_string(),
+                provider_account_email: provider_account_email.clone(),
+            },
+            prior_access: CloudAccessState::Present {
+                member_pubkey: revokee_pubkey.to_string(),
+                provider_account_email,
+            },
+            wraps,
+            keyring_payload: new_keyring.to_keyring_payload().map_err(|error| {
+                InviteError::Crypto(format!("serialize rotated keyring: {error}"))
+            })?,
+        })
+    }
 }
 
 async fn execute_revoke_mutation(
@@ -649,8 +653,7 @@ pub(crate) async fn revoke_member_durable(
                 return Ok(keyring);
             }
             let stream_id = operation.select_membership_author_stream(chain).await?;
-            let plan = Box::pin(build_revoke_mutation(
-                operation,
+            let plan = Box::pin(operation.build_revoke_mutation(
                 chain,
                 stream_id,
                 revokee_pubkey,

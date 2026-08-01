@@ -15,190 +15,190 @@ use crate::store_dir::StoreDir;
 use crate::sync::gate;
 use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_partition_package(
-    operation: &AuthorizedWriterOperation<'_>,
-    candidate_family: CandidateFamilyId,
-    write_id: &crate::WriteId,
-    coord: &StoreCommitCoord,
-    schema_version: u32,
-    stream_id: String,
-    seq: u64,
-    partition: gate::AudiencePartition,
-    blob_facts: &StoreWriteBlobFacts,
-    store_dir: &StoreDir,
-    active_store_members: &std::collections::BTreeSet<String>,
-) -> Result<PreparedPartitionPackage, StoreError> {
-    let database = &operation.database;
-    let storage = operation.storage.as_ref();
-    let store_root_hash = operation.store_root().store_root_hash;
-    let authority = BlobWriteAuthority::new(
-        &operation.writer.registration_ref,
-        &operation.writer.registration,
-    )
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    let partition = if let circle::Audience::Circle(circle_id) = partition.audience {
-        if let Some(blocked) = database
-            .circle_publication_rotation_block(circle_id, active_store_members.clone())
-            .await?
-        {
-            return Err(StoreError::CirclePublicationBlocked(blocked));
-        }
-        // Publish under the Circle's current active control. An epoch close
-        // between capture and publication retires the control the write was
-        // captured under; its rows belong to the successor epoch that is live now.
-        let control = database.current_circle_partition_control(circle_id).await?;
-        gate::AudiencePartition {
-            control: Some(control),
-            ..partition
-        }
-    } else {
-        partition
-    };
-    let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
-    let (remote_audience, protection) = match partition.audience {
-        circle::Audience::Store => (
-            crate::blob::locator::RemoteAudience::Store,
-            storage
-                .store_blob_protection()
-                .map_err(|source| StoreError::BlobStorage {
-                    namespace: "store".to_string(),
-                    id: "protection".to_string(),
-                    source,
-                })?,
-        ),
-        circle::Audience::Circle(circle_id) => {
-            let control = partition.control.as_ref().ok_or_else(|| {
-                StoreError::InvalidOutbound(format!(
-                    "Circle partition {circle_id} has no exact control"
-                ))
-            })?;
-            let (encryption, _) = database
-                .circle_publication_context(circle_id, control.coordinate().clone())
-                .await?;
-            (
-                crate::blob::locator::RemoteAudience::Circle(circle_id),
-                storage::BlobSpoolProtection::Opaque(encryption),
-            )
-        }
-        circle::Audience::Local => {
-            return Err(StoreError::InvalidOutbound(
-                "Local partition reached Store publication".to_string(),
-            ));
-        }
-    };
-    let mut prepared_blobs = Vec::with_capacity(blob_facts.len());
-    let mut blob_bindings = Vec::with_capacity(blob_facts.len());
-    for fact in blob_facts {
-        let (binding, blob) = operation
-            .prepare_partition_blob(
-                fact,
-                remote_audience.clone(),
-                protection.clone(),
-                &authority,
-                store_dir,
-            )
-            .await?;
-        blob_bindings.push(binding);
-        prepared_blobs.push(blob);
-    }
-    let (package, context, semantic_prefix, key_fingerprint) = match partition.audience {
-        circle::Audience::Store => {
-            if partition.control.is_some() {
+impl AuthorizedWriterOperation<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_partition_package(
+        &self,
+        candidate_family: CandidateFamilyId,
+        write_id: &crate::WriteId,
+        coord: &StoreCommitCoord,
+        schema_version: u32,
+        stream_id: String,
+        seq: u64,
+        partition: gate::AudiencePartition,
+        blob_facts: &StoreWriteBlobFacts,
+        store_dir: &StoreDir,
+        active_store_members: &std::collections::BTreeSet<String>,
+    ) -> Result<PreparedPartitionPackage, StoreError> {
+        let database = &self.database;
+        let storage = self.storage.as_ref();
+        let store_root_hash = self.store_root().store_root_hash;
+        let authority =
+            BlobWriteAuthority::new(&self.writer.registration_ref, &self.writer.registration)
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let partition = if let circle::Audience::Circle(circle_id) = partition.audience {
+            if let Some(blocked) = database
+                .circle_publication_rotation_block(circle_id, active_store_members.clone())
+                .await?
+            {
+                return Err(StoreError::CirclePublicationBlocked(blocked));
+            }
+            // Publish under the Circle's current active control. An epoch close
+            // between capture and publication retires the control the write was
+            // captured under; its rows belong to the successor epoch that is live now.
+            let control = database.current_circle_partition_control(circle_id).await?;
+            gate::AudiencePartition {
+                control: Some(control),
+                ..partition
+            }
+        } else {
+            partition
+        };
+        let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
+        let (remote_audience, protection) = match partition.audience {
+            circle::Audience::Store => (
+                crate::blob::locator::RemoteAudience::Store,
+                storage
+                    .store_blob_protection()
+                    .map_err(|source| StoreError::BlobStorage {
+                        namespace: "store".to_string(),
+                        id: "protection".to_string(),
+                        source,
+                    })?,
+            ),
+            circle::Audience::Circle(circle_id) => {
+                let control = partition.control.as_ref().ok_or_else(|| {
+                    StoreError::InvalidOutbound(format!(
+                        "Circle partition {circle_id} has no exact control"
+                    ))
+                })?;
+                let (encryption, _) = database
+                    .circle_publication_context(circle_id, control.coordinate().clone())
+                    .await?;
+                (
+                    crate::blob::locator::RemoteAudience::Circle(circle_id),
+                    storage::BlobSpoolProtection::Opaque(encryption),
+                )
+            }
+            circle::Audience::Local => {
                 return Err(StoreError::InvalidOutbound(
-                    "Store partition carries Circle control".to_string(),
+                    "Local partition reached Store publication".to_string(),
                 ));
             }
-            let package = audience_package::AudiencePackage::store(
-                store_root_hash,
-                candidate_family,
-                write_id.clone(),
-                coord.clone(),
-                schema_version,
-                partition.changeset.clone(),
-                blob_bindings,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-            let bytes = package.to_bytes();
-            let prefix = package_semantic_prefix(
-                candidate_family,
-                &stream_id,
-                seq,
-                ObjectHash::digest(&bytes),
-            );
-            (
-                package,
-                ProtocolObjectContext::store_encrypted(
-                    store_root_hash,
-                    ProtocolObjectDomain::StorePackage,
-                ),
-                prefix,
-                None,
-            )
-        }
-        circle::Audience::Circle(circle_id) => {
-            let control = partition.control.as_ref().ok_or_else(|| {
-                StoreError::InvalidOutbound(format!(
-                    "Circle partition {circle_id} has no exact control"
-                ))
-            })?;
-            let (encryption, key_fingerprint) = database
-                .circle_publication_context(circle_id, control.coordinate().clone())
+        };
+        let mut prepared_blobs = Vec::with_capacity(blob_facts.len());
+        let mut blob_bindings = Vec::with_capacity(blob_facts.len());
+        for fact in blob_facts {
+            let (binding, blob) = self
+                .prepare_partition_blob(
+                    fact,
+                    remote_audience.clone(),
+                    protection.clone(),
+                    &authority,
+                    store_dir,
+                )
                 .await?;
-            let package = audience_package::AudiencePackage::circle(
-                store_root_hash,
-                candidate_family,
-                write_id.clone(),
-                coord.clone(),
-                schema_version,
-                circle_id,
-                control.coordinate().clone(),
-                key_fingerprint,
-                partition.changeset.clone(),
-                blob_bindings,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-            let bytes = package.to_bytes();
-            let prefix = circle_package_semantic_prefix(
-                circle_id,
-                candidate_family,
-                &stream_id,
-                seq,
-                ObjectHash::digest(&bytes),
-            );
-            (
-                package,
-                ProtocolObjectContext::circle(
+            blob_bindings.push(binding);
+            prepared_blobs.push(blob);
+        }
+        let (package, context, semantic_prefix, key_fingerprint) = match partition.audience {
+            circle::Audience::Store => {
+                if partition.control.is_some() {
+                    return Err(StoreError::InvalidOutbound(
+                        "Store partition carries Circle control".to_string(),
+                    ));
+                }
+                let package = audience_package::AudiencePackage::store(
                     store_root_hash,
-                    ProtocolObjectDomain::CirclePackage,
-                    encryption,
-                ),
-                prefix,
-                Some(key_fingerprint),
-            )
-        }
-        circle::Audience::Local => {
-            return Err(StoreError::InvalidOutbound(
-                "Local partition reached Store publication".to_string(),
-            ));
-        }
-    };
-    let semantic_bytes = package.to_bytes();
-    let slot = storage
-        .allocate_protocol_slot(&context, &semantic_prefix, ".pkg")
-        .await
-        .map_err(StoreObjectError::from)?;
-    let prepared = storage
-        .prepare_protocol_object(&context, slot, &semantic_prefix, semantic_bytes.clone())
-        .map_err(StoreObjectError::from)?;
-    Ok(PreparedPartitionPackage {
-        audience: partition.audience,
-        control: partition.control,
-        key_fingerprint,
-        semantic_bytes,
-        prepared,
-        blobs: prepared_blobs,
-    })
+                    candidate_family,
+                    write_id.clone(),
+                    coord.clone(),
+                    schema_version,
+                    partition.changeset.clone(),
+                    blob_bindings,
+                )
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                let bytes = package.to_bytes();
+                let prefix = package_semantic_prefix(
+                    candidate_family,
+                    &stream_id,
+                    seq,
+                    ObjectHash::digest(&bytes),
+                );
+                (
+                    package,
+                    ProtocolObjectContext::store_encrypted(
+                        store_root_hash,
+                        ProtocolObjectDomain::StorePackage,
+                    ),
+                    prefix,
+                    None,
+                )
+            }
+            circle::Audience::Circle(circle_id) => {
+                let control = partition.control.as_ref().ok_or_else(|| {
+                    StoreError::InvalidOutbound(format!(
+                        "Circle partition {circle_id} has no exact control"
+                    ))
+                })?;
+                let (encryption, key_fingerprint) = database
+                    .circle_publication_context(circle_id, control.coordinate().clone())
+                    .await?;
+                let package = audience_package::AudiencePackage::circle(
+                    store_root_hash,
+                    candidate_family,
+                    write_id.clone(),
+                    coord.clone(),
+                    schema_version,
+                    circle_id,
+                    control.coordinate().clone(),
+                    key_fingerprint,
+                    partition.changeset.clone(),
+                    blob_bindings,
+                )
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                let bytes = package.to_bytes();
+                let prefix = circle_package_semantic_prefix(
+                    circle_id,
+                    candidate_family,
+                    &stream_id,
+                    seq,
+                    ObjectHash::digest(&bytes),
+                );
+                (
+                    package,
+                    ProtocolObjectContext::circle(
+                        store_root_hash,
+                        ProtocolObjectDomain::CirclePackage,
+                        encryption,
+                    ),
+                    prefix,
+                    Some(key_fingerprint),
+                )
+            }
+            circle::Audience::Local => {
+                return Err(StoreError::InvalidOutbound(
+                    "Local partition reached Store publication".to_string(),
+                ));
+            }
+        };
+        let semantic_bytes = package.to_bytes();
+        let slot = storage
+            .allocate_protocol_slot(&context, &semantic_prefix, ".pkg")
+            .await
+            .map_err(StoreObjectError::from)?;
+        let prepared = storage
+            .prepare_protocol_object(&context, slot, &semantic_prefix, semantic_bytes.clone())
+            .map_err(StoreObjectError::from)?;
+        Ok(PreparedPartitionPackage {
+            audience: partition.audience,
+            control: partition.control,
+            key_fingerprint,
+            semantic_bytes,
+            prepared,
+            blobs: prepared_blobs,
+        })
+    }
 }
 
 fn partition_blob_facts<'a>(

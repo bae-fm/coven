@@ -286,6 +286,105 @@ impl LocalStoreBlobAccess {
         )
     }
 
+    pub(crate) async fn drain_published_blob_drop_intents(
+        &self,
+        max_seq: u64,
+    ) -> Result<(), String> {
+        let intents = self
+            .database
+            .published_blob_drop_intents(max_seq)
+            .await
+            .map_err(|error| format!("Failed to load published blob drop intents: {error}"))?;
+        for intent in intents {
+            let deferred = &intent.drop;
+            let asset_upload_error = |error: String| {
+                crate::sync::store::StorePreparationError::AssetUpload(error).to_string()
+            };
+            let local = self
+                .store_dir
+                .local_blob_path_if_present(&deferred.namespace, &deferred.id, deferred.size)
+                .await
+                .map_err(|error| asset_upload_error(error.to_string()))?;
+            let remove_local = match (deferred.disposition, local) {
+                (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, Some(source)) => {
+                    self.store_dir
+                        .populate_pinned_blob_from_file(
+                            &deferred.namespace,
+                            deferred.locator_hash,
+                            deferred.size,
+                            deferred.plaintext_hash,
+                            &source,
+                        )
+                        .await
+                        .map_err(|error| asset_upload_error(error.to_string()))?;
+                    true
+                }
+                (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, Some(source)) => {
+                    self.cache
+                        .populate_from_file(
+                            &deferred.namespace,
+                            deferred.locator_hash,
+                            deferred.size,
+                            deferred.plaintext_hash,
+                            &source,
+                        )
+                        .await
+                        .map_err(|error| asset_upload_error(error.to_string()))?;
+                    true
+                }
+                (crate::sync::cycle::DeferredLocalBlobDisposition::Drop, _) => true,
+                (
+                    crate::sync::cycle::DeferredLocalBlobDisposition::Pin
+                    | crate::sync::cycle::DeferredLocalBlobDisposition::Cache,
+                    None,
+                ) => {
+                    let exact = match deferred.disposition {
+                        crate::sync::cycle::DeferredLocalBlobDisposition::Pin => {
+                            self.store_dir
+                                .pinned_blob_is_exact(
+                                    &deferred.namespace,
+                                    deferred.locator_hash,
+                                    deferred.size,
+                                    deferred.plaintext_hash,
+                                )
+                                .await
+                        }
+                        crate::sync::cycle::DeferredLocalBlobDisposition::Cache => {
+                            self.store_dir
+                                .cached_blob_is_exact(
+                                    &deferred.namespace,
+                                    deferred.locator_hash,
+                                    deferred.size,
+                                    deferred.plaintext_hash,
+                                )
+                                .await
+                        }
+                        crate::sync::cycle::DeferredLocalBlobDisposition::Drop => unreachable!(),
+                    }
+                    .map_err(|error| asset_upload_error(error.to_string()))?;
+                    if !exact {
+                        return Err(asset_upload_error(format!(
+                            "published blob {}/{} is missing from both the local store and its {:?} destination",
+                            deferred.namespace, deferred.id, deferred.disposition,
+                        )));
+                    }
+                    false
+                }
+            };
+            if remove_local {
+                self.store_dir
+                    .remove_local_blob(&deferred.namespace, &deferred.id)
+                    .await
+                    .map_err(|error| asset_upload_error(error.to_string()))?;
+            }
+            self.database
+                .clear_published_blob_drop_intent(&intent)
+                .await
+                .map_err(|error| format!("Failed to clear published blob drop intent: {error}"))?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         self.database.validate_row_blob_ref(reference).await?;
         let blob = reference.blob();

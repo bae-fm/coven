@@ -1,4 +1,3 @@
-use coven::InMemoryCloudHome;
 use coven::{
     Config, Coven, CovenError, HomeStorage, Migration, RowIdentity, StoreDir, SyncedTable,
 };
@@ -41,8 +40,6 @@ fn migrations() -> Vec<Migration> {
 fn assert_browsable_scoped_tables_are_rejected() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let cloud = InMemoryCloudHome::new();
-
     let result = Coven::builder(config(store_dir.clone(), HomeStorage::Browsable))
         .synced_tables(tables())
         .migrations(migrations())
@@ -61,8 +58,6 @@ fn assert_browsable_scoped_tables_are_rejected() {
     assert!(!store_dir.db_path().exists());
     assert!(!store_dir.config_path().exists());
     assert!(!temp.path().join(".coven-lock").exists());
-    assert!(cloud.is_empty());
-    assert!(cloud.keys().is_empty());
 }
 
 #[test]

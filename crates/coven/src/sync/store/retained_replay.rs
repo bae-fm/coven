@@ -466,7 +466,47 @@ impl RetainedReplayBaseline {
                         "genesis retained replay baseline has a non-genesis cut".to_string(),
                     ));
                 }
-                validate_generation_zero_image(&image, self.schema_version, self.routing_hash)
+                validate_replay_image_metadata(&image, self.schema_version, self.routing_hash)?;
+                let protocol_keys = protocol_state_keys(&image)?;
+                let founder_membership_cursor = founder_membership_cursor_key(&image)?;
+                if protocol_keys.iter().any(|key| {
+                    !generation_zero_protocol_key(founder_membership_cursor.as_deref(), key)
+                }) || !required_generation_zero_protocol_keys()
+                    .iter()
+                    .all(|key| protocol_keys.contains(*key))
+                    || founder_membership_cursor
+                        .as_ref()
+                        .is_none_or(|key| !protocol_keys.contains(key))
+                {
+                    return Err(DbError::Message(
+                        "retained replay image protocol state is not the generation-zero set"
+                            .to_string(),
+                    ));
+                }
+                for table in crate::db::user_table_names(&image).map_err(DbError::from)? {
+                    let count: i64 = image
+                        .query_row(
+                            &format!(
+                                "SELECT COUNT(*) FROM {}",
+                                crate::sync::session::quote_ident(&table)
+                            ),
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(DbError::from)?;
+                    let expected = match table.as_str() {
+                        "protocol_state" => None,
+                        "store_protocol_root_authority"
+                        | "store_device_registration_activations" => Some(1),
+                        _ => Some(0),
+                    };
+                    if expected.is_some_and(|expected| count != expected) {
+                        return Err(DbError::Message(format!(
+                            "generation-zero retained replay image table {table:?} has {count} rows"
+                        )));
+                    }
+                }
+                validate_replay_image_foreign_keys(&image)
             }
             RetainedReplayAuthority::StableSnapshot(authority) => {
                 authority.validate()?;
@@ -475,13 +515,64 @@ impl RetainedReplayBaseline {
                         "snapshot retained replay cut differs from its signed metadata".to_string(),
                     ));
                 }
-                validate_snapshot_replay_image(
+                validate_replay_image_metadata(&image, self.schema_version, self.routing_hash)?;
+                let mut actual = BTreeMap::new();
+                let mut statement = image
+                    .prepare(
+                        "SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                for row in rows {
+                    let (stream_id, sequence, encoded) = row.map_err(DbError::from)?;
+                    let reference: StoreBatchCommitRef =
+                        serde_json::from_str(&encoded).map_err(|error| {
+                            DbError::Message(format!("snapshot replay coverage reference: {error}"))
+                        })?;
+                    if sequence < 0
+                        || u64::try_from(sequence).ok() != Some(reference.coord.sequence())
+                    {
+                        return Err(DbError::Message(
+                            "snapshot replay coverage sequence differs from its exact reference"
+                                .to_string(),
+                        ));
+                    }
+                    if actual.insert(stream_id, reference).is_some() {
+                        return Err(DbError::Message(
+                            "snapshot replay coverage repeats a Store stream".to_string(),
+                        ));
+                    }
+                }
+                drop(statement);
+                if actual != self.exact_cut.clone().into_refs() {
+                    return Err(DbError::Message(
+                        "snapshot replay image coverage differs from its baseline".to_string(),
+                    ));
+                }
+                validate_must_be_empty_replay_tables(&image, "snapshot replay baseline")?;
+                let materialized_commits: i64 = image
+                    .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(DbError::from)?;
+                if materialized_commits != 0 {
+                    return Err(DbError::Message(
+                        "snapshot replay baseline contains materialized_commits rows".to_string(),
+                    ));
+                }
+                crate::database::StoreDatabase::validate_snapshot_retained_inputs_on(
                     &image,
-                    self.schema_version,
-                    self.routing_hash,
-                    &self.exact_cut,
                     &authority.store_root,
-                )
+                )?;
+                validate_replay_image_foreign_keys(&image)
             }
         }
     }
@@ -675,53 +766,6 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
     serialized_database(&image)
 }
 
-fn validate_generation_zero_image(
-    image: &Connection,
-    schema_version: u32,
-    routing_hash: ObjectHash,
-) -> Result<(), DbError> {
-    validate_replay_image_metadata(image, schema_version, routing_hash)?;
-    let protocol_keys = protocol_state_keys(image)?;
-    let founder_membership_cursor = founder_membership_cursor_key(image)?;
-    if protocol_keys
-        .iter()
-        .any(|key| !generation_zero_protocol_key(founder_membership_cursor.as_deref(), key))
-        || !required_generation_zero_protocol_keys()
-            .iter()
-            .all(|key| protocol_keys.contains(*key))
-        || founder_membership_cursor
-            .as_ref()
-            .is_none_or(|key| !protocol_keys.contains(key))
-    {
-        return Err(DbError::Message(
-            "retained replay image protocol state is not the generation-zero set".to_string(),
-        ));
-    }
-    for table in crate::db::user_table_names(image).map_err(DbError::from)? {
-        let count: i64 = image
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {}",
-                    crate::sync::session::quote_ident(&table)
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        let expected = match table.as_str() {
-            "protocol_state" => None,
-            "store_protocol_root_authority" | "store_device_registration_activations" => Some(1),
-            _ => Some(0),
-        };
-        if expected.is_some_and(|expected| count != expected) {
-            return Err(DbError::Message(format!(
-                "generation-zero retained replay image table {table:?} has {count} rows"
-            )));
-        }
-    }
-    validate_replay_image_foreign_keys(image)
-}
-
 fn validate_replay_image_metadata(
     image: &Connection,
     schema_version: u32,
@@ -743,64 +787,6 @@ fn validate_replay_image_metadata(
         ));
     }
     Ok(())
-}
-
-fn validate_snapshot_replay_image(
-    image: &Connection,
-    schema_version: u32,
-    routing_hash: ObjectHash,
-    exact_cut: &CommitFrontier,
-    root: &StoreRootRef,
-) -> Result<(), DbError> {
-    validate_replay_image_metadata(image, schema_version, routing_hash)?;
-    let mut actual = BTreeMap::new();
-    let mut statement = image
-        .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id")
-        .map_err(DbError::from)?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(DbError::from)?;
-    for row in rows {
-        let (stream_id, sequence, encoded) = row.map_err(DbError::from)?;
-        let reference: StoreBatchCommitRef = serde_json::from_str(&encoded).map_err(|error| {
-            DbError::Message(format!("snapshot replay coverage reference: {error}"))
-        })?;
-        if sequence < 0 || u64::try_from(sequence).ok() != Some(reference.coord.sequence()) {
-            return Err(DbError::Message(
-                "snapshot replay coverage sequence differs from its exact reference".to_string(),
-            ));
-        }
-        if actual.insert(stream_id, reference).is_some() {
-            return Err(DbError::Message(
-                "snapshot replay coverage repeats a Store stream".to_string(),
-            ));
-        }
-    }
-    drop(statement);
-    if actual != exact_cut.clone().into_refs() {
-        return Err(DbError::Message(
-            "snapshot replay image coverage differs from its baseline".to_string(),
-        ));
-    }
-    validate_must_be_empty_replay_tables(image, "snapshot replay baseline")?;
-    let materialized_commits: i64 = image
-        .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
-            row.get(0)
-        })
-        .map_err(DbError::from)?;
-    if materialized_commits != 0 {
-        return Err(DbError::Message(
-            "snapshot replay baseline contains materialized_commits rows".to_string(),
-        ));
-    }
-    crate::database::StoreDatabase::validate_snapshot_retained_inputs_on(image, root)?;
-    validate_replay_image_foreign_keys(image)
 }
 
 fn validate_replay_image_foreign_keys(image: &Connection) -> Result<(), DbError> {

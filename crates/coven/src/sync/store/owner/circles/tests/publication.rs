@@ -570,6 +570,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     .expect("construct Circle blob writer");
     let components = crate::sync::cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         writer,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -1218,6 +1222,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .expect("open Circle owner storage");
     let components = crate::sync::cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -2255,6 +2263,10 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
     .expect("open Circle owner storage");
     let components = crate::sync::cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -3368,6 +3380,10 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
     .expect("open Circle owner storage");
     let components = crate::sync::cycle::init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),

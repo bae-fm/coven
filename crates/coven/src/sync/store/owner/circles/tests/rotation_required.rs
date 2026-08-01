@@ -115,6 +115,10 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
     .expect("open Circle owner storage");
     let components = init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -1075,6 +1079,10 @@ async fn setup_active_member_circle_snapshot(
     .expect("open Circle owner storage");
     let components = init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -1423,6 +1431,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     .expect("open Circle owner storage");
     let components = init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
@@ -1710,6 +1722,10 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     .expect("open Circle owner storage");
     let components = init_sync_over_storage(
         &crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
+        ),
         owner_storage,
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),

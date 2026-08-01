@@ -171,57 +171,6 @@ fn validate_circle_snapshot_activated_reclaim_target(
     Ok(())
 }
 
-async fn validate_commit_reclaim_receipt(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    commit: &StoreBatchCommit,
-    reference: &super::store_reclaim::ReclaimReceiptRef,
-    activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&MembershipChain>,
-    accepted: VerifiedMergePredecessorHistory<'_>,
-) -> Result<(), RegistrationLoadError> {
-    let predecessor = predecessor.ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "reclaim receipt activation has no exact predecessor provider authority".to_string(),
-        )
-    })?;
-    let (receipt_executor, provider_admin_state, provider_admin_grant, authorization, executor) = {
-        let opened = Box::pin(history_verifier.load_reclaim_receipt(reference))
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-        (
-            opened.receipt.value.executor.clone(),
-            opened.receipt.value.provider_admin_state.clone(),
-            opened.receipt.value.provider_admin_grant.clone(),
-            opened.receipt.value.authorization.clone(),
-            opened.executor,
-        )
-    };
-    if receipt_executor != commit.author_registration
-        || executor != *activating_author
-        || provider_admin_state != commit.membership_state
-        || !predecessor_verifies_provider_administrator_grant(
-            predecessor,
-            &provider_admin_grant,
-            &receipt_executor,
-        )
-    {
-        return Err(RegistrationLoadError::Invalid(
-            "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
-                .to_string(),
-        ));
-    }
-    if accepted
-        .find(|_, candidate| candidate.reclaim_authorization() == Some(&authorization))
-        .map_err(registration_attempt_error)?
-        .is_none()
-    {
-        return Err(RegistrationLoadError::Invalid(
-            "reclaim receipt authorization is absent from predecessor history".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn load_commit_registrations(
     history_verifier: &MergeHistoryVerifier<'_>,
     commit: &StoreBatchCommit,
@@ -284,15 +233,40 @@ pub(crate) async fn load_commit_registrations(
         }?;
     }
     if let Some(reference) = commit.reclaim_receipt() {
-        Box::pin(validate_commit_reclaim_receipt(
-            history_verifier,
-            commit,
-            reference,
-            activating_author,
-            predecessor,
-            accepted,
-        ))
-        .await?;
+        let predecessor = predecessor.ok_or_else(|| {
+            RegistrationLoadError::Invalid(
+                "reclaim receipt activation has no exact predecessor provider authority"
+                    .to_string(),
+            )
+        })?;
+        let opened = history_verifier
+            .load_reclaim_receipt(reference)
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        let receipt = &opened.receipt.value;
+        if receipt.executor != commit.author_registration
+            || opened.executor != *activating_author
+            || receipt.provider_admin_state != commit.membership_state
+            || !predecessor_verifies_provider_administrator_grant(
+                predecessor,
+                &receipt.provider_admin_grant,
+                &receipt.executor,
+            )
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
+                    .to_string(),
+            ));
+        }
+        if accepted
+            .find(|_, candidate| candidate.reclaim_authorization() == Some(&receipt.authorization))
+            .map_err(registration_attempt_error)?
+            .is_none()
+        {
+            return Err(RegistrationLoadError::Invalid(
+                "reclaim receipt authorization is absent from predecessor history".to_string(),
+            ));
+        }
     }
     let has_join_attempt = commit
         .device_join_attempt_decisions()

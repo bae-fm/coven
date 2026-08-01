@@ -1156,7 +1156,7 @@ unsafe fn partition_outbound_raw(
     routing: &RoutingChanges,
     gates: &Gates,
 ) -> Result<PartitionedAudienceWrite, GateError> {
-    let mut groups = BTreeMap::<Audience, PartitionGroup>::new();
+    let mut groups = AudiencePartitionGroups::new(conn);
     let audience_moves = audience_moves(conn, changeset, gates)?;
     let mut ancestor_inserts = HashSet::new();
     let mut ancestor_deletes = HashSet::new();
@@ -1170,9 +1170,7 @@ unsafe fn partition_outbound_raw(
             .pk()
             .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
         store_rows.insert((row.table.clone(), row_id.to_string()));
-        partition_group(conn, &mut groups, Audience::Store)?
-            .group
-            .add_change(iter)?;
+        groups.group(Audience::Store)?.group.add_change(iter)?;
         Ok(())
     })?;
     for_each_change(changeset, |iter, row| {
@@ -1212,7 +1210,7 @@ unsafe fn partition_outbound_raw(
             }
         }
         if gates.table_is_scoped(&row.table) || audience == Audience::Local {
-            let partition = partition_group(conn, &mut groups, audience)?;
+            let partition = groups.group(audience)?;
             partition.group.add_change(iter)?;
         }
         Ok(())
@@ -1247,7 +1245,7 @@ unsafe fn partition_outbound_raw(
                 gates,
                 &component,
                 FullStateDirection::Inserts,
-                partition_group(conn, &mut groups, audience_move.destination.clone())?,
+                groups.group(audience_move.destination.clone())?,
             )?;
         }
     }
@@ -1257,7 +1255,7 @@ unsafe fn partition_outbound_raw(
             gates,
             &ancestor_inserts,
             FullStateDirection::Inserts,
-            partition_group(conn, &mut groups, Audience::Store)?,
+            groups.group(Audience::Store)?,
         )?;
     }
     if !ancestor_deletes.is_empty() {
@@ -1266,7 +1264,7 @@ unsafe fn partition_outbound_raw(
             gates,
             &ancestor_deletes,
             FullStateDirection::Deletes,
-            partition_group(conn, &mut groups, Audience::Store)?,
+            groups.group(Audience::Store)?,
         )?;
     }
     for_each_change(&routing.store_mirror, |iter, row| {
@@ -1276,9 +1274,7 @@ unsafe fn partition_outbound_raw(
                 rusqlite::Error::InvalidQuery,
             ));
         }
-        partition_group(conn, &mut groups, Audience::Store)?
-            .group
-            .add_change(iter)?;
+        groups.group(Audience::Store)?.group.add_change(iter)?;
         Ok(())
     })?;
     for (audience, routes) in &routing.private_routes {
@@ -1288,22 +1284,11 @@ unsafe fn partition_outbound_raw(
                     "generated private routes must be complete INSERT images".to_string(),
                 ));
             }
-            partition_group(conn, &mut groups, audience.clone())?
-                .group
-                .add_change(iter)?;
+            groups.group(audience.clone())?.group.add_change(iter)?;
             Ok(())
         })?;
     }
-    let partitions = groups
-        .into_iter()
-        .map(|(audience, group)| {
-            Ok(AudiencePartition {
-                audience,
-                control: group.control,
-                changeset: group.group.output()?,
-            })
-        })
-        .collect::<Result<Vec<_>, GateError>>()?;
+    let partitions = groups.finish()?;
     Ok(PartitionedAudienceWrite {
         partitions,
         moves: audience_moves,
@@ -1840,22 +1825,45 @@ fn stored_route_audience(
     })
 }
 
-unsafe fn partition_group<'a>(
-    conn: &Connection,
-    groups: &'a mut BTreeMap<Audience, PartitionGroup>,
-    audience: Audience,
-) -> Result<&'a mut PartitionGroup, GateError> {
-    let control = match audience {
-        Audience::Circle(circle_id) => Some(active_circle_control(conn, circle_id)?),
-        Audience::Store | Audience::Local => None,
-    };
-    match groups.entry(audience) {
-        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let group = Changegroup::new()?;
-            group.set_schema(conn.handle())?;
-            Ok(entry.insert(PartitionGroup { control, group }))
+struct AudiencePartitionGroups<'connection> {
+    connection: &'connection Connection,
+    groups: BTreeMap<Audience, PartitionGroup>,
+}
+
+impl<'connection> AudiencePartitionGroups<'connection> {
+    fn new(connection: &'connection Connection) -> Self {
+        Self {
+            connection,
+            groups: BTreeMap::new(),
         }
+    }
+
+    unsafe fn group(&mut self, audience: Audience) -> Result<&mut PartitionGroup, GateError> {
+        let control = match audience {
+            Audience::Circle(circle_id) => Some(active_circle_control(self.connection, circle_id)?),
+            Audience::Store | Audience::Local => None,
+        };
+        match self.groups.entry(audience) {
+            std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let group = Changegroup::new()?;
+                group.set_schema(self.connection.handle())?;
+                Ok(entry.insert(PartitionGroup { control, group }))
+            }
+        }
+    }
+
+    fn finish(self) -> Result<Vec<AudiencePartition>, GateError> {
+        self.groups
+            .into_iter()
+            .map(|(audience, group)| {
+                Ok(AudiencePartition {
+                    audience,
+                    control: group.control,
+                    changeset: group.group.output()?,
+                })
+            })
+            .collect()
     }
 }
 

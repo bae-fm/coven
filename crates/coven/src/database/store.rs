@@ -64,7 +64,6 @@ fn cache_budget_state_key(namespace: &str) -> String {
     format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")
 }
 
-pub(crate) use blob_outbox::PublishedBlobDropIntent;
 pub(crate) use blob_transitions::MaterializedLocalBlob;
 #[cfg(test)]
 pub(crate) use candidate_records::select_author_exclusion_activation_locator;

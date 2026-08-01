@@ -564,6 +564,10 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .expect("open Circle owner storage");
     let components = init_sync_over_storage(
         &StoreDatabase::new(&db1),
+        crate::sync::test_owner_graph::local_blob_access(
+            StoreDatabase::new(&db1),
+            store_dir.clone(),
+        ),
         owner_storage,
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),

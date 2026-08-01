@@ -95,187 +95,193 @@ impl ResolveMutationPlan {
 /// `execute_resolution_mutation` ends on — deleting what the candidate published
 /// and clearing the staged mutation, so the next resolution composes at the
 /// position that follows.
-async fn build_resolution_mutation(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    chain: &MembershipChain,
-    conflict_hash: store_commit::ObjectHash,
-    selection: membership::MembershipConflictSelection,
-    created_at: &str,
-) -> Result<ResolveMutationPlan, InviteError> {
-    let signer = operation.writer.identity.clone();
-    let base = operation
-        .prepare_conflict_resolution_plan(chain.head_refs())
-        .await
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let chain = base.membership().clone();
-    let membership::MembershipStatus::Conflict(conflict) = chain.status() else {
-        return Err(MembershipError::Conflict.into());
-    };
-    let current = match conflict {
-        membership::MembershipConflict::ConcurrentMemberAssignments { conflict_hash, .. }
-        | membership::MembershipConflict::RevocationCycle { conflict_hash, .. } => *conflict_hash,
-    };
-    if current != conflict_hash {
-        return Err(MembershipError::InvalidConflictResolution.into());
-    }
-    let resolver_pubkey = keys::public_key_hex(&signer);
-    let replacement_grant =
-        membership::derive_store_resolution_grant(&conflict_hash, &resolver_pubkey);
-    let stream_id = store_commit::StreamActivation::grant_authorized_stream_id(
-        base.root().store_root_hash,
-        base.registration_ref(),
-        &replacement_grant,
-        store_commit::StreamAnchorDomain::StoreMembership,
-    );
-    let membership_context = ProtocolObjectContext::signed_plaintext(
-        base.root().store_root_hash,
-        ProtocolObjectDomain::StoreMembershipHead,
-    );
-    let membership_slot = operation
-        .storage
-        .as_ref()
-        .allocate_protocol_slot(
-            &membership_context,
-            &membership_head_slot_prefix(&resolver_pubkey, &replacement_grant, stream_id, 1),
-            ".json",
-        )
-        .await?;
-    let recovery_context = ProtocolObjectContext::signed_plaintext(
-        base.root().store_root_hash,
-        ProtocolObjectDomain::OwnerRecoveryNode,
-    );
-    let recovery_slot = operation
-        .storage
-        .as_ref()
-        .allocate_protocol_slot(
-            &recovery_context,
-            &store_commit::owner_recovery_semantic_prefix(
-                &resolver_pubkey,
-                replacement_grant.clone(),
-                1,
-            ),
-            ".json",
-        )
-        .await?;
-    let membership = store_commit::GrantStreamAnchor::StoreMembership {
-        first_slot: membership_slot,
-    };
-    let recovery = store_commit::GrantStreamAnchor::OwnerRecovery {
-        first_slot: recovery_slot,
-    };
-    let acceptance = store_commit::OwnerConflictResolutionAcceptance::signed(
-        base.root().store_root_hash,
-        replacement_grant,
-        base.registration_ref().clone(),
-        membership.clone(),
-        recovery,
-        base.device_state().clone(),
-        base.registration(),
-        &signer,
-    )
-    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let resolution = chain.signed_conflict_resolution(
-        base.root().store_root_hash,
-        selection,
-        membership,
-        acceptance,
-        &signer,
-    )?;
-    let resolution_bytes = serde_json::to_vec(&resolution).map_err(|error| {
-        InviteError::InvalidDurableMutation(format!("serialize membership resolution: {error}"))
-    })?;
-    let resolution_context = ProtocolObjectContext::signed_plaintext(
-        base.root().store_root_hash,
-        ProtocolObjectDomain::StoreMembershipResolution,
-    );
-    let resolution_hash = resolution.resolution_hash();
-    let resolution_prefix = store_commit::membership_resolution_semantic_prefix(
-        conflict_hash,
-        &resolver_pubkey,
-        resolution_hash,
-    );
-    let resolution_slot = operation
-        .storage
-        .as_ref()
-        .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
-        .await?;
-    let resolution_object = operation.storage.as_ref().prepare_protocol_object(
-        &resolution_context,
-        resolution_slot,
-        &resolution_prefix,
-        resolution_bytes,
-    )?;
-    let reference = resolution.resolution_ref(resolution_object.reference().clone());
-    let mut resolved_chain = chain.clone();
-    resolved_chain.apply_resolutions(
-        base.root().store_root_hash,
-        &[(reference.clone(), resolution.clone())],
-    )?;
-    let entry = resolved_chain.signed_resolution_activation_in_stream(
-        base.root().store_root_hash,
-        &signer,
-        stream_id,
-        reference.clone(),
-        &resolution,
-        created_at.to_string(),
-    )?;
-    let transition = AuthorizedMembershipPublication::new(operation)
-        .prepare_transition(&resolved_chain, entry)
-        .await?;
-    let operation_plan = base
-        .finish(&resolved_chain, &reference)
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let mut stream_activations = vec![
-        store_commit::StreamActivation::grant_authorized(
-            resolution.store_root_hash,
-            resolution.replacement_acceptance.owner_registration.clone(),
-            resolution.replacement_grant.clone(),
-            resolution.replacement_acceptance.membership.clone(),
-        ),
-        store_commit::StreamActivation::grant_authorized(
-            resolution.store_root_hash,
-            resolution.replacement_acceptance.owner_registration.clone(),
-            resolution.replacement_grant.clone(),
-            resolution.replacement_acceptance.recovery.clone(),
-        ),
-    ];
-    stream_activations.sort();
-    let mut candidate = operation
-        .prepare_candidate(
-            operation_plan,
-            operations::StoreOperationBatch::MergeMembershipActivation {
-                transition: transition.transition.clone(),
-                stream_activations,
-            },
-        )
-        .await
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let publication = AuthorizedMembershipPublication::new(operation)
-        .finish_transition(
-            transition.clone(),
-            membership::MembershipHeadActivation::StoreCommit {
-                commit: candidate.reference.clone(),
-            },
-        )
-        .await?;
-    candidate
-        .attach_merge_membership_proof(
-            operation.storage.as_ref(),
-            &publication,
-            Some(&resolution),
+impl crate::sync::store::owner::AuthorizedWriterOperation<'_> {
+    async fn build_resolution_mutation(
+        &mut self,
+        chain: &MembershipChain,
+        conflict_hash: store_commit::ObjectHash,
+        selection: membership::MembershipConflictSelection,
+        created_at: &str,
+    ) -> Result<ResolveMutationPlan, InviteError> {
+        let signer = self.writer.identity.clone();
+        let base = self
+            .prepare_conflict_resolution_plan(chain.head_refs())
+            .await
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        let chain = base.membership().clone();
+        let membership::MembershipStatus::Conflict(conflict) = chain.status() else {
+            return Err(MembershipError::Conflict.into());
+        };
+        let current = match conflict {
+            membership::MembershipConflict::ConcurrentMemberAssignments {
+                conflict_hash, ..
+            }
+            | membership::MembershipConflict::RevocationCycle { conflict_hash, .. } => {
+                *conflict_hash
+            }
+        };
+        if current != conflict_hash {
+            return Err(MembershipError::InvalidConflictResolution.into());
+        }
+        let resolver_pubkey = keys::public_key_hex(&signer);
+        let replacement_grant =
+            membership::derive_store_resolution_grant(&conflict_hash, &resolver_pubkey);
+        let stream_id = store_commit::StreamActivation::grant_authorized_stream_id(
+            base.root().store_root_hash,
+            base.registration_ref(),
+            &replacement_grant,
+            store_commit::StreamAnchorDomain::StoreMembership,
+        );
+        let membership_context = ProtocolObjectContext::signed_plaintext(
+            base.root().store_root_hash,
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let membership_slot = self
+            .storage
+            .as_ref()
+            .allocate_protocol_slot(
+                &membership_context,
+                &membership_head_slot_prefix(&resolver_pubkey, &replacement_grant, stream_id, 1),
+                ".json",
+            )
+            .await?;
+        let recovery_context = ProtocolObjectContext::signed_plaintext(
+            base.root().store_root_hash,
+            ProtocolObjectDomain::OwnerRecoveryNode,
+        );
+        let recovery_slot = self
+            .storage
+            .as_ref()
+            .allocate_protocol_slot(
+                &recovery_context,
+                &store_commit::owner_recovery_semantic_prefix(
+                    &resolver_pubkey,
+                    replacement_grant.clone(),
+                    1,
+                ),
+                ".json",
+            )
+            .await?;
+        let membership = store_commit::GrantStreamAnchor::StoreMembership {
+            first_slot: membership_slot,
+        };
+        let recovery = store_commit::GrantStreamAnchor::OwnerRecovery {
+            first_slot: recovery_slot,
+        };
+        let acceptance = store_commit::OwnerConflictResolutionAcceptance::signed(
+            base.root().store_root_hash,
+            replacement_grant,
+            base.registration_ref().clone(),
+            membership.clone(),
+            recovery,
+            base.device_state().clone(),
+            base.registration(),
             &signer,
         )
         .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-    let plan = ResolveMutationPlan {
-        resolution,
-        reference,
-        resolution_object,
-        transition: Box::new(transition),
-        candidate: Box::new(candidate),
-        publication: Box::new(publication),
-    };
-    plan.validate_closed_shape()?;
-    Ok(plan)
+        let resolution = chain.signed_conflict_resolution(
+            base.root().store_root_hash,
+            selection,
+            membership,
+            acceptance,
+            &signer,
+        )?;
+        let resolution_bytes = serde_json::to_vec(&resolution).map_err(|error| {
+            InviteError::InvalidDurableMutation(format!("serialize membership resolution: {error}"))
+        })?;
+        let resolution_context = ProtocolObjectContext::signed_plaintext(
+            base.root().store_root_hash,
+            ProtocolObjectDomain::StoreMembershipResolution,
+        );
+        let resolution_hash = resolution.resolution_hash();
+        let resolution_prefix = store_commit::membership_resolution_semantic_prefix(
+            conflict_hash,
+            &resolver_pubkey,
+            resolution_hash,
+        );
+        let resolution_slot = self
+            .storage
+            .as_ref()
+            .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
+            .await?;
+        let resolution_object = self.storage.as_ref().prepare_protocol_object(
+            &resolution_context,
+            resolution_slot,
+            &resolution_prefix,
+            resolution_bytes,
+        )?;
+        let reference = resolution.resolution_ref(resolution_object.reference().clone());
+        let mut resolved_chain = chain.clone();
+        resolved_chain.apply_resolutions(
+            base.root().store_root_hash,
+            &[(reference.clone(), resolution.clone())],
+        )?;
+        let entry = resolved_chain.signed_resolution_activation_in_stream(
+            base.root().store_root_hash,
+            &signer,
+            stream_id,
+            reference.clone(),
+            &resolution,
+            created_at.to_string(),
+        )?;
+        let transition = AuthorizedMembershipPublication::new(self)
+            .prepare_transition(&resolved_chain, entry)
+            .await?;
+        let operation_plan = base
+            .finish(&resolved_chain, &reference)
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        let mut stream_activations = vec![
+            store_commit::StreamActivation::grant_authorized(
+                resolution.store_root_hash,
+                resolution.replacement_acceptance.owner_registration.clone(),
+                resolution.replacement_grant.clone(),
+                resolution.replacement_acceptance.membership.clone(),
+            ),
+            store_commit::StreamActivation::grant_authorized(
+                resolution.store_root_hash,
+                resolution.replacement_acceptance.owner_registration.clone(),
+                resolution.replacement_grant.clone(),
+                resolution.replacement_acceptance.recovery.clone(),
+            ),
+        ];
+        stream_activations.sort();
+        let mut candidate = self
+            .prepare_candidate(
+                operation_plan,
+                operations::StoreOperationBatch::MergeMembershipActivation {
+                    transition: transition.transition.clone(),
+                    stream_activations,
+                },
+            )
+            .await
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        let publication = AuthorizedMembershipPublication::new(self)
+            .finish_transition(
+                transition.clone(),
+                membership::MembershipHeadActivation::StoreCommit {
+                    commit: candidate.reference.clone(),
+                },
+            )
+            .await?;
+        candidate
+            .attach_merge_membership_proof(
+                self.storage.as_ref(),
+                &publication,
+                Some(&resolution),
+                &signer,
+            )
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        let plan = ResolveMutationPlan {
+            resolution,
+            reference,
+            resolution_object,
+            transition: Box::new(transition),
+            candidate: Box::new(candidate),
+            publication: Box::new(publication),
+        };
+        plan.validate_closed_shape()?;
+        Ok(plan)
+    }
 }
 
 async fn execute_resolution_mutation(
@@ -465,9 +471,9 @@ pub(crate) async fn resolve_membership_conflict(
             (plan, progress, intent_hash)
         }
         None => {
-            let plan =
-                build_resolution_mutation(operation, chain, conflict_hash, selection, created_at)
-                    .await?;
+            let plan = operation
+                .build_resolution_mutation(chain, conflict_hash, selection, created_at)
+                .await?;
             let bytes = encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
             let progress = MembershipMutationProgress::Pending;
             let intent_hash = database

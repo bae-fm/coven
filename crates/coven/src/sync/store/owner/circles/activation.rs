@@ -152,6 +152,38 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         }
         Ok(verified)
     }
+
+    async fn verify_control_membership(
+        &mut self,
+        control: &PreparedCircleControl,
+    ) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
+        let state = &control.value.access_epoch().store_membership;
+        let chain = self
+            .history
+            .load_membership_at_exact_heads(&state.heads, &state.resolutions)
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        verify_loaded_control_membership(control, chain)
+    }
+
+    async fn verify_control_membership_at_verified_prefix(
+        &self,
+        control: &PreparedCircleControl,
+        verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    ) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
+        let state = &control.value.access_epoch().store_membership;
+        let chain = self
+            .history
+            .load_membership_at_verified_prefix(
+                &state.heads,
+                &state.resolutions,
+                verified_activations,
+                None,
+            )
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        verify_loaded_control_membership(control, chain)
+    }
 }
 
 /// The verified epoch-close settlement a successor activation carries: the exact
@@ -166,35 +198,6 @@ struct VerifiedAccessPair {
     reference: CircleAccessObjectRef,
     envelope: AccessEnvelope,
     leaf_bytes: Vec<u8>,
-}
-
-async fn verify_control_membership(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    control: &PreparedCircleControl,
-) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.access_epoch().store_membership;
-    let chain =
-        Box::pin(history_verifier.load_membership_at_exact_heads(&state.heads, &state.resolutions))
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    verify_loaded_control_membership(control, chain)
-}
-
-async fn verify_control_membership_with_verified_activations(
-    history_verifier: &crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    control: &PreparedCircleControl,
-    verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
-) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
-    let state = &control.value.access_epoch().store_membership;
-    let chain = Box::pin(history_verifier.load_membership_at_verified_prefix(
-        &state.heads,
-        &state.resolutions,
-        verified_activations,
-        None,
-    ))
-    .await
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    verify_loaded_control_membership(control, chain)
 }
 
 fn verify_loaded_control_membership(
@@ -1483,9 +1486,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let verified_access = self
             .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
             .await?;
-        let history_verifier = &mut *self.history;
-        let checkpoint_members =
-            Box::pin(verify_control_membership(history_verifier, control)).await?;
+        let checkpoint_members = self.verify_control_membership(control).await?;
         let Some(resolved) = resolve_identity_access_leaf(
             &verified_access,
             checkpoint_members.as_slice(),
@@ -1762,12 +1763,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             let verified_access = self
                 .load_access_pairs(commit, reference.circle_id(), &control, objects)
                 .await?;
-            let checkpoint_members = Box::pin(verify_control_membership_with_verified_activations(
-                &*self.history,
-                &control,
-                verified_membership_prefix,
-            ))
-            .await?;
+            let checkpoint_members = self
+                .verify_control_membership_at_verified_prefix(&control, verified_membership_prefix)
+                .await?;
             if control.value.state().is_deleted() {
                 // A deletion carries no access material. It activates to the
                 // terminal Deleted state with no local access; materialization

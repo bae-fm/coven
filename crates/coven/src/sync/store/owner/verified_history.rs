@@ -57,15 +57,6 @@ pub(crate) async fn load_membership_at_exact_heads_with_verified_activations(
     .await
 }
 
-pub(crate) async fn load_merge_predecessor_membership_with_history(
-    history_verifier: &mut MergeHistoryVerifier<'_>,
-    state: &StoreMembershipStateRef,
-) -> Result<MembershipChain, RegistrationLoadError> {
-    Box::pin(history_verifier.load_membership_at_exact_heads(&state.heads, &state.resolutions))
-        .await
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
-}
-
 pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
     commit_verifier: &StoreCommitVerifier<'_>,
     state: &StoreMembershipStateRef,
@@ -73,22 +64,6 @@ pub(crate) async fn load_merge_predecessor_membership_with_verified_activations(
     pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
 ) -> Result<MembershipChain, RegistrationLoadError> {
     Box::pin(commit_verifier.load_membership_at_verified_prefix(
-        &state.heads,
-        &state.resolutions,
-        verified_activations,
-        pending_resolution,
-    ))
-    .await
-    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
-}
-
-pub(crate) async fn load_merge_predecessor_membership_with_retained_history(
-    history_verifier: &MergeHistoryVerifier<'_>,
-    state: &StoreMembershipStateRef,
-    verified_activations: &VerifiedMergeMembershipPrefix,
-    pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
-) -> Result<MembershipChain, RegistrationLoadError> {
-    Box::pin(history_verifier.load_membership_at_verified_prefix(
         &state.heads,
         &state.resolutions,
         verified_activations,
@@ -1013,15 +988,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .to_string(),
             ));
         }
-        let membership = load_merge_predecessor_membership_with_history(
-            self,
-            &activation.value().membership_state,
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+        let membership = self
+            .load_predecessor_membership(&activation.value().membership_state)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
         if !predecessor_verifies_provider_administrator(
             &membership,
             &access.grant.administrator_grant,
@@ -1215,15 +1188,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         activation: LoadedDeviceJoinCleanupActivation,
     ) -> Result<crate::sync::store::JoinerJoinTerminal, StorePullError> {
-        let membership = load_merge_predecessor_membership_with_history(
-            self,
-            &activation.verified_commit.value().membership_state,
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+        let membership = self
+            .load_predecessor_membership(&activation.verified_commit.value().membership_state)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
         if !membership.is_owner_now(&activation.verified_commit.author().author_pubkey) {
             return Err(StorePullError::Database(
                 "device join cleanup activation author is not an active Merge Owner".to_string(),
@@ -1987,6 +1958,31 @@ impl<'a> MergeHistoryVerifier<'a> {
                 pending_resolution,
             )
             .await
+    }
+
+    pub(crate) async fn load_predecessor_membership(
+        &mut self,
+        state: &StoreMembershipStateRef,
+    ) -> Result<MembershipChain, RegistrationLoadError> {
+        self.load_membership_at_exact_heads(&state.heads, &state.resolutions)
+            .await
+            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+    }
+
+    pub(crate) async fn load_predecessor_membership_at_verified_prefix(
+        &self,
+        state: &StoreMembershipStateRef,
+        verified_activations: &VerifiedMergeMembershipPrefix,
+        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
+    ) -> Result<MembershipChain, RegistrationLoadError> {
+        self.load_membership_at_verified_prefix(
+            &state.heads,
+            &state.resolutions,
+            verified_activations,
+            pending_resolution,
+        )
+        .await
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
     }
 
     pub(crate) async fn load_exact_membership_head(
@@ -2773,7 +2769,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         attempt_activation: &StoreBatchCommitRef,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
-        let membership = load_merge_predecessor_membership_with_history(self, membership_state)
+        let membership = self
+            .load_predecessor_membership(membership_state)
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
@@ -3227,15 +3224,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "membership revocation witness commit names another membership state".to_string(),
             ));
         }
-        let current_membership = load_merge_predecessor_membership_with_history(
-            self,
-            &witness_commit.value().membership_state,
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+        let current_membership = self
+            .load_predecessor_membership(&witness_commit.value().membership_state)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
         let MembershipStatus::Resolved(current) = current_membership.status() else {
             return Err(StorePullError::Database(
                 "membership revocation witness state is conflicted".to_string(),
@@ -3253,15 +3248,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         let candidate_ref = candidate.reference();
         let candidate_commit = candidate.value();
         let candidate_author = candidate.author();
-        let predecessor_membership = load_merge_predecessor_membership_with_history(
-            self,
-            &candidate_commit.membership_state,
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
-        })?;
+        let predecessor_membership = self
+            .load_predecessor_membership(&candidate_commit.membership_state)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
         let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
             return Err(StorePullError::Database(
                 "membership revocation candidate predecessor is conflicted".to_string(),

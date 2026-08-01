@@ -2100,8 +2100,8 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     )
     .await;
 
-    let error = store_database
-        .drain_published_blob_drop_intents(&lib, sequence)
+    let error = crate::sync::test_owner_graph::local_blob_access(store_database, lib.clone())
+        .drain_published_blob_drop_intents(sequence)
         .await
         .expect_err("a lost disposition fails the drain");
     assert!(error.contains("missing from both"), "{error}");

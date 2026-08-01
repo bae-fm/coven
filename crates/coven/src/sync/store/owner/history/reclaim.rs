@@ -11,6 +11,23 @@ pub(crate) struct ReclaimHistory<'operation, 'storage> {
     history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
 }
 
+/// One device's per-Circle snapshot stream, read in generation order.
+pub(crate) struct CircleSnapshotStream {
+    pub(crate) author_registration: StoreDeviceRegistrationRef,
+    pub(crate) generations: Vec<(
+        crate::protocol::store_commit::CircleSnapshotRef,
+        crate::protocol::store_commit::CircleSnapshotMeta,
+    )>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SelectedCircleSnapshot {
+    pub(crate) author_registration: StoreDeviceRegistrationRef,
+    pub(crate) reference: crate::protocol::store_commit::CircleSnapshotRef,
+    pub(crate) meta: crate::protocol::store_commit::CircleSnapshotMeta,
+    pub(crate) acknowledgements: Vec<crate::protocol::store_commit::CircleAckRef>,
+}
+
 impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
@@ -114,6 +131,98 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         covered: &StoreBatchCommitRef,
     ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
         self.history.commit_position_covers(covering, covered).await
+    }
+
+    pub(crate) async fn snapshot_covers_target(
+        &mut self,
+        coverage: &CommitFrontier,
+        target: &StoreBatchCommitRef,
+    ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
+        match coverage.0.get(&target.coord.stream_id) {
+            Some(covering) => self.commit_position_covers(covering, target).await,
+            None => Ok(false),
+        }
+    }
+
+    /// Load every supplied device's Circle snapshot stream using the current
+    /// control's retained keyring. A stream can span epochs, so a key restricted
+    /// to one epoch cannot decrypt its older generations.
+    pub(crate) async fn load_circle_snapshot_streams(
+        &mut self,
+        circle_id: crate::protocol::circle::CircleId,
+        current_control: &crate::protocol::circle::CircleControlCoord,
+        registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+    ) -> Result<Vec<CircleSnapshotStream>, crate::sync::store::StoreReclaimError> {
+        let encryption = self
+            .database
+            .circle_package_access(self.root.clone(), circle_id, current_control.clone())
+            .await?
+            .ok_or_else(|| {
+                crate::sync::store::StoreReclaimError::Authorization(format!(
+                    "Circle {circle_id} snapshot key is not resolvable from retained controls"
+                ))
+            })?
+            .into_encryption();
+        let mut streams = Vec::new();
+        for (registration_ref, registration) in registrations {
+            // A device's stream can span epochs. If this reader cannot resolve one
+            // generation's key, that stream cannot establish current coverage.
+            let generations = match self
+                .circle_snapshots()
+                .load_stream_refs(
+                    circle_id,
+                    encryption.clone(),
+                    registration_ref,
+                    registration,
+                )
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!(
+                        circle_id = %circle_id,
+                        device_id = %registration.device_id,
+                        "skip Circle snapshot stream for reclaim coverage: {error}"
+                    );
+                    continue;
+                }
+            };
+            streams.push(CircleSnapshotStream {
+                author_registration: registration_ref.clone(),
+                generations,
+            });
+        }
+        Ok(streams)
+    }
+
+    /// Return every snapshot generation whose cut every device holding active
+    /// Circle access has acknowledged.
+    pub(crate) async fn stable_circle_snapshots(
+        &mut self,
+        circle_id: crate::protocol::circle::CircleId,
+        streams: &[CircleSnapshotStream],
+    ) -> Result<Vec<SelectedCircleSnapshot>, crate::sync::store::StoreReclaimError> {
+        let mut stable = Vec::new();
+        for stream in streams {
+            for (reference, meta) in &stream.generations {
+                if let Some(acknowledgements) = self
+                    .circle_acknowledgements()
+                    .stable_dominating(circle_id, &meta.bootstrap.coverage)
+                    .await
+                    .map_err(|error| {
+                        crate::sync::store::StoreReclaimError::Authorization(error.to_string())
+                    })?
+                {
+                    stable.push(SelectedCircleSnapshot {
+                        author_registration: stream.author_registration.clone(),
+                        reference: reference.clone(),
+                        meta: meta.clone(),
+                        acknowledgements,
+                    });
+                }
+            }
+        }
+        Ok(stable)
     }
 
     pub(crate) async fn load_reclaim_authorization(

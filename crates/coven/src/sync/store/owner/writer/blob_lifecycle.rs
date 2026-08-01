@@ -80,16 +80,6 @@ impl AuthorizedWriterOperation<'_> {
         .await
     }
 
-    pub(crate) async fn drain_published_blob_drop_intents(
-        &self,
-        store_dir: &StoreDir,
-        max_seq: u64,
-    ) -> Result<(), String> {
-        self.database
-            .drain_published_blob_drop_intents(store_dir, max_seq)
-            .await
-    }
-
     pub(crate) async fn drain_local_blob_cleanup(
         &self,
         store_dir: &StoreDir,

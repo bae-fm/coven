@@ -170,11 +170,10 @@ pub(crate) use store::{
     BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
     DurableStoreReclaimOperation, HostWriteError, HostWriteOperation, MaterializedLocalBlob,
     MergeCandidateAbandonmentPreparation, MergeMaterializationTransaction, OwnStreamAuthorship,
-    OwnedVerifiedMergeMaterialization, PublishedBlobDropIntent, ReclaimCommitActivation,
-    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime,
-    StoreReclaimJournalError, StoreWritePreparation, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects,
+    OwnedVerifiedMergeMaterialization, ReclaimCommitActivation, ReclaimedStorePackage,
+    RetainedAudiencePackage, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
+    StoreWritePreparation, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
 pub use store::{SqlContext, WriteBatch};
 pub(crate) use store_authority_records::{

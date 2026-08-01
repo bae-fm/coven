@@ -960,17 +960,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .verify_resolution_activation_acceptance(commit)
             .await
             .map_err(|error| error.to_string())?;
-        let predecessor_membership = load_merge_predecessor_membership_with_retained_history(
-            &self.history_verifier,
-            &commit.membership_state,
-            &verified_membership_activations,
-            pending_resolution.as_ref(),
-        )
-        .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => error.to_string(),
-            RegistrationLoadError::Invalid(error) => error,
-        })?;
+        let predecessor_membership = self
+            .history_verifier
+            .load_predecessor_membership_at_verified_prefix(
+                &commit.membership_state,
+                &verified_membership_activations,
+                pending_resolution.as_ref(),
+            )
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => error.to_string(),
+                RegistrationLoadError::Invalid(error) => error,
+            })?;
         verify_merge_membership_state_ref(
             &commit.membership_state,
             &predecessor_membership,
@@ -1504,7 +1505,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         state: &StoreMembershipStateRef,
     ) -> Result<MembershipChain, RegistrationLoadError> {
-        load_merge_predecessor_membership_with_history(&mut self.history_verifier, state).await
+        self.history_verifier
+            .load_predecessor_membership(state)
+            .await
     }
 
     async fn materialized_reference_status(
@@ -2849,11 +2852,9 @@ impl AuthorizedStoreHistory<'_> {
             {
                 continue;
             }
-            let membership =
-                super::verified_history::load_merge_predecessor_membership_with_history(
-                    &mut self.history_verifier,
-                    &witness.commit().membership_state,
-                )
+            let membership = self
+                .history_verifier
+                .load_predecessor_membership(&witness.commit().membership_state)
                 .await
                 .map_err(|error| match error {
                     super::verified_history::registration::RegistrationLoadError::Object(error) => {

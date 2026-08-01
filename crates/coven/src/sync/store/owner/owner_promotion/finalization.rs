@@ -103,6 +103,87 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
             .await?;
         self.delete_candidate_objects(targets).await
     }
+
+    /// Publish the promotion's membership authority and compose the Store candidate
+    /// that activates it, journaled as `MergeHeadPrepared` for the publication that
+    /// follows. The turn that claimed the stream position is released with the plan,
+    /// so a writer can take that position before the publication runs; the candidate
+    /// is then bound to a head slot it can never take, and the publication ends the
+    /// attempt on the verified winner. Everything composed here — the membership
+    /// entry and head above all — sits in create-once slots the promoter's next
+    /// attempt composes into, which is why ending the attempt deletes them.
+    async fn prepare_merge_store_candidate(
+        &mut self,
+        journal: &OwnerPromotionJournalPredecessor,
+        acceptance: OwnerPromotionAcceptance,
+        wrapped_key: PreparedWrappedStoreKey,
+        transition: Box<PreparedMembershipTransition>,
+    ) -> Result<OwnerPromotionJournal, OwnerPromotionError> {
+        let root = self.root.clone();
+        self.writer
+            .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
+            .await
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let plan = self.writer.prepare_plan().await?;
+        let OwnerPromotionAnchors {
+            membership: membership_anchor,
+            recovery,
+        } = &acceptance.anchors;
+        let mut stream_activations = vec![
+            StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.request.member_registration.clone(),
+                acceptance.request.intended_owner_grant.clone(),
+                membership_anchor.clone(),
+            ),
+            StreamActivation::grant_authorized(
+                root.store_root_hash,
+                acceptance.request.member_registration.clone(),
+                acceptance.request.intended_owner_grant.clone(),
+                recovery.clone(),
+            ),
+        ];
+        stream_activations.sort();
+        let mut candidate = self
+            .writer
+            .prepare_candidate(
+                plan,
+                StoreOperationBatch::MergeMembershipActivation {
+                    transition: transition.transition.clone(),
+                    stream_activations,
+                },
+            )
+            .await?;
+        let publication = self
+            .writer
+            .finish_membership_transition(
+                transition.as_ref().clone(),
+                crate::protocol::membership::MembershipHeadActivation::StoreCommit {
+                    commit: candidate.reference.clone(),
+                },
+            )
+            .await
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        candidate
+            .attach_merge_membership_proof(
+                self.storage.as_ref(),
+                &publication,
+                None,
+                &self.identity,
+            )
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        Ok(OwnerPromotionJournal {
+            promotion_id: journal.promotion_id,
+            target: journal.target.clone(),
+            state: OwnerPromotionJournalState::MergeHeadPrepared {
+                acceptance,
+                wrapped_key,
+                transition,
+                publication: Box::new(publication),
+                candidate: Box::new(candidate),
+            },
+        })
+    }
 }
 
 enum OwnerPromotionPreparation {
@@ -231,85 +312,6 @@ async fn prepare_merge_owner_promotion_finalization(
         },
     };
     Ok(OwnerPromotionPreparation::Continue(next))
-}
-
-/// Publish the promotion's membership authority and compose the Store candidate
-/// that activates it, journaled as `MergeHeadPrepared` for the publication that
-/// follows. The turn that claimed the stream position is released with the plan,
-/// so a writer can take that position before the publication runs; the candidate
-/// is then bound to a head slot it can never take, and the publication ends the
-/// attempt on the verified winner. Everything composed here — the membership
-/// entry and head above all — sits in create-once slots the promoter's next
-/// attempt composes into, which is why ending the attempt deletes them.
-async fn prepare_merge_store_candidate(
-    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
-    journal: &OwnerPromotionJournalPredecessor,
-    acceptance: OwnerPromotionAcceptance,
-    wrapped_key: PreparedWrappedStoreKey,
-    transition: Box<PreparedMembershipTransition>,
-) -> Result<OwnerPromotionJournal, OwnerPromotionError> {
-    let root = operation.root.clone();
-    operation
-        .writer
-        .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
-        .await
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let plan = operation.writer.prepare_plan().await?;
-    let OwnerPromotionAnchors {
-        membership: membership_anchor,
-        recovery,
-    } = &acceptance.anchors;
-    let mut stream_activations = vec![
-        StreamActivation::grant_authorized(
-            root.store_root_hash,
-            acceptance.request.member_registration.clone(),
-            acceptance.request.intended_owner_grant.clone(),
-            membership_anchor.clone(),
-        ),
-        StreamActivation::grant_authorized(
-            root.store_root_hash,
-            acceptance.request.member_registration.clone(),
-            acceptance.request.intended_owner_grant.clone(),
-            recovery.clone(),
-        ),
-    ];
-    stream_activations.sort();
-    let mut candidate = operation
-        .writer
-        .prepare_candidate(
-            plan,
-            StoreOperationBatch::MergeMembershipActivation {
-                transition: transition.transition.clone(),
-                stream_activations,
-            },
-        )
-        .await?;
-    let publication = operation
-        .writer
-        .finish_membership_transition(
-            transition.as_ref().clone(),
-            crate::protocol::membership::MembershipHeadActivation::StoreCommit {
-                commit: candidate.reference.clone(),
-            },
-        )
-        .await
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let identity = operation.identity.clone();
-    candidate
-        .attach_merge_membership_proof(operation.storage.as_ref(), &publication, None, &identity)
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let next = OwnerPromotionJournal {
-        promotion_id: journal.promotion_id,
-        target: journal.target.clone(),
-        state: OwnerPromotionJournalState::MergeHeadPrepared {
-            acceptance,
-            wrapped_key,
-            transition,
-            publication: Box::new(publication),
-            candidate: Box::new(candidate),
-        },
-    };
-    Ok(next)
 }
 
 enum MergeHeadPublication {
@@ -591,14 +593,9 @@ async fn resume_owner_promotion_finalization(
                 wrapped_key,
                 transition,
             } => {
-                let next = prepare_merge_store_candidate(
-                    operation,
-                    &previous,
-                    acceptance,
-                    wrapped_key,
-                    transition,
-                )
-                .await?;
+                let next = operation
+                    .prepare_merge_store_candidate(&previous, acceptance, wrapped_key, transition)
+                    .await?;
                 (previous, state) = operation.advance_journal(previous, next).await?;
             }
             OwnerPromotionJournalState::MergeHeadPrepared {

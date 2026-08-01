@@ -1217,6 +1217,8 @@ pub(crate) async fn run_cycle_fixture(
     store_dir: &StoreDir,
 ) -> Result<crate::sync::cycle::SyncComponents, String> {
     let database = crate::database::StoreDatabase::new(db);
+    let local_blob_access =
+        crate::sync::test_owner_graph::local_blob_access(database.clone(), store_dir.clone());
     let expected_store_root = database
         .local_store_root_ref()
         .await
@@ -1224,6 +1226,7 @@ pub(crate) async fn run_cycle_fixture(
         .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
     let components = Box::pin(crate::sync::cycle::init_sync_over_storage(
         &database,
+        local_blob_access,
         storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root,
@@ -2402,8 +2405,8 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         if published > 0 {
-            database
-                .drain_published_blob_drop_intents(store_dir, u64::MAX)
+            crate::sync::test_owner_graph::local_blob_access(database.clone(), store_dir.clone())
+                .drain_published_blob_drop_intents(u64::MAX)
                 .await?;
             database
                 .drain_local_blob_cleanup(store_dir)

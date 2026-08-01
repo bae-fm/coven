@@ -232,17 +232,21 @@ pub(crate) async fn run_single_sync_cycle(
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let store = Store::load(
-        crate::database::StoreDatabase::new(db),
-        storage,
-        user_keypair.clone(),
-    )
-    .await
-    .map_err(|error| SyncCycleFailure::operation("load local Store", error))?;
+    let store_database = crate::database::StoreDatabase::new(db);
+    let store = Store::load(store_database.clone(), storage, user_keypair.clone())
+        .await
+        .map_err(|error| SyncCycleFailure::operation("load local Store", error))?;
     let authorization = store
         .authorize_writer()
         .await
         .map_err(|error| SyncCycleFailure::operation("authorize local Store writer", error))?;
+    let blob_cache =
+        super::store::blob::StoreBlobCache::new(store_database.clone(), store_dir.clone());
+    let local_blob_access = super::store::blob::LocalStoreBlobAccess::new(
+        store_database,
+        store_dir.clone(),
+        blob_cache,
+    );
     AuthorizedSyncCycle {
         device_id,
         hlc,
@@ -252,6 +256,7 @@ pub(crate) async fn run_single_sync_cycle(
         security,
         routing_encryption: None,
         store_dir,
+        local_blob_access: &local_blob_access,
         cloud_home,
         observer,
         authorization,
@@ -288,6 +293,7 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     security: Option<&'cycle crate::store_security::StoreSecurity>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
     store_dir: &'cycle StoreDir,
+    local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     cloud_home: Option<&'cycle dyn CloudHome>,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     authorization: AuthorizedWriterOperation<'store>,
@@ -413,8 +419,8 @@ impl AuthorizedSyncCycle<'_, '_> {
             .await
             .map_err(|error| format!("read local Store position: {error}"))?
             .map_or(0, |reference| reference.coord.sequence());
-        self.authorization
-            .drain_published_blob_drop_intents(self.store_dir, local_seq)
+        self.local_blob_access
+            .drain_published_blob_drop_intents(local_seq)
             .await?;
 
         // One wall-clock reading for this whole cycle. Store acknowledgements and
@@ -504,8 +510,8 @@ impl AuthorizedSyncCycle<'_, '_> {
             .await
             .map_err(|error| format!("read local Store position after publish: {error}"))?
             .map_or(0, |position| position.coord.sequence());
-        self.authorization
-            .drain_published_blob_drop_intents(self.store_dir, local_seq)
+        self.local_blob_access
+            .drain_published_blob_drop_intents(local_seq)
             .await?;
         let local_blob_cleanup_pending = self
             .authorization
@@ -589,6 +595,7 @@ pub(crate) enum StoreInitialization {
 
 pub(crate) async fn init_sync_over_storage(
     store_database: &crate::database::StoreDatabase,
+    local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
     initialization: StoreInitialization,
     routing_encryption: Option<crate::encryption::EncryptionService>,
@@ -671,6 +678,7 @@ pub(crate) async fn init_sync_over_storage(
     Ok(SyncComponents {
         store: std::sync::Arc::new(initialized.store),
         database: store_database.clone(),
+        local_blob_access,
         storage: store_storage,
         hlc,
         store_id,
@@ -689,6 +697,7 @@ pub(crate) async fn init_sync_over_storage(
 pub(crate) struct SyncComponents {
     store: std::sync::Arc<Store>,
     database: crate::database::StoreDatabase,
+    local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     hlc: std::sync::Arc<Hlc>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
@@ -1011,6 +1020,7 @@ impl SyncComponents {
             security,
             routing_encryption: self.routing_encryption.as_ref(),
             store_dir,
+            local_blob_access: &self.local_blob_access,
             cloud_home: Some(self.storage.cloud_home()),
             observer,
             authorization,

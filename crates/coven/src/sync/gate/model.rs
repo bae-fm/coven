@@ -326,7 +326,63 @@ impl Gates {
         &self,
         conn: &Connection,
     ) -> Result<Vec<String>, GateError> {
-        fk_topological_order(conn, &self.tables)
+        // Edge parent -> child means "parent must precede child". A table's FK to a
+        // gated table makes that table its prerequisite (it points at the parent's
+        // id), so the FK target is the parent of the edge and the referrer the child.
+        // Only edges between two gated tables matter.
+        let names: Vec<String> = self.tables.keys().cloned().collect();
+        let mut indegree: HashMap<String, usize> =
+            names.iter().map(|name| (name.clone(), 0)).collect();
+        let mut edges: HashMap<String, Vec<String>> = names
+            .iter()
+            .map(|name| (name.clone(), Vec::new()))
+            .collect();
+
+        let child_edges = gated_fk_child_edges(conn, &self.tables)?;
+        for (parent, children) in &child_edges {
+            for child in children {
+                edges
+                    .get_mut(parent)
+                    .expect("gated parent has a topological node")
+                    .push(child.child_table.clone());
+                *indegree
+                    .get_mut(&child.child_table)
+                    .expect("gated child has a topological node") += 1;
+            }
+        }
+
+        // Kahn with a deterministic tie-break: a min-heap of the ready
+        // (zero-indegree) tables, so equal-rank tables always emit smallest-first.
+        let mut ready: BinaryHeap<Reverse<String>> = indegree
+            .iter()
+            .filter(|(_, &degree)| degree == 0)
+            .map(|(name, _)| Reverse(name.clone()))
+            .collect();
+
+        let mut order = Vec::with_capacity(names.len());
+        while let Some(Reverse(next)) = ready.pop() {
+            for child in &edges[&next] {
+                let degree = indegree
+                    .get_mut(child)
+                    .expect("gated child has a topological degree");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.push(Reverse(child.clone()));
+                }
+            }
+            order.push(next);
+        }
+
+        if order.len() != names.len() {
+            let mut remaining: Vec<String> = names
+                .iter()
+                .filter(|name| !order.contains(name))
+                .cloned()
+                .collect();
+            remaining.sort();
+            return Err(GateError::FkCycle(remaining));
+        }
+        Ok(order)
     }
 
     /// Delete from `db` every row the gate excludes: each gated root row whose
@@ -631,7 +687,7 @@ fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> b
 /// FK column name)]`: for every gated table, each of its FKs that points at
 /// another gated table contributes an edge under the *target* (the parent). The
 /// fixpoint walk in `connected_component` (the outbound pass) follows these down-edges
-/// directly; [`fk_topological_order`] uses the same edges (discarding the FK
+/// directly; [`Gates::gated_tables_parent_first`] uses the same edges (discarding the FK
 /// column) so the parent-first order is derived from one definition, not a second
 /// parallel FK scan.
 ///
@@ -664,73 +720,6 @@ pub(super) fn gated_fk_child_edges(
     Ok(edges)
 }
 
-/// The gated tables in FK-topological order: every table comes after every gated
-/// table it has a foreign key to (e.g. artists, albums, album_artists, releases,
-/// tracks). The snapshot prune deletes in the reverse (child-first) order, which
-/// must not reject a parent's deletion under `foreign_keys=ON`; the re-emit
-/// changeset reuses this order for a deterministic, FK-sensible layout.
-///
-/// A chain-depth sort does not suffice: the gate graph spans both directions — an
-/// ancestor (album) is the FK *parent* of gated rows (releases) yet is itself
-/// kept *by* them — so only a real topological sort over the FK edges produces a
-/// valid order. Deterministic Kahn: among the ready (zero-indegree) tables,
-/// always take the lexicographically smallest, so the order is stable.
-///
-fn fk_topological_order(
-    conn: &Connection,
-    gate_map: &HashMap<String, TableGate>,
-) -> Result<Vec<String>, GateError> {
-    // Edge parent -> child means "parent must precede child". A table's FK to a
-    // gated table makes that table its prerequisite (it points at the parent's
-    // id), so the FK target is the parent of the edge and the referrer the child.
-    // Only edges between two gated tables matter.
-    let names: Vec<String> = gate_map.keys().cloned().collect();
-    let mut indegree: HashMap<String, usize> = names.iter().map(|n| (n.clone(), 0)).collect();
-    let mut edges: HashMap<String, Vec<String>> =
-        names.iter().map(|n| (n.clone(), Vec::new())).collect();
-
-    let child_edges = gated_fk_child_edges(conn, gate_map)?;
-    for (parent, children) in &child_edges {
-        for child in children {
-            edges
-                .get_mut(parent)
-                .unwrap()
-                .push(child.child_table.clone());
-            *indegree.get_mut(&child.child_table).unwrap() += 1;
-        }
-    }
-
-    // Kahn with a deterministic tie-break: a min-heap of the ready
-    // (zero-indegree) tables, so equal-rank tables always emit smallest-first.
-    let mut ready: BinaryHeap<Reverse<String>> = indegree
-        .iter()
-        .filter(|(_, &d)| d == 0)
-        .map(|(n, _)| Reverse(n.clone()))
-        .collect();
-
-    let mut order = Vec::with_capacity(names.len());
-    while let Some(Reverse(next)) = ready.pop() {
-        for child in &edges[&next] {
-            let d = indegree.get_mut(child).unwrap();
-            *d -= 1;
-            if *d == 0 {
-                ready.push(Reverse(child.clone()));
-            }
-        }
-        order.push(next);
-    }
-
-    if order.len() != names.len() {
-        let mut remaining: Vec<String> = names
-            .iter()
-            .filter(|n| !order.contains(n))
-            .cloned()
-            .collect();
-        remaining.sort();
-        return Err(GateError::FkCycle(remaining));
-    }
-    Ok(order)
-}
 /// The ids of rows in `table` whose `fk` column equals `value`.
 pub(super) fn rows_referencing(
     conn: &Connection,

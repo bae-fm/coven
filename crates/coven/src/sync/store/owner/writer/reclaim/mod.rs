@@ -22,7 +22,9 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::storage::{StoreObjectError, SyncStorage};
-use crate::sync::store::owner::history::ReclaimHistory;
+use crate::sync::store::owner::history::{
+    CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
+};
 use crate::sync::store::AuthorizedWriterOperation;
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
@@ -1023,6 +1025,17 @@ pub(crate) enum StoreReclaimError {
     },
 }
 
+impl From<super::pull::CommitCoverageError> for StoreReclaimError {
+    fn from(error: super::pull::CommitCoverageError) -> Self {
+        match error {
+            super::pull::CommitCoverageError::Object(error) => Self::Object(error),
+            super::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
+                Self::MissingAncestry { commit_hash }
+            }
+        }
+    }
+}
+
 fn reclaim_pull_error(error: super::pull::StorePullError) -> StoreReclaimError {
     match error {
         super::pull::StorePullError::Object(error) => StoreReclaimError::Object(error),
@@ -1352,7 +1365,6 @@ impl AuthorizedReclaim<'_, '_> {
         registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
-        let root = self.root.clone();
         for input in database.circle_acknowledgement_publication_inputs().await? {
             let circle_id = input.circle_id;
             let control = input.control;
@@ -1363,21 +1375,14 @@ impl AuthorizedReclaim<'_, '_> {
             // Both remaining passes read the same evidence: every device's snapshot
             // stream and which of its generations every active-access device has
             // acknowledged. Read it once.
-            let streams = Box::pin(load_circle_snapshot_streams(
-                &database,
-                &root,
-                &mut self.history(),
-                circle_id,
-                &control,
-                registrations,
-            ))
-            .await?;
-            let stable = Box::pin(stable_circle_snapshots(
-                &mut self.history(),
-                circle_id,
-                &streams,
-            ))
-            .await?;
+            let streams = self
+                .history()
+                .load_circle_snapshot_streams(circle_id, &control, registrations)
+                .await?;
+            let stable = self
+                .history()
+                .stable_circle_snapshots(circle_id, &streams)
+                .await?;
             let selected = maximal_stable_circle_snapshot(&stable);
             Box::pin(self.prepare_circle_bootstrap_authorizations(circle_id, &control, selected))
                 .await?;
@@ -1430,108 +1435,6 @@ impl AuthorizedReclaim<'_, '_> {
     }
 }
 
-#[derive(Clone)]
-struct SelectedCircleSnapshot {
-    author_registration: StoreDeviceRegistrationRef,
-    reference: CircleSnapshotRef,
-    meta: crate::protocol::store_commit::CircleSnapshotMeta,
-    acknowledgements: Vec<CircleAckRef>,
-}
-
-/// One device's per-Circle snapshot stream, read in generation order.
-struct CircleSnapshotStream {
-    author_registration: StoreDeviceRegistrationRef,
-    generations: Vec<(
-        CircleSnapshotRef,
-        crate::protocol::store_commit::CircleSnapshotMeta,
-    )>,
-}
-
-/// Every active device's Circle snapshot stream, decrypted under the current
-/// control's retained keyring — which resolves every epoch the reader holds, since
-/// a device's stream may span epochs that rotated away and a single-epoch key
-/// cannot decrypt the older ones.
-async fn load_circle_snapshot_streams(
-    database: &StoreDatabase,
-    root: &StoreRootRef,
-    history: &mut ReclaimHistory<'_, '_>,
-    circle_id: CircleId,
-    current_control: &CircleControlCoord,
-    registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
-) -> Result<Vec<CircleSnapshotStream>, StoreReclaimError> {
-    let encryption = database
-        .circle_package_access(root.clone(), circle_id, current_control.clone())
-        .await?
-        .ok_or_else(|| {
-            StoreReclaimError::Authorization(format!(
-                "Circle {circle_id} snapshot key is not resolvable from retained controls"
-            ))
-        })?
-        .into_encryption();
-    let mut streams = Vec::new();
-    for (registration_ref, registration) in registrations {
-        // A device's snapshot stream is a create-once chain sealed under the epoch
-        // active when each generation was authored. A generation sealed under an
-        // epoch key this reader cannot resolve (one that rotated away before the
-        // reader held it) is not current-epoch coverage; skip the stream — reclaim
-        // is best-effort and idempotent, so a later cycle retries once coverage is
-        // resolvable. Only a decryptable stream contributes coverage evidence.
-        let generations = match history
-            .circle_snapshots()
-            .load_stream_refs(
-                circle_id,
-                encryption.clone(),
-                registration_ref,
-                registration,
-            )
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::debug!(
-                    circle_id = %circle_id,
-                    device_id = %registration.device_id,
-                    "skip Circle snapshot stream for reclaim coverage: {error}"
-                );
-                continue;
-            }
-        };
-        streams.push(CircleSnapshotStream {
-            author_registration: registration_ref.clone(),
-            generations,
-        });
-    }
-    Ok(streams)
-}
-
-/// Every Circle snapshot generation, across every active device's stream, whose
-/// cut every device holding active Circle access has acknowledged.
-async fn stable_circle_snapshots(
-    history: &mut ReclaimHistory<'_, '_>,
-    circle_id: CircleId,
-    streams: &[CircleSnapshotStream],
-) -> Result<Vec<SelectedCircleSnapshot>, StoreReclaimError> {
-    let mut stable = Vec::new();
-    for stream in streams {
-        for (reference, meta) in &stream.generations {
-            if let Some(acknowledgements) = history
-                .circle_acknowledgements()
-                .stable_dominating(circle_id, &meta.bootstrap.coverage)
-                .await
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
-            {
-                stable.push(SelectedCircleSnapshot {
-                    author_registration: stream.author_registration.clone(),
-                    reference: reference.clone(),
-                    meta: meta.clone(),
-                    acknowledgements,
-                });
-            }
-        }
-    }
-    Ok(stable)
-}
-
 /// The maximal stable Circle snapshot: the one whose cut no other stable
 /// snapshot strictly dominates.
 fn maximal_stable_circle_snapshot(
@@ -1555,23 +1458,15 @@ fn maximal_stable_circle_snapshot(
 /// stream: its cut is dominated by no other stable snapshot, and every device
 /// holding active Circle access has acknowledged coverage dominating that cut.
 async fn choose_circle_snapshot(
-    database: &StoreDatabase,
-    root: &StoreRootRef,
     history: &mut ReclaimHistory<'_, '_>,
     circle_id: CircleId,
     current_control: &CircleControlCoord,
     registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
 ) -> Result<Option<SelectedCircleSnapshot>, StoreReclaimError> {
-    let streams = Box::pin(load_circle_snapshot_streams(
-        database,
-        root,
-        history,
-        circle_id,
-        current_control,
-        registrations,
-    ))
-    .await?;
-    let stable = Box::pin(stable_circle_snapshots(history, circle_id, &streams)).await?;
+    let streams = history
+        .load_circle_snapshot_streams(circle_id, current_control, registrations)
+        .await?;
+    let stable = history.stable_circle_snapshots(circle_id, &streams).await?;
     Ok(maximal_stable_circle_snapshot(&stable).cloned())
 }
 
@@ -1989,20 +1884,14 @@ impl AuthorizedReclaim<'_, '_> {
                 ))
             }
             ReclaimClaim::CirclePackage(claim) => {
-                let mut history = self.history();
-                let activation = history
+                let activation = self
+                    .history()
                     .load_ref(&claim.target().activation)
                     .await
                     .map_err(reclaim_pull_error)?;
                 Ok(ReclaimTarget::CirclePackage(
-                    verify_circle_package_reclaim_claim(
-                        &database,
-                        &root,
-                        &mut history,
-                        &activation,
-                        claim,
-                    )
-                    .await?,
+                    self.verify_circle_package_reclaim_claim(&activation, claim)
+                        .await?,
                 ))
             }
             ReclaimClaim::CircleBootstrapImage(claim) => {
@@ -2023,13 +1912,8 @@ impl AuthorizedReclaim<'_, '_> {
                 ))
             }
             ReclaimClaim::CircleSnapshotImage(claim) => Ok(ReclaimTarget::CircleSnapshotImage(
-                verify_circle_snapshot_image_reclaim_claim(
-                    &database,
-                    &root,
-                    &mut self.history(),
-                    claim,
-                )
-                .await?,
+                verify_circle_snapshot_image_reclaim_claim(&database, &mut self.history(), claim)
+                    .await?,
             )),
             ReclaimClaim::AudienceBlob(claim) => {
                 let activation = self
@@ -2146,6 +2030,121 @@ impl AuthorizedReclaim<'_, '_> {
         crate::protocol::audience_package::AudiencePackage::parse(&bytes)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
     }
+
+    async fn verify_circle_package_reclaim_claim(
+        &mut self,
+        activation: &VerifiedStoreBatchCommit,
+        claim: &CirclePackageReclaimClaim,
+    ) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
+        match claim {
+            CirclePackageReclaimClaim::SnapshotCovered(claim) => {
+                let database = self.database.clone();
+                let root = self.root.clone();
+                Box::pin(verify_circle_package_snapshot_coverage_claim(
+                    &database,
+                    &root,
+                    &mut self.history(),
+                    activation,
+                    claim,
+                ))
+                .await
+            }
+            CirclePackageReclaimClaim::BeyondEpochCutoff(claim) => {
+                self.verify_circle_package_beyond_cutoff_claim(activation, claim)
+                    .await
+            }
+        }
+    }
+
+    /// Re-verify that a Circle package lies beyond its epoch's accepted close
+    /// cutoff. The named successor control must be a retained activation whose
+    /// closed-epoch origin names the epoch the package's own control belongs to,
+    /// and the same replay-epoch predicate the pull path applies must refuse the
+    /// package. A package the cutoff accepts, or one whose control the cutoff
+    /// conflicts with, is not eligible under this arm and fails loud rather than
+    /// falling back to coverage.
+    async fn verify_circle_package_beyond_cutoff_claim(
+        &self,
+        activation: &VerifiedStoreBatchCommit,
+        claim: &CirclePackageBeyondCutoffClaim,
+    ) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
+        if !activation
+            .value()
+            .circle_packages()
+            .contains(&claim.target.package)
+        {
+            return Err(StoreReclaimError::Authorization(
+                "Circle package reclaim activation names another package".to_string(),
+            ));
+        }
+        let circle_id = claim.target.package.circle_id;
+        let successor = self
+            .database
+            .verified_circle_activation(
+                self.root.clone(),
+                circle_id,
+                claim.successor_control.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(format!(
+                    "Circle {circle_id} beyond-cutoff successor control is not a retained activation"
+                ))
+            })?;
+        let CircleControlState::ActiveEpoch(active) = successor.control.value.state() else {
+            return Err(StoreReclaimError::Authorization(
+                "Circle beyond-cutoff successor control is not an activated epoch".to_string(),
+            ));
+        };
+        let CircleEpochOrigin::Closed {
+            closed_epoch_id, ..
+        } = &active.common.origin
+        else {
+            return Err(StoreReclaimError::Authorization(
+                "Circle beyond-cutoff successor epoch did not close a predecessor".to_string(),
+            ));
+        };
+        // The package must be addressed to the epoch that close cut off, not to
+        // another epoch that merely happens to precede the successor.
+        let package_control = self
+            .database
+            .verified_circle_activation(
+                self.root.clone(),
+                circle_id,
+                claim.target.package.control.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(format!(
+                    "Circle {circle_id} package control is not a retained activation"
+                ))
+            })?;
+        if package_control.control.value.epoch_id() != *closed_epoch_id {
+            return Err(StoreReclaimError::Authorization(
+                "Circle beyond-cutoff package belongs to another epoch than the one closed"
+                    .to_string(),
+            ));
+        }
+        // Apply the exact predicate pull uses to skip a package beyond its
+        // accepted cutoff. A package it permits remains live history.
+        if self
+            .database
+            .circle_replay_epoch_index(self.root.clone())
+            .await?
+            .permits(
+                &claim.target.activation,
+                circle_id,
+                &claim.target.package.control,
+            )
+            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+        {
+            return Err(StoreReclaimError::Authorization(
+                "Circle package lies within its accepted epoch cutoff and is not reclaimable as beyond-cutoff"
+                    .to_string(),
+            ));
+        }
+        Ok(claim.target.clone())
+    }
 }
 
 /// Re-verify that a later generation of the reclaimed image's own stream
@@ -2157,7 +2156,6 @@ impl AuthorizedReclaim<'_, '_> {
 /// stability, or the image itself is taken on trust.
 async fn verify_circle_snapshot_image_reclaim_claim(
     database: &StoreDatabase,
-    root: &StoreRootRef,
     history: &mut ReclaimHistory<'_, '_>,
     claim: &CircleSnapshotImageReclaimClaim,
 ) -> Result<CircleSnapshotImageReclaimTarget, StoreReclaimError> {
@@ -2174,15 +2172,9 @@ async fn verify_circle_snapshot_image_reclaim_claim(
         .activated_store_device_registration(claim.target.snapshot_author.clone())
         .await?;
     let author_stream = [(claim.target.snapshot_author.clone(), author)];
-    let streams = Box::pin(load_circle_snapshot_streams(
-        database,
-        root,
-        history,
-        circle_id,
-        &current_control,
-        &author_stream,
-    ))
-    .await?;
+    let streams = history
+        .load_circle_snapshot_streams(circle_id, &current_control, &author_stream)
+        .await?;
     let [stream] = streams.as_slice() else {
         return Err(StoreReclaimError::Authorization(
             "Circle snapshot reclaim author's stream is not readable".to_string(),
@@ -2293,113 +2285,12 @@ async fn verify_store_package_reclaim_claim(
         ));
     }
     if activation.value().store_package() != Some(&claim.target.package)
-        || !snapshot_covers_target(history, &snapshot.meta.coverage, &claim.target.activation)
+        || !history
+            .snapshot_covers_target(&snapshot.meta.coverage, &claim.target.activation)
             .await?
     {
         return Err(StoreReclaimError::Authorization(
             "reclaim target is not the exact Store package covered by its snapshot".to_string(),
-        ));
-    }
-    Ok(claim.target.clone())
-}
-
-async fn verify_circle_package_reclaim_claim(
-    database: &StoreDatabase,
-    root: &StoreRootRef,
-    history: &mut ReclaimHistory<'_, '_>,
-    activation: &VerifiedStoreBatchCommit,
-    claim: &CirclePackageReclaimClaim,
-) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
-    match claim {
-        CirclePackageReclaimClaim::SnapshotCovered(claim) => {
-            Box::pin(verify_circle_package_snapshot_coverage_claim(
-                database, root, history, activation, claim,
-            ))
-            .await
-        }
-        CirclePackageReclaimClaim::BeyondEpochCutoff(claim) => {
-            verify_circle_package_beyond_cutoff_claim(database, root, activation, claim).await
-        }
-    }
-}
-
-/// Re-verify that a Circle package lies beyond its epoch's accepted close cutoff.
-/// The named successor control must be a retained activation whose closed-epoch
-/// origin names the epoch the package's own control belongs to, and the same
-/// replay-epoch predicate the pull path applies must refuse the package. A package
-/// the cutoff accepts, or one whose control the cutoff conflicts with, is not
-/// eligible under this arm and fails loud rather than falling back to coverage.
-async fn verify_circle_package_beyond_cutoff_claim(
-    database: &StoreDatabase,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    activation: &VerifiedStoreBatchCommit,
-    claim: &CirclePackageBeyondCutoffClaim,
-) -> Result<CirclePackageReclaimTarget, StoreReclaimError> {
-    if !activation
-        .value()
-        .circle_packages()
-        .contains(&claim.target.package)
-    {
-        return Err(StoreReclaimError::Authorization(
-            "Circle package reclaim activation names another package".to_string(),
-        ));
-    }
-    let circle_id = claim.target.package.circle_id;
-    let successor = database
-        .verified_circle_activation(root.clone(), circle_id, claim.successor_control.clone())
-        .await?
-        .ok_or_else(|| {
-            StoreReclaimError::Authorization(format!(
-                "Circle {circle_id} beyond-cutoff successor control is not a retained activation"
-            ))
-        })?;
-    let CircleControlState::ActiveEpoch(active) = successor.control.value.state() else {
-        return Err(StoreReclaimError::Authorization(
-            "Circle beyond-cutoff successor control is not an activated epoch".to_string(),
-        ));
-    };
-    let CircleEpochOrigin::Closed {
-        closed_epoch_id, ..
-    } = &active.common.origin
-    else {
-        return Err(StoreReclaimError::Authorization(
-            "Circle beyond-cutoff successor epoch did not close a predecessor".to_string(),
-        ));
-    };
-    // The package must be addressed to the epoch that close cut off, not to some
-    // other epoch that merely happens to precede the successor.
-    let package_control = database
-        .verified_circle_activation(
-            root.clone(),
-            circle_id,
-            claim.target.package.control.clone(),
-        )
-        .await?
-        .ok_or_else(|| {
-            StoreReclaimError::Authorization(format!(
-                "Circle {circle_id} package control is not a retained activation"
-            ))
-        })?;
-    if package_control.control.value.epoch_id() != *closed_epoch_id {
-        return Err(StoreReclaimError::Authorization(
-            "Circle beyond-cutoff package belongs to another epoch than the one closed".to_string(),
-        ));
-    }
-    // The same predicate the pull path uses to skip a package beyond its accepted
-    // cutoff; a package it permits is live history and is never eligible here.
-    if database
-        .circle_replay_epoch_index(root.clone())
-        .await?
-        .permits(
-            &claim.target.activation,
-            circle_id,
-            &claim.target.package.control,
-        )
-        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
-    {
-        return Err(StoreReclaimError::Authorization(
-            "Circle package lies within its accepted epoch cutoff and is not reclaimable as beyond-cutoff"
-                .to_string(),
         ));
     }
     Ok(claim.target.clone())
@@ -2484,7 +2375,9 @@ async fn verify_circle_package_snapshot_coverage_claim(
         .value()
         .circle_packages()
         .contains(&claim.target.package)
-        || !snapshot_covers_target(history, cut, &claim.target.activation).await?
+        || !history
+            .snapshot_covers_target(cut, &claim.target.activation)
+            .await?
     {
         return Err(StoreReclaimError::Authorization(
             "Circle reclaim target is not the exact package covered by its snapshot".to_string(),
@@ -2562,8 +2455,6 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
                 .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
             let seed = &claim.target.coverage.bootstrap.coverage;
             let superseded = Box::pin(choose_circle_snapshot(
-                database,
-                root,
                 history,
                 circle_id,
                 &current_control,
@@ -2612,26 +2503,6 @@ async fn verify_circle_bootstrap_image_reclaim_claim(
         }
     }
     Ok(claim.target.clone())
-}
-
-async fn snapshot_covers_target(
-    history: &mut ReclaimHistory<'_, '_>,
-    coverage: &CommitFrontier,
-    target: &StoreBatchCommitRef,
-) -> Result<bool, StoreReclaimError> {
-    let covering = coverage.0.get(&target.coord.stream_id);
-    match covering {
-        Some(covering) => history
-            .commit_position_covers(covering, target)
-            .await
-            .map_err(|error| match error {
-                super::pull::CommitCoverageError::Object(error) => StoreReclaimError::Object(error),
-                super::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
-                    StoreReclaimError::MissingAncestry { commit_hash }
-                }
-            }),
-        None => Ok(false),
-    }
 }
 
 impl AuthorizedReclaim<'_, '_> {
