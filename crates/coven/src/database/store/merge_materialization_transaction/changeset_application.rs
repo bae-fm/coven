@@ -590,41 +590,30 @@ fn merge_losing_update(
         // dominates the incoming one; re-stamping the merged row could only lower
         // it, and the row winner's stamp is what future arbitration must compare
         // against. The merge changes a losing column's value, not the row's clock.
-        apply_columns(conn, columns, update, &applied)?;
+        let assignments = applied
+            .iter()
+            .enumerate()
+            .map(|(offset, column)| {
+                format!("{} = ?{}", quote_ident(&columns[column.index]), offset + 1)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE {} SET {assignments} WHERE {} = ?{}",
+            quote_ident(&update.table),
+            quote_ident(&columns[0]),
+            applied.len() + 1
+        );
+        let mut params: Vec<&dyn ToSql> = applied
+            .iter()
+            .map(|column| &column.incoming as &dyn ToSql)
+            .collect();
+        params.push(&update.pk);
+        conn.execute(&sql, params_from_iter(params))
+            .map_err(DbError::from)?;
     }
 
     Ok(true)
-}
-
-fn apply_columns(
-    conn: &Connection,
-    columns: &[String],
-    update: &IncomingUpdate,
-    applied: &[&ChangedColumn],
-) -> Result<(), DbError> {
-    let assignments = applied
-        .iter()
-        .enumerate()
-        .map(|(offset, column)| {
-            format!("{} = ?{}", quote_ident(&columns[column.index]), offset + 1)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "UPDATE {} SET {assignments} WHERE {} = ?{}",
-        quote_ident(&update.table),
-        quote_ident(&columns[0]),
-        applied.len() + 1
-    );
-
-    let mut params: Vec<&dyn ToSql> = applied
-        .iter()
-        .map(|column| &column.incoming as &dyn ToSql)
-        .collect();
-    params.push(&update.pk);
-    conn.execute(&sql, params_from_iter(params))
-        .map(|_| ())
-        .map_err(DbError::from)
 }
 
 fn changeset_value(
