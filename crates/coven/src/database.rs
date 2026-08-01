@@ -135,13 +135,19 @@ mod store_authority_records;
 mod store_coordinates;
 mod store_reclaim_records;
 #[cfg(test)]
+mod test_sql;
+#[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod test_transaction;
 #[cfg(test)]
 pub(crate) use coven_schema::DatabaseTestTable;
 #[cfg(test)]
-pub(crate) use test_support::{
-    DatabaseImageTest, DatabaseTestSql, OutboxAttempt, RetainedRegistrationTamper,
-};
+pub(crate) use test_sql::DatabaseTestSql;
+#[cfg(test)]
+pub(crate) use test_support::{DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper};
+#[cfg(test)]
+pub(crate) use test_transaction::DatabaseTestTransaction;
 mod write_lifecycle;
 mod write_models;
 
