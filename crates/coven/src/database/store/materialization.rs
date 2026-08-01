@@ -66,9 +66,8 @@ impl StoreDatabase {
                     .frontier();
                 let requires_canonical_replay =
                     !candidate_predecessors.covers(&materialized_frontier);
-                let mut applied =
-                    crate::sync::apply_prepared_merge_materialization_on(
-                        &tx,
+                let mut applied = MergeMaterializationTransaction::new(&tx)
+                    .apply_prepared_merge_materialization(
                         &blob_decls,
                         &gates,
                         &synced_tables,

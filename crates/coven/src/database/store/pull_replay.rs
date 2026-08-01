@@ -10,9 +10,9 @@ use crate::protocol::store_commit::{CommitFrontier, StoreBatchCommitRef, StoreRo
 use crate::protocol::{circle, remote_object};
 use crate::storage::ExactObjectRef;
 use crate::sync::{
-    activated_merge_membership_remote_objects, apply_prepared_merge_materialization_on,
-    ApplyOutcome, HeldStorePositionReason, LocalStoreMembership, MembershipAuthorityBytes,
-    PreparedMergeMaterialization, PreparedMergeMaterializationPackage, VerifiedCircleImage,
+    activated_merge_membership_remote_objects, ApplyOutcome, HeldStorePositionReason,
+    LocalStoreMembership, MembershipAuthorityBytes, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, VerifiedCircleImage,
 };
 use crate::SyncedTable;
 
@@ -295,22 +295,22 @@ pub(crate) fn replay_retained_merge_projection_on(
                 package_application,
             };
             let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-            let outcome = apply_prepared_merge_materialization_on(
-                &tx,
-                blob_decls,
-                gates,
-                synced_tables,
-                routing_key,
-                local_store_membership,
-                timestamp_policy,
-                Some(&circle_bootstrap_cuts),
-                replay_materialization,
-            )
-            .map_err(|error| {
-                DbError::Message(format!(
+            let outcome = MergeMaterializationTransaction::new(&tx)
+                .apply_prepared_merge_materialization(
+                    blob_decls,
+                    gates,
+                    synced_tables,
+                    routing_key,
+                    local_store_membership,
+                    timestamp_policy,
+                    Some(&circle_bootstrap_cuts),
+                    replay_materialization,
+                )
+                .map_err(|error| {
+                    DbError::Message(format!(
                     "apply retained Merge commit {reference:?} during canonical replay: {error}"
                 ))
-            })?;
+                })?;
             match outcome.outcome {
                 ApplyOutcome::Applied(_) => {
                     tx.commit().map_err(DbError::from)?;

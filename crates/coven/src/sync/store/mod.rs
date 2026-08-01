@@ -88,9 +88,9 @@ pub(crate) use owner::operations::{
 pub(crate) use owner::owner_promotion::{OwnerPromotionJournal, OwnerPromotionJournalTransition};
 pub(crate) use owner::pull::VerifiedStoreSnapshotStability;
 pub(crate) use owner::pull::{
-    activated_merge_membership_remote_objects, apply_prepared_merge_materialization_on,
-    ApplyOutcome, DeviceJoinBootstrapPlan, HeldStorePositionReason, LocalStoreMembership,
-    MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
+    activated_merge_membership_remote_objects, ApplyOutcome, DeviceJoinBootstrapPlan,
+    HeldStorePositionReason, LocalStoreMembership, MembershipAuthorityBytes,
+    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
 };
 #[cfg(test)]
 pub(crate) use owner::pull::{HeldStoreCoordinate, StorePullMembershipError};

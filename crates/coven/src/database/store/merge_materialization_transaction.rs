@@ -1,7 +1,10 @@
 mod changeset_application;
 mod conflict;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use rusqlite::OptionalExtension;
+use tracing::{debug, warn};
 
 #[cfg(test)]
 pub(crate) use changeset_application::{
@@ -13,14 +16,16 @@ pub(crate) use conflict::{IncomingTimestampPolicy, TableSchema};
 use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on, StoreDatabase,
 };
+use crate::blob::local_cleanup::intents_from_changes as local_blob_cleanup_intents;
+use crate::changeset::RowChange;
 use crate::database::ReclaimCommitActivation;
 use crate::database::{
     load_activated_registration_on, load_remote_object_on, record_store_reclaim_activation_on,
     required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
-    Database, DbError, OwnedVerifiedMergeMaterialization, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, VerifiedMergeMaterialization,
+    BlobActivation, BlobDecls, Database, DbError, OwnedVerifiedMergeMaterialization,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
-use crate::protocol::audience_package::AudiencePackage;
+use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::{
     CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
@@ -28,7 +33,102 @@ use crate::protocol::store_commit::{
     VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::storage::ExactObjectRef;
-use crate::sync::{VerifiedCircleActivations, VerifiedStreamActivations};
+use crate::sync::{
+    ApplyOutcome, HeldStorePositionReason, LocalStoreMembership, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, SyncedTable, VerifiedCircleActivations,
+    VerifiedStreamActivations,
+};
+
+pub(crate) struct AppliedMergeMaterialization {
+    pub(crate) outcome: ApplyOutcome,
+    pub(crate) max_updated_at: Option<crate::sync::hlc::Timestamp>,
+    pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
+    pub(crate) retained: Option<crate::database::OwnedVerifiedMergeMaterialization>,
+}
+
+enum MergeSubsetOutcome {
+    Applied(Vec<crate::database::WinningRow>),
+    ConstraintConflict(Vec<String>),
+}
+
+impl MergeSubsetOutcome {
+    fn extend_winning_rows(
+        self,
+        winning_rows: &mut Vec<crate::database::WinningRow>,
+    ) -> Result<(), Vec<String>> {
+        match self {
+            Self::Applied(rows) => {
+                winning_rows.extend(rows);
+                Ok(())
+            }
+            Self::ConstraintConflict(tables) => Err(tables),
+        }
+    }
+}
+
+/// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
+/// as an HLC [`crate::sync::hlc::Timestamp`]. A row whose `_updated_at` fails to
+/// parse is logged and skipped — it must not panic the pull or silently default
+/// the clock.
+///
+/// `max` becomes the value the caller advances the local HLC past, and that
+/// advance is deliberately uncapped (it trusts a value already written to disk).
+/// So the bound lives here, at the point a stamp is *collected*: a grossly-future
+/// stamp — beyond `receiver_wall_ms` +
+/// [`crate::sync::hlc::MAX_FUTURE_SKEW_MS`] — is logged and skipped, so it can
+/// never ratchet the clock. A conflicting row with such a stamp was already
+/// refused by the apply, but a *non-conflicting* INSERT (no local row to conflict
+/// with) reaches here as an applied row, so this is the gate that stops it from
+/// dragging the clock forward.
+fn advance_max_updated_at(
+    max: &mut Option<crate::sync::hlc::Timestamp>,
+    changes: &[RowChange],
+    schema: &TableSchema,
+    receiver_wall_ms: u64,
+) {
+    for change in changes {
+        let Some(idx) = schema.updated_at(&change.table) else {
+            // Incoming apply rejects the entire changeset before mutation when any
+            // operation names an undeclared table. Reaching this after a successful
+            // apply means its walked rows and the apply schema disagree.
+            debug!(
+                table = %change.table,
+                "applied changeset references a table absent from the synced set, not advancing HLC"
+            );
+            continue;
+        };
+        let Some(raw) = change.col(idx) else {
+            // A DELETE carries no new-state columns, and an absent value at the
+            // schema's `_updated_at` index means this row change has no stamp to
+            // advance past — expected for deletes, but a genuinely wrong index
+            // or a schema mismatch surfaces here as the same absence, so log it.
+            debug!(
+                table = %change.table,
+                updated_at_idx = idx,
+                "applied row change has no _updated_at value (DELETE or absent new-state column), not advancing HLC past it"
+            );
+            continue;
+        };
+        match crate::sync::hlc::Timestamp::parse(raw) {
+            Some(ts) if !ts.is_within_future_bound(receiver_wall_ms) => warn!(
+                table = %change.table,
+                value = raw,
+                receiver_wall_ms,
+                "applied row's _updated_at is grossly beyond the offline-skew allowance, not advancing HLC past it"
+            ),
+            Some(ts) => {
+                if max.as_ref().is_none_or(|cur| ts > *cur) {
+                    *max = Some(ts);
+                }
+            }
+            None => warn!(
+                table = %change.table,
+                value = raw,
+                "applied row has an unparseable _updated_at, not advancing HLC past it"
+            ),
+        }
+    }
+}
 
 pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
@@ -916,5 +1016,417 @@ impl MergeMaterializationTransaction<'_, '_> {
             update_remote_object_on(conn, *object_id, &remote)?;
         }
         Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn apply_merge_subset(
+        &self,
+        blob_decls: &BlobDecls,
+        gates: &crate::database::Gates,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        source: &ValidatedChangeset<Vec<u8>>,
+        bytes: Vec<u8>,
+        package_audience: Option<&crate::protocol::circle::Audience>,
+        timestamp_policy: IncomingTimestampPolicy,
+        changeset_max: &mut Option<crate::sync::hlc::Timestamp>,
+        returned_changes: &mut Vec<RowChange>,
+        package_reported_fk_violation: &mut bool,
+    ) -> Result<MergeSubsetOutcome, DbError> {
+        let conn = self.transaction;
+        let applied_changeset = source
+            .validate_subset(bytes.clone())
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let actual_changes = crate::database::walk_changeset(&bytes).map_err(DbError::Message)?;
+        if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
+            advance_max_updated_at(
+                changeset_max,
+                &actual_changes,
+                source.schema(),
+                receiver_wall_ms,
+            );
+        }
+        returned_changes.extend(
+            actual_changes
+                .iter()
+                .filter(|change| !crate::database::is_routing_table(&change.table))
+                .cloned(),
+        );
+        let apply = self.apply_changeset(applied_changeset, timestamp_policy)?;
+        if !apply.constraint_conflict_tables.is_empty() {
+            return Ok(MergeSubsetOutcome::ConstraintConflict(
+                apply.constraint_conflict_tables,
+            ));
+        }
+        *package_reported_fk_violation |= apply.had_fk_violations;
+        if let Some(package_audience) = package_audience {
+            crate::database::align_inbound_scoped_root_audiences(
+                conn,
+                &bytes,
+                package_audience,
+                gates,
+                routing_key.ok_or_else(|| {
+                    DbError::Message(
+                        "scoped audience application requires a row-routing key".to_string(),
+                    )
+                })?,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        let winning_rows = self.current_winning_rows(source.schema(), &bytes)?;
+        let old_changes = crate::database::walk_old_changeset(&bytes).map_err(DbError::Message)?;
+        let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        for intent in cleanup {
+            self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
+        }
+        Ok(MergeSubsetOutcome::Applied(winning_rows))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_merge_package(
+        &self,
+        blob_decls: &BlobDecls,
+        gates: &crate::database::Gates,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        package: &AudiencePackage,
+        changeset: &ValidatedChangeset<Vec<u8>>,
+        store_audience_transitions: &crate::database::StoreAudienceTransitions,
+        timestamp_policy: IncomingTimestampPolicy,
+        changeset_max: &mut Option<crate::sync::hlc::Timestamp>,
+        returned_changes: &mut Vec<RowChange>,
+        package_reported_fk_violation: &mut bool,
+    ) -> Result<MergeSubsetOutcome, DbError> {
+        let conn = self.transaction;
+        let mut winning_rows = Vec::new();
+        match package.audience() {
+            PackageAudience::Store if gates.has_scoped_graph() => {
+                let routing_key = routing_key.ok_or_else(|| {
+                    DbError::Message(
+                        "scoped Store package application requires a row-routing key".to_string(),
+                    )
+                })?;
+                let inbound = crate::database::normalize_inbound_store_changeset(
+                    conn,
+                    package.changeset(),
+                    gates,
+                    routing_key,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                if let Err(tables) = self
+                    .apply_merge_subset(
+                        blob_decls,
+                        gates,
+                        Some(routing_key),
+                        changeset,
+                        inbound.mirror,
+                        None,
+                        timestamp_policy,
+                        changeset_max,
+                        returned_changes,
+                        package_reported_fk_violation,
+                    )?
+                    .extend_winning_rows(&mut winning_rows)
+                {
+                    return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+                }
+                let rows = crate::database::filter_inbound_store_rows(
+                    conn,
+                    &inbound.rows,
+                    gates,
+                    routing_key,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                if let Err(tables) = self
+                    .apply_merge_subset(
+                        blob_decls,
+                        gates,
+                        Some(routing_key),
+                        changeset,
+                        rows,
+                        Some(&crate::protocol::circle::Audience::Store),
+                        timestamp_policy,
+                        changeset_max,
+                        returned_changes,
+                        package_reported_fk_violation,
+                    )?
+                    .extend_winning_rows(&mut winning_rows)
+                {
+                    return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
+                }
+            }
+            PackageAudience::Store => {
+                return self.apply_merge_subset(
+                    blob_decls,
+                    gates,
+                    None,
+                    changeset,
+                    package.changeset().to_vec(),
+                    None,
+                    timestamp_policy,
+                    changeset_max,
+                    returned_changes,
+                    package_reported_fk_violation,
+                );
+            }
+            PackageAudience::Circle { circle_id, .. } => {
+                let routing_key = routing_key.ok_or_else(|| {
+                    DbError::Message(
+                        "Circle package application requires a row-routing key".to_string(),
+                    )
+                })?;
+                let rows = crate::database::filter_inbound_circle_changeset(
+                    conn,
+                    package.changeset(),
+                    *circle_id,
+                    store_audience_transitions,
+                    gates,
+                    routing_key,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                return self.apply_merge_subset(
+                    blob_decls,
+                    gates,
+                    Some(routing_key),
+                    changeset,
+                    rows,
+                    Some(&crate::protocol::circle::Audience::Circle(*circle_id)),
+                    timestamp_policy,
+                    changeset_max,
+                    returned_changes,
+                    package_reported_fk_violation,
+                );
+            }
+        }
+        Ok(MergeSubsetOutcome::Applied(winning_rows))
+    }
+
+    pub(crate) fn apply_prepared_merge_materialization(
+        &self,
+        blob_decls: &BlobDecls,
+        gates: &crate::database::Gates,
+        synced_tables: &[SyncedTable],
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        local_store_membership: LocalStoreMembership,
+        timestamp_policy: IncomingTimestampPolicy,
+        baseline_circle_cuts: Option<
+            &BTreeMap<
+                crate::protocol::circle::CircleId,
+                crate::protocol::store_commit::CommitFrontier,
+            >,
+        >,
+        materialization: PreparedMergeMaterialization,
+    ) -> Result<AppliedMergeMaterialization, DbError> {
+        let conn = self.transaction;
+        let PreparedMergeMaterialization {
+            root,
+            verified_commit,
+            activation_head,
+            activation_head_object,
+            history_summary,
+            membership_objects,
+            membership_remote_objects,
+            registrations,
+            packages,
+            device_operations,
+            circle_activations,
+            package_application,
+        } = materialization;
+        let commit = verified_commit.value();
+        let commit_ref = verified_commit.reference();
+        let mut inactive_circles = circle_activations
+            .circles()
+            .iter()
+            .filter_map(|activation| {
+                activation
+                    .local_access
+                    .as_ref()
+                    .filter(|access| access.active.is_none())
+                    .filter(|_| {
+                        baseline_circle_cuts
+                            .and_then(|cuts| cuts.get(&activation.circle_id))
+                            .is_none_or(|cut| !cut.covers_commit(commit_ref))
+                    })
+                    .map(|_| activation.circle_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut changeset_max = None;
+        let mut returned_changes = Vec::new();
+        let mut package_reported_fk_violation = false;
+        crate::database::StoreDatabase::record_activated_store_device_registrations_on(
+            conn,
+            commit,
+            &registrations,
+        )?;
+        for bootstrap in circle_activations.bootstraps() {
+            crate::database::install_circle_bootstrap_remote_objects_on(
+                conn, commit_ref, bootstrap,
+            )?;
+        }
+        self.record_verified_circle_activations(&verified_commit, circle_activations.circles())?;
+        // A Circle whose winning control chain is now Deleted prunes its rows,
+        // routes, and blob bindings like an inactive recipient. Recording the
+        // verified activation above already removed its live access cache while
+        // retaining the authority spine.
+        for activation in circle_activations.circles() {
+            if crate::database::StoreDatabase::circle_current_state_is_deleted_on(
+                conn,
+                activation.circle_id,
+            )? {
+                inactive_circles.insert(activation.circle_id);
+            }
+        }
+        let retained_packages = packages
+            .iter()
+            .map(|prepared| prepared.package.clone())
+            .collect::<Vec<_>>();
+        let store_audience_transitions = packages
+            .iter()
+            .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
+            .map(|prepared| {
+                crate::database::store_audience_transitions(prepared.package.changeset())
+            })
+            .transpose()
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .unwrap_or_default();
+        for prepared in packages {
+            let PreparedMergeMaterializationPackage { package, changeset } = prepared;
+            let winning_rows = match self.apply_merge_package(
+                blob_decls,
+                gates,
+                routing_key,
+                &package,
+                &changeset,
+                &store_audience_transitions,
+                timestamp_policy,
+                &mut changeset_max,
+                &mut returned_changes,
+                &mut package_reported_fk_violation,
+            )? {
+                MergeSubsetOutcome::Applied(rows) => rows,
+                MergeSubsetOutcome::ConstraintConflict(tables) => {
+                    return Ok(AppliedMergeMaterialization {
+                        outcome: ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(
+                            tables,
+                        )),
+                        max_updated_at: None,
+                        write_status_notifications: Vec::new(),
+                        retained: None,
+                    });
+                }
+            };
+            let retained = crate::database::RetainedAudiencePackage::verify(
+                commit,
+                commit_ref,
+                package.clone(),
+            )?;
+            Database::install_pulled_package_activation_on(
+                conn,
+                commit_ref,
+                retained.domain(),
+                retained.object(),
+                retained.package(),
+            )?;
+            Database::install_pulled_blob_activations_on(conn, &package, commit_ref)?;
+            Database::install_winning_blob_bindings_on(
+                conn,
+                gates,
+                synced_tables,
+                &package,
+                &BlobActivation {
+                    coord: commit_ref.coord.clone(),
+                },
+                &winning_rows,
+            )?;
+        }
+        if gates.has_scoped_graph() && !local_store_membership.retains_circle_rows() {
+            let mut statement = conn
+                .prepare(
+                    "SELECT DISTINCT circle_id
+                     FROM _coven_audience
+                     WHERE circle_id IS NOT NULL
+                     ORDER BY circle_id",
+                )
+                .map_err(DbError::from)?;
+            let circles = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            for encoded in circles {
+                inactive_circles.insert(encoded.parse().map_err(|error| {
+                    DbError::Message(format!(
+                        "parse materialized Circle audience {encoded}: {error}"
+                    ))
+                })?);
+            }
+            crate::database::StoreDatabase::remove_local_circle_access_on(conn)?;
+        }
+        let mut removal_session = rusqlite::session::Session::new(conn).map_err(DbError::from)?;
+        for table in synced_tables {
+            removal_session
+                .attach(Some(table.name()))
+                .map_err(DbError::from)?;
+        }
+        crate::database::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        crate::database::validate_scoped_foreign_key_audiences(conn, gates)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let mut removal_changeset = Vec::new();
+        removal_session
+            .changeset_strm(&mut removal_changeset)
+            .map_err(DbError::from)?;
+        drop(removal_session);
+        let removed =
+            crate::database::walk_old_changeset(&removal_changeset).map_err(DbError::Message)?;
+        let removal_changes =
+            crate::database::walk_changeset(&removal_changeset).map_err(DbError::Message)?;
+        let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &removal_changes)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        returned_changes.extend(removal_changes);
+        for intent in removal_cleanup {
+            self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
+        }
+        if package_reported_fk_violation {
+            let violations: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if violations {
+                return Ok(AppliedMergeMaterialization {
+                    outcome: ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency),
+                    max_updated_at: None,
+                    write_status_notifications: Vec::new(),
+                    retained: None,
+                });
+            }
+        }
+        let verified = VerifiedMergeMaterialization::verify(
+            &root,
+            &verified_commit,
+            &registrations,
+            &device_operations,
+            &circle_activations,
+            &activation_head,
+            &activation_head_object,
+            &history_summary,
+            membership_objects.as_ref(),
+            &retained_packages,
+            package_application,
+        )?;
+        Database::install_pulled_merge_membership_activations_on(
+            conn,
+            commit_ref,
+            &membership_remote_objects,
+        )?;
+        let retained = self.record_verified_merge_materialization(verified)?;
+        Ok(AppliedMergeMaterialization {
+            outcome: ApplyOutcome::Applied(returned_changes),
+            max_updated_at: changeset_max,
+            write_status_notifications: Vec::new(),
+            retained: Some(retained),
+        })
     }
 }
