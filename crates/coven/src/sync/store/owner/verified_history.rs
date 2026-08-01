@@ -372,14 +372,12 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         }
         Ok(())
     }
-}
 
-fn verify_commit_join_evidence<'a>(
-    commit: &'a StoreBatchCommit,
-    loaded: LoadedCommitJoinEvidence,
-    accepted: VerifiedMergePredecessorHistory<'a>,
-) -> StorePullFuture<'a, VerifiedCommitJoinEvidence> {
-    Box::pin(async move {
+    fn verify_commit_join_evidence(
+        &self,
+        commit: &StoreBatchCommit,
+        loaded: LoadedCommitJoinEvidence,
+    ) -> Result<VerifiedCommitJoinEvidence, StorePullError> {
         if loaded.attempts.is_empty() {
             return Ok(VerifiedCommitJoinEvidence {
                 commit: commit.clone(),
@@ -390,7 +388,7 @@ fn verify_commit_join_evidence<'a>(
         let mut attempts = BTreeMap::new();
         for (reference, evidence) in loaded.attempts {
             let access = &evidence.attempt.value.provider_approval.access_grant;
-            let verified = accepted
+            let verified = self
                 .find(|candidate, _| candidate == &access.activation)?
                 .ok_or_else(|| {
                     StorePullError::Database(
@@ -422,7 +420,7 @@ fn verify_commit_join_evidence<'a>(
             attempts,
             cleanup_receipts: loaded.cleanup_receipts,
         })
-    })
+    }
 }
 
 pub(crate) struct VerifiedMergeHistoryAuthority {
@@ -3818,7 +3816,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
-        let join_evidence = verify_commit_join_evidence(commit, loaded, accepted).await?;
+        let join_evidence = accepted.verify_commit_join_evidence(commit, loaded)?;
         let registrations = self
             .load_commit_registrations(commit, author, Some(membership), &join_evidence, accepted)
             .await;

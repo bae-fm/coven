@@ -441,11 +441,6 @@ fn s3_access_key_id_hash(access_key_id: &str) -> crate::protocol::store_commit::
     crate::protocol::store_commit::ObjectHash::digest(&material)
 }
 
-fn custom_s3_origin(endpoint: &str) -> Result<String, CloudHomeError> {
-    crate::protocol::provider::canonical_custom_s3_origin(endpoint)
-        .map_err(|error| CloudHomeError::Configuration(error.to_string()))
-}
-
 fn aws_caller_identity(
     account_id: &str,
     arn: &str,
@@ -1015,7 +1010,8 @@ impl ExactSlotStorage for S3CloudHome {
             }
             Some(endpoint) => (
                 S3EndpointBinding::Custom {
-                    origin: custom_s3_origin(endpoint)?,
+                    origin: crate::protocol::provider::canonical_custom_s3_origin(endpoint)
+                        .map_err(|error| CloudHomeError::Configuration(error.to_string()))?,
                 },
                 ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: s3_access_key_id_hash(&self.access_key),

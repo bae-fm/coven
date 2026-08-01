@@ -252,25 +252,7 @@ pub(crate) fn ensure_schema_supported(
     conn: &Connection,
     migrations: &[Migration],
 ) -> Result<u32, MigrationError> {
-    for (i, m) in migrations.iter().enumerate() {
-        let expected = i as u32 + 1;
-        if m.version != expected {
-            return Err(MigrationError::NotContiguous {
-                position: i,
-                found: m.version,
-                expected,
-            });
-        }
-    }
-    let top = supported_version(migrations);
-    let current = read_user_version(conn)?;
-    if current > top {
-        return Err(MigrationError::SchemaTooNew {
-            current,
-            supported: top,
-        });
-    }
-    Ok(current)
+    validate_registered_migrations(conn, migrations)
 }
 
 /// Read the db's applied synced-schema version from `PRAGMA user_version`.

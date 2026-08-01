@@ -29,24 +29,6 @@ unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
     )
 }
 
-/// The new value at `col` for the change at the iterator's current position.
-/// The boolean distinguishes an absent unchanged column from a present SQL NULL.
-unsafe fn extract_new_value(
-    iter: *mut ffi::sqlite3_changeset_iter,
-    col: c_int,
-) -> (bool, Option<String>) {
-    extract_value(iter, col, ffi::sqlite3changeset_new)
-}
-
-/// The old value at `col` for the change at the iterator's current position.
-/// The boolean distinguishes an absent unchanged column from a present SQL NULL.
-unsafe fn extract_old_value(
-    iter: *mut ffi::sqlite3_changeset_iter,
-    col: c_int,
-) -> (bool, Option<String>) {
-    extract_value(iter, col, ffi::sqlite3changeset_old)
-}
-
 type ChangesetValueReader = unsafe extern "C" fn(
     *mut ffi::sqlite3_changeset_iter,
     c_int,
@@ -260,10 +242,10 @@ impl ChangeRow {
         let mut old = Vec::with_capacity(ncol as usize);
         let mut old_present = Vec::with_capacity(ncol as usize);
         for c in 0..ncol {
-            let (present, value) = extract_new_value(iter, c);
+            let (present, value) = extract_value(iter, c, ffi::sqlite3changeset_new);
             new_present.push(present);
             new.push(value);
-            let (present, value) = extract_old_value(iter, c);
+            let (present, value) = extract_value(iter, c, ffi::sqlite3changeset_old);
             old_present.push(present);
             old.push(value);
         }

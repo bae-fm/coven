@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::pin::Pin;
 
 use super::verified_history::registration::*;
 use super::verified_history::*;
@@ -101,8 +99,8 @@ pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(crate) use model::{
     commit_stream_id, Candidate, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
-    LoadedCirclePackage, LocalStoreMembership, StorePullError, StorePullFuture,
-    StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
+    LoadedCirclePackage, LocalStoreMembership, StorePullError, StorePullMembershipError,
+    StorePullResult, VerifiedStoreDeviceHead,
 };
 pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_history;
 pub(crate) use root_validation::*;

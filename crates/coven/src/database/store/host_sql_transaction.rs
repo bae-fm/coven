@@ -5,7 +5,7 @@ pub(super) struct HostSqlTransaction<'transaction, 'connection> {
     authorization: HostSqlAuthorization<'transaction>,
 }
 
-struct HostSqlAuthorization<'connection> {
+pub(super) struct HostSqlAuthorization<'connection> {
     connection: &'connection rusqlite::Connection,
     authorizer_installed: bool,
 }
@@ -30,6 +30,14 @@ impl<'connection> HostSqlAuthorization<'connection> {
         }
     }
 
+    pub(super) fn run_on<R, E>(
+        connection: &'connection rusqlite::Connection,
+        read: impl FnOnce(&rusqlite::Connection) -> Result<R, E>,
+    ) -> Result<Result<R, E>, DbError> {
+        let authorization = Self::begin(connection)?;
+        Ok(authorization.run(|| read(connection)))
+    }
+
     fn remove_authorizer(&mut self) {
         self.authorizer_installed = false;
         if let Err(error) = self.connection.authorizer(
@@ -46,14 +54,6 @@ impl Drop for HostSqlAuthorization<'_> {
             self.remove_authorizer();
         }
     }
-}
-
-pub(super) fn run_host_sql_read<R, E>(
-    connection: &rusqlite::Connection,
-    read: impl FnOnce(&rusqlite::Connection) -> Result<R, E>,
-) -> Result<Result<R, E>, DbError> {
-    let authorization = HostSqlAuthorization::begin(connection)?;
-    Ok(authorization.run(|| read(connection)))
 }
 
 impl<'transaction, 'connection> HostSqlTransaction<'transaction, 'connection> {
@@ -187,7 +187,7 @@ mod tests {
         assert!(!stored);
         tx.rollback().expect("finish host SQL transaction test");
 
-        let error = run_host_sql_read(&conn, |connection| {
+        let error = HostSqlAuthorization::run_on(&conn, |connection| {
             connection
                 .query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
                     row.get::<_, i64>(0)

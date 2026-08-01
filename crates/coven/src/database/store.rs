@@ -101,15 +101,15 @@ pub(crate) use reclaim::journal::{
 };
 pub(crate) use retained_merge_replay::RetainedMergeMaterializationCache;
 pub(crate) use retained_replay::{
-    copy_table_with_conflicts, projection_table_names,
-    validate_merge_generation_zero_preconditions, RetainedReplayAuthority, RetainedReplayBaseline,
-    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+    copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
+    GENERATION_ZERO,
 };
 pub(crate) use snapshot_image::{
     install_snapshot_blob_graph, verify_circle_bootstrap_image, CreatedSnapshot,
     SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError,
 };
-pub(super) use store_device_state::{
+use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
 };
 #[cfg(test)]
@@ -273,7 +273,7 @@ impl StoreDatabase {
     {
         self.connection
             .call(move |connection| {
-                host_sql_transaction::run_host_sql_read(connection, |connection| {
+                host_sql_transaction::HostSqlAuthorization::run_on(connection, |connection| {
                     read(SqlReadContext::new(connection))
                 })
             })

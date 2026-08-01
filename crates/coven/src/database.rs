@@ -214,8 +214,7 @@ pub(crate) use schema_introspection::{
 pub(crate) use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on, install_snapshot_blob_graph,
-    projection_table_names, replay_retained_merge_projection_on,
-    validate_merge_generation_zero_preconditions, verify_circle_bootstrap_image,
+    projection_table_names, replay_retained_merge_projection_on, verify_circle_bootstrap_image,
     BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot, DeviceJoinJournalStore,
     DurableStoreReclaimObject, DurableStoreReclaimOperation, HostWriteBlobTransaction,
     HostWriteError, HostWriteOperation, IncomingTimestampPolicy, MaterializedLocalBlob,

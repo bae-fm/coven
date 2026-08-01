@@ -237,9 +237,6 @@ pub enum StorePullMembershipError {
     Message(String),
 }
 
-pub(crate) type StorePullFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, StorePullError>> + Send + 'a>>;
-
 impl From<DbError> for StorePullError {
     fn from(error: DbError) -> Self {
         Self::Database(error.into_message())

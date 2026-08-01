@@ -2284,106 +2284,143 @@ struct FounderRosterObjects {
     resolved: ResolvedCircleRoster,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_access_material(
+struct CircleAccessDraft<'identity> {
     store_root_hash: ObjectHash,
     candidate_family: super::store_commit::CandidateFamilyId,
     circle_id: CircleId,
-    epoch_id: CircleEpochId,
-    keyring: &str,
-    key_fingerprint: KeyFingerprint,
-    roster_state: &CircleRosterStateRef,
-    roster_members: &std::collections::BTreeMap<String, super::circle::CircleRole>,
-    store_membership: &StoreMembershipStateRef,
-    store_members: &[(String, MemberRole)],
-    bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
-    ids: &dyn crate::id_provider::IdProvider,
-    signer: &UserKeypair,
-) -> Result<Vec<PreparedAccessLeaf>, CircleTransitionError> {
-    let author_pubkey = keys::public_key_hex(signer);
-    store_members
-        .iter()
-        .map(|(recipient_pubkey, _)| {
-            let recipient_slot = recipient_slot(signer, recipient_pubkey, circle_id)?;
-            let disposition = if roster_members.contains_key(recipient_pubkey) {
-                CircleAccessDisposition::Active {
-                    keyring: keyring.to_string(),
-                    key_fingerprint,
-                    roster: roster_state.clone(),
-                    bootstrap: bootstraps.get(recipient_pubkey).cloned(),
-                }
-            } else {
-                CircleAccessDisposition::Inactive
-            };
-            let mut value = CircleAccessLeaf {
-                version: STORE_PROTOCOL_VERSION,
-                store_root_hash,
-                candidate_family,
-                circle_id,
-                epoch_id,
-                leaf_id: AccessLeafId::generate(ids),
-                owner_pubkey: author_pubkey.clone(),
-                recipient_pubkey: recipient_pubkey.clone(),
-                recipient_slot,
-                disposition,
-                store_membership: store_membership.clone(),
-                signature: String::new(),
-            };
-            value.signature = keys::sign_hex(signer, &value.canonical_bytes()).1;
-            let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] = hex::decode(recipient_pubkey)
-                .map_err(|_| CircleTransitionError::InvalidRecipient(recipient_pubkey.clone()))?
-                .try_into()
-                .map_err(|_| CircleTransitionError::InvalidRecipient(recipient_pubkey.clone()))?;
-            let recipient_x25519 = keys::ed25519_to_x25519_public_key(&recipient_ed25519)
-                .map_err(|_| CircleTransitionError::InvalidRecipient(recipient_pubkey.clone()))?;
-            let plaintext =
-                serde_json::to_vec(&value).expect("circle access serialization cannot fail");
-            let bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
-            let leaf_hash = ObjectHash::digest(&bytes);
-            Ok(PreparedAccessLeaf {
-                bytes,
-                value,
-                leaf_hash,
-            })
-        })
-        .collect()
-}
-
-fn prepare_access_envelopes(
-    store_root_hash: ObjectHash,
-    candidate_family: super::store_commit::CandidateFamilyId,
-    circle_id: CircleId,
-    control: &PreparedCircleControl,
+    access_root: ObjectHash,
     leaves: Vec<PreparedAccessLeaf>,
     proofs: Vec<Vec<MerkleStep>>,
-    signer: &UserKeypair,
-) -> Vec<PreparedCircleAccess> {
-    let author_pubkey = keys::public_key_hex(signer);
-    leaves
-        .into_iter()
-        .zip(proofs)
-        .map(|(leaf, proof)| {
-            let mut envelope = AccessEnvelope {
-                version: STORE_PROTOCOL_VERSION,
-                store_root_hash,
-                candidate_family,
-                circle_id,
-                owner_pubkey: author_pubkey.clone(),
-                recipient_slot: leaf.value.recipient_slot.clone(),
-                control_hash: control.coord.control_hash(),
-                leaf_id: leaf.value.leaf_id,
-                leaf_hash: leaf.leaf_hash,
-                value_hash: ObjectHash::digest(
-                    &serde_json::to_vec(&leaf.value)
-                        .expect("circle access leaf serialization cannot fail"),
-                ),
-                proof,
-                signature: String::new(),
-            };
-            envelope.signature = keys::sign_hex(signer, &envelope.canonical_bytes()).1;
-            PreparedCircleAccess { leaf, envelope }
+    signer: &'identity UserKeypair,
+}
+
+impl<'identity> CircleAccessDraft<'identity> {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        store_root_hash: ObjectHash,
+        candidate_family: super::store_commit::CandidateFamilyId,
+        circle_id: CircleId,
+        epoch_id: CircleEpochId,
+        keyring: &str,
+        key_fingerprint: KeyFingerprint,
+        roster_state: &CircleRosterStateRef,
+        roster_members: &std::collections::BTreeMap<String, super::circle::CircleRole>,
+        store_membership: &StoreMembershipStateRef,
+        store_members: &[(String, MemberRole)],
+        bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
+        ids: &dyn crate::id_provider::IdProvider,
+        signer: &'identity UserKeypair,
+    ) -> Result<Self, CircleTransitionError> {
+        let author_pubkey = keys::public_key_hex(signer);
+        let leaves = store_members
+            .iter()
+            .map(|(recipient_pubkey, _)| {
+                let recipient_slot = recipient_slot(signer, recipient_pubkey, circle_id)?;
+                let disposition = if roster_members.contains_key(recipient_pubkey) {
+                    CircleAccessDisposition::Active {
+                        keyring: keyring.to_string(),
+                        key_fingerprint,
+                        roster: roster_state.clone(),
+                        bootstrap: bootstraps.get(recipient_pubkey).cloned(),
+                    }
+                } else {
+                    CircleAccessDisposition::Inactive
+                };
+                let mut value = CircleAccessLeaf {
+                    version: STORE_PROTOCOL_VERSION,
+                    store_root_hash,
+                    candidate_family,
+                    circle_id,
+                    epoch_id,
+                    leaf_id: AccessLeafId::generate(ids),
+                    owner_pubkey: author_pubkey.clone(),
+                    recipient_pubkey: recipient_pubkey.clone(),
+                    recipient_slot,
+                    disposition,
+                    store_membership: store_membership.clone(),
+                    signature: String::new(),
+                };
+                value.signature = keys::sign_hex(signer, &value.canonical_bytes()).1;
+                let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] =
+                    hex::decode(recipient_pubkey)
+                        .map_err(|_| {
+                            CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
+                        })?
+                        .try_into()
+                        .map_err(|_| {
+                            CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
+                        })?;
+                let recipient_x25519 = keys::ed25519_to_x25519_public_key(&recipient_ed25519)
+                    .map_err(|_| {
+                        CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
+                    })?;
+                let plaintext =
+                    serde_json::to_vec(&value).expect("circle access serialization cannot fail");
+                let bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
+                let leaf_hash = ObjectHash::digest(&bytes);
+                Ok::<PreparedAccessLeaf, CircleTransitionError>(PreparedAccessLeaf {
+                    bytes,
+                    value,
+                    leaf_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
+        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
+        Ok(Self {
+            store_root_hash,
+            candidate_family,
+            circle_id,
+            access_root,
+            leaves,
+            proofs,
+            signer,
         })
-        .collect()
+    }
+
+    fn access_root(&self) -> ObjectHash {
+        self.access_root
+    }
+
+    fn finish(
+        self,
+        control: &PreparedCircleControl,
+    ) -> Result<Vec<PreparedCircleAccess>, CircleTransitionError> {
+        let author_pubkey = keys::public_key_hex(self.signer);
+        if control.value.store_root_hash != self.store_root_hash
+            || control.value.circle_id != self.circle_id
+            || control.value.author_pubkey != author_pubkey
+            || control.value.access_root() != self.access_root
+        {
+            return Err(CircleTransitionError::InvalidCurrentState);
+        }
+        Ok(self
+            .leaves
+            .into_iter()
+            .zip(self.proofs)
+            .map(|(leaf, proof)| {
+                let mut envelope = AccessEnvelope {
+                    version: STORE_PROTOCOL_VERSION,
+                    store_root_hash: self.store_root_hash,
+                    candidate_family: self.candidate_family,
+                    circle_id: self.circle_id,
+                    owner_pubkey: author_pubkey.clone(),
+                    recipient_slot: leaf.value.recipient_slot.clone(),
+                    control_hash: control.coord.control_hash(),
+                    leaf_id: leaf.value.leaf_id,
+                    leaf_hash: leaf.leaf_hash,
+                    value_hash: ObjectHash::digest(
+                        &serde_json::to_vec(&leaf.value)
+                            .expect("circle access leaf serialization cannot fail"),
+                    ),
+                    proof,
+                    signature: String::new(),
+                };
+                envelope.signature = keys::sign_hex(self.signer, &envelope.canonical_bytes()).1;
+                PreparedCircleAccess { leaf, envelope }
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2622,7 +2659,7 @@ impl CircleTransitionDraft {
             state_hash: metadata.metadata_hash(),
         };
         let roster = roster_objects.resolved.clone();
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -2637,13 +2674,11 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         let common = ActiveCircleEpochCore {
             epoch_id,
             key_fingerprint,
             owners: vec![author_pubkey.clone()],
-            access_root,
+            access_root: access.access_root(),
             origin: CircleEpochOrigin::Founder,
         };
         let value = CircleControlValue {
@@ -2690,15 +2725,7 @@ impl CircleTransitionDraft {
             },
             metadata_successor: true,
         };
-        let access = prepare_access_envelopes(
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -2806,7 +2833,7 @@ impl CircleTransitionDraft {
         };
         let bootstraps =
             std::collections::BTreeMap::from([(member_pubkey.clone(), bootstrap.clone())]);
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -2826,15 +2853,13 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         control_value
             .value
             .state
             .active_epoch_mut()
             .expect("member addition constructs an active epoch")
             .common
-            .access_root = access_root;
+            .access_root = access.access_root();
         control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -2842,15 +2867,7 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = prepare_access_envelopes(
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -2974,7 +2991,7 @@ impl CircleTransitionDraft {
             author_pubkey,
             signature: String::new(),
         };
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -2989,14 +3006,12 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         control_value
             .value
             .state
             .access_epoch_mut()
             .common
-            .access_root = access_root;
+            .access_root = access.access_root();
         control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -3004,15 +3019,7 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = prepare_access_envelopes(
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -3212,7 +3219,7 @@ impl CircleTransitionDraft {
             author_pubkey,
             signature: String::new(),
         };
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             control_value.store_root_hash,
             candidate_family,
             control_value.circle_id,
@@ -3227,30 +3234,20 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         control_value
             .value
             .state
             .active_epoch_mut()
             .expect("Circle finalization constructs an active epoch")
             .common
-            .access_root = access_root;
+            .access_root = access.access_root();
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
                 .expect("Circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = prepare_access_envelopes(
-            control.value.store_root_hash,
-            candidate_family,
-            control.value.circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id: control.value.circle_id,
             epoch_id,
@@ -3384,7 +3381,7 @@ impl CircleTransitionDraft {
             author_pubkey,
             signature: String::new(),
         };
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             control_value.store_root_hash,
             candidate_family,
             control_value.circle_id,
@@ -3399,15 +3396,13 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         control_value
             .value
             .state
             .active_epoch_mut()
             .expect("Circle reopen constructs an active epoch")
             .common
-            .access_root = access_root;
+            .access_root = access.access_root();
         control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -3415,15 +3410,7 @@ impl CircleTransitionDraft {
                 .expect("Circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = prepare_access_envelopes(
-            control.value.store_root_hash,
-            candidate_family,
-            control.value.circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id: control.value.circle_id,
             epoch_id,
@@ -3575,7 +3562,7 @@ impl CircleTransitionDraft {
         metadata_state.selected = selected.coord();
         metadata_state.state_hash = selected.metadata_hash();
 
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -3594,13 +3581,11 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         let active_epoch = control_value
             .state
             .active_epoch_mut()
             .expect("rename constructs an active epoch");
-        active_epoch.common.access_root = access_root;
+        active_epoch.common.access_root = access.access_root();
         active_epoch.metadata = metadata_state;
         let mut control_value = CircleControl {
             version: STORE_PROTOCOL_VERSION,
@@ -3621,15 +3606,7 @@ impl CircleTransitionDraft {
             roster: CircleRosterDraftPolicy::Inherited,
             metadata_successor: true,
         };
-        let access = prepare_access_envelopes(
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,
@@ -3798,7 +3775,7 @@ impl CircleTransitionDraft {
             author_pubkey,
             signature: String::new(),
         };
-        let leaves = prepare_access_material(
+        let access = CircleAccessDraft::prepare(
             store_root_hash,
             candidate_family,
             circle_id,
@@ -3818,15 +3795,13 @@ impl CircleTransitionDraft {
             ids,
             signer,
         )?;
-        let leaf_hashes = leaves.iter().map(|leaf| leaf.leaf_hash).collect::<Vec<_>>();
-        let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
         control_value
             .value
             .state
             .active_epoch_mut()
             .expect("control resolution constructs an active epoch")
             .common
-            .access_root = access_root;
+            .access_root = access.access_root();
         control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control_value.coord(),
@@ -3834,15 +3809,7 @@ impl CircleTransitionDraft {
                 .expect("circle control serialization cannot fail"),
             value: control_value,
         };
-        let access = prepare_access_envelopes(
-            store_root_hash,
-            candidate_family,
-            circle_id,
-            &control,
-            leaves,
-            proofs,
-            signer,
-        );
+        let access = access.finish(&control)?;
         Ok(Self {
             circle_id,
             epoch_id,

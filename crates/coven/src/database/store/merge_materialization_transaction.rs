@@ -1031,7 +1031,6 @@ impl MergeMaterializationTransaction<'_, '_> {
         returned_changes: &mut Vec<RowChange>,
         package_reported_fk_violation: &mut bool,
     ) -> Result<MergeSubsetOutcome, DbError> {
-        let conn = self.transaction;
         let applied_changeset = source
             .validate_subset(bytes.clone())
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -1059,7 +1058,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         *package_reported_fk_violation |= apply.had_fk_violations;
         if let Some(package_audience) = package_audience {
             crate::database::align_inbound_scoped_root_audiences(
-                conn,
+                self.transaction,
                 &bytes,
                 package_audience,
                 gates,

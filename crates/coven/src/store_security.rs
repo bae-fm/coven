@@ -68,7 +68,10 @@ impl StoreSecurity {
     }
 
     pub(crate) fn identity_public_key(&self) -> Result<Option<[u8; 32]>, KeyError> {
-        crate::keys::identity_public_key(self.identity.as_ref())
+        Ok(self
+            .identity
+            .unlock()?
+            .map(|identity| identity.public_key()))
     }
 
     pub(crate) fn adopt_key_rotation(

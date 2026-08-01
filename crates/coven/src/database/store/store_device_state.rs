@@ -17,7 +17,7 @@ pub(super) fn load_store_device_genesis_state_on(
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }
 
-pub(crate) fn load_store_device_snapshot_on(
+pub(super) fn load_store_device_snapshot_on(
     conn: &Connection,
     reference: &StoreBatchCommitRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
@@ -49,7 +49,7 @@ pub(crate) fn load_store_device_snapshot_on(
     Ok(state)
 }
 
-pub(crate) fn store_device_state_for_history_cut_on(
+pub(super) fn store_device_state_for_history_cut_on(
     conn: &Connection,
     cut: &crate::protocol::store_commit::StoreHistoryCut,
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
@@ -71,7 +71,7 @@ pub(crate) fn store_device_state_for_history_cut_on(
     Ok((reference, state))
 }
 
-pub(crate) fn load_declared_store_device_state_on(
+pub(super) fn load_declared_store_device_state_on(
     conn: &Connection,
     reference: &StoreDeviceStateRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
@@ -96,7 +96,7 @@ pub(crate) fn load_declared_store_device_state_on(
     Ok(state)
 }
 
-pub(crate) fn load_store_device_exclusion_freezes_on(
+pub(super) fn load_store_device_exclusion_freezes_on(
     conn: &Connection,
     root: &crate::protocol::store_commit::StoreRootRef,
 ) -> Result<BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalAck>, DbError> {
@@ -160,7 +160,7 @@ pub(crate) fn load_store_device_exclusion_freezes_on(
     Ok(existing)
 }
 
-pub(crate) fn apply_store_device_exclusion_freezes_on(
+pub(super) fn apply_store_device_exclusion_freezes_on(
     conn: &Connection,
     root: &crate::protocol::store_commit::StoreRootRef,
     state: &ResolvedStoreDeviceState,

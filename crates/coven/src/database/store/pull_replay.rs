@@ -29,7 +29,6 @@ pub(crate) fn replay_retained_merge_projection_on(
     include_local_write_overlays: bool,
     local_store_membership: LocalStoreMembership,
 ) -> Result<rusqlite::Connection, DbError> {
-    crate::database::validate_merge_generation_zero_preconditions(live)?;
     let baseline = crate::database::StoreDatabase::generation_zero_replay_baseline_on(live)?;
     let replay = baseline.open_image()?;
     replay

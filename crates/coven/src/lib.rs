@@ -49,7 +49,7 @@ mod blob_facade_tests;
 
 pub use database::rusqlite;
 
-pub use atomic_file::{write_atomic, write_atomic_io, WriteError};
+pub use atomic_file::{write_atomic, WriteError};
 pub use blob::{
     content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
     ContentHasher, MakeLocalError, MakeRemoteError, Provenance, RowBlobAuthority, RowBlobRef,

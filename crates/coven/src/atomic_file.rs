@@ -84,11 +84,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
     flush_directory_blocking(parent).map_err(WriteError::AfterCommit)
 }
 
-/// [`write_atomic`] for callers that do not act on the commit phase.
-pub fn write_atomic_io(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic(path, bytes).map_err(WriteError::into_inner)
-}
-
 /// One local file whose complete contents are installed with a durable rename.
 pub(crate) struct AtomicFile {
     path: PathBuf,

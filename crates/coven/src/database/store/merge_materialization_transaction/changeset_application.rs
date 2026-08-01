@@ -230,7 +230,12 @@ impl MergeMaterializationTransaction<'_, '_> {
                 if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
                     && op_code == Action::SQLITE_UPDATE
                 {
-                    match is_premerged_update(&item, &table, &premerged_updates) {
+                    match update_pk_key(&item, &table).map(|pk| {
+                        premerged_updates.contains(&RowKey {
+                            table: table.clone(),
+                            pk,
+                        })
+                    }) {
                         Ok(true) => return ConflictAction::SQLITE_CHANGESET_OMIT,
                         Ok(false) => {}
                         Err(error) => {
@@ -472,7 +477,7 @@ fn incoming_update(
         return Ok(None);
     };
 
-    let pk = update_pk_value(item, table)?;
+    let pk = update_pk_key(item, table).map_err(DbError::Message)?;
 
     let mut changed_columns = Vec::new();
     for index in 0..op.number_of_columns() as usize {
@@ -636,22 +641,6 @@ fn changeset_value(
             "changeset {side:?} value read failed for column {column}: {error}"
         ))),
     }
-}
-
-fn update_pk_value(item: &ChangesetItem, table: &str) -> Result<String, DbError> {
-    update_pk_key(item, table).map_err(DbError::Message)
-}
-
-fn is_premerged_update(
-    item: &ChangesetItem,
-    table: &str,
-    premerged: &HashSet<RowKey>,
-) -> Result<bool, String> {
-    let pk = update_pk_key(item, table)?;
-    Ok(premerged.contains(&RowKey {
-        table: table.to_string(),
-        pk,
-    }))
 }
 
 fn update_pk_key(item: &ChangesetItem, table: &str) -> Result<String, String> {

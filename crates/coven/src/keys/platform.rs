@@ -2,7 +2,7 @@ use tracing::info;
 
 use super::core::{
     public_key_hex, CloudHomeCredentials, DeviceIdentityCustody, KeyError, UserKeypair,
-    SIGN_PUBLICKEYBYTES, SIGN_SECRETKEYBYTES,
+    SIGN_SECRETKEYBYTES,
 };
 
 /// Why a [`CovenHandle`](crate::CovenHandle) master-key lifecycle call
@@ -371,14 +371,6 @@ pub(crate) fn require_identity(
     custody: &dyn DeviceIdentityCustody,
 ) -> Result<UserKeypair, KeyError> {
     custody.unlock()?.ok_or(KeyError::NoDeviceIdentity)
-}
-
-/// A query, not a connect: `Ok(None)` when this store has no identity
-/// established, distinct from a key-store failure (`Err`). Never mints.
-pub(crate) fn identity_public_key(
-    custody: &dyn DeviceIdentityCustody,
-) -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
-    Ok(custody.unlock()?.map(|kp| kp.public_key()))
 }
 
 /// Mint a fresh identity for a join request that has not yet named a store:

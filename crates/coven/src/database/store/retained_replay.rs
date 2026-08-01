@@ -31,7 +31,6 @@ enum ReplayTableDisposition {
     ReplaceWhenRouting,
     Preserve,
     ExactTransition,
-    MustBeEmpty,
 }
 
 const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
@@ -173,43 +172,9 @@ pub(crate) fn projection_table_names(include_routing: bool) -> Vec<String> {
             }
             ReplayTableDisposition::ReplaceWhenRouting
             | ReplayTableDisposition::Preserve
-            | ReplayTableDisposition::ExactTransition
-            | ReplayTableDisposition::MustBeEmpty => None,
+            | ReplayTableDisposition::ExactTransition => None,
         })
         .collect()
-}
-
-pub(crate) fn validate_merge_generation_zero_preconditions(
-    connection: &Connection,
-) -> Result<(), DbError> {
-    validate_must_be_empty_replay_tables(connection, "generation-zero retained replay")
-}
-
-fn validate_must_be_empty_replay_tables(
-    connection: &Connection,
-    context: &str,
-) -> Result<(), DbError> {
-    for (table, disposition) in REPLAY_TABLES {
-        if *disposition != ReplayTableDisposition::MustBeEmpty {
-            continue;
-        }
-        let count: i64 = connection
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {}",
-                    crate::database::quote_ident(table)
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if count != 0 {
-            return Err(DbError::Message(format!(
-                "{context} requires {table} to be empty"
-            )));
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,7 +431,7 @@ impl RetainedReplayBaseline {
                         "genesis retained replay baseline has a non-genesis cut".to_string(),
                     ));
                 }
-                validate_replay_image_metadata(&image, self.schema_version, self.routing_hash)?;
+                self.validate_image_metadata(&image)?;
                 let protocol_keys = protocol_state_keys(&image)?;
                 let founder_membership_cursor = founder_membership_cursor_key(&image)?;
                 if protocol_keys.iter().any(|key| {
@@ -515,7 +480,7 @@ impl RetainedReplayBaseline {
                         "snapshot retained replay cut differs from its signed metadata".to_string(),
                     ));
                 }
-                validate_replay_image_metadata(&image, self.schema_version, self.routing_hash)?;
+                self.validate_image_metadata(&image)?;
                 let mut actual = BTreeMap::new();
                 let mut statement = image
                     .prepare(
@@ -557,7 +522,6 @@ impl RetainedReplayBaseline {
                         "snapshot replay image coverage differs from its baseline".to_string(),
                     ));
                 }
-                validate_must_be_empty_replay_tables(&image, "snapshot replay baseline")?;
                 let materialized_commits: i64 = image
                     .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
                         row.get(0)
@@ -575,6 +539,26 @@ impl RetainedReplayBaseline {
                 validate_replay_image_foreign_keys(&image)
             }
         }
+    }
+
+    fn validate_image_metadata(&self, image: &Connection) -> Result<(), DbError> {
+        let stored_schema_version: u32 = image
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(DbError::from)?;
+        if stored_schema_version != self.schema_version {
+            return Err(DbError::Message(format!(
+                "retained replay image schema version is {stored_schema_version}, expected {}",
+                self.schema_version
+            )));
+        }
+        let stored_routing_hash =
+            crate::database::required_protocol_state_on(image, SYNC_ROUTING_HASH_STATE_KEY)?;
+        if stored_routing_hash != self.routing_hash.to_string() {
+            return Err(DbError::Message(
+                "retained replay image routing hash differs from its baseline".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -697,29 +681,6 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
         ));
     }
     serialized_database(&image)
-}
-
-fn validate_replay_image_metadata(
-    image: &Connection,
-    schema_version: u32,
-    routing_hash: ObjectHash,
-) -> Result<(), DbError> {
-    let stored_schema_version: u32 = image
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(DbError::from)?;
-    if stored_schema_version != schema_version {
-        return Err(DbError::Message(format!(
-            "retained replay image schema version is {stored_schema_version}, expected {schema_version}"
-        )));
-    }
-    let stored_routing_hash =
-        crate::database::required_protocol_state_on(image, SYNC_ROUTING_HASH_STATE_KEY)?;
-    if stored_routing_hash != routing_hash.to_string() {
-        return Err(DbError::Message(
-            "retained replay image routing hash differs from its baseline".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_replay_image_foreign_keys(image: &Connection) -> Result<(), DbError> {
