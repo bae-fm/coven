@@ -240,12 +240,14 @@ async fn external_blob(
     db: &Database,
     table: &str,
     row_id: &str,
-) -> Option<crate::db::ExternalBlob> {
-    let reference = db
+) -> Option<crate::database::ExternalBlob> {
+    let blobs = crate::database::StoreDatabase::new(db);
+    let reference = blobs
         .row_blob_ref(table, row_id)
         .await
         .expect("load row blob reference for external ownership");
-    db.external_blob_for_row(&reference)
+    blobs
+        .external_blob_for_row(&reference)
         .await
         .expect("load exact external blob ownership")
 }
@@ -521,13 +523,13 @@ async fn created_upload_blob(db: &Database, blob_id: &str) -> crate::blob::locat
         .expect("load exact upload journals")
         .into_iter()
         .find_map(|entry| match entry.operation {
-            crate::db::OutboxOperation::Upload {
+            crate::database::OutboxOperation::Upload {
                 row,
-                state: crate::db::OutboxUploadState::Created { stored, .. },
+                state: crate::database::OutboxUploadState::Created { stored, .. },
                 ..
             } if row.blob().id == blob_id => Some(stored),
-            crate::db::OutboxOperation::Upload { .. }
-            | crate::db::OutboxOperation::Delete { .. } => None,
+            crate::database::OutboxOperation::Upload { .. }
+            | crate::database::OutboxOperation::Delete { .. } => None,
         })
         .expect("blob has a Created exact upload journal")
 }
@@ -538,8 +540,10 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
         .unwrap()
         .into_iter()
         .map(|entry| match entry.operation {
-            crate::db::OutboxOperation::Delete { stored } => stored.locator().blob_id().to_string(),
-            crate::db::OutboxOperation::Upload { .. } => {
+            crate::database::OutboxOperation::Delete { stored } => {
+                stored.locator().blob_id().to_string()
+            }
+            crate::database::OutboxOperation::Upload { .. } => {
                 panic!("pending delete query returned an upload")
             }
         })
@@ -864,14 +868,14 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
         .expect("load pending exact row uploads")
         .into_iter()
         .filter_map(|entry| match entry.operation {
-            crate::db::OutboxOperation::Upload {
+            crate::database::OutboxOperation::Upload {
                 row,
                 source_path,
                 retain_pinned,
                 ..
             } if row == expected => Some((source_path, retain_pinned)),
-            crate::db::OutboxOperation::Upload { .. }
-            | crate::db::OutboxOperation::Delete { .. } => None,
+            crate::database::OutboxOperation::Upload { .. }
+            | crate::database::OutboxOperation::Delete { .. } => None,
         });
     let state = matching.next().expect("exact row has a pending upload");
     assert!(
@@ -2611,10 +2615,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     assert_eq!(entries.len(), 2);
     let mut created = Vec::new();
     for pending in entries {
-        let crate::db::OutboxOperation::Upload {
+        let crate::database::OutboxOperation::Upload {
             row,
             source_path,
-            state: crate::db::OutboxUploadState::Pending,
+            state: crate::database::OutboxUploadState::Pending,
             ..
         } = &pending.operation
         else {

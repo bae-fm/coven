@@ -2,6 +2,20 @@ use rusqlite::OptionalExtension;
 
 use super::*;
 
+/// An external user-owned file a blob id resolves to, read back from a
+/// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
+/// coven references but does not own); `size` is its registered plaintext length,
+/// combined with the row's signed content hash to validate the exact file. The
+/// namespace stays on the row but is not part of the read shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalBlob {
+    /// Absolute path to the external file coven reads but does not own.
+    pub path: std::path::PathBuf,
+    /// The file's plaintext length at registration. A read fails loud if the
+    /// file's current length differs.
+    pub size: u64,
+}
+
 impl StoreDatabase {
     pub(crate) async fn stored_blob_reference_state(
         &self,
@@ -85,7 +99,7 @@ impl StoreDatabase {
     pub(crate) async fn external_blob_for_row(
         &self,
         reference: &crate::blob::RowBlobRef,
-    ) -> Result<Option<crate::database::ExternalBlob>, DbError> {
+    ) -> Result<Option<ExternalBlob>, DbError> {
         let table = reference.table().to_string();
         let row_id = reference.row_id().to_string();
         let column = reference.column().to_string();
@@ -134,7 +148,7 @@ impl StoreDatabase {
                         "external blob row {table}/{row_id}/{column} differs from its row reference"
                     )));
                 }
-                Ok(Some(crate::database::ExternalBlob {
+                Ok(Some(ExternalBlob {
                     path: std::path::PathBuf::from(path),
                     size,
                 }))
@@ -147,7 +161,7 @@ impl StoreDatabase {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<Option<crate::database::ExternalBlob>, DbError> {
+    ) -> Result<Option<ExternalBlob>, DbError> {
         let reference = self.row_blob_ref(table, row_id).await?;
         self.external_blob_for_row(&reference).await
     }

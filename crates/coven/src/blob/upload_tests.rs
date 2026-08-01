@@ -411,7 +411,7 @@ async fn run_drain(
     .await
 }
 
-async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::db::OutboxEntry {
+async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::database::OutboxEntry {
     fixture
         .db
         .get_pending_cloud_uploads()
@@ -421,7 +421,7 @@ async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::db::OutboxEnt
         .find(|entry| {
             matches!(
                 &entry.operation,
-                crate::db::OutboxOperation::Upload { row, .. } if row.blob().id == blob_id
+                crate::database::OutboxOperation::Upload { row, .. } if row.blob().id == blob_id
             )
         })
         .expect("upload journal exists")
@@ -449,30 +449,30 @@ async fn journal_attempt(
         .expect("journal exists")
 }
 
-fn is_created(entry: &crate::db::OutboxEntry) -> bool {
+fn is_created(entry: &crate::database::OutboxEntry) -> bool {
     matches!(
         entry.operation,
-        crate::db::OutboxOperation::Upload {
-            state: crate::db::OutboxUploadState::Created { .. },
+        crate::database::OutboxOperation::Upload {
+            state: crate::database::OutboxUploadState::Created { .. },
             ..
         }
     )
 }
 
-fn created_slot(entry: &crate::db::OutboxEntry) -> &ObjectSlot {
+fn created_slot(entry: &crate::database::OutboxEntry) -> &ObjectSlot {
     match &entry.operation {
-        crate::db::OutboxOperation::Upload {
-            state: crate::db::OutboxUploadState::Created { stored, .. },
+        crate::database::OutboxOperation::Upload {
+            state: crate::database::OutboxUploadState::Created { stored, .. },
             ..
         } => stored.object().slot(),
         _ => panic!("journal is not Created"),
     }
 }
 
-fn created_stored(entry: &crate::db::OutboxEntry) -> &crate::blob::locator::StoredBlobRef {
+fn created_stored(entry: &crate::database::OutboxEntry) -> &crate::blob::locator::StoredBlobRef {
     match &entry.operation {
-        crate::db::OutboxOperation::Upload {
-            state: crate::db::OutboxUploadState::Created { stored, .. },
+        crate::database::OutboxOperation::Upload {
+            state: crate::database::OutboxUploadState::Created { stored, .. },
             ..
         } => stored,
         _ => panic!("journal is not Created"),

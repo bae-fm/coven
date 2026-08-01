@@ -799,7 +799,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
 /// contract.
 #[tokio::test]
 async fn upload_carries_scope_delete_carries_no_extra_fields() {
-    use crate::db::{OutboxOperation, OutboxUploadState};
+    use crate::database::{OutboxOperation, OutboxUploadState};
 
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",

@@ -483,7 +483,7 @@ impl RetainedReplayBaseline {
                             .to_string(),
                     ));
                 }
-                for table in crate::db::user_table_names(&image).map_err(DbError::from)? {
+                for table in crate::database::user_table_names(&image).map_err(DbError::from)? {
                     let count: i64 = image
                         .query_row(
                             &format!(
@@ -662,7 +662,7 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
         .map_err(DbError::from)?;
     let transaction = image.unchecked_transaction().map_err(DbError::from)?;
     let founder_membership_cursor = founder_membership_cursor_key(&transaction)?;
-    for table in crate::db::user_table_names(&transaction).map_err(DbError::from)? {
+    for table in crate::database::user_table_names(&transaction).map_err(DbError::from)? {
         if GENESIS_PRESERVED_TABLES.contains(&table.as_str()) {
             continue;
         }
@@ -801,7 +801,7 @@ mod tests {
             .map(|(table, _)| *table)
             .collect::<BTreeSet<_>>();
         assert_eq!(classified.len(), REPLAY_TABLES.len());
-        assert_eq!(classified, crate::db::all_table_names());
+        assert_eq!(classified, crate::database::all_table_names());
 
         let without_routing = projection_table_names(false)
             .into_iter()
@@ -830,8 +830,8 @@ mod tests {
                  ) STRICT;",
             )
             .expect("create host table");
-        crate::db::apply_coven_schema(connection).expect("create Coven tables");
-        crate::db::apply_coven_routing_schema(connection).expect("create routing tables");
+        crate::database::apply_coven_schema(connection).expect("create Coven tables");
+        crate::database::apply_coven_routing_schema(connection).expect("create routing tables");
         connection
             .execute_batch(
                 "INSERT INTO host_rows VALUES ('host', 'projection-secret-marker');

@@ -3,7 +3,7 @@ use super::*;
 use crate::blob::transition::PostUpload;
 use crate::blob::{Provenance, RowBlobRef};
 use crate::database::{CloudOutboxRecords, MakeRemoteIntentState};
-use crate::db::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 
 #[derive(Clone)]
 pub(crate) struct MaterializedLocalBlob {

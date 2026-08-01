@@ -1564,7 +1564,7 @@ fn private_route_insert_changeset(
 ) -> Result<Vec<u8>, GateError> {
     let conn = Connection::open_in_memory()
         .map_err(|source| GateError::Sql("open private route image".to_string(), source))?;
-    crate::db::apply_coven_routing_schema(&conn)
+    crate::database::apply_coven_routing_schema(&conn)
         .map_err(|source| GateError::Sql("create private route image".to_string(), source))?;
     let mut session =
         rusqlite::session::Session::new(&conn).map_err(|source| GateError::Session {

@@ -128,7 +128,7 @@ async fn verify_exact_file(
 
 async fn read_external_file(
     reference: &RowBlobRef,
-    external: crate::db::ExternalBlob,
+    external: crate::database::ExternalBlob,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let (bytes, size, hash) = exact_file_facts(&external.path).await.map_err(|source| {
         BlobCacheError::ExternalMissing {
@@ -143,7 +143,7 @@ async fn read_external_file(
 
 async fn verify_external_file(
     reference: &RowBlobRef,
-    external: &crate::db::ExternalBlob,
+    external: &crate::database::ExternalBlob,
 ) -> Result<(), BlobCacheError> {
     let (_, size, hash) = exact_file_facts(&external.path).await.map_err(|source| {
         BlobCacheError::ExternalMissing {
@@ -157,7 +157,7 @@ async fn verify_external_file(
 
 fn verify_external_file_facts(
     reference: &RowBlobRef,
-    external: &crate::db::ExternalBlob,
+    external: &crate::database::ExternalBlob,
     size: u64,
     hash: crate::protocol::store_commit::ObjectHash,
 ) -> Result<(), BlobCacheError> {
@@ -179,7 +179,7 @@ async fn open_local_file(path: &std::path::Path) -> Result<BlobStreamSource, Blo
 
 async fn open_external_file(
     reference: &RowBlobRef,
-    external: crate::db::ExternalBlob,
+    external: crate::database::ExternalBlob,
 ) -> Result<BlobStreamSource, BlobCacheError> {
     let file = crate::storage::LocalBlobFile::open(&external.path)
         .await

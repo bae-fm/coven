@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::BlobTransitionObserver;
 use crate::database::DbError;
-use crate::db::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use crate::encryption::EncryptionService;
 use crate::store_dir::StoreDir;
 use crate::sync::hlc::Hlc;

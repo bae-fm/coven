@@ -4,7 +4,7 @@
 //! operation it carries.
 
 use crate::database::DbError;
-use crate::db::OutboxEntry;
+use crate::database::OutboxEntry;
 
 /// Minimum delay before a failed outbox entry is retried, keyed on its prior
 /// `attempt_count`. Exponential (`30s · 2^(n-1)`) capped at one hour: the base

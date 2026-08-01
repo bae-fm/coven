@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn host_sql_cannot_mutate_coven_owned_tables() {
         let conn = Connection::open_in_memory().expect("open");
-        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
+        crate::database::apply_coven_schema(&conn).expect("install Coven schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
         let error = HostSqlTransaction::begin(&tx)
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn coven_owned_writes_pass_the_host_sql_authorizer() {
         let conn = Connection::open_in_memory().expect("open");
-        crate::db::apply_coven_schema(&conn).expect("install Coven schema");
+        crate::database::apply_coven_schema(&conn).expect("install Coven schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
         HostSqlTransaction::begin(&tx)

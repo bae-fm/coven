@@ -43,7 +43,7 @@ use tracing::{debug, warn};
 
 use crate::blob::locator::StoredBlobRef;
 use crate::database::StoredBlobReferenceState;
-use crate::db::{OutboxEntry, OutboxOperation};
+use crate::database::{OutboxEntry, OutboxOperation};
 use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::MembershipChain;
 use crate::storage::cloud::{no_progress, CloudHome};

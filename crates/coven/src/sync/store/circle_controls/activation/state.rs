@@ -1438,7 +1438,7 @@ mod derived_state_tests {
         let db = crate::sync::test_helpers::open_test_db();
         let state = db
             .call(|conn| {
-                crate::db::apply_coven_routing_schema(conn)
+                crate::database::apply_coven_routing_schema(conn)
                     .map_err(crate::database::DbError::from)?;
                 let (circle_id, _) =
                     crate::sync::test_helpers::install_test_active_circle(conn, "derived-state");
@@ -1457,7 +1457,8 @@ mod derived_state_tests {
     async fn installed_inactive_state() -> CircleCurrentState {
         let db = crate::sync::test_helpers::open_test_db();
         db.call(|conn| {
-            crate::db::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)?;
+            crate::database::apply_coven_routing_schema(conn)
+                .map_err(crate::database::DbError::from)?;
             let (circle_id, _) = crate::sync::test_helpers::install_test_inactive_circle(
                 conn,
                 "derived-state-inactive",

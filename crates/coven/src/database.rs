@@ -71,12 +71,6 @@ use std::sync::Arc;
 use crate::blob::decl::BlobDecls;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
-use crate::db::{
-    apply_coven_schema, expected_coven_schema_manifest, is_reserved_table_name,
-    live_coven_schema_manifest, CovenSchemaManifest, OutboxEntry, OutboxOperation,
-    OutboxUploadState,
-};
-pub use crate::db::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
@@ -114,8 +108,15 @@ mod circle_operation_records;
 mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
+mod coven_schema;
 mod database_connection;
 pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
+#[cfg(test)]
+pub(crate) use coven_schema::all_table_names;
+pub(crate) use coven_schema::{
+    apply_coven_routing_schema, apply_coven_schema, expected_coven_schema_manifest,
+    is_reserved_table_name, live_coven_schema_manifest, user_table_names, CovenSchemaManifest,
+};
 mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
@@ -183,13 +184,14 @@ pub(crate) use store::{
     BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
     DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
     IncomingTimestampPolicy, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation,
-    MergeMaterializationTransaction, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
-    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, SnapshotPublicationPermit,
-    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
-    StoreWritePreparation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects, WinningRow,
+    MergeMaterializationTransaction, OutboxEntry, OutboxOperation, OutboxUploadState,
+    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
+    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection,
+    StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation, TableSchema,
+    ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
 };
+pub use store::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, WriteBatch};
 pub(crate) use store_authority_records::{
     ensure_founder_replay_baseline_on, founder_graph_identity,

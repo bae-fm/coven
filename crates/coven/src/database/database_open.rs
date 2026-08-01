@@ -39,7 +39,7 @@ fn initialize_coven_metadata_on(
 ) -> Result<(), DbError> {
     apply_coven_schema(conn).map_err(DbError::from)?;
     if install_routing_schema {
-        crate::db::apply_coven_routing_schema(conn).map_err(DbError::from)?;
+        apply_coven_routing_schema(conn).map_err(DbError::from)?;
     }
     let schema_manifest = validate_live_coven_schema(conn, install_routing_schema)?;
     let contract_json =

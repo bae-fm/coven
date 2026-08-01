@@ -947,7 +947,7 @@ pub(crate) fn verify_circle_bootstrap_image(
             ));
         }
     }
-    for table in crate::db::user_table_names(&connection)
+    for table in crate::database::user_table_names(&connection)
         .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?
     {
         if tables.iter().any(|synced| synced.name() == table)
@@ -1092,7 +1092,7 @@ fn clear_non_synced(
             ));
         }
     };
-    for table in crate::db::user_table_names(conn)
+    for table in crate::database::user_table_names(conn)
         .map_err(|error| SnapshotError::ClearFailed(format!("list user tables: {error}")))?
     {
         if synced.iter().any(|t| t.name() == table) {
@@ -3168,7 +3168,7 @@ mod tests {
             .expect("activate existing blob graph object");
         {
             let connection = Connection::open(&image_path).expect("open blob graph image");
-            crate::db::apply_coven_schema(&connection).expect("apply blob graph schema");
+            crate::database::apply_coven_schema(&connection).expect("apply blob graph schema");
             connection
                 .execute(
                     "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",

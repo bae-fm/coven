@@ -1,4 +1,112 @@
 use super::*;
+use crate::database::{MakeRemoteIntentState, OutboxIdentity};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboxEntry {
+    pub id: i64,
+    pub attempt_count: i64,
+    pub last_attempt_at: Option<String>,
+    pub operation: OutboxOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutboxOperation {
+    Upload {
+        root_table: String,
+        root_id: String,
+        row: crate::blob::RowBlobRef,
+        source_path: std::path::PathBuf,
+        retain_pinned: bool,
+        state: OutboxUploadState,
+    },
+    Delete {
+        stored: crate::blob::locator::StoredBlobRef,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum OutboxUploadState {
+    Pending,
+    Prepared {
+        authority: crate::protocol::audience_package::PackageAudience,
+        stored: crate::blob::locator::StoredBlobRef,
+        spool_path: std::path::PathBuf,
+    },
+    Created {
+        authority: crate::protocol::audience_package::PackageAudience,
+        stored: crate::blob::locator::StoredBlobRef,
+        spool_path: std::path::PathBuf,
+    },
+}
+
+/// How far a gated root's make-remote transition has got, as its durable
+/// intent records it. The write id a publication carries is bookkeeping the
+/// transition owns, so it is not part of this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MakeRemoteProgress {
+    /// Blobs are queued or uploading.
+    Uploading,
+    /// A cancellation is unwinding the transition.
+    Cancelling,
+    /// Every upload landed; the Store write that publishes them is pending.
+    Publishing,
+}
+
+/// One cloud object the durable queue is holding a tombstone for.
+///
+/// A delete carries only the stored object it removes — there is no row left to
+/// name, which is the point: the row is gone and this is what still has to
+/// happen in the cloud.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedDelete {
+    /// The namespace the removed blob lived in.
+    pub namespace: String,
+    /// The removed blob's id within that namespace.
+    pub blob_id: String,
+    /// Failed removal attempts so far; 0 for one never yet tried.
+    pub attempt_count: u64,
+    /// Why the last attempt failed, if one has.
+    pub last_error: Option<String>,
+    /// When the tombstone was enqueued.
+    pub created_at: String,
+    /// When it was last attempted, if it has been.
+    pub last_attempt_at: Option<String>,
+}
+
+/// One upload the durable cloud queue is holding, as a host renders it.
+///
+/// This is a projection of the queue row, not the drain's working entry: it
+/// carries what a person needs to see — which blob, which row it belongs to,
+/// whether it is retried and why — and none of the transfer bookkeeping the
+/// drain needs. `attempt_count` is 0 and `last_error` is `None` until a
+/// transfer has actually been tried and failed, so a freshly queued upload is
+/// distinguishable from a retrying one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedUpload {
+    /// The blob's namespace, from the queued row reference.
+    pub namespace: String,
+    /// The blob's id within that namespace.
+    pub blob_id: String,
+    /// The blob-bearing row this upload belongs to.
+    pub table_name: String,
+    pub row_id: String,
+    /// The gated root whose make-remote enqueued this upload. Every upload for
+    /// one root shares this pair, and the root is what a host groups by.
+    pub root_table: String,
+    pub root_id: String,
+    /// Whether the transition asked for the plaintext to stay cached locally
+    /// once the upload lands.
+    pub retain_pinned: bool,
+    /// Failed transfer attempts so far; 0 for an upload never yet tried.
+    pub attempt_count: u64,
+    /// Why the last attempt failed, if one has.
+    pub last_error: Option<String>,
+    /// When the upload was enqueued.
+    pub created_at: String,
+    /// When it was last attempted, if it has been.
+    pub last_attempt_at: Option<String>,
+}
 
 #[derive(Clone)]
 pub(crate) struct PublishedBlobDropIntent {
@@ -8,7 +116,7 @@ pub(crate) struct PublishedBlobDropIntent {
 
 impl StoreDatabase {
     #[doc(hidden)]
-    pub(crate) async fn queued_uploads(&self) -> Result<Vec<crate::db::QueuedUpload>, DbError> {
+    pub(crate) async fn queued_uploads(&self) -> Result<Vec<QueuedUpload>, DbError> {
         self.queued_upload_rows(None).await
     }
 
@@ -17,7 +125,7 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Vec<crate::db::QueuedUpload>, DbError> {
+    ) -> Result<Vec<QueuedUpload>, DbError> {
         self.queued_upload_rows(Some((root_table.to_string(), root_id.to_string())))
             .await
     }
@@ -25,7 +133,7 @@ impl StoreDatabase {
     async fn queued_upload_rows(
         &self,
         root: Option<(String, String)>,
-    ) -> Result<Vec<crate::db::QueuedUpload>, DbError> {
+    ) -> Result<Vec<QueuedUpload>, DbError> {
         self.connection
             .call(move |connection| {
                 const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
@@ -50,7 +158,7 @@ impl StoreDatabase {
     }
 
     #[doc(hidden)]
-    pub(crate) async fn queued_deletes(&self) -> Result<Vec<crate::db::QueuedDelete>, DbError> {
+    pub(crate) async fn queued_deletes(&self) -> Result<Vec<QueuedDelete>, DbError> {
         self.connection
             .call(move |connection| {
                 let mut statement = connection
@@ -69,9 +177,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn pending_blob_deletes(
-        &self,
-    ) -> Result<Vec<crate::db::OutboxEntry>, DbError> {
+    pub(crate) async fn pending_blob_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.connection
             .call(move |connection| {
                 let mut statement = connection
@@ -91,11 +197,8 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn remove_blob_delete(
-        &self,
-        entry: &crate::db::OutboxEntry,
-    ) -> Result<(), DbError> {
-        let crate::db::OutboxOperation::Delete { stored } = &entry.operation else {
+    pub(crate) async fn remove_blob_delete(&self, entry: &OutboxEntry) -> Result<(), DbError> {
+        let OutboxOperation::Delete { stored } = &entry.operation else {
             return Err(DbError::Message(
                 "blob delete dequeue requires a delete outbox entry".to_string(),
             ));
@@ -124,11 +227,11 @@ impl StoreDatabase {
 
     pub(crate) async fn record_blob_delete_failure(
         &self,
-        entry: &crate::db::OutboxEntry,
+        entry: &OutboxEntry,
         error: &str,
         attempted_at: &str,
     ) -> Result<(), DbError> {
-        let crate::db::OutboxOperation::Delete { stored } = &entry.operation else {
+        let OutboxOperation::Delete { stored } = &entry.operation else {
             return Err(DbError::Message(
                 "blob delete failure requires a delete outbox entry".to_string(),
             ));
@@ -285,9 +388,7 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn pending_blob_uploads(
-        &self,
-    ) -> Result<Vec<crate::db::OutboxEntry>, DbError> {
+    pub(crate) async fn pending_blob_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.connection
             .call(move |connection| {
                 let mut statement = connection
@@ -309,17 +410,17 @@ impl StoreDatabase {
 
     pub(crate) async fn mark_blob_upload_prepared(
         &self,
-        entry: &crate::db::OutboxEntry,
+        entry: &OutboxEntry,
         authority: crate::protocol::audience_package::PackageAudience,
         stored: crate::blob::locator::StoredBlobRef,
         spool_path: std::path::PathBuf,
     ) -> Result<(), DbError> {
-        let crate::db::OutboxOperation::Upload { row, state, .. } = &entry.operation else {
+        let OutboxOperation::Upload { row, state, .. } = &entry.operation else {
             return Err(DbError::Message(
                 "only an upload outbox entry can own a prepared blob".to_string(),
             ));
         };
-        if state != &crate::db::OutboxUploadState::Pending {
+        if state != &OutboxUploadState::Pending {
             return Err(DbError::Message(
                 "blob upload is already prepared".to_string(),
             ));
@@ -340,7 +441,7 @@ impl StoreDatabase {
                 "prepared blob audience differs from its package authority".to_string(),
             ));
         }
-        let prepared = crate::db::OutboxUploadState::Prepared {
+        let prepared = OutboxUploadState::Prepared {
             authority,
             stored,
             spool_path,
@@ -348,7 +449,7 @@ impl StoreDatabase {
         let prepared_json = serde_json::to_string(&prepared).map_err(|error| {
             DbError::Message(format!("serialize prepared blob upload: {error}"))
         })?;
-        let pending_json = serde_json::to_string(&crate::db::OutboxUploadState::Pending)
+        let pending_json = serde_json::to_string(&OutboxUploadState::Pending)
             .map_err(|error| DbError::Message(format!("serialize pending blob upload: {error}")))?;
         self.swap_blob_upload_state(
             entry.id,
@@ -362,14 +463,14 @@ impl StoreDatabase {
 
     pub(crate) async fn mark_blob_upload_created(
         &self,
-        entry: &crate::db::OutboxEntry,
+        entry: &OutboxEntry,
     ) -> Result<(), DbError> {
-        let crate::db::OutboxOperation::Upload { row, state, .. } = &entry.operation else {
+        let OutboxOperation::Upload { row, state, .. } = &entry.operation else {
             return Err(DbError::Message(
                 "only a prepared upload outbox entry can record cloud creation".to_string(),
             ));
         };
-        let crate::db::OutboxUploadState::Prepared {
+        let OutboxUploadState::Prepared {
             authority,
             stored,
             spool_path,
@@ -379,7 +480,7 @@ impl StoreDatabase {
                 "cloud creation requires a prepared upload object".to_string(),
             ));
         };
-        let created_json = serde_json::to_string(&crate::db::OutboxUploadState::Created {
+        let created_json = serde_json::to_string(&OutboxUploadState::Created {
             authority: authority.clone(),
             stored: stored.clone(),
             spool_path: spool_path.clone(),
@@ -400,7 +501,7 @@ impl StoreDatabase {
 
     pub(crate) async fn record_blob_upload_failure(
         &self,
-        entry: &crate::db::OutboxEntry,
+        entry: &OutboxEntry,
         error: &str,
         attempted_at: &str,
     ) -> Result<(), DbError> {
@@ -411,7 +512,7 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 let updated = match identity {
-                    crate::database::OutboxIdentity::Upload {
+                    OutboxIdentity::Upload {
                         table,
                         row_id,
                         column,
@@ -431,13 +532,12 @@ impl StoreDatabase {
                             row_stamp
                         ],
                     ),
-                    crate::database::OutboxIdentity::Stored { operation, stored } => connection
-                        .execute(
-                            "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
+                    OutboxIdentity::Stored { operation, stored } => connection.execute(
+                        "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
                              last_error = ?1, last_attempt_at = ?2
                              WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
-                            rusqlite::params![error, attempted_at, id, operation, stored],
-                        ),
+                        rusqlite::params![error, attempted_at, id, operation, stored],
+                    ),
                 }
                 .map_err(DbError::from)?;
                 if updated != 1 {
@@ -487,7 +587,7 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Option<crate::database::MakeRemoteIntentState>, DbError> {
+    ) -> Result<Option<MakeRemoteIntentState>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         self.connection
@@ -506,21 +606,15 @@ impl StoreDatabase {
             .make_remote_intent_state(root_table, root_id)
             .await?
             .map(|state| match state {
-                crate::database::MakeRemoteIntentState::Uploading => {
-                    crate::MakeRemoteProgress::Uploading
-                }
-                crate::database::MakeRemoteIntentState::Cancelling => {
-                    crate::MakeRemoteProgress::Cancelling
-                }
-                crate::database::MakeRemoteIntentState::Publishing(_) => {
-                    crate::MakeRemoteProgress::Publishing
-                }
+                MakeRemoteIntentState::Uploading => MakeRemoteProgress::Uploading,
+                MakeRemoteIntentState::Cancelling => MakeRemoteProgress::Cancelling,
+                MakeRemoteIntentState::Publishing(_) => MakeRemoteProgress::Publishing,
             }))
     }
 
     pub(crate) async fn finish_cancelled_blob_upload(
         &self,
-        entry: &crate::db::OutboxEntry,
+        entry: &OutboxEntry,
     ) -> Result<bool, DbError> {
         let entry = entry.clone();
         self.connection
@@ -535,7 +629,7 @@ impl StoreDatabase {
     }
 }
 
-fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::db::QueuedUpload> {
+fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUpload> {
     let invalid = |index: usize, message: String| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -547,7 +641,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::db::
     let reference: crate::blob::RowBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
     let attempt_count: i64 = row.get(4)?;
-    Ok(crate::db::QueuedUpload {
+    Ok(QueuedUpload {
         namespace: reference.blob().namespace.clone(),
         blob_id: reference.blob().id.clone(),
         table_name: reference.table().to_string(),
@@ -563,7 +657,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::db::
     })
 }
 
-fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::db::QueuedDelete> {
+fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDelete> {
     let invalid = |index: usize, message: String| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -575,7 +669,7 @@ fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::db::
     let stored: crate::blob::locator::StoredBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
     let attempt_count: i64 = row.get(1)?;
-    Ok(crate::db::QueuedDelete {
+    Ok(QueuedDelete {
         namespace: stored.locator().namespace().to_string(),
         blob_id: stored.locator().blob_id().to_string(),
         attempt_count: u64::try_from(attempt_count)

@@ -18,7 +18,6 @@ pub(crate) mod config;
 pub(crate) mod coven;
 pub(crate) mod custody;
 pub(crate) mod database;
-pub(crate) mod db;
 pub(crate) mod encryption;
 pub(crate) mod envelope;
 mod handle;
