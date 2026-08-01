@@ -4093,7 +4093,9 @@ def verified_free_workflow(
     for record in records:
         if record["kind"] in {"closure", "async-block"}:
             continue
-        decision = decisions.get((record["symbol"], record["signature"]))
+        decision = decisions.get(
+            decision_key(record["symbol"], record["signature"])
+        )
         if (
             decision is None
             or decision.get("status") != "verified"
@@ -5163,11 +5165,48 @@ def read_decisions() -> dict[tuple[str, str], dict[str, Any]]:
     data = parse_decisions(DECISIONS_PATH.read_text())
     decisions: dict[tuple[str, str], dict[str, Any]] = {}
     for decision in data.get("decision", []):
-        key = (decision["symbol"], decision["signature"])
+        key = decision_key(decision["symbol"], decision["signature"])
         if key in decisions:
             raise RuntimeError(f"duplicate decision: {decision['symbol']}")
         decisions[key] = decision
     return decisions
+
+
+def normalized_signature(signature: str) -> str:
+    value = re.sub(r"\s+", " ", signature).strip()
+    function = re.search(r"\bfn\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*", value)
+    if function is not None:
+        angle_depth = 0
+        parameter_start = None
+        for index in range(function.end(), len(value)):
+            character = value[index]
+            if character == "<":
+                angle_depth += 1
+            elif character == ">" and angle_depth:
+                angle_depth -= 1
+            elif character == "(" and angle_depth == 0:
+                parameter_start = index
+                break
+        if parameter_start is not None:
+            depth = 0
+            for index in range(parameter_start, len(value)):
+                character = value[index]
+                if character == "(":
+                    depth += 1
+                elif character == ")":
+                    depth -= 1
+                    if depth != 0:
+                        continue
+                    before = value[:index].rstrip()
+                    if before.endswith(","):
+                        value = before[:-1].rstrip() + value[index:]
+                    break
+    value = re.sub(r"\s*(::|->|=>)\s*", r"\1", value)
+    return re.sub(r"\s*([()\[\]{},:;=&*+?!|<>])\s*", r"\1", value)
+
+
+def decision_key(symbol: str, signature: str) -> tuple[str, str]:
+    return symbol, normalized_signature(signature)
 
 
 def parse_decisions(source: str) -> dict[str, list[dict[str, str]]]:
@@ -5365,7 +5404,7 @@ def unclassified(
     return [
         record
         for record in index["callables"]
-        if (record["symbol"], record["signature"]) not in decisions
+        if decision_key(record["symbol"], record["signature"]) not in decisions
     ]
 
 
@@ -5400,7 +5439,7 @@ def command_check(_: argparse.Namespace) -> None:
         decision
         for key, decision in decisions.items()
         if not any(
-            record["symbol"] == key[0] and record["signature"] == key[1]
+            decision_key(record["symbol"], record["signature"]) == key
             for record in index["callables"]
         )
         and decision.get("classification") != "delete"

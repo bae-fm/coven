@@ -612,6 +612,40 @@ status = "verified"
             finally:
                 ownership_audit.DECISIONS_PATH = original_path
 
+    def test_decision_signature_ignores_rust_formatting_whitespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_path = ownership_audit.DECISIONS_PATH
+            ownership_audit.DECISIONS_PATH = Path(directory) / "decisions.toml"
+            ownership_audit.DECISIONS_PATH.write_text(
+                """
+[[decision]]
+symbol = "sample::transform"
+signature = "fn transform(value: u64) -> Result<u64, Error>"
+classification = "transformation"
+reason = "The explicit value completely determines the result."
+status = "verified"
+"""
+            )
+            try:
+                decisions = ownership_audit.read_decisions()
+            finally:
+                ownership_audit.DECISIONS_PATH = original_path
+
+        current = {
+            "symbol": "sample::transform",
+            "signature": (
+                "fn transform( value: u64, ) "
+                "-> Result<u64, Error>"
+            ),
+        }
+        self.assertEqual(
+            ownership_audit.unclassified(
+                {"callables": [current]},
+                decisions,
+            ),
+            [],
+        )
+
 
 class SemanticCacheTests(unittest.TestCase):
     def test_semantic_cache_invalidates_only_the_callable_whose_body_changed(self):
