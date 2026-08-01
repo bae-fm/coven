@@ -160,7 +160,7 @@ impl Default for ContentHasher {
 }
 
 /// How many blob transfers coven runs at once in each of its two transfer loops:
-/// the upload drain ([`upload::drain_uploads`]) and the pin/download loop. An
+/// the upload drain and the pin/download loop. An
 /// open-time blob-engine tunable the host sets on the builder,
 /// carried on [`Database`](crate::database::Database) alongside the other open-time
 /// blob config and read back by each loop, which holds `&Database`.
@@ -716,8 +716,8 @@ impl RowBlobRef {
 ///
 /// `should_skip_uploads` lets the host pause the upload pipeline without touching
 /// the queue: the sync cycle consults it before draining so a paused queue still
-/// accepts new entries but doesn't drain ([`upload::drain_uploads`] checks once at
-/// the top of each entry; in-flight uploads complete normally).
+/// accepts new entries but doesn't drain (the queue checks once at the top of each
+/// entry; in-flight uploads complete normally).
 ///
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {
@@ -741,8 +741,8 @@ pub trait BlobTransitionObserver: Send + Sync {
     async fn on_blob_upload_failed(&self, blob_id: &str, error: &str);
 
     /// If true, the sync cycle skips the upload drain this round and
-    /// [`upload::drain_uploads`] short-circuits before pulling the next queued
-    /// entry. The default is `false` so existing implementations don't need a stub.
+    /// the queue stops before pulling the next queued entry. The default is `false`
+    /// so existing implementations don't need a stub.
     fn should_skip_uploads(&self) -> bool {
         false
     }

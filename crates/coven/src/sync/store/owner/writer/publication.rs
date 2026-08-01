@@ -24,13 +24,6 @@ pub(super) async fn drain_store_writes(
     let Some(first) = database.oldest_prepared_store_write().await? else {
         return Ok(0);
     };
-    drain_prepared_store_writes(operation, first).await
-}
-
-async fn drain_prepared_store_writes(
-    operation: &mut AuthorizedWriterOperation<'_>,
-    first: crate::database::PreparedStoreWriteCommit,
-) -> Result<u64, StoreError> {
     let database = operation.database.clone();
     let storage = operation.storage.as_ref();
     #[cfg(test)]

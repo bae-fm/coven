@@ -11,7 +11,7 @@ pub(super) struct HostSqlAuthorization<'connection> {
 }
 
 impl<'connection> HostSqlAuthorization<'connection> {
-    fn begin(connection: &'connection rusqlite::Connection) -> Result<Self, DbError> {
+    pub(super) fn begin(connection: &'connection rusqlite::Connection) -> Result<Self, DbError> {
         connection
             .authorizer(Some(authorize_host_sql))
             .map_err(DbError::from)?;
@@ -21,21 +21,13 @@ impl<'connection> HostSqlAuthorization<'connection> {
         })
     }
 
-    fn run<R>(mut self, f: impl FnOnce() -> R) -> R {
+    pub(super) fn run<R>(mut self, f: impl FnOnce() -> R) -> R {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         self.remove_authorizer();
         match outcome {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
-    }
-
-    pub(super) fn run_on<R, E>(
-        connection: &'connection rusqlite::Connection,
-        read: impl FnOnce(&rusqlite::Connection) -> Result<R, E>,
-    ) -> Result<Result<R, E>, DbError> {
-        let authorization = Self::begin(connection)?;
-        Ok(authorization.run(|| read(connection)))
     }
 
     fn remove_authorizer(&mut self) {
@@ -187,16 +179,16 @@ mod tests {
         assert!(!stored);
         tx.rollback().expect("finish host SQL transaction test");
 
-        let error = HostSqlAuthorization::run_on(&conn, |connection| {
-            connection
-                .query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+        let error = HostSqlAuthorization::begin(&conn)
+            .expect("install host read authorizer")
+            .run(|| {
+                conn.query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
                     row.get::<_, i64>(0)
                 })
                 .map(|_| ())
                 .map_err(DbError::from)
-        })
-        .expect("install host read authorizer")
-        .expect_err("host read API must not expose Coven bookkeeping");
+            })
+            .expect_err("host read API must not expose Coven bookkeeping");
         assert!(error.to_string().contains("not authorized"));
     }
 

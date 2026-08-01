@@ -345,14 +345,11 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         candidates: Vec<crate::database::PublishedStoreSnapshot>,
     ) -> Result<
-        Option<crate::sync::store::owner::writer::snapshot::SelectedStableStoreSnapshot>,
+        Option<super::super::verified_history::SelectedStableStoreSnapshot>,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        crate::sync::store::owner::writer::snapshot::
-            select_maximal_stable_store_snapshot_with_history(
-                self.history,
-                candidates,
-            )
+        self.history
+            .select_maximal_stable_store_snapshot(candidates)
             .await
     }
 }

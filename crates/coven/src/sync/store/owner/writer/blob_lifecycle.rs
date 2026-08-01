@@ -16,7 +16,7 @@ impl AuthorizedWriterOperation<'_> {
         let (registration_ref, registration) = self.database.local_blob_write_authority().await?;
         let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-        crate::blob::upload::drain_uploads(
+        crate::blob::upload::BlobUploadQueue::new(
             &self.database,
             self.storage.as_ref(),
             authority,
@@ -26,6 +26,7 @@ impl AuthorizedWriterOperation<'_> {
             routing_encryption,
             observer,
         )
+        .drain()
         .await
     }
 

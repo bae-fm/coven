@@ -39,7 +39,6 @@ mod snapshot_image;
 mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
-mod store_creation_attempts;
 mod store_device_state;
 mod stream_activation_records;
 #[cfg(test)]
@@ -106,8 +105,8 @@ pub(crate) use retained_replay::{
     GENERATION_ZERO,
 };
 pub(crate) use snapshot_image::{
-    install_snapshot_blob_graph, verify_circle_bootstrap_image, CreatedSnapshot,
-    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError,
+    verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience, SnapshotDatabaseImage,
+    SnapshotImageError,
 };
 use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
@@ -273,9 +272,8 @@ impl StoreDatabase {
     {
         self.connection
             .call(move |connection| {
-                host_sql_transaction::HostSqlAuthorization::run_on(connection, |connection| {
-                    read(SqlReadContext::new(connection))
-                })
+                let authorization = host_sql_transaction::HostSqlAuthorization::begin(connection)?;
+                Ok(authorization.run(|| read(SqlReadContext::new(connection))))
             })
             .await
     }

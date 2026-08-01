@@ -29,7 +29,6 @@ pub(super) use authorized::AuthorizedPull;
 mod device_lifecycle_state;
 mod discovery;
 mod join_activation;
-mod local_device_operations;
 mod materialization;
 mod membership_control;
 mod model;
@@ -87,14 +86,10 @@ pub(crate) struct StorePullExecution {
     pub membership: MembershipChain,
 }
 
-use super::verification::DeviceStateResolver;
 pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;
 pub(crate) use join_activation::*;
-pub(crate) use local_device_operations::{
-    derive_local_post_device_state, load_local_commit_device_operations,
-};
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(crate) use model::{

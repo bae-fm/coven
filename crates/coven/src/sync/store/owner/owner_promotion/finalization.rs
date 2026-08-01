@@ -202,25 +202,6 @@ async fn prepare_owner_promotion_finalization(
 ) -> Result<OwnerPromotionPreparation, OwnerPromotionError> {
     let author_stream = acceptance.request.finalization.author_stream;
     let seq = acceptance.request.finalization.seq;
-    prepare_merge_owner_promotion_finalization(
-        operation,
-        encryption,
-        journal,
-        acceptance,
-        author_stream,
-        seq,
-    )
-    .await
-}
-
-async fn prepare_merge_owner_promotion_finalization(
-    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
-    encryption: &EncryptionService,
-    journal: &OwnerPromotionJournalPredecessor,
-    acceptance: OwnerPromotionAcceptance,
-    author_stream: crate::protocol::causal_grants::AuthorStreamId,
-    seq: u64,
-) -> Result<OwnerPromotionPreparation, OwnerPromotionError> {
     let database = operation.database.clone();
     let root = operation.root.clone();
     let db = &database;
@@ -356,15 +337,103 @@ async fn activate_owner_promotion_merge_head(
         .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-    let membership = finalized_merge_membership_ref(
-        &operation.root,
-        &mut operation.writer.owner_promotion_history(),
-        &candidate_ref,
-        &candidate_commit,
-        &transition,
-        &publication,
+    if candidate_commit.control()
+        != Some(&crate::protocol::store_commit::StoreControl {
+            transition: transition.transition.clone(),
+        })
+        || !transition
+            .transition
+            .matches_head(&publication.head, &publication.head_ref)
+        || !matches!(
+            &publication.head.activation,
+            crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }
+                if commit == &candidate_ref
+        )
+    {
+        return Err(OwnerPromotionError::Protocol(
+            "activated Owner promotion differs from its exact membership transition".to_string(),
+        ));
+    }
+    let predecessor = &candidate_commit.membership_state;
+    let mut membership = operation
+        .writer
+        .owner_promotion_history()
+        .load_membership(&predecessor.heads, &predecessor.resolutions)
+        .await
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+    else {
+        return Err(OwnerPromotionError::Protocol(
+            "Owner promotion predecessor membership is conflicted".to_string(),
+        ));
+    };
+    let exact_predecessor = StoreMembershipStateRef::from_parts(
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        candidate_commit.device_state.recovery().to_vec(),
+        resolved.state_hash,
     )
-    .await?;
+    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    if exact_predecessor != candidate_commit.membership_state {
+        return Err(OwnerPromotionError::Protocol(
+            "Owner promotion candidate membership differs from its exact predecessor".to_string(),
+        ));
+    }
+    membership
+        .add_entry(transition.entry.clone())
+        .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
+        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+    let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+    else {
+        return Err(OwnerPromotionError::Protocol(
+            "finalized Owner promotion produced conflicted membership".to_string(),
+        ));
+    };
+    let crate::protocol::membership::MembershipChange::SetMember {
+        user_pubkey,
+        role:
+            StoreMembershipRoleGrant::Owner {
+                recovery:
+                    crate::protocol::membership::OwnerRecoveryAnchorRef::Promotion {
+                        acceptance: promotion_acceptance,
+                    },
+            },
+        grant_id,
+        ..
+    } = &transition.entry.change
+    else {
+        return Err(OwnerPromotionError::Protocol(
+            "Merge Owner promotion entry does not add an Owner recovery stream".to_string(),
+        ));
+    };
+    let mut recovery = candidate_commit.device_state.recovery().to_vec();
+    if recovery
+        .iter()
+        .any(|cursor| &cursor.owner_grant == grant_id)
+    {
+        return Err(OwnerPromotionError::Protocol(
+            "Merge Owner promotion recovery stream already exists".to_string(),
+        ));
+    }
+    recovery.push(crate::protocol::store_commit::OwnerRecoveryCursor {
+        owner_grant: grant_id.clone(),
+        position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+            activation: crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+                &operation.root,
+                user_pubkey,
+                grant_id,
+                promotion_acceptance.anchors.recovery(),
+            )
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?,
+        },
+    });
+    let membership = StoreMembershipStateRef::from_parts(
+        membership.head_refs().to_vec(),
+        membership.resolution_refs().to_vec(),
+        recovery,
+        resolved.state_hash,
+    )
+    .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
     if membership
         .heads
         .binary_search(&publication.head_ref)
@@ -630,117 +699,4 @@ async fn resume_owner_promotion_finalization(
             }
         }
     }
-}
-
-fn finalized_merge_membership_ref<'a>(
-    root: &'a crate::protocol::store_commit::StoreRootRef,
-    history: &'a mut crate::sync::store::owner::history::OwnerPromotionHistory<'_, '_>,
-    candidate_ref: &'a crate::protocol::store_commit::StoreBatchCommitRef,
-    candidate: &'a crate::protocol::store_commit::StoreBatchCommit,
-    transition: &'a PreparedMembershipTransition,
-    publication: &'a PreparedMembershipPublication,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<StoreMembershipStateRef, OwnerPromotionError>>
-            + Send
-            + 'a,
-    >,
-> {
-    Box::pin(async move {
-        if candidate.control()
-            != Some(&crate::protocol::store_commit::StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }
-                    if commit == candidate_ref
-            )
-        {
-            return Err(OwnerPromotionError::Protocol(
-                "activated Owner promotion differs from its exact membership transition"
-                    .to_string(),
-            ));
-        }
-        let predecessor = &candidate.membership_state;
-        let mut membership = history
-            .load_membership(&predecessor.heads, &predecessor.resolutions)
-            .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(OwnerPromotionError::Protocol(
-                "Owner promotion predecessor membership is conflicted".to_string(),
-            ));
-        };
-        let exact_predecessor = StoreMembershipStateRef::from_parts(
-            membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
-            candidate.device_state.recovery().to_vec(),
-            resolved.state_hash,
-        )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        if exact_predecessor != candidate.membership_state {
-            return Err(OwnerPromotionError::Protocol(
-                "Owner promotion candidate membership differs from its exact predecessor"
-                    .to_string(),
-            ));
-        }
-        membership
-            .add_entry(transition.entry.clone())
-            .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
-        else {
-            return Err(OwnerPromotionError::Protocol(
-                "finalized Owner promotion produced conflicted membership".to_string(),
-            ));
-        };
-        let crate::protocol::membership::MembershipChange::SetMember {
-            user_pubkey,
-            role:
-                StoreMembershipRoleGrant::Owner {
-                    recovery:
-                        crate::protocol::membership::OwnerRecoveryAnchorRef::Promotion { acceptance },
-                },
-            grant_id,
-            ..
-        } = &transition.entry.change
-        else {
-            return Err(OwnerPromotionError::Protocol(
-                "Merge Owner promotion entry does not add an Owner recovery stream".to_string(),
-            ));
-        };
-        let mut recovery = candidate.device_state.recovery().to_vec();
-        if recovery
-            .iter()
-            .any(|cursor| &cursor.owner_grant == grant_id)
-        {
-            return Err(OwnerPromotionError::Protocol(
-                "Merge Owner promotion recovery stream already exists".to_string(),
-            ));
-        }
-        recovery.push(crate::protocol::store_commit::OwnerRecoveryCursor {
-            owner_grant: grant_id.clone(),
-            position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
-                activation: crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
-                    root,
-                    user_pubkey,
-                    grant_id,
-                    acceptance.anchors.recovery(),
-                )
-                .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?,
-            },
-        });
-        StoreMembershipStateRef::from_parts(
-            membership.head_refs().to_vec(),
-            membership.resolution_refs().to_vec(),
-            recovery,
-            resolved.state_hash,
-        )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))
-    })
 }

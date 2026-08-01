@@ -205,6 +205,54 @@ impl SnapshotDatabaseImage {
         })
     }
 
+    pub(crate) fn install_blob_graph(
+        self,
+        blobs: &[crate::database::PreparedSnapshotBlob],
+    ) -> Result<Vec<u8>, SnapshotImageError> {
+        let result = (|| {
+            let mut connection = Connection::open(self.path()).map_err(|error| {
+                SnapshotImageError::Projection(format!("open snapshot closure image: {error}"))
+            })?;
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            let transaction = connection
+                .transaction()
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            for blob in blobs {
+                blob.remote
+                    .validate()
+                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                if blob.bindings.is_empty()
+                    || blob
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.blob().object() != blob.remote.object())
+                {
+                    return Err(SnapshotImageError::Projection(
+                        "snapshot blob binding differs from its remote object".to_string(),
+                    ));
+                }
+                crate::database::install_snapshot_blob_plan_on(&transaction, blob).map_err(
+                    |error| {
+                        SnapshotImageError::Projection(format!("install snapshot blob: {error}"))
+                    },
+                )?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            connection.execute_batch("VACUUM").map_err(|error| {
+                SnapshotImageError::Projection(format!("vacuum snapshot closure: {error}"))
+            })?;
+            connection.close().map_err(|(_, error)| {
+                SnapshotImageError::Projection(format!("close snapshot closure image: {error}"))
+            })?;
+            std::fs::read(self.path()).map_err(SnapshotImageError::Io)
+        })();
+        self.finish(result)
+    }
+
     fn remove_files(&self) -> std::io::Result<()> {
         for candidate in [
             self.path.clone(),
@@ -810,58 +858,6 @@ fn scope_authenticated_blob_graph(
             SnapshotImageError::Projection(format!("scope blob ownership graph: {error}"))
         })?;
     Ok(())
-}
-
-pub(crate) fn install_snapshot_blob_graph(
-    image: Vec<u8>,
-    blobs: &[crate::database::PreparedSnapshotBlob],
-    store_dir: &crate::store_dir::StoreDir,
-) -> Result<Vec<u8>, SnapshotImageError> {
-    if blobs.is_empty() {
-        return Ok(image);
-    }
-    let staged_image =
-        SnapshotDatabaseImage::replace(store_dir.as_ref().join("snapshot-closure.db"), &image)?;
-    let result = (|| {
-        let mut connection = Connection::open(staged_image.path()).map_err(|error| {
-            SnapshotImageError::Projection(format!("open snapshot closure image: {error}"))
-        })?;
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-        for blob in blobs {
-            blob.remote
-                .validate()
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            if blob.bindings.is_empty()
-                || blob
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.blob().object() != blob.remote.object())
-            {
-                return Err(SnapshotImageError::Projection(
-                    "snapshot blob binding differs from its remote object".to_string(),
-                ));
-            }
-            crate::database::install_snapshot_blob_plan_on(&transaction, blob).map_err(
-                |error| SnapshotImageError::Projection(format!("install snapshot blob: {error}")),
-            )?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-        connection.execute_batch("VACUUM").map_err(|error| {
-            SnapshotImageError::Projection(format!("vacuum snapshot closure: {error}"))
-        })?;
-        connection.close().map_err(|(_, error)| {
-            SnapshotImageError::Projection(format!("close snapshot closure image: {error}"))
-        })?;
-        std::fs::read(staged_image.path()).map_err(SnapshotImageError::Io)
-    })();
-    staged_image.finish(result)
 }
 
 pub(crate) fn verify_circle_bootstrap_image(

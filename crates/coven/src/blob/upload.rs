@@ -111,18 +111,152 @@ struct BlobUploadAttempt<'operation, 'authority> {
     entry: OutboxEntry,
 }
 
-/// Drain pending blob uploads: read each local file, seal it under its scope,
-/// create its exact cloud object — and, for an entry marked `retain_pinned`, keep the
-/// plaintext in the protected locator-keyed local cache so the blob
-/// stays local without a later fetch.
-///
-/// A failing entry is recorded and skipped rather than stopping the drain, with a
-/// per-entry backoff so a persistently-failing entry doesn't block the rest of
-/// the queue or get re-attempted every cycle. The `observer` (if any) is notified
-/// as each attempt starts, succeeds, or fails. Created journals remain until the
-/// pending Store write activates their normal locator bindings. A cancelled root
-/// exact-deletes each created object and its spool before removing the journal;
-/// restarting during cleanup resets that exact journal to Pending.
+pub(crate) struct BlobUploadQueue<'operation, 'authority> {
+    database: &'operation crate::database::StoreDatabase,
+    storage: &'operation dyn crate::storage::SyncStorage,
+    authority: crate::storage::BlobWriteAuthority<'authority>,
+    store_dir: &'operation StoreDir,
+    clock: &'operation dyn crate::clock::Clock,
+    hlc: &'operation Hlc,
+    routing_encryption: Option<&'operation EncryptionService>,
+    observer: Option<&'operation dyn BlobTransitionObserver>,
+}
+
+impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        database: &'operation crate::database::StoreDatabase,
+        storage: &'operation dyn crate::storage::SyncStorage,
+        authority: crate::storage::BlobWriteAuthority<'authority>,
+        store_dir: &'operation StoreDir,
+        clock: &'operation dyn crate::clock::Clock,
+        hlc: &'operation Hlc,
+        routing_encryption: Option<&'operation EncryptionService>,
+        observer: Option<&'operation dyn BlobTransitionObserver>,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            authority,
+            store_dir,
+            clock,
+            hlc,
+            routing_encryption,
+            observer,
+        }
+    }
+
+    /// Drain pending blob uploads: read each local file, seal it under its scope,
+    /// create its exact cloud object — and, for an entry marked `retain_pinned`, keep the
+    /// plaintext in the protected locator-keyed local cache so the blob
+    /// stays local without a later fetch.
+    ///
+    /// A failing entry is recorded and skipped rather than stopping the drain, with a
+    /// per-entry backoff so a persistently-failing entry doesn't block the rest of
+    /// the queue or get re-attempted every cycle. The `observer` (if any) is notified
+    /// as each attempt starts, succeeds, or fails. Created journals remain until the
+    /// pending Store write activates their normal locator bindings. A cancelled root
+    /// exact-deletes each created object and its spool before removing the journal;
+    /// restarting during cleanup resets that exact journal to Pending.
+    pub(crate) async fn drain(&self) -> Result<DrainOutcome, DbError> {
+        let uploads = self.database.pending_blob_uploads().await?;
+
+        let now = self.clock.now();
+        let mut count = 0;
+        let mut yielded_for_publish = false;
+
+        if uploads.is_empty() {
+            return Ok(DrainOutcome {
+                uploaded: 0,
+                yielded_for_publish: false,
+                failures: UploadFailures::default(),
+            });
+        }
+        // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
+        // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
+        // one, await it fully, then the next — same order-observable effects and error
+        // semantics. Prepared and Created handoffs are exact compare-and-set updates;
+        // the finalizer reads every row-version journal in one transaction and flips
+        // only when all are Created.
+        let limit = self.database.transfer_limits().uploads.get();
+        let mut pending = uploads
+            .into_iter()
+            .map(|entry| {
+                crate::blob::retry::entry_in_backoff(&entry, now)
+                    .map(|in_backoff| (entry, in_backoff))
+            })
+            .collect::<Result<Vec<_>, DbError>>()?
+            .into_iter()
+            .filter_map(|(entry, in_backoff)| (!in_backoff).then_some(entry));
+        let mut inflight = FuturesUnordered::new();
+        // Set once a pause is seen or a make_remote completes: stop admitting new
+        // uploads while letting those already in flight finish (never aborting them).
+        let mut stop_admitting = false;
+        let mut failures = Vec::new();
+
+        loop {
+            while !stop_admitting && inflight.len() < limit {
+                // Host-driven pause: checked before admitting each entry so a freshly
+                // paused queue stops admitting without aborting in-flight uploads, and a
+                // resume mid-cycle picks back up.
+                if let Some(obs) = self.observer {
+                    if obs.should_skip_uploads() {
+                        stop_admitting = true;
+                        break;
+                    }
+                }
+                let Some(entry) = pending.next() else {
+                    break;
+                };
+                inflight.push(
+                    BlobUploadAttempt::new(
+                        self.database,
+                        self.storage,
+                        self.authority,
+                        self.store_dir,
+                        now,
+                        self.hlc,
+                        self.routing_encryption.cloned(),
+                        self.observer,
+                        entry,
+                    )
+                    .run(),
+                );
+            }
+
+            match inflight.next().await {
+                Some(EntryOutcome::Uploaded {
+                    made_remote,
+                    created_this_pass,
+                }) => {
+                    if created_this_pass {
+                        count += 1;
+                    }
+                    if made_remote {
+                        // This upload completed a make_remote: the gate is flipped and the
+                        // subtree is shareable. Yield so this cycle publishes it, and stop
+                        // admitting new uploads — any other root's blobs drain on the
+                        // promptly-run next cycle, and the in-flight uploads finish here.
+                        yielded_for_publish = true;
+                        stop_admitting = true;
+                    }
+                }
+                Some(EntryOutcome::NotUploaded(failure)) => failures.push(failure),
+                // Nothing left in flight and none admitted this pass: the drain is done.
+                None => break,
+            }
+        }
+
+        Ok(DrainOutcome {
+            uploaded: count,
+            yielded_for_publish,
+            failures: UploadFailures(failures),
+        })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_uploads(
     database: &crate::database::StoreDatabase,
     storage: &dyn crate::storage::SyncStorage,
@@ -133,102 +267,21 @@ pub(crate) async fn drain_uploads(
     routing_encryption: Option<&EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
-    let db = &database;
-    let uploads = db.pending_blob_uploads().await?;
-
-    let now = clock.now();
-    let mut count = 0;
-    let mut yielded_for_publish = false;
-
-    if uploads.is_empty() {
-        return Ok(DrainOutcome {
-            uploaded: 0,
-            yielded_for_publish: false,
-            failures: UploadFailures::default(),
-        });
-    }
-    // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
-    // and refilling as each completes. At limit 1 this is the one-at-a-time drain: admit
-    // one, await it fully, then the next — same order-observable effects and error
-    // semantics. Prepared and Created handoffs are exact compare-and-set updates;
-    // the finalizer reads every row-version journal in one transaction and flips
-    // only when all are Created.
-    let limit = db.transfer_limits().uploads.get();
-    let mut pending = uploads
-        .into_iter()
-        .map(|entry| {
-            crate::blob::retry::entry_in_backoff(&entry, now).map(|in_backoff| (entry, in_backoff))
-        })
-        .collect::<Result<Vec<_>, DbError>>()?
-        .into_iter()
-        .filter_map(|(entry, in_backoff)| (!in_backoff).then_some(entry));
-    let mut inflight = FuturesUnordered::new();
-    // Set once a pause is seen or a make_remote completes: stop admitting new
-    // uploads while letting those already in flight finish (never aborting them).
-    let mut stop_admitting = false;
-    let mut failures = Vec::new();
-
-    loop {
-        while !stop_admitting && inflight.len() < limit {
-            // Host-driven pause: checked before admitting each entry so a freshly
-            // paused queue stops admitting without aborting in-flight uploads, and a
-            // resume mid-cycle picks back up.
-            if let Some(obs) = observer {
-                if obs.should_skip_uploads() {
-                    stop_admitting = true;
-                    break;
-                }
-            }
-            let Some(entry) = pending.next() else {
-                break;
-            };
-            inflight.push(
-                BlobUploadAttempt::new(
-                    database,
-                    storage,
-                    authority,
-                    store_dir,
-                    now,
-                    hlc,
-                    routing_encryption.cloned(),
-                    observer,
-                    entry,
-                )
-                .run(),
-            );
-        }
-
-        match inflight.next().await {
-            Some(EntryOutcome::Uploaded {
-                made_remote,
-                created_this_pass,
-            }) => {
-                if created_this_pass {
-                    count += 1;
-                }
-                if made_remote {
-                    // This upload completed a make_remote: the gate is flipped and the
-                    // subtree is shareable. Yield so this cycle publishes it, and stop
-                    // admitting new uploads — any other root's blobs drain on the
-                    // promptly-run next cycle, and the in-flight uploads finish here.
-                    yielded_for_publish = true;
-                    stop_admitting = true;
-                }
-            }
-            Some(EntryOutcome::NotUploaded(failure)) => failures.push(failure),
-            // Nothing left in flight and none admitted this pass: the drain is done.
-            None => break,
-        }
-    }
-
-    Ok(DrainOutcome {
-        uploaded: count,
-        yielded_for_publish,
-        failures: UploadFailures(failures),
-    })
+    BlobUploadQueue::new(
+        database,
+        storage,
+        authority,
+        store_dir,
+        clock,
+        hlc,
+        routing_encryption,
+        observer,
+    )
+    .drain()
+    .await
 }
 
-/// What one entry's upload attempt did, for [`drain_uploads`] to aggregate.
+/// What one entry's upload attempt did, for [`BlobUploadQueue::drain`] to aggregate.
 enum EntryOutcome {
     /// The cloud write failed; the failure was recorded and the entry left queued.
     /// Not counted toward [`DrainOutcome::uploaded`].

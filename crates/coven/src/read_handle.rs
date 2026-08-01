@@ -77,8 +77,9 @@ impl CovenReadHandle {
         blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
-        let security =
-            StoreSecurity::new(key_service, key_custody, identity_custody, oauth_clients);
+        let cloud_homes =
+            crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
+        let security = StoreSecurity::new(key_service, key_custody, identity_custody, cloud_homes);
         let rows = ReadStoreRows::new(database.clone());
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =

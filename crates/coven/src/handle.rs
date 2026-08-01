@@ -158,11 +158,13 @@ impl CovenHandle {
     ) -> Self {
         let database = StoreDatabase::from_database(db);
         let read_database = StoreDatabase::from_database(read_db);
+        let cloud_homes =
+            crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
         let security = StoreSecurity::new(
             key_service.clone(),
             key_custody.clone(),
             identity_custody.clone(),
-            oauth_clients,
+            cloud_homes,
         );
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =

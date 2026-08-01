@@ -688,12 +688,11 @@ pub(crate) fn test_store_security(
             &store_keys,
             &StoreDir::new(format!("{store_id}-unused-test-identity-directory")),
         );
-    crate::store_security::StoreSecurity::new(
-        store_keys,
-        master_keys,
-        identity,
+    let cloud_homes = crate::storage::cloud::CloudHomeFactory::new(
+        store_keys.clone(),
         crate::oauth::OAuthClients::empty(),
-    )
+    );
+    crate::store_security::StoreSecurity::new(store_keys, master_keys, identity, cloud_homes)
 }
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced

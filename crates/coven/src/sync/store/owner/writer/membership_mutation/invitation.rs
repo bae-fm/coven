@@ -1,8 +1,6 @@
 use crate::encryption::EncryptionService;
 use crate::keys;
-use crate::protocol::membership::{
-    AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipError,
-};
+use crate::protocol::membership::{MemberRole, MembershipChain, MembershipChange, MembershipError};
 use crate::protocol::wrapped_store_key::WrappedStoreKey;
 use crate::protocol::wrapped_store_key::WrappedStoreKeyRef;
 use crate::storage as store_objects;
@@ -15,76 +13,6 @@ use super::{
     InviteError, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
     MutationPersistence,
 };
-
-async fn build_invite_mutation(
-    operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
-    chain: &MembershipChain,
-    stream_id: AuthorStreamId,
-    invitee_ed25519_pubkey: &str,
-    invitee_email: Option<&str>,
-    role: MemberRole,
-    encryption: &EncryptionService,
-    store_id: &str,
-    timestamp: &str,
-) -> Result<InviteMutationPlan, InviteError> {
-    let owner_keypair = operation.writer.identity.clone();
-    if role == MemberRole::Owner {
-        return Err(MembershipError::OwnerPromotionRequired.into());
-    }
-    if chain.store_id() != Some(store_id) {
-        return Err(InviteError::InvalidDurableMutation(format!(
-            "membership chain store {:?} differs from requested store {store_id:?}",
-            chain.store_id()
-        )));
-    }
-    let invitee_x25519_pk = keys::ed25519_hex_to_x25519_public_key(invitee_ed25519_pubkey)?;
-    let authorized_keyring = operation
-        .open_keyring_or_for_membership(chain, encryption)
-        .await?;
-    let signing_store_id = store_id.to_string();
-    let signing_recipient = invitee_ed25519_pubkey.to_string();
-    let signing_keyring = authorized_keyring.clone();
-    let signing_owner = owner_keypair.clone();
-    let signed = blocking::run(move || {
-        WrappedStoreKey::seal_keyring(
-            &signing_store_id,
-            &signing_recipient,
-            &invitee_x25519_pk,
-            &signing_keyring,
-            &signing_owner,
-        )
-        .map_err(|error| InviteError::Crypto(format!("serialize invited member keyring: {error}")))
-    })
-    .await
-    .map_err(|error| InviteError::Crypto(format!("seal invited member Store key: {error}")))??;
-    let wrapped_key = operation
-        .prepare_wrapped_key(invitee_ed25519_pubkey, signed)
-        .await?;
-    let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
-        &owner_keypair,
-        stream_id,
-        invitee_ed25519_pubkey.to_string(),
-        invitee_email.map(str::to_string),
-        role.clone(),
-        None,
-        wrapped_key.reference.clone(),
-        timestamp.to_string(),
-    )?;
-    let publication = AuthorizedMembershipPublication::new(operation)
-        .prepare_publication(chain, entry)
-        .await?;
-    Ok(InviteMutationPlan {
-        publication,
-        invitee_pubkey: invitee_ed25519_pubkey.to_string(),
-        invitee_email: invitee_email.map(str::to_string),
-        role,
-        desired_access: CloudAccessState::Present {
-            member_pubkey: invitee_ed25519_pubkey.to_string(),
-            provider_account_email: invitee_email.map(str::to_string),
-        },
-        wrapped_key,
-    })
-}
 
 async fn execute_invite_mutation(
     operation: &mut crate::sync::store::owner::AuthorizedWriterOperation<'_>,
@@ -223,18 +151,66 @@ pub(crate) async fn create_invitation_with_encryption_durable(
         }
         None => {
             let stream_id = operation.select_membership_author_stream(&chain).await?;
-            let plan = Box::pin(build_invite_mutation(
-                operation,
-                &chain,
+            if role == MemberRole::Owner {
+                return Err(MembershipError::OwnerPromotionRequired.into());
+            }
+            if chain.store_id() != Some(store_id) {
+                return Err(InviteError::InvalidDurableMutation(format!(
+                    "membership chain store {:?} differs from requested store {store_id:?}",
+                    chain.store_id()
+                )));
+            }
+            let invitee_x25519_pk = keys::ed25519_hex_to_x25519_public_key(invitee_ed25519_pubkey)?;
+            let authorized_keyring = operation
+                .open_keyring_or_for_membership(&chain, encryption)
+                .await?;
+            let signing_store_id = store_id.to_string();
+            let signing_recipient = invitee_ed25519_pubkey.to_string();
+            let signing_keyring = authorized_keyring.clone();
+            let signing_owner = owner_keypair.clone();
+            let signed = blocking::run(move || {
+                WrappedStoreKey::seal_keyring(
+                    &signing_store_id,
+                    &signing_recipient,
+                    &invitee_x25519_pk,
+                    &signing_keyring,
+                    &signing_owner,
+                )
+                .map_err(|error| {
+                    InviteError::Crypto(format!("serialize invited member keyring: {error}"))
+                })
+            })
+            .await
+            .map_err(|error| {
+                InviteError::Crypto(format!("seal invited member Store key: {error}"))
+            })??;
+            let wrapped_key = operation
+                .prepare_wrapped_key(invitee_ed25519_pubkey, signed)
+                .await?;
+            let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+                &owner_keypair,
                 stream_id,
-                invitee_ed25519_pubkey,
-                invitee_email,
+                invitee_ed25519_pubkey.to_string(),
+                invitee_email.map(str::to_string),
+                role.clone(),
+                None,
+                wrapped_key.reference.clone(),
+                timestamp.to_string(),
+            )?;
+            let publication = AuthorizedMembershipPublication::new(operation)
+                .prepare_publication(&chain, entry)
+                .await?;
+            let plan = InviteMutationPlan {
+                publication,
+                invitee_pubkey: invitee_ed25519_pubkey.to_string(),
+                invitee_email: invitee_email.map(str::to_string),
                 role,
-                encryption,
-                store_id,
-                timestamp,
-            ))
-            .await?;
+                desired_access: CloudAccessState::Present {
+                    member_pubkey: invitee_ed25519_pubkey.to_string(),
+                    provider_account_email: invitee_email.map(str::to_string),
+                },
+                wrapped_key,
+            };
             let encoded =
                 encode_membership_mutation(&MembershipMutationPlan::Invite(plan.clone()))?;
             let progress = MembershipMutationProgress::Pending;

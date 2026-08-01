@@ -9,7 +9,7 @@
 //!
 //! - [`LocalBlobTransitions::make_remote`] verifies and journals every
 //!   blob-bearing row beneath the root,
-//!   then returns. The upload drain ([`crate::blob::upload::drain_uploads`]) creates
+//!   then returns. The upload drain creates
 //!   each exact cloud object. Once every row has a created object, one Store write
 //!   flips the gate true and drops external-file ownership. The intent and exact
 //!   upload journals remain authoritative until that Store write activates, when

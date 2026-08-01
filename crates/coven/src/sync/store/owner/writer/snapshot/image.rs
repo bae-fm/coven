@@ -247,23 +247,44 @@ impl<'storage> BootstrapResult<'storage> {
                         root_ref.store_root_hash,
                     )
                     .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-                    stage_restore_circle_decisions(
-                        &requested,
-                        &install,
-                        &synced_tables,
-                        blob_tombstone_grace,
-                        transfer_limits,
-                        &device_id,
-                        &clock,
-                        migrations,
-                        storage,
-                        &root_ref,
-                        &mut history_verifier,
-                        &store_frontier,
-                        &restorer_identity,
-                        Some(&routing_key),
-                    )
-                    .await?
+                    let query_path = requested.with_extension("restore-select.db");
+                    let query_image = SnapshotDatabaseImage::prepare(query_path)?;
+                    if let Err(error) = std::fs::copy(&requested, query_image.path()) {
+                        return finish_database_image_operation(
+                            query_image,
+                            Err(SnapshotError::Io(error)),
+                        );
+                    }
+                    let query_path = query_image.path().to_path_buf();
+                    let staged = async {
+                        let (query_db, _stamper) = Database::open_initialized_store(
+                            &query_path,
+                            &install,
+                            synced_tables.clone(),
+                            blob_tombstone_grace,
+                            transfer_limits,
+                            device_id.clone(),
+                            clock.clone(),
+                            migrations,
+                        )
+                        .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+                        let store_database =
+                            crate::database::StoreDatabase::from_database(query_db);
+                        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+                            &store_database,
+                            storage,
+                            &root_ref,
+                            &mut history_verifier,
+                        )
+                        .select_staged_decisions(
+                            &store_frontier,
+                            &restorer_identity,
+                            Some(&routing_key),
+                        )
+                        .await
+                    }
+                    .await;
+                    finish_database_image_operation(query_image, staged)?
                 }
                 None => Vec::new(),
             };
@@ -316,62 +337,6 @@ impl<'storage> BootstrapResult<'storage> {
             Err(cause) => finish_database_image_operation(database_image, Err(cause)),
         }
     }
-}
-
-/// Stage the Circle install/clear decisions for a restore by re-resolving the
-/// restoring identity's access against a throwaway copy of the raw Store image.
-/// The copy is installed through the same verified authority the real install
-/// uses, queried, then deleted; only the decisions cross back to the real
-/// install, which applies them in its single transaction.
-#[allow(clippy::too_many_arguments)]
-async fn stage_restore_circle_decisions<'storage>(
-    raw_image_path: &Path,
-    install: &crate::database::VerifiedSnapshotBootstrapInstall,
-    synced_tables: &[SyncedTable],
-    blob_tombstone_grace: chrono::Duration,
-    transfer_limits: crate::blob::TransferLimits,
-    device_id: &str,
-    clock: &crate::clock::ClockRef,
-    migrations: &[Migration],
-    storage: &'storage dyn SyncStorage,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
-        'storage,
-    >,
-    store_frontier: &crate::protocol::store_commit::CommitFrontier,
-    restorer_identity: &crate::keys::UserKeypair,
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
-    let query_path = raw_image_path.with_extension("restore-select.db");
-    let query_image = SnapshotDatabaseImage::prepare(query_path)?;
-    if let Err(error) = std::fs::copy(raw_image_path, query_image.path()) {
-        return finish_database_image_operation(query_image, Err(SnapshotError::Io(error)));
-    }
-    let query_path = query_image.path().to_path_buf();
-    let staged = async {
-        let (query_db, _stamper) = Database::open_initialized_store(
-            &query_path,
-            install,
-            synced_tables.to_vec(),
-            blob_tombstone_grace,
-            transfer_limits,
-            device_id.to_string(),
-            clock.clone(),
-            migrations,
-        )
-        .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-        let store_database = crate::database::StoreDatabase::from_database(query_db);
-        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
-            &store_database,
-            storage,
-            root,
-            history_verifier,
-        )
-        .select_staged_decisions(store_frontier, restorer_identity, routing_key)
-        .await
-    }
-    .await;
-    finish_database_image_operation(query_image, staged)
 }
 
 /// Check whether it's time to create a new snapshot.
@@ -483,9 +448,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::database::{
-        install_snapshot_blob_graph, verify_circle_bootstrap_image, StoreDatabase,
-    };
+    use crate::database::{verify_circle_bootstrap_image, StoreDatabase};
     use crate::keys::UserKeypair;
     use crate::protocol::store_commit::CommitFrontier;
 
@@ -2097,8 +2060,10 @@ mod tests {
             spool_path: None,
         };
         let store_dir = crate::store_dir::StoreDir::new(dir.path());
-        let error = install_snapshot_blob_graph(image, &[prepared], &store_dir)
-            .expect_err("a conflicting existing row binding must fail the image install");
+        let error =
+            SnapshotDatabaseImage::replace(store_dir.as_ref().join("snapshot-closure.db"), &image)
+                .and_then(|image| image.install_blob_graph(&[prepared]))
+                .expect_err("a conflicting existing row binding must fail the image install");
         assert!(
             error
                 .to_string()

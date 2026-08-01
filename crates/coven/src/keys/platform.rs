@@ -526,13 +526,23 @@ impl StoreKeys {
     }
 
     #[cfg(feature = "oauth-providers")]
+    pub fn get_cloud_home_oauth_tokens(
+        &self,
+    ) -> Result<Option<crate::oauth::OAuthTokens>, KeyError> {
+        Ok(match self.get_cloud_home_credentials()? {
+            Some(CloudHomeCredentials::OAuth { tokens }) => Some(tokens),
+            _ => None,
+        })
+    }
+
+    #[cfg(feature = "oauth-providers")]
     pub fn set_cloud_home_oauth_tokens(
         &self,
         tokens: &crate::oauth::OAuthTokens,
     ) -> Result<(), KeyError> {
-        let token_json = serde_json::to_string(tokens)
-            .map_err(|e| KeyError::Crypto(format!("serialize OAuth tokens: {e}")))?;
-        self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
+        self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth {
+            tokens: tokens.clone(),
+        })
     }
 
     #[cfg(test)]

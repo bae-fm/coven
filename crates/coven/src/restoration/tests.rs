@@ -20,8 +20,7 @@ use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::joining::MembershipFloor;
 use crate::joining::{
-    bootstrap_and_save_store, open_db_and_pull, BootstrapCleanup, BootstrapError,
-    RestoreBootstrapContext,
+    bootstrap_and_save_store, BootstrapCleanup, BootstrapError, RestoreBootstrapContext,
 };
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::restoration::restore_from_code;
@@ -1066,6 +1065,7 @@ async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_devi
 
 struct OwnerRecoveryRestoreFixture {
     code: String,
+    owner_pubkey: String,
     tables: Vec<crate::sync::session::SyncedTable>,
     migrations: Vec<crate::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
@@ -1133,6 +1133,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let app = tempfile::tempdir().expect("restore app dir");
     OwnerRecoveryRestoreFixture {
         code,
+        owner_pubkey: pubkey_hex(&owner),
         tables,
         migrations: test_migrations(),
         cloudkit_ops,
@@ -1143,6 +1144,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
 async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
     let OwnerRecoveryRestoreFixture {
         code,
+        owner_pubkey,
         tables,
         migrations,
         cloudkit_ops,
@@ -1182,6 +1184,14 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         .await
         .expect("load recovered Store device identity")
         .expect("recovered Store device identity exists");
+    assert_eq!(
+        restored
+            .get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)
+            .await
+            .expect("load recovered Store owner"),
+        Some(owner_pubkey),
+        "restore pins the verified chain founder as the Store owner",
+    );
     let activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation = restored
         .test_sql(move |database| database.store_device_registration_activation(&store_device_id))
         .await
@@ -1404,106 +1414,6 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
         successor.predecessor,
         Some(imported_snapshot),
         "the due snapshot extends the imported exact generation",
-    );
-}
-
-/// The restore-only branch in `open_db_and_pull` (join.rs, around the
-/// `owner_pubkey.is_none()` block): restore carries no owner from an invite, so
-/// it adopts the chain founder as the pinned owner itself, after the pull, from
-/// membership entries loaded straight from the bootstrapped storage. No existing
-/// test publishes a founder chain and checks this — join_tests.rs's
-/// `open_db_and_pull` calls also pass `owner_pubkey: None`, but never publish any
-/// membership entries, so that branch's `if !entries.is_empty()` body never runs
-/// there. This seeds a real founder entry (and its head) before bootstrapping,
-/// then asserts the joiner's `protocol_state` pins that founder's pubkey.
-#[tokio::test]
-async fn restore_pins_the_chain_founder_as_owner() {
-    let tables = test_synced_tables();
-
-    let owner_keypair = UserKeypair::generate();
-    let db_owner = open_test_db();
-    let storage =
-        crate::sync::test_helpers::TestStore::create(&db_owner, "test-lib", owner_keypair.clone())
-            .await
-            .expect("create exact owner Store");
-    let owner_pk = pubkey_hex(&owner_keypair);
-    let owner_device = storage
-        .open_into(&db_owner)
-        .await
-        .expect("open exact founder Store");
-    let chain = owner_device
-        .membership()
-        .await
-        .expect("load exact founder membership");
-
-    // The owner also publishes an empty snapshot, the shape
-    // `bootstrap_from_snapshot` needs to succeed.
-    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
-    let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = crate::database::StoreDatabase::new(&db_owner);
-    let snapshot = store_database
-        .capture_snapshot_image_for_test(storage.root.clone(), snap_dir, None)
-        .await
-        .expect("owner snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
-    owner_device
-        .publish_snapshot(snapshot, snapshot_coverage.clone())
-        .await
-        .expect("publish owner snapshot");
-    owner_device
-        .publish_acknowledgement(snapshot_coverage)
-        .await
-        .expect("publish owner snapshot acknowledgement");
-
-    let (_tmp_b, lib_b) = temp_store_dir();
-    let joiner_identity = crate::keys::UserKeypair::generate();
-    let boot = bootstrap_from_snapshot(
-        &storage.storage,
-        "test-lib",
-        storage.root.clone(),
-        &MembershipFloor(chain.head_refs().to_vec()),
-        1,
-        &lib_b.db_path(),
-        &joiner_identity,
-    )
-    .await
-    .expect("B bootstrap");
-    open_db_and_pull(
-        "test-lib",
-        &lib_b.db_path(),
-        &tables,
-        &test_migrations(),
-        "B",
-        std::sync::Arc::new(crate::clock::SystemClock),
-        None,
-        None,
-        None,
-        boot,
-        &lib_b,
-        &tokio::sync::watch::channel(false).1,
-    )
-    .await
-    .expect("B open_db_and_pull");
-
-    let (db_b, _stamper) = Database::open(
-        &lib_b.db_path(),
-        tables.clone(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        "B".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open B db");
-
-    let pinned_owner_sql = format!(
-        "SELECT value FROM protocol_state WHERE key = '{}'",
-        crate::sync::store::OWNER_PUBKEY_STATE_KEY
-    );
-    assert_eq!(
-        crate::sync::test_helpers::query_text(&db_b, &pinned_owner_sql).await,
-        owner_pk,
-        "restore must pin the chain founder's pubkey as the store owner",
     );
 }
 

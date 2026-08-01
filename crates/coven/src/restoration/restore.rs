@@ -34,28 +34,10 @@ pub struct RestoreSource {
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
 
-/// Require OAuth tokens for a provider that needs them and persist them to the
-/// store-scoped keyring, the same way join's parallel arms do, so the next
-/// launch's home construction (`parse_oauth_tokens` in `storage::cloud`) can
-/// read them back instead of erroring on their absence.
-#[cfg(feature = "oauth-providers")]
-fn require_and_persist_oauth(
-    oauth_tokens: Option<OAuthTokens>,
-    store_id: &str,
-    provider_name: &str,
-) -> Result<(OAuthTokens, StoreKeys), BootstrapError> {
-    let tokens = oauth_tokens.ok_or_else(|| {
-        BootstrapError::Provider(format!("{provider_name} restore requires OAuth token"))
-    })?;
-    let ks = StoreKeys::bind(store_id.to_string());
-    ks.set_cloud_home_oauth_tokens(&tokens)?;
-    Ok((tokens, ks))
-}
-
 /// Build a cloud home from a `RestoreSource`.
 async fn build_cloud_home(
     source: RestoreSource,
-    store_id: &str,
+    store_keys: &StoreKeys,
     clock: crate::clock::ClockRef,
 ) -> Result<(CloudHomeJoinInfo, Arc<dyn CloudHome>), BootstrapError> {
     use crate::storage::cloud::*;
@@ -70,7 +52,16 @@ async fn build_cloud_home(
 
     // Consumed only by the oauth provider arms below.
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (store_id, &clock, &oauth_clients, &oauth_tokens);
+    let _ = (&store_keys, &clock, &oauth_clients, &oauth_tokens);
+
+    #[cfg(feature = "oauth-providers")]
+    let require_oauth = |provider_name: &str| {
+        let tokens = oauth_tokens.clone().ok_or_else(|| {
+            BootstrapError::Provider(format!("{provider_name} restore requires OAuth token"))
+        })?;
+        store_keys.set_cloud_home_oauth_tokens(&tokens)?;
+        Ok::<_, BootstrapError>(tokens)
+    };
 
     let home: Arc<dyn CloudHome> = match &join_info {
         CloudHomeJoinInfo::S3 {
@@ -112,12 +103,17 @@ async fn build_cloud_home(
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
-            let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Google Drive")?;
+            let tokens = require_oauth("Google Drive")?;
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::GoogleDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            let session =
-                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "Google Drive");
+            let session = oauth_session::OAuthSession::new(
+                tokens,
+                store_keys.clone(),
+                clock,
+                oauth_config,
+                "Google Drive",
+            );
             Arc::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
                 session,
@@ -126,12 +122,17 @@ async fn build_cloud_home(
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
-            let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Dropbox")?;
+            let tokens = require_oauth("Dropbox")?;
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::Dropbox)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            let session =
-                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "Dropbox");
+            let session = oauth_session::OAuthSession::new(
+                tokens,
+                store_keys.clone(),
+                clock,
+                oauth_config,
+                "Dropbox",
+            );
             Arc::new(dropbox::DropboxCloudHome::new(folder_path.clone(), session))
         }
 
@@ -140,12 +141,17 @@ async fn build_cloud_home(
             drive_id,
             folder_id,
         } => {
-            let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "OneDrive")?;
+            let tokens = require_oauth("OneDrive")?;
             let oauth_config = oauth_clients
                 .config_for(crate::CloudProvider::OneDrive)
                 .map_err(|error| BootstrapError::Provider(error.to_string()))?;
-            let session =
-                oauth_session::OAuthSession::new(tokens, ks, clock, oauth_config, "OneDrive");
+            let session = oauth_session::OAuthSession::new(
+                tokens,
+                store_keys.clone(),
+                clock,
+                oauth_config,
+                "OneDrive",
+            );
             Arc::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
@@ -260,7 +266,7 @@ pub async fn restore_from_cloud(
 
         let blob_paths = BlobPathScheme::for_storage(storage);
 
-        let (join_info, cloud_home) = build_cloud_home(source, store_id, clock.clone()).await?;
+        let (join_info, cloud_home) = build_cloud_home(source, &store_keys, clock.clone()).await?;
 
         let storage = CloudSyncStorage::new(
             cloud_home,
@@ -457,12 +463,11 @@ pub async fn restore_from_code(
 #[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;
-    use crate::keys::CloudHomeCredentials;
 
     /// Restore's per-provider `build_cloud_home` must save the caller-supplied
     /// OAuth tokens to the store-scoped keyring, the same way join's parallel
-    /// arms already do. Launch-time home construction (`parse_oauth_tokens` in
-    /// `storage::cloud`) reads them back from there and errors when they're
+    /// arms already do. Launch-time home construction reads them back through
+    /// `StoreKeys` and errors when they're
     /// absent, so a store restored over an OAuth provider must be able to build
     /// its cloud home again on the next launch. Dropbox is the smallest OAuth
     /// arm, so it stands in for Google Drive and OneDrive here.
@@ -486,23 +491,17 @@ mod tests {
             cloudkit_ops: None,
         };
 
-        build_cloud_home(source, store_id, Arc::new(crate::clock::SystemClock))
+        let store_keys = StoreKeys::bind(store_id.to_string());
+        build_cloud_home(source, &store_keys, Arc::new(crate::clock::SystemClock))
             .await
             .expect("build restore cloud home for Dropbox");
 
         let stored = StoreKeys::bind(store_id.to_string())
-            .get_cloud_home_credentials()
+            .get_cloud_home_oauth_tokens()
             .expect("read cloud home credentials")
             .expect("restore must persist OAuth tokens to the keyring");
-        match stored {
-            CloudHomeCredentials::OAuth { token_json } => {
-                let stored_tokens: OAuthTokens =
-                    serde_json::from_str(&token_json).expect("stored OAuth tokens deserialize");
-                assert_eq!(stored_tokens.access_token, tokens.access_token);
-                assert_eq!(stored_tokens.refresh_token, tokens.refresh_token);
-            }
-            other => panic!("expected OAuth credentials, got {other:?}"),
-        }
+        assert_eq!(stored.access_token, tokens.access_token);
+        assert_eq!(stored.refresh_token, tokens.refresh_token);
     }
 }
 
@@ -537,8 +536,9 @@ mod build_cloud_home_tests {
             cloudkit_ops: None,
         };
 
+        let store_keys = StoreKeys::bind("store-id".to_string());
         let (returned_info, _home) =
-            build_cloud_home(source, "store-id", Arc::new(crate::clock::SystemClock))
+            build_cloud_home(source, &store_keys, Arc::new(crate::clock::SystemClock))
                 .await
                 .expect("build S3 cloud home");
 
@@ -568,8 +568,9 @@ mod build_cloud_home_tests {
             cloudkit_ops: None,
         };
 
+        let store_keys = StoreKeys::bind("store-id".to_string());
         let result =
-            build_cloud_home(source, "store-id", Arc::new(crate::clock::SystemClock)).await;
+            build_cloud_home(source, &store_keys, Arc::new(crate::clock::SystemClock)).await;
 
         match result {
             Err(BootstrapError::Provider(_)) => {}

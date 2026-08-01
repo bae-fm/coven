@@ -105,6 +105,18 @@ fn established_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
         .resolve(&store_keys, &StoreDir::new("unused-store-dir"))
 }
 
+fn store_security(
+    keys: StoreKeys,
+    master_keys: Arc<dyn MasterKeyCustody>,
+    identity: Arc<dyn DeviceIdentityCustody>,
+) -> StoreSecurity {
+    let cloud_homes = crate::storage::cloud::CloudHomeFactory::new(
+        keys.clone(),
+        crate::oauth::OAuthClients::empty(),
+    );
+    StoreSecurity::new(keys, master_keys, identity, cloud_homes)
+}
+
 fn store_sync(
     config_provider: ConfigProvider,
     keys: StoreKeys,
@@ -118,12 +130,7 @@ fn store_sync(
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     StoreSync::new(
         config_provider,
-        StoreSecurity::new(
-            keys,
-            master_keys,
-            identity,
-            crate::oauth::OAuthClients::empty(),
-        ),
+        store_security(keys, master_keys, identity),
         database,
         store_dir.clone(),
         Arc::new(SystemClock),
@@ -173,12 +180,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         &join_info,
         &CloudCipher::Plaintext,
     );
-    let security = StoreSecurity::new(
-        keys,
-        Arc::new(NoKeyCustody),
-        established_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
-    );
+    let security = store_security(keys, Arc::new(NoKeyCustody), established_identity_custody());
     let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
@@ -500,12 +502,7 @@ fn cipher_resolution_reads_current_custody_each_time() {
     let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let key_a = MasterKeyring::generate();
     custody.persist(&key_a).expect("establish key A");
-    let security = StoreSecurity::new(
-        store_keys,
-        custody.clone(),
-        established_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
-    );
+    let security = store_security(store_keys, custody.clone(), established_identity_custody());
 
     let fingerprint_a = match security
         .resolve_cloud_cipher(HomeStorage::Opaque)

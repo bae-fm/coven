@@ -2,7 +2,6 @@
 //!
 //! Shared across all platforms (macOS, iOS, CLI).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::watch;
@@ -23,8 +22,7 @@ use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::session::SyncedTable;
 use crate::sync::store::{
-    bootstrap_from_snapshot, BootstrapResult, InviteError, PullError, SnapshotBlobReconcile,
-    SnapshotError,
+    bootstrap_from_snapshot, InviteError, PullError, SnapshotBlobReconcile, SnapshotError,
 };
 use crate::Migration;
 
@@ -865,13 +863,13 @@ pub(crate) async fn bootstrap_and_save_store(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     // Join pins the store owner from the invite. Restore adopts the owner
-    // from the chain founder during `open_db_and_pull`, because the restore code
-    // carries the bucket credentials rather than an inviter assertion.
+    // from the chain founder while opening the bootstrapped store, because the
+    // restore code carries the bucket credentials rather than an inviter assertion.
     //
     // Cancellation is checked between phases (before the snapshot download here,
-    // before the pull inside `open_db_and_pull`, and per-blob during blob
-    // reconciliation), never inside a download. A cancel returns through the same
-    // failure-cleanup the caller runs, so the store directory is removed.
+    // before the subsequent Store pull, and per-blob during blob reconciliation),
+    // never inside a download. A cancel returns through the same failure-cleanup
+    // the caller runs, so the store directory is removed.
     error_if_cancelled(cancel)?;
     on_status("Downloading store snapshot...");
     let db_path = store_dir.db_path();
@@ -898,26 +896,55 @@ pub(crate) async fn bootstrap_and_save_store(
         error_if_cancelled(cancel)?;
         on_status("Applying recent changes...");
         let routing_encryption = master_key.map(|keyring| EncryptionService::from(keyring.clone()));
-        let changesets_applied = open_db_and_pull(
-            store_id,
-            &db_path,
-            synced_tables,
-            migrations,
-            device_id,
-            clock,
-            context.activated_continuation(),
-            context.owner_recovery(),
-            routing_encryption.as_ref(),
-            bootstrap_result,
-            store_dir,
-            cancel,
-        )
-        .await?;
+        let mut store = bootstrap_result
+            .open_database(
+                store_id,
+                &db_path,
+                synced_tables.to_vec(),
+                // This bootstrap database only applies changesets during restore; it never runs
+                // tombstone collection, so the grace is immaterial and takes the default.
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::one_at_a_time(),
+                device_id.to_string(),
+                clock,
+                migrations,
+                routing_encryption.as_ref(),
+            )
+            .await?;
 
-        if changesets_applied.changesets_applied > 0 {
+        match store
+            .reconcile_snapshot_blobs(store_dir, cancel)
+            .await
+            .map_err(|error| {
+                BootstrapError::Database(format!("failed to reconcile snapshot blobs: {error}"))
+            })? {
+            SnapshotBlobReconcile::Complete => {}
+            SnapshotBlobReconcile::Incomplete => {
+                return Err(BootstrapError::Database(
+                    "snapshot blob reconciliation did not land every required eager blob"
+                        .to_string(),
+                ));
+            }
+            SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
+        }
+
+        error_if_cancelled(cancel)?;
+        let pull_result = store.pull(store_dir, routing_encryption.as_ref()).await?;
+
+        if let Some(continuation) = context.activated_continuation() {
+            store
+                .install_activated_device_continuation(continuation.clone())
+                .await?;
+        }
+
+        if let Some(authority) = context.owner_recovery() {
+            store.recover_owner_device(authority).await?;
+        }
+
+        if pull_result.changesets_applied > 0 {
             info!(
                 "Applied {} changesets since snapshot",
-                changesets_applied.changesets_applied
+                pull_result.changesets_applied
             );
         }
 
@@ -960,89 +987,6 @@ pub(crate) async fn bootstrap_and_save_store(
     .await;
 
     committed
-}
-
-/// Open a [`crate::database::Database`] over the bootstrapped db file and pull changesets since
-/// the snapshot. The snapshot already carries the full schema and the writer's
-/// `user_version`, so the migration ladder only carries the image forward when
-/// this binary is newer (a no-op when they match).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn open_db_and_pull(
-    store_id: &str,
-    db_path: &Path,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    device_id: &str,
-    clock: crate::clock::ClockRef,
-    activated_continuation: Option<&crate::restoration::ActivatedContinuation>,
-    owner_recovery: Option<&crate::restoration::OwnerRecoveryAuthority>,
-    routing_encryption: Option<&EncryptionService>,
-    bootstrap: BootstrapResult<'_>,
-    store_dir: &StoreDir,
-    cancel: &watch::Receiver<bool>,
-) -> Result<OpenDbPullOutcome, BootstrapError> {
-    let mut store = bootstrap
-        .open_database(
-            store_id,
-            db_path,
-            synced_tables.to_vec(),
-            // This bootstrap database only applies changesets during join; it never runs
-            // the tombstone GC, so the grace is immaterial and takes the default.
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
-            device_id.to_string(),
-            clock,
-            migrations,
-            routing_encryption,
-        )
-        .await?;
-
-    // Download the blob files the snapshot's rows reference: the snapshot carried
-    // the catalog rows but no blob files, and the pull starts past its signed
-    // coverage, so it never re-walks the INSERTs that first carried them. Missing
-    // eager blobs abort the bootstrap before the store is saved. Cancellation is
-    // checked between blobs inside the reconcile, surfacing as `Cancelled` here.
-    match store
-        .reconcile_snapshot_blobs(store_dir, cancel)
-        .await
-        .map_err(|e| BootstrapError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
-    {
-        SnapshotBlobReconcile::Complete => {}
-        SnapshotBlobReconcile::Incomplete => {
-            return Err(BootstrapError::Database(
-                "Snapshot blob reconciliation did not land every required eager blob".to_string(),
-            ));
-        }
-        SnapshotBlobReconcile::Cancelled => {
-            return Err(BootstrapError::Cancelled);
-        }
-    }
-
-    // The pull downloads every changeset published since the snapshot — the last
-    // heavy phase. Check cancellation before entering it; the pull itself is a
-    // single phase here (per-changeset cancel is the sync loop's own concern).
-    error_if_cancelled(cancel)?;
-
-    let pull_result = store.pull(store_dir, routing_encryption).await?;
-
-    if let Some(continuation) = activated_continuation {
-        store
-            .install_activated_device_continuation(continuation.clone())
-            .await?;
-    }
-
-    if let Some(authority) = owner_recovery {
-        store.recover_owner_device(authority).await?;
-    }
-
-    Ok(OpenDbPullOutcome {
-        changesets_applied: pull_result.changesets_applied,
-    })
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct OpenDbPullOutcome {
-    pub changesets_applied: u64,
 }
 
 /// The credentials to persist for this join, or `None` when the provider needs

@@ -71,7 +71,7 @@ pub enum KeyError {
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
 ///
-/// `Debug` is hand-written so the S3 `secret_key` and the OAuth `token_json`
+/// `Debug` is hand-written so the S3 `secret_key` and the OAuth tokens
 /// print as `<redacted>` — `{:?}` in an error path cannot leak them.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CloudHomeCredentials {
@@ -80,8 +80,8 @@ pub enum CloudHomeCredentials {
         access_key: String,
         secret_key: String,
     },
-    /// Consumer cloud providers (Google Drive, Dropbox, OneDrive): OAuth token JSON.
-    OAuth { token_json: String },
+    /// Consumer cloud providers (Google Drive, Dropbox, OneDrive).
+    OAuth { tokens: crate::oauth::OAuthTokens },
     /// iCloud: no credentials needed (macOS handles auth).
     None,
 }
@@ -97,9 +97,9 @@ impl std::fmt::Debug for CloudHomeCredentials {
                 .field("access_key", access_key)
                 .field("secret_key", &"<redacted>")
                 .finish(),
-            CloudHomeCredentials::OAuth { token_json: _ } => f
+            CloudHomeCredentials::OAuth { tokens: _ } => f
                 .debug_struct("OAuth")
-                .field("token_json", &"<redacted>")
+                .field("tokens", &"<redacted>")
                 .finish(),
             CloudHomeCredentials::None => f.write_str("None"),
         }
@@ -582,7 +582,11 @@ mod tests {
         );
 
         let oauth = CloudHomeCredentials::OAuth {
-            token_json: "{\"access_token\":\"oauth-token-do-not-print\"}".to_string(),
+            tokens: crate::oauth::OAuthTokens {
+                access_token: "oauth-token-do-not-print".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
         };
         let debug = format!("{oauth:?}");
         assert!(debug.contains("<redacted>"), "{debug}");

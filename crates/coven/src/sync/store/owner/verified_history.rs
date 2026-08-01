@@ -801,16 +801,37 @@ impl<'a> MergeHistoryVerifier<'a> {
         state_ref: &StoreDeviceStateRef,
         state: ResolvedStoreDeviceState,
     ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
-        load_local_commit_device_operations(
-            self.root.reference(),
-            database,
-            &mut self.commit_verifier,
-            verified_commit,
-            membership,
-            state_ref,
-            state,
-        )
+        if verified_commit.store_root_hash() != self.root.reference().store_root_hash {
+            return Err(StorePullError::Database(
+                "local device-operation commit belongs to another Store root".to_string(),
+            ));
+        }
+        let commit = verified_commit.value();
+        if commit.device_exclusion_proposals().is_empty()
+            && commit.device_exclusion_outcomes().is_empty()
+        {
+            return VerifiedStoreDeviceOperations::without_exclusions(commit)
+                .map_err(|error| StorePullError::Database(error.to_string()));
+        }
+        if state_ref != &commit.device_state {
+            return Err(StorePullError::Database(
+                "local exclusion commit differs from its materialized predecessor device state"
+                    .to_string(),
+            ));
+        }
+        verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
+        let resolver = DeviceStateResolver::Database(database);
+        Box::pin(self.commit_verifier.load_commit_device_operations(
+            Some(&resolver),
+            commit,
+            &state,
+            Some(membership),
+        ))
         .await
+        .map_err(|error| match error {
+            RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+        })
     }
 
     pub(crate) async fn derive_local_post_device_state(
@@ -820,14 +841,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
         device_operations: VerifiedStoreDeviceOperations,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
-        derive_local_post_device_state(
-            &self.commit_verifier,
-            commit,
-            predecessor_state,
-            registrations,
-            device_operations,
-        )
-        .await
+        let (authorized_predecessor, recovery_author) =
+            predecessor_with_recovery_author(predecessor_state, commit, registrations)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let owner_recovery = self
+            .commit_verifier
+            .verify_owner_recovery_activation(commit)
+            .await?;
+        device_operations
+            .apply_to(authorized_predecessor, &commit.device_state)
+            .and_then(|state| {
+                apply_verified_device_lifecycle(
+                    state,
+                    commit,
+                    registrations,
+                    recovery_author.as_ref(),
+                    owner_recovery,
+                )
+            })
+            .map_err(|error| StorePullError::Database(error.to_string()))
     }
 
     pub(crate) async fn load_head(
@@ -1589,6 +1621,11 @@ pub(crate) struct MergeHistoryVerifier<'a> {
     history: VerifiedMergeHistory,
 }
 
+pub(crate) struct SelectedStableStoreSnapshot {
+    pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
+    pub(crate) stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+}
+
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
 
 pub(crate) struct MergeOutboundAuthorization {
@@ -2075,6 +2112,60 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
+    pub(crate) async fn select_maximal_stable_store_snapshot(
+        &mut self,
+        candidates: Vec<crate::database::PublishedStoreSnapshot>,
+    ) -> Result<Option<SelectedStableStoreSnapshot>, StorePullError> {
+        let Some(maximal_candidate) =
+            super::snapshot::select_maximal_store_snapshot(candidates.clone())
+        else {
+            return Ok(None);
+        };
+        let maximal_reference = maximal_candidate.reference;
+        let mut stable = Vec::new();
+        let mut maximal_rejection = None;
+        for snapshot in candidates {
+            match self.verify_snapshot_stability(&snapshot).await {
+                Ok(stability) => stable.push(SelectedStableStoreSnapshot {
+                    snapshot,
+                    stability,
+                }),
+                Err(error) => match &error {
+                    StorePullError::SnapshotNotStable { .. }
+                    | StorePullError::SnapshotAuthorInactive
+                    | StorePullError::SnapshotAuthorNotOwner => {
+                        if snapshot.reference == maximal_reference {
+                            maximal_rejection = Some(error);
+                        }
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
+        let selected = super::snapshot::select_maximal_store_snapshot(
+            stable
+                .iter()
+                .map(|candidate| candidate.snapshot.clone())
+                .collect(),
+        );
+        if let Some(selected) = selected {
+            let index = stable
+                .iter()
+                .position(|candidate| candidate.snapshot.reference == selected.reference)
+                .ok_or_else(|| {
+                    StorePullError::Database(
+                        "stable Store snapshot selection lost its verified candidate".to_string(),
+                    )
+                })?;
+            return Ok(Some(stable.swap_remove(index)));
+        }
+        Err(maximal_rejection.ok_or_else(|| {
+            StorePullError::Database(
+                "Store snapshot candidates produced no stability decision".to_string(),
+            )
+        })?)
+    }
+
     pub(crate) async fn load_exact_anchored_membership(
         &mut self,
         heads: &[protocol_membership::MembershipHeadRef],

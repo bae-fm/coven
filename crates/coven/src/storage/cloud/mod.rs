@@ -39,7 +39,7 @@ mod sharing;
 mod test_server;
 
 pub use factory::create_cloud_home;
-pub(crate) use factory::create_cloud_home_with_cloudkit;
+pub(crate) use factory::CloudHomeFactory;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};

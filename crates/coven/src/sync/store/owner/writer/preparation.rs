@@ -1,7 +1,5 @@
 use super::blob_preparation::close_prepared_packages;
-use crate::database::{
-    PreparedProtocolObject, PreparedStoreWrite, StoreDatabase, StoreWritePreparation,
-};
+use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use crate::protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
     StoreBatchCommit, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
@@ -342,7 +340,16 @@ pub(super) async fn prepare_store_write(
     let preparation = match preparation {
         Ok(preparation) => preparation,
         Err(error) => {
-            record_preparation_failure(&database, &write_id, &error).await?;
+            if let Some(block) = blocked_status(&error) {
+                database
+                    .block_write_if_unresolved(&write_id, block)
+                    .await
+                    .map_err(|status_error| {
+                        StoreError::Database(format!(
+                            "record blocked status for write {write_id} after {error}: {status_error}"
+                        ))
+                    })?;
+            }
             return Err(error);
         }
     };
@@ -397,23 +404,4 @@ fn bind_local_cleanup(
         });
     }
     Ok(crate::database::StoreBatchLocalCleanup { drops })
-}
-
-async fn record_preparation_failure(
-    database: &StoreDatabase,
-    write_id: &crate::WriteId,
-    error: &StoreError,
-) -> Result<(), StoreError> {
-    let Some(block) = blocked_status(error) else {
-        return Ok(());
-    };
-    database
-        .block_write_if_unresolved(write_id, block)
-        .await
-        .map(|_| ())
-        .map_err(|status_error| {
-            StoreError::Database(format!(
-                "record blocked status for write {write_id} after {error}: {status_error}"
-            ))
-        })
 }

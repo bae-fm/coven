@@ -126,35 +126,6 @@ async fn verify_exact_file(
     verify_file_identity(path, reference, size, hash)
 }
 
-async fn read_external_file(
-    reference: &RowBlobRef,
-    external: crate::database::ExternalBlob,
-) -> Result<Vec<u8>, BlobCacheError> {
-    let (bytes, size, hash) = exact_file_facts(&external.path).await.map_err(|source| {
-        BlobCacheError::ExternalMissing {
-            id: reference.blob().id.clone(),
-            path: external.path.clone(),
-            source,
-        }
-    })?;
-    verify_external_file_facts(reference, &external, size, hash)?;
-    Ok(bytes)
-}
-
-async fn verify_external_file(
-    reference: &RowBlobRef,
-    external: &crate::database::ExternalBlob,
-) -> Result<(), BlobCacheError> {
-    let (_, size, hash) = exact_file_facts(&external.path).await.map_err(|source| {
-        BlobCacheError::ExternalMissing {
-            id: reference.blob().id.clone(),
-            path: external.path.clone(),
-            source,
-        }
-    })?;
-    verify_external_file_facts(reference, external, size, hash)
-}
-
 fn verify_external_file_facts(
     reference: &RowBlobRef,
     external: &crate::database::ExternalBlob,
@@ -341,7 +312,16 @@ impl LocalStoreBlobAccess {
                     .ok_or_else(|| BlobCacheError::NoExternalRef {
                         id: blob.id.clone(),
                     })?;
-                read_external_file(reference, external).await
+                let (bytes, size, hash) =
+                    exact_file_facts(&external.path).await.map_err(|source| {
+                        BlobCacheError::ExternalMissing {
+                            id: reference.blob().id.clone(),
+                            path: external.path.clone(),
+                            source,
+                        }
+                    })?;
+                verify_external_file_facts(reference, &external, size, hash)?;
+                Ok(bytes)
             }
             BlobSource::LocalStore => {
                 let path = self
@@ -407,7 +387,14 @@ impl LocalStoreBlobAccess {
                     .ok_or_else(|| BlobCacheError::NoExternalRef {
                         id: reference.blob().id.clone(),
                     })?;
-                verify_external_file(reference, &external).await?;
+                let (_, size, hash) = exact_file_facts(&external.path).await.map_err(|source| {
+                    BlobCacheError::ExternalMissing {
+                        id: reference.blob().id.clone(),
+                        path: external.path.clone(),
+                        source,
+                    }
+                })?;
+                verify_external_file_facts(reference, &external, size, hash)?;
                 self.database.validate_row_blob_ref(reference).await?;
                 Ok(())
             }
@@ -563,64 +550,10 @@ impl<'storage> RemoteBlobSource<'storage> {
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
-        let namespace = stored.locator().namespace();
-        let id = stored.locator().blob_id();
-        let locator_hash = stored.locator().locator_hash();
-        crate::store_dir::validate_path_token(namespace)
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-        crate::store_dir::validate_path_token(id)
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-        let cache = cache_owner
-            .store_dir
-            .cache_blob_path(namespace, locator_hash)
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
-        let staged = self
-            .storage
-            .as_ref()
-            .stage_verified_blob_plaintext(stored, protection, &cache)
-            .await
-            .map_err(BlobDownloadFailureCause::Storage)?;
-        if !retain {
-            return Ok(());
-        }
-        if cache_owner
-            .store_dir
-            .remote_blob_is_exact(
-                namespace,
-                locator_hash,
-                stored.locator().plaintext_size(),
-                stored.locator().plaintext_hash(),
-            )
-            .await
-            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
-        {
-            return Ok(());
-        }
-        match staged.commit_new().await {
-            Ok(()) => {}
-            Err(crate::storage::PublishBlobFileError::DestinationExists(_)) => {
-                if !cache_owner
-                    .store_dir
-                    .remote_blob_is_exact(
-                        namespace,
-                        locator_hash,
-                        stored.locator().plaintext_size(),
-                        stored.locator().plaintext_hash(),
-                    )
-                    .await
-                    .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
-                {
-                    return Err(BlobDownloadFailureCause::Local(
-                        "occupied exact blob cache path differs from its locator".to_string(),
-                    ));
-                }
-            }
-            Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
-        }
+        let remote = ExactRemoteBlobAccess::new(self.storage.as_ref(), protection);
         cache_owner
-            .enforce_budget(namespace, Some(&cache))
+            .verify_remote_plaintext(&remote, stored, retain)
             .await
-            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
     }
 
     #[cfg(test)]
@@ -958,6 +891,70 @@ impl StoreBlobCache {
             }
             Err(error) => Err(BlobCacheError::Io(error.to_string())),
         }
+    }
+
+    async fn verify_remote_plaintext(
+        &self,
+        remote: &ExactRemoteBlobAccess<'_>,
+        stored: &crate::blob::locator::StoredBlobRef,
+        retain: bool,
+    ) -> Result<(), BlobDownloadFailureCause> {
+        let locator = stored.locator();
+        crate::store_dir::validate_path_token(locator.namespace())
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        crate::store_dir::validate_path_token(locator.blob_id())
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let destination = self
+            .store_dir
+            .cache_blob_path(locator.namespace(), locator.locator_hash())
+            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let staged = remote
+            .stage_verified_plaintext(stored, &destination)
+            .await
+            .map_err(|error| match error {
+                BlobCacheError::Storage(error) => BlobDownloadFailureCause::Storage(error),
+                other => BlobDownloadFailureCause::Local(other.to_string()),
+            })?;
+        if !retain {
+            return Ok(());
+        }
+        if self
+            .store_dir
+            .remote_blob_is_exact(
+                locator.namespace(),
+                locator.locator_hash(),
+                locator.plaintext_size(),
+                locator.plaintext_hash(),
+            )
+            .await
+            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
+        {
+            return Ok(());
+        }
+        match staged.commit_new().await {
+            Ok(()) => {}
+            Err(crate::storage::PublishBlobFileError::DestinationExists(_)) => {
+                if !self
+                    .store_dir
+                    .remote_blob_is_exact(
+                        locator.namespace(),
+                        locator.locator_hash(),
+                        locator.plaintext_size(),
+                        locator.plaintext_hash(),
+                    )
+                    .await
+                    .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
+                {
+                    return Err(BlobDownloadFailureCause::Local(
+                        "occupied exact blob cache path differs from its locator".to_string(),
+                    ));
+                }
+            }
+            Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
+        }
+        self.enforce_budget(locator.namespace(), Some(&destination))
+            .await
+            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
     }
 
     async fn stage_exact_copy(

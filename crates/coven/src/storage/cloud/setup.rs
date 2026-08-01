@@ -463,12 +463,11 @@ mod tests {
             crate::keys::UserKeypair::generate(),
         )
         .resolve(&keys, &config.store_dir);
-        crate::store_security::StoreSecurity::new(
-            keys,
-            master_keys,
-            identity,
+        let cloud_homes = crate::storage::cloud::CloudHomeFactory::new(
+            keys.clone(),
             crate::oauth::OAuthClients::empty(),
-        )
+        );
+        crate::store_security::StoreSecurity::new(keys, master_keys, identity, cloud_homes)
     }
 
     #[test]

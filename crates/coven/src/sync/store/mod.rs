@@ -107,9 +107,7 @@ pub(crate) use owner::reclaim::{
 };
 pub(crate) use owner::snapshot::verify_store_snapshot_bytes;
 #[doc(hidden)]
-pub(crate) use owner::snapshot::{
-    bootstrap_from_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,
-};
+pub(crate) use owner::snapshot::{bootstrap_from_snapshot, SnapshotBlobReconcile, SnapshotError};
 #[cfg(test)]
 pub(crate) use owner::StoreAckError;
 pub(crate) use owner::{

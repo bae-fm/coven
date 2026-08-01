@@ -6,9 +6,7 @@ mod publication;
 pub(super) use publication::AuthorizedSnapshotPublication;
 
 pub(crate) use image::should_create_snapshot;
-pub(crate) use image::{
-    bootstrap_from_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,
-};
+pub(crate) use image::{bootstrap_from_snapshot, SnapshotBlobReconcile, SnapshotError};
 
 use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
 
@@ -557,11 +555,12 @@ impl super::AuthorizedWriterOperation<'_> {
                 "prepared snapshot blob graph has no captured Store directory".to_string(),
             )
         })?;
-        let image = match crate::database::install_snapshot_blob_graph(
-            db_image,
-            &prepared,
-            &image_store_dir,
-        ) {
+        let image = match crate::database::SnapshotDatabaseImage::replace(
+            image_store_dir.as_ref().join("snapshot-closure.db"),
+            &db_image,
+        )
+        .and_then(|image| image.install_blob_graph(&prepared))
+        {
             Ok(image) => image,
             Err(error) => {
                 cleanup_snapshot_spools(&prepared)
@@ -754,63 +753,6 @@ pub(crate) fn select_maximal_store_snapshot(
     candidates.pop()
 }
 
-pub(crate) struct SelectedStableStoreSnapshot {
-    pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
-    pub(crate) stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
-}
-
-pub(crate) async fn select_maximal_stable_store_snapshot_with_history(
-    history_verifier: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
-    candidates: Vec<crate::database::PublishedStoreSnapshot>,
-) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::owner::pull::StorePullError> {
-    let Some(maximal_candidate) = select_maximal_store_snapshot(candidates.clone()) else {
-        return Ok(None);
-    };
-    let maximal_reference = maximal_candidate.reference;
-    let mut stable = Vec::new();
-    let mut maximal_rejection = None;
-    for snapshot in candidates {
-        match history_verifier.verify_snapshot_stability(&snapshot).await {
-            Ok(stability) => stable.push(SelectedStableStoreSnapshot {
-                snapshot,
-                stability,
-            }),
-            Err(error) => match &error {
-                crate::sync::store::owner::pull::StorePullError::SnapshotNotStable { .. }
-                | crate::sync::store::owner::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::owner::pull::StorePullError::SnapshotAuthorNotOwner => {
-                    if snapshot.reference == maximal_reference {
-                        maximal_rejection = Some(error);
-                    }
-                }
-                _ => return Err(error),
-            },
-        }
-    }
-    let selected = select_maximal_store_snapshot(
-        stable
-            .iter()
-            .map(|candidate| candidate.snapshot.clone())
-            .collect(),
-    );
-    if let Some(selected) = selected {
-        let index = stable
-            .iter()
-            .position(|candidate| candidate.snapshot.reference == selected.reference)
-            .ok_or_else(|| {
-                crate::sync::store::owner::pull::StorePullError::Database(
-                    "stable Store snapshot selection lost its verified candidate".to_string(),
-                )
-            })?;
-        return Ok(Some(stable.swap_remove(index)));
-    }
-    Err(maximal_rejection.ok_or_else(|| {
-        crate::sync::store::owner::pull::StorePullError::Database(
-            "Store snapshot candidates produced no stability decision".to_string(),
-        )
-    })?)
-}
-
 pub(crate) fn publication_error(error: crate::database::DbError) -> SnapshotError {
     SnapshotError::PublicationState(error.to_string())
 }
@@ -892,10 +834,10 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
                     .await?,
             );
         }
-        let selected = Box::pin(select_maximal_stable_store_snapshot_with_history(
-            &mut self.history_verifier,
-            authorized,
-        ))
+        let selected = Box::pin(
+            self.history_verifier
+                .select_maximal_stable_store_snapshot(authorized),
+        )
         .await
         .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
         .ok_or_else(|| {

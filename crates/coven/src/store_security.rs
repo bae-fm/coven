@@ -14,7 +14,7 @@ pub(crate) struct StoreSecurity {
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
-    oauth_clients: crate::oauth::OAuthClients,
+    cloud_homes: crate::storage::cloud::CloudHomeFactory,
 }
 
 impl StoreSecurity {
@@ -22,13 +22,13 @@ impl StoreSecurity {
         keys: StoreKeys,
         master_keys: Arc<dyn MasterKeyCustody>,
         identity: Arc<dyn DeviceIdentityCustody>,
-        oauth_clients: crate::oauth::OAuthClients,
+        cloud_homes: crate::storage::cloud::CloudHomeFactory,
     ) -> Self {
         Self {
             keys,
             master_keys,
             identity,
-            oauth_clients,
+            cloud_homes,
         }
     }
 
@@ -148,14 +148,7 @@ impl StoreSecurity {
         clock: crate::clock::ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
-        crate::storage::cloud::create_cloud_home_with_cloudkit(
-            config,
-            &self.keys,
-            &self.oauth_clients,
-            clock,
-            cloudkit_ops,
-        )
-        .await
+        self.cloud_homes.create(config, clock, cloudkit_ops).await
     }
 
     pub(crate) async fn create_sync_storage(
