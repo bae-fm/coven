@@ -2,7 +2,7 @@ use super::*;
 
 use crate::blob::transition::PostUpload;
 use crate::blob::{Provenance, RowBlobRef};
-use crate::database::{CloudOutboxRecords, MakeRemoteIntentState};
+use crate::database::{CloudOutboxRecords, ExternalBlobRecords, MakeRemoteIntentState};
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 
 #[derive(Clone)]
@@ -288,9 +288,10 @@ impl StoreDatabase {
                             &root_id,
                         )
                         .map_err(DbError::from)?;
+                        let external_blobs = ExternalBlobRecords::new(transaction);
                         for reference in &rows {
                             if reference.blob().provenance == Provenance::UserProvided {
-                                Database::clear_external_blob_on(transaction, reference)?;
+                                external_blobs.clear(reference)?;
                             }
                         }
                         Database::mark_make_remote_publishing_on(
@@ -401,6 +402,7 @@ impl StoreDatabase {
                             )));
                         }
                         let cloud_outbox = CloudOutboxRecords::new(transaction);
+                        let external_blobs = ExternalBlobRecords::new(transaction);
                         for (local, materialized) in local_rows.iter().zip(&materialized) {
                             if local.table() != materialized.remote.table()
                                 || local.row_id() != materialized.remote.row_id()
@@ -422,11 +424,7 @@ impl StoreDatabase {
                                 )));
                             }
                             if let Some(path) = &materialized.destination {
-                                Database::register_external_blob_on(
-                                    transaction,
-                                    local,
-                                    path,
-                                )?;
+                                external_blobs.register(local, path)?;
                             }
                             cloud_outbox.enqueue_delete(&materialized.stored, &stamp)?;
                         }

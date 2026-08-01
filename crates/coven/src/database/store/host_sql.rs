@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::database::Gates;
-use crate::database::{CloudOutboxRecords, Database, DbError};
+use crate::database::{CloudOutboxRecords, Database, DbError, ExternalBlobRecords};
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::{Provenance, SyncedTable};
 
@@ -133,7 +133,7 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
                      an external file registration on it would never be read"
                 )));
             }
-            Database::register_external_blob_on(self.transaction, &reference, path)
+            ExternalBlobRecords::new(self.transaction).register(&reference, path)
         })
     }
 
@@ -155,7 +155,7 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
             let declared = self.blob_table(table)?;
             let reference =
                 Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
-            Database::clear_external_blob_on(self.transaction, &reference)
+            ExternalBlobRecords::new(self.transaction).clear(&reference)
         })
     }
 }

@@ -116,6 +116,7 @@ pub(crate) use coven_schema::{
 mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
+mod external_blob_records;
 mod gate;
 mod local_state;
 mod local_store_identity;
@@ -164,6 +165,8 @@ pub(crate) use circle_operation_records::{
 };
 pub(crate) use database_connection::DatabaseConnection;
 use database_open::CovenMetadataOpen;
+pub use external_blob_records::ExternalBlob;
+use external_blob_records::ExternalBlobRecords;
 pub(crate) use gate::query_truth;
 pub(crate) use gate::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
@@ -235,7 +238,7 @@ pub(crate) use store::{
 pub(crate) use store::{
     resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
 };
-pub use store::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
+pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, SqlReadContext, WriteBatch};
 pub(crate) use store_authority_records::{
     ensure_founder_replay_baseline_on, founder_graph_identity,

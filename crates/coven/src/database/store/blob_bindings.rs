@@ -1,20 +1,5 @@
-use rusqlite::OptionalExtension;
-
 use super::*;
-
-/// An external user-owned file a blob id resolves to, read back from a
-/// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
-/// coven references but does not own); `size` is its registered plaintext length,
-/// combined with the row's signed content hash to validate the exact file. The
-/// namespace stays on the row but is not part of the read shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalBlob {
-    /// Absolute path to the external file coven reads but does not own.
-    pub path: std::path::PathBuf,
-    /// The file's plaintext length at registration. A read fails loud if the
-    /// file's current length differs.
-    pub size: u64,
-}
+use crate::database::{ExternalBlob, ExternalBlobRecords};
 
 impl StoreDatabase {
     pub(crate) async fn eager_row_blob_refs(
@@ -138,59 +123,9 @@ impl StoreDatabase {
         &self,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<Option<ExternalBlob>, DbError> {
-        let table = reference.table().to_string();
-        let row_id = reference.row_id().to_string();
-        let column = reference.column().to_string();
-        let row_stamp = reference.row_stamp().to_string();
-        let namespace = reference.blob().namespace.clone();
-        let blob_id = reference.blob().id.clone();
-        let expected_size = reference.plaintext_size();
-        let expected_hash = reference.plaintext_hash();
+        let reference = reference.clone();
         self.connection
-            .call(move |connection| {
-                let row = connection
-                    .query_row(
-                        "SELECT path, plaintext_size, plaintext_hash, namespace, blob_id
-                         FROM local_blob_refs
-                         WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-                           AND row_stamp = ?4",
-                        rusqlite::params![table, row_id, column, row_stamp],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                                row.get::<_, String>(4)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some((path, size, hash, stored_namespace, stored_blob_id)) = row else {
-                    return Ok(None);
-                };
-                let size = u64::try_from(size).map_err(|_| {
-                    DbError::Message(format!("external blob {blob_id} has negative size"))
-                })?;
-                let hash: crate::protocol::store_commit::ObjectHash =
-                    hash.parse().map_err(|error| {
-                        DbError::Message(format!("external blob {blob_id} hash: {error}"))
-                    })?;
-                if size != expected_size
-                    || hash != expected_hash
-                    || stored_namespace != namespace
-                    || stored_blob_id != blob_id
-                {
-                    return Err(DbError::Message(format!(
-                        "external blob row {table}/{row_id}/{column} differs from its row reference"
-                    )));
-                }
-                Ok(Some(ExternalBlob {
-                    path: std::path::PathBuf::from(path),
-                    size,
-                }))
-            })
+            .call(move |connection| ExternalBlobRecords::new(connection).load(&reference))
             .await
     }
 

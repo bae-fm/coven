@@ -539,7 +539,7 @@ pub(crate) fn attach_empty_clone(
     }
 }
 
-pub(crate) fn detach_empty_clone(conn: &Connection) -> Result<(), GateError> {
+fn detach_empty_clone(conn: &Connection) -> Result<(), GateError> {
     execute_batch(conn, "DETACH DATABASE coven_gate_empty")
 }
 

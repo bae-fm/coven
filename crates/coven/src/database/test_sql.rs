@@ -2,7 +2,9 @@ use super::test_support::{
     author_exclusion_activation_evidence, clear_table, table_row_count, OutboxAttempt,
     RetainedRegistrationTamper,
 };
-use super::{Connection, Database, DatabaseTestTable, DatabaseTestTransaction, DbError};
+use super::{
+    Connection, Database, DatabaseTestTable, DatabaseTestTransaction, DbError, ExternalBlobRecords,
+};
 use rusqlite::OptionalExtension;
 
 /// Test-only SQL access to Coven's retained database connection.
@@ -1047,14 +1049,14 @@ impl DatabaseTestSql<'_> {
         reference: &crate::blob::RowBlobRef,
         path: &std::path::Path,
     ) -> Result<(), DbError> {
-        Database::register_external_blob_on(self.connection, reference, path)
+        ExternalBlobRecords::new(self.connection).register(reference, path)
     }
 
     pub(crate) fn clear_external_blob(
         &self,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<(), DbError> {
-        Database::clear_external_blob_on(self.connection, reference)
+        ExternalBlobRecords::new(self.connection).clear(reference)
     }
 
     pub(crate) fn make_remote_intent_exists(

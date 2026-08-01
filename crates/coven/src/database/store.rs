@@ -67,7 +67,6 @@ fn cache_budget_state_key(namespace: &str) -> String {
     format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")
 }
 
-pub use blob_bindings::ExternalBlob;
 pub use blob_outbox::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub(crate) use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
 pub(crate) use blob_transitions::MaterializedLocalBlob;
