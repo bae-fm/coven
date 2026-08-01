@@ -193,18 +193,20 @@ pub(crate) use schema_introspection::{
     CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
 };
 pub(crate) use store::{
-    copy_table_with_conflicts, projection_table_names,
-    validate_merge_generation_zero_preconditions, BlockedWriteDiscard, CandidateCleanupObject,
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, HostWriteBlobTransaction,
-    HostWriteError, HostWriteOperation, IncomingTimestampPolicy, MaterializedLocalBlob,
-    MergeCandidateAbandonmentPreparation, MergeMaterializationTransaction, OutboxEntry,
-    OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
-    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
-    SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime,
-    StoreReclaimJournalError, StoreWritePreparation, TableSchema, ValidatedChangeset,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
+    copy_table_with_conflicts, install_circle_bootstrap_image_on,
+    install_circle_bootstrap_remote_objects_on, projection_table_names,
+    replay_retained_merge_projection_on, validate_merge_generation_zero_preconditions,
+    BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
+    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
+    IncomingTimestampPolicy, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation,
+    MergeMaterializationTransaction, OutboxEntry, OutboxOperation, OutboxUploadState,
+    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
+    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
+    RetainedPackageApplication, RetainedReplayAuthority, RetainedReplayBaseline,
+    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, SnapshotPublicationPermit,
+    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
+    StoreWritePreparation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
 #[cfg(test)]
 pub(crate) use store::{
@@ -809,7 +811,7 @@ impl VerifiedSnapshotBootstrapInstall {
                             image.circle_id()
                         ))
                     })?;
-                    crate::sync::store::install_circle_bootstrap_image_on(
+                    crate::database::install_circle_bootstrap_image_on(
                         conn,
                         synced_tables,
                         activation_commit,

@@ -86,16 +86,14 @@ pub(crate) use owner::operations::{
     CircleAckActivation, PreparedStoreOperationCommit, StoreMembershipJournalCompletion,
 };
 pub(crate) use owner::owner_promotion::{OwnerPromotionJournal, OwnerPromotionJournalTransition};
-pub(crate) use owner::pull::install_circle_bootstrap_image_on;
 pub(crate) use owner::pull::VerifiedStoreSnapshotStability;
 pub(crate) use owner::pull::{
-    apply_prepared_merge_materialization_on, replay_retained_merge_projection_on, ApplyOutcome,
-    DeviceJoinBootstrapPlan, LocalStoreMembership, PreparedMergeMaterialization,
+    activated_merge_membership_remote_objects, apply_prepared_merge_materialization_on,
+    ApplyOutcome, DeviceJoinBootstrapPlan, HeldStorePositionReason, LocalStoreMembership,
+    MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
 };
 #[cfg(test)]
-pub(crate) use owner::pull::{
-    HeldStoreCoordinate, HeldStorePositionReason, StorePullMembershipError,
-};
+pub(crate) use owner::pull::{HeldStoreCoordinate, StorePullMembershipError};
 pub(crate) use owner::pull::{
     HeldStorePosition, PullError, StorePullError, StorePullResult, VerifiedStoreDeviceHead,
 };
@@ -113,7 +111,7 @@ pub(crate) use owner::snapshot::{
 };
 pub(crate) use owner::snapshot::{
     create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
-    verify_store_snapshot_bytes, CreatedSnapshot,
+    verify_circle_bootstrap_image, verify_store_snapshot_bytes, CreatedSnapshot,
 };
 #[cfg(test)]
 pub(crate) use owner::StoreAckError;

@@ -139,7 +139,7 @@ impl StoreDatabase {
                         || !retracted.is_empty()
                     {
                         let replay =
-                            crate::sync::replay_retained_merge_projection_on(
+                            crate::database::replay_retained_merge_projection_on(
                                 &tx,
                                 &root,
                                 &mut transaction_cache,

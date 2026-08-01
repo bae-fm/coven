@@ -332,7 +332,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         &registrations,
     )?;
     for bootstrap in circle_activations.bootstraps() {
-        super::replay::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
+        crate::database::install_circle_bootstrap_remote_objects_on(conn, commit_ref, bootstrap)?;
     }
     let store_transaction = crate::database::MergeMaterializationTransaction::new(conn);
     store_transaction
@@ -605,7 +605,7 @@ impl VerifiedMergeMembershipClosure {
     }
 }
 
-pub(super) struct MembershipAuthorityBytes {
+pub(crate) struct MembershipAuthorityBytes {
     canonical: Vec<u8>,
     stored: Vec<u8>,
 }
@@ -618,12 +618,12 @@ impl MembershipAuthorityBytes {
         }
     }
 
-    pub(super) fn new(canonical: Vec<u8>, stored: Vec<u8>) -> Self {
+    pub(crate) fn new(canonical: Vec<u8>, stored: Vec<u8>) -> Self {
         Self { canonical, stored }
     }
 }
 
-pub(super) fn activated_merge_membership_remote_objects(
+pub(crate) fn activated_merge_membership_remote_objects(
     family: super::store_commit::CandidateFamilyId,
     objects: &crate::database::VerifiedMergeMembershipObjects,
     entry_bytes: MembershipAuthorityBytes,

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use super::verified_history::registration::*;
 use super::verified_history::*;
@@ -10,11 +9,11 @@ use super::*;
 mod authorized;
 use crate::changeset::RowChange;
 use crate::database::BlobDecls;
+use crate::database::IncomingTimestampPolicy;
 use crate::database::{
     BlobActivation, Database, DbError, MergeMaterializationTransaction, ValidatedChangeset,
     VerifiedMergeMaterialization,
 };
-use crate::database::{IncomingTimestampPolicy, TableSchema};
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
@@ -44,7 +43,6 @@ mod materialization;
 mod membership_control;
 mod model;
 mod owner_promotion;
-mod replay;
 mod root_validation;
 mod snapshot_evidence;
 mod support;
@@ -114,7 +112,6 @@ pub(crate) use model::{
     StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
 };
 pub(crate) use owner_promotion::verify_merge_owner_promotion_acceptance_with_history;
-pub(crate) use replay::{install_circle_bootstrap_image_on, replay_retained_merge_projection_on};
 pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
 pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};

@@ -10,8 +10,8 @@ pub(crate) use image::{
 };
 pub(crate) use image::{
     create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
-    install_snapshot_blob_graph, open_database_image, should_create_snapshot,
-    verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience,
+    install_snapshot_blob_graph, should_create_snapshot, verify_circle_bootstrap_image,
+    CreatedSnapshot, SnapshotBlobAudience,
 };
 
 use tracing::{info, warn};

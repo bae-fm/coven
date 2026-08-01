@@ -121,7 +121,7 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                let replay = crate::sync::replay_retained_merge_projection_on(
+                let replay = crate::database::replay_retained_merge_projection_on(
                     &transaction,
                     &root,
                     &mut retained,
