@@ -367,32 +367,14 @@ impl DeviceJoinJournalRecord {
 /// compare-and-swap update rejects stale or skipped transitions.
 #[derive(Clone, Debug)]
 pub struct DeviceJoinJournalDatabase {
-    path: PathBuf,
+    store: crate::database::DeviceJoinJournalStore,
 }
 
 impl DeviceJoinJournalDatabase {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, DeviceJoinError> {
-        let path = path.as_ref().to_path_buf();
-        let connection = Connection::open(&path)?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS device_join_journals (
-                 attempt_id TEXT NOT NULL,
-                 role TEXT NOT NULL,
-                 payload TEXT NOT NULL,
-                 PRIMARY KEY (attempt_id, role)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TABLE IF NOT EXISTS pending_join_transfers (
-                 attempt_id TEXT PRIMARY KEY,
-                 payload_hash TEXT NOT NULL,
-                 payload TEXT NOT NULL
-             ) STRICT, WITHOUT ROWID;",
-        )?;
-        Ok(Self { path })
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, DeviceJoinError> {
+        Ok(Self {
+            store: crate::database::DeviceJoinJournalStore::open(path).map_err(database_error)?,
+        })
     }
 
     pub fn begin(
@@ -400,22 +382,13 @@ impl DeviceJoinJournalDatabase {
         record: DeviceJoinJournalRecord,
     ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
         validate_initial_progress(&record.progress)?;
-        let connection = Connection::open(&self.path)?;
-        let tx = connection.unchecked_transaction()?;
         let attempt_id = attempt_key(record.attempt_id);
         let role = record.progress.role_name();
         let payload = serde_json::to_string(&record)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO device_join_journals (attempt_id, role, payload)
-             VALUES (?1, ?2, ?3)",
-            (&attempt_id, role, &payload),
-        )?;
-        let actual: String = tx.query_row(
-            "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
-            (&attempt_id, role),
-            |row| row.get(0),
-        )?;
-        tx.commit()?;
+        let actual = self
+            .store
+            .insert_or_load(&attempt_id, role, &payload)
+            .map_err(database_error)?;
         let actual = serde_json::from_str::<DeviceJoinJournalRecord>(&actual)?;
         if actual != record {
             return Err(DeviceJoinError::JournalConflict);
@@ -428,14 +401,10 @@ impl DeviceJoinJournalDatabase {
         attempt_id: DeviceJoinAttemptId,
         role: DeviceJoinRole,
     ) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinError> {
-        let connection = Connection::open(&self.path)?;
-        let raw = connection
-            .query_row(
-                "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
-                (attempt_key(attempt_id), role.as_str()),
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
+        let raw = self
+            .store
+            .load(&attempt_key(attempt_id), role.as_str())
+            .map_err(database_error)?;
         let record = raw
             .map(|value| serde_json::from_str::<DeviceJoinJournalRecord>(&value))
             .transpose()?;
@@ -449,21 +418,8 @@ impl DeviceJoinJournalDatabase {
     }
 
     pub fn records(&self) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinError> {
-        let connection = Connection::open(&self.path)?;
-        let mut statement = connection.prepare(
-            "SELECT attempt_id, role, payload FROM device_join_journals
-             ORDER BY attempt_id, role",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
         let mut records = Vec::new();
-        for row in rows {
-            let (attempt_id, role, payload) = row?;
+        for (attempt_id, role, payload) in self.store.records().map_err(database_error)? {
             let record: DeviceJoinJournalRecord = serde_json::from_str(&payload)?;
             if attempt_key(record.attempt_id) != attempt_id || record.progress.role_name() != role {
                 return Err(DeviceJoinError::JournalConflict);
@@ -549,21 +505,28 @@ impl DeviceJoinJournalDatabase {
         previous.validate_successor(&next)?;
         let previous_payload = serde_json::to_string(previous)?;
         let next_payload = serde_json::to_string(&next)?;
-        let connection = Connection::open(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE device_join_journals SET payload = ?1
-             WHERE attempt_id = ?2 AND role = ?3 AND payload = ?4",
-            (
-                &next_payload,
-                attempt_key(previous.attempt_id),
+        if !self
+            .store
+            .compare_and_swap(
+                &attempt_key(previous.attempt_id),
                 previous.progress.role_name(),
                 &previous_payload,
-            ),
-        )?;
-        if changed != 1 {
+                &next_payload,
+            )
+            .map_err(database_error)?
+        {
             return Err(DeviceJoinError::JournalConflict);
         }
         Ok(())
+    }
+
+    pub(super) async fn complete_into(
+        &self,
+        database: &StoreDatabase,
+        current: &DeviceJoinJournalRecord,
+        activated: &DeviceJoinJournalRecord,
+    ) -> Result<(), DeviceJoinError> {
+        self.store.complete_into(database, current, activated).await
     }
 
     pub(super) fn advance_joiner_cleanup_from_replacement(
@@ -595,17 +558,16 @@ impl DeviceJoinJournalDatabase {
         }
         let previous_payload = serde_json::to_string(previous)?;
         let next_payload = serde_json::to_string(&next)?;
-        let connection = Connection::open(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE device_join_journals SET payload = ?1
-             WHERE attempt_id = ?2 AND role = 'joiner' AND payload = ?3",
-            (
-                &next_payload,
-                attempt_key(previous.attempt_id),
+        if !self
+            .store
+            .compare_and_swap(
+                &attempt_key(previous.attempt_id),
+                DeviceJoinRole::Joiner.as_str(),
                 &previous_payload,
-            ),
-        )?;
-        if changed != 1 {
+                &next_payload,
+            )
+            .map_err(database_error)?
+        {
             return Err(DeviceJoinError::JournalConflict);
         }
         Ok(())

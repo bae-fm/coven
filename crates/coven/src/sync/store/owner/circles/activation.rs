@@ -1385,7 +1385,7 @@ async fn build_verified_leaf_bootstrap_image(
         &image_prefix,
     )
     .await?;
-    crate::sync::store::snapshot::verify_circle_bootstrap_image(
+    crate::database::verify_circle_bootstrap_image(
         &image_bytes,
         bootstrap,
         leaf.circle_id,

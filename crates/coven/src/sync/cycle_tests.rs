@@ -291,7 +291,7 @@ async fn retain_store_packages_for_assertion(db: &Database, storage: &TestStore,
         .expect("authorize snapshot fixture writer");
     writer
         .push_store_snapshot(
-            crate::sync::store::CreatedSnapshot {
+            crate::database::CreatedSnapshot {
                 db_image: marker.to_vec(),
                 blobs: Vec::new(),
             },
@@ -4503,7 +4503,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .expect("authorize cadence snapshot writer");
         snapshot_writer
             .push_store_snapshot(
-                crate::sync::store::CreatedSnapshot {
+                crate::database::CreatedSnapshot {
                     db_image: b"cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },
@@ -4628,7 +4628,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .expect("authorize timed snapshot writer");
         snapshot_writer
             .push_store_snapshot(
-                crate::sync::store::CreatedSnapshot {
+                crate::database::CreatedSnapshot {
                     db_image: b"time-cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },

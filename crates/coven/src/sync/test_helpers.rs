@@ -1620,7 +1620,7 @@ impl TestDevice {
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, String> {
         self.store
             .publish_snapshot_for_test(
-                crate::sync::store::CreatedSnapshot {
+                crate::database::CreatedSnapshot {
                     db_image,
                     blobs: Vec::new(),
                 },

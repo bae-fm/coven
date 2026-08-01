@@ -179,8 +179,8 @@ impl PendingJoinJournal {
         current: &DeviceJoinJournalRecord,
         activated: &DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
-        database
-            .complete_device_join(&self.database, current, activated)
+        self.database
+            .complete_into(database, current, activated)
             .await
     }
 }

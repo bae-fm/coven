@@ -105,13 +105,10 @@ pub(crate) use owner::reclaim::{
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
     StoreReclaimError,
 };
+pub(crate) use owner::snapshot::verify_store_snapshot_bytes;
 #[doc(hidden)]
 pub(crate) use owner::snapshot::{
     bootstrap_from_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,
-};
-pub(crate) use owner::snapshot::{
-    create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
-    verify_circle_bootstrap_image, verify_store_snapshot_bytes, CreatedSnapshot,
 };
 #[cfg(test)]
 pub(crate) use owner::StoreAckError;

@@ -9,9 +9,9 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::KeyFingerprint;
 use tracing::warn;
 
+use crate::database::{verify_circle_bootstrap_image, CreatedSnapshot};
 use crate::sync::store::owner::snapshot::{
-    coverage_dominates, publication_error, verify_circle_bootstrap_image, CreatedSnapshot,
-    SnapshotCut, SnapshotError,
+    coverage_dominates, publication_error, SnapshotCut, SnapshotError,
 };
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
@@ -508,7 +508,8 @@ impl CircleSnapshotWriter<'_, '_> {
             circle_id,
             self.database.synced_tables(),
             Some(&routing_key),
-        )
+        )?;
+        Ok(())
     }
 
     pub(crate) async fn author_one_circle_snapshot_for_test(

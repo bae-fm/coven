@@ -40,7 +40,7 @@ pub(crate) fn replay_retained_merge_projection_on(
         crate::database::StoreDatabase::circle_bootstrap_replay_inputs_on(live)?;
     let mut circle_bootstrap_cuts = BTreeMap::new();
     for (activation_commit, bootstrap) in &circle_bootstraps {
-        crate::sync::verify_circle_bootstrap_image(
+        crate::database::verify_circle_bootstrap_image(
             bootstrap.image_bytes(),
             bootstrap.reference(),
             bootstrap.circle_id(),

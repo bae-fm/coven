@@ -37,15 +37,13 @@ pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use session::{BlobDecl, RowIdentity, SyncedTable};
 pub use status::DeviceActivity;
 pub(crate) use store::{
-    activated_merge_membership_remote_objects, create_circle_snapshot_with_host_blobs,
-    create_snapshot_with_host_blobs, verify_circle_bootstrap_image, verify_store_snapshot_bytes,
-    ApplyOutcome, CircleAuthoringState, CircleCurrentState, CircleOperationIntent,
-    CircleOperationJournal, CirclePackageAccess, CreatedSnapshot, DeviceJoinBootstrapPlan,
-    HeldStorePositionReason, HostWriteBlobStaging, LocalCircleExclusion, LocalStoreMembership,
-    MembershipAuthorityBytes, OwnerPromotionJournal, OwnerPromotionJournalTransition,
-    PreparedCircleOperation, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-    PreparedStoreOperationCommit, Store, StoreCreationAttempt, StoreError,
-    StoreMembershipJournalCompletion, VerifiedCircleActivations, VerifiedCircleImage,
+    activated_merge_membership_remote_objects, verify_store_snapshot_bytes, ApplyOutcome,
+    CircleAuthoringState, CircleCurrentState, CircleOperationIntent, CircleOperationJournal,
+    CirclePackageAccess, DeviceJoinBootstrapPlan, HeldStorePositionReason, HostWriteBlobStaging,
+    LocalCircleExclusion, LocalStoreMembership, MembershipAuthorityBytes, OwnerPromotionJournal,
+    OwnerPromotionJournalTransition, PreparedCircleOperation, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, PreparedStoreOperationCommit, Store, StoreCreationAttempt,
+    StoreError, StoreMembershipJournalCompletion, VerifiedCircleActivations, VerifiedCircleImage,
     VerifiedCircleReference, VerifiedStreamActivations, OWNER_PUBKEY_STATE_KEY,
     STORE_CREATION_ATTEMPT_STATE_KEY,
 };

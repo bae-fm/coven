@@ -35,6 +35,7 @@ mod pull_replay;
 pub(super) mod reclaim;
 mod retained_merge_replay;
 mod retained_replay;
+mod snapshot_image;
 mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
@@ -73,6 +74,7 @@ pub(crate) use blob_transitions::MaterializedLocalBlob;
 #[cfg(test)]
 pub(crate) use candidate_records::select_author_exclusion_activation_locator;
 pub(crate) use candidate_records::CandidateCleanupObject;
+pub(crate) use device_join::DeviceJoinJournalStore;
 pub use host_sql::SqlContext;
 pub(crate) use host_write_capture::HostWriteBlobTransaction;
 pub use host_write_operation::WriteBatch;
@@ -103,6 +105,10 @@ pub(crate) use retained_replay::{
     copy_table_with_conflicts, projection_table_names,
     validate_merge_generation_zero_preconditions, RetainedReplayAuthority, RetainedReplayBaseline,
     RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+};
+pub(crate) use snapshot_image::{
+    install_snapshot_blob_graph, verify_circle_bootstrap_image, CreatedSnapshot,
+    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError,
 };
 pub(super) use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,

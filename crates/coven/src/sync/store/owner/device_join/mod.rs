@@ -6,9 +6,7 @@
 //! only from the exact adjacent predecessor.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::{prepare_registration_object, AuthorizedWriterOperation};

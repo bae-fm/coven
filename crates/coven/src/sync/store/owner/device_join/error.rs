@@ -55,7 +55,5 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Storage(#[from] crate::storage::StorageError),
     #[error(transparent)]
-    Database(#[from] rusqlite::Error),
-    #[error(transparent)]
     Serialization(#[from] serde_json::Error),
 }

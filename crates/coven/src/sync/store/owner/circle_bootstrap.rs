@@ -15,11 +15,11 @@ impl CircleBootstrapVerifier {
     pub(super) async fn verify_snapshot_blobs(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        snapshot: &crate::sync::store::snapshot::CreatedSnapshot,
+        snapshot: &crate::database::CreatedSnapshot,
     ) -> Result<Vec<crate::blob::RowBlobRef>, CircleOperationError> {
         let mut blobs = Vec::with_capacity(snapshot.blobs.len());
         for captured in &snapshot.blobs {
-            let crate::sync::store::snapshot::SnapshotBlobAudience::Circle {
+            let crate::database::SnapshotBlobAudience::Circle {
                 circle_id: captured_circle,
                 ..
             } = captured.audience

@@ -23,6 +23,43 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn insert_write_status_for_test(
+        &self,
+        write_id: WriteId,
+        status: crate::WriteStatus,
+    ) -> Result<(), DbError> {
+        let base = serde_json::json!({ "dependencies": {} }).to_string();
+        let status = serde_json::to_string(&status)
+            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
+        self.connection
+            .call(move |connection| {
+                connection
+                    .execute(
+                        r#"INSERT INTO store_writes
+                         (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+                         VALUES (?1, ?2, '[]', X'', X'', ?3, '{"blobs":[]}')"#,
+                        (write_id.as_str(), status, base),
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn delete_write_for_test(&self, write_id: WriteId) -> Result<(), DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .execute(
+                        "DELETE FROM store_writes WHERE write_id = ?1",
+                        [write_id.as_str()],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
     pub(crate) fn arm_test_pause(
         &self,
         point: crate::database::DatabaseTestPoint,

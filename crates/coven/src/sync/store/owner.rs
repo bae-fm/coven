@@ -1299,7 +1299,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn publish_snapshot_for_test(
         &self,
-        snapshot: writer::snapshot::CreatedSnapshot,
+        snapshot: crate::database::CreatedSnapshot,
         coverage: crate::protocol::store_commit::CommitFrontier,
         created_at: String,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, writer::snapshot::SnapshotError> {

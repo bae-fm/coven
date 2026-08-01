@@ -888,8 +888,8 @@ mod tests {
         assert!(matches!(status, SyncLoopStatus::Failed { .. }));
     }
 
-    fn database() -> crate::database::Database {
-        crate::database::Database::open(
+    fn database() -> crate::database::StoreDatabase {
+        let database = crate::database::Database::open(
             std::path::Path::new(":memory:"),
             Vec::new(),
             chrono::Duration::days(30),
@@ -899,44 +899,25 @@ mod tests {
             &[],
         )
         .expect("open status test database")
-        .0
-    }
-
-    async fn insert_write_status(
-        db: &crate::database::Database,
-        write_id: &'static str,
-        status: crate::WriteStatus,
-    ) {
-        let base = serde_json::json!({ "dependencies": {} }).to_string();
-        let status = serde_json::to_string(&status).expect("serialize durable write status");
-        db.call(move |conn| {
-            conn.execute(
-                r#"INSERT INTO store_writes
-                 (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
-                 VALUES (?1, ?2, '[]', X'', X'', ?3, '{"blobs":[]}')"#,
-                (write_id, status, base),
-            )
-            .map(|_| ())
-            .map_err(crate::DbError::from)
-        })
-        .await
-        .expect("insert durable write status");
+        .0;
+        crate::database::StoreDatabase::new(&database)
     }
 
     #[tokio::test]
     async fn successful_cycle_projects_durable_blocked_state() {
-        let db = database();
-        let store_database = crate::database::StoreDatabase::new(&db);
-        insert_write_status(
-            &db,
-            "blocked-write",
-            crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
-                namespace: "audio".to_string(),
-                id: "missing".to_string(),
-            }),
-        )
-        .await;
-        let writes = store_database
+        let database = database();
+        let write_id = crate::WriteId::from_generated("blocked-write".to_string());
+        database
+            .insert_write_status_for_test(
+                write_id.clone(),
+                crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
+                    namespace: "audio".to_string(),
+                    id: "missing".to_string(),
+                }),
+            )
+            .await
+            .expect("insert durable write status");
+        let writes = database
             .pending_writes()
             .await
             .expect("load blocked writes");
@@ -944,22 +925,16 @@ mod tests {
         assert!(matches!(
             blocked,
             SyncLoopStatus::Blocked { writes, .. }
-                if writes.len() == 1 && writes[0].write_id.as_str() == "blocked-write"
+                if writes.len() == 1 && writes[0].write_id == write_id
         ));
-        db.call(|conn| {
-            conn.execute(
-                "DELETE FROM store_writes WHERE write_id = 'blocked-write'",
-                [],
-            )
-            .map(|_| ())
-            .map_err(crate::DbError::from)
-        })
-        .await
-        .expect("remove blocked projection fixture");
+        database
+            .delete_write_for_test(write_id)
+            .await
+            .expect("remove blocked projection fixture");
 
         assert!(matches!(
             current_success_status(
-                store_database
+                database
                     .pending_writes()
                     .await
                     .expect("load synchronized writes"),

@@ -5,14 +5,12 @@ mod publication;
 
 pub(super) use publication::AuthorizedSnapshotPublication;
 
+pub(crate) use image::should_create_snapshot;
 pub(crate) use image::{
     bootstrap_from_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,
 };
-pub(crate) use image::{
-    create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
-    install_snapshot_blob_graph, should_create_snapshot, verify_circle_bootstrap_image,
-    CreatedSnapshot, SnapshotBlobAudience,
-};
+
+use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
 
 use tracing::{info, warn};
 
@@ -559,7 +557,11 @@ impl super::AuthorizedWriterOperation<'_> {
                 "prepared snapshot blob graph has no captured Store directory".to_string(),
             )
         })?;
-        let image = match install_snapshot_blob_graph(db_image, &prepared, &image_store_dir) {
+        let image = match crate::database::install_snapshot_blob_graph(
+            db_image,
+            &prepared,
+            &image_store_dir,
+        ) {
             Ok(image) => image,
             Err(error) => {
                 cleanup_snapshot_spools(&prepared)
@@ -569,7 +571,7 @@ impl super::AuthorizedWriterOperation<'_> {
                         "snapshot image closure failed: {error}; spool cleanup failed: {cleanup}"
                     ))
                     })?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         Ok((image, prepared))
