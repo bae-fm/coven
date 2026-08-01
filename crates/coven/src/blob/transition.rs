@@ -192,16 +192,7 @@ impl ExactPlaintextFile {
                 self.expected_size
             ));
         }
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent: {}", self.path.display()))?;
-        tokio::fs::File::open(parent)
-            .await
-            .map_err(|error| format!("open blob parent {}: {error}", parent.display()))?
-            .sync_all()
-            .await
-            .map_err(|error| format!("sync blob parent {}: {error}", parent.display()))
+        crate::atomic_file::sync_parent_dir(&self.path).await
     }
 
     async fn remove(&self) -> Result<(), String> {

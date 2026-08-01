@@ -621,15 +621,7 @@ async fn remove_snapshot_spool(
             return Err(format!("remove snapshot spool {}: {error}", path.display()));
         }
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("snapshot spool has no parent: {}", path.display()))?;
-    tokio::fs::File::open(parent)
-        .await
-        .map_err(|error| format!("open snapshot spool parent {}: {error}", parent.display()))?
-        .sync_all()
-        .await
-        .map_err(|error| format!("sync snapshot spool parent {}: {error}", parent.display()))
+    crate::atomic_file::sync_parent_dir(path).await
 }
 
 fn snapshot_first_slot(

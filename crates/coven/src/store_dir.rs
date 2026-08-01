@@ -415,7 +415,7 @@ impl StoreDir {
     ) -> Result<(), String> {
         let path = self.outbound_blob_spool_path(locator_hash);
         match tokio::fs::remove_file(&path).await {
-            Ok(()) => sync_parent_dir(&path).await,
+            Ok(()) => crate::atomic_file::sync_parent_dir(&path).await,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(format!(
                 "remove exact blob spool {}: {error}",
@@ -937,18 +937,6 @@ async fn remove_file(path: &Path) -> Result<bool, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(format!("remove store blob {}: {error}", path.display())),
     }
-}
-
-async fn sync_parent_dir(path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("store blob path has no parent: {}", path.display()))?;
-    tokio::fs::File::open(parent)
-        .await
-        .map_err(|error| format!("open store blob parent {}: {error}", parent.display()))?
-        .sync_all()
-        .await
-        .map_err(|error| format!("sync store blob parent {}: {error}", parent.display()))
 }
 
 async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {

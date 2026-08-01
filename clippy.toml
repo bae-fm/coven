@@ -1,0 +1,22 @@
+# Durable local writes go through `crate::atomic_file` — never a hand-rolled
+# open/write/fsync/rename at the call site.
+#
+# The reason is a platform split that only one implementation can carry: the
+# POSIX "fsync the parent directory after a rename" idiom has no Windows
+# counterpart, because `FlushFileBuffers` on a directory handle needs write
+# access that opening a directory cannot grant, so it fails with
+# `ERROR_ACCESS_DENIED` (os error 5). Ten separate copies of that idiom had
+# accumulated across the crate, and every one of them failed on Windows —
+# taking blob installs, spool removals, and snapshot writes down with them.
+#
+# `atomic_file` owns the split and allows this lint for itself. A call site
+# that genuinely needs a raw fsync — a streaming stage that cannot buffer the
+# whole payload before writing it — opts out with its own
+# `#[allow(clippy::disallowed_methods)]` plus a comment saying why, so each
+# exception is visible in review rather than blending into the crowd.
+disallowed-methods = [
+    { path = "std::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
+    { path = "std::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
+    { path = "tokio::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
+    { path = "tokio::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
+]

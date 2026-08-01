@@ -219,10 +219,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     tokio::fs::remove_file(&spool)
         .await
         .expect("remove shared exact spool");
-    tokio::fs::File::open(spool.parent().expect("spool parent"))
-        .await
-        .expect("open shared spool parent")
-        .sync_all()
+    crate::atomic_file::sync_parent_dir(&spool)
         .await
         .expect("sync removed shared exact spool");
 
