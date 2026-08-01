@@ -1341,32 +1341,20 @@ mod tests {
         let db = crate::sync::test_helpers::open_test_db();
         let store_database = crate::database::StoreDatabase::new(&db);
         let first_commit = verified_commit.clone();
-        db.call(move |conn| {
-            crate::database::record_verified_circle_activations_for_test(
-                conn,
-                &first_commit,
-                &[verified],
-            )
+        db.test_sql(move |database| {
+            database.record_verified_circle_activations(&first_commit, &[verified])
         })
         .await
         .expect("record multi-Owner control");
-        let circle_id = creation.circle_id.to_string();
         let cached_owner = db
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT owner_pubkey FROM circle_access_cache WHERE circle_id = ?1",
-                    [circle_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(crate::database::DbError::from)
-            })
+            .test_sql(move |database| database.circle_access_owner(creation.circle_id))
             .await
             .expect("read cached access owner");
         assert_eq!(cached_owner, author_pubkey);
-        db.call(|conn| {
-            conn.execute("DELETE FROM circle_access_cache", [])
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
+        db.test_sql(|database| {
+            database.clear_table(crate::database::DatabaseTestTable::named(
+                "circle_access_cache",
+            ))
         })
         .await
         .expect("remove historical Circle projections");
@@ -1483,9 +1471,8 @@ mod tests {
         )
         .expect("authenticate second Store commit");
         let error = db
-            .call(move |conn| {
-                crate::database::record_verified_circle_activations_for_test(
-                    conn,
+            .test_sql(move |database| {
+                database.record_verified_circle_activations(
                     &second_commit,
                     &[crate::sync::store::VerifiedCircleReference {
                         reference: second_reference,

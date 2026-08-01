@@ -71,7 +71,7 @@ pub use database::{
     DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext,
     SqlReadContext, WriteBatch,
 };
-pub use database::{Migration, MigrationError, MigrationStep};
+pub use database::{Migration, MigrationContext, MigrationError, MigrationStep};
 #[cfg(any(test, feature = "test-utils"))]
 pub use encryption::EncryptionService;
 pub use encryption::{EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE};

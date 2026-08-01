@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 
 use crate::blob::{CacheFill, Provenance};
 use crate::database::Database;
@@ -91,43 +90,17 @@ async fn stored_remote_object(
     db: &crate::database::Database,
     object: &crate::storage::ExactObjectRef,
 ) -> crate::protocol::remote_object::RemoteObjectRecord {
-    let object_id = crate::protocol::remote_object::remote_object_id(object);
-    db.call(move |conn| {
-        let state: String = conn
-            .query_row(
-                "SELECT state FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(crate::database::DbError::from)?;
-        serde_json::from_str(&state)
-            .map_err(|error| crate::database::DbError::Message(error.to_string()))
-    })
-    .await
-    .expect("load exact remote object")
+    db.remote_object_for_test(object.clone())
+        .await
+        .expect("load exact remote object")
 }
 
 async fn stored_remote_objects(
     db: &crate::database::Database,
 ) -> Vec<crate::protocol::remote_object::RemoteObjectRecord> {
-    db.call(|conn| {
-        let mut statement = conn
-            .prepare("SELECT state FROM remote_objects ORDER BY object_id")
-            .map_err(crate::database::DbError::from)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(crate::database::DbError::from)?;
-        let mut objects = Vec::new();
-        for row in rows {
-            let state = row.map_err(crate::database::DbError::from)?;
-            objects.push(serde_json::from_str(&state).map_err(|error| {
-                crate::database::DbError::Message(format!("parse remote object: {error}"))
-            })?);
-        }
-        Ok(objects)
-    })
-    .await
-    .expect("load remote objects")
+    db.remote_objects_for_test()
+        .await
+        .expect("load remote objects")
 }
 
 async fn replace_retained_merge_input(
@@ -135,126 +108,8 @@ async fn replace_retained_merge_input(
     stream_id: String,
     canonical_input: Vec<u8>,
 ) {
-    db.call(move |conn| {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(crate::database::DbError::from)?;
-        tx.pragma_update(None, "defer_foreign_keys", true)
-            .map_err(crate::database::DbError::from)?;
-        let stored_hash: String = tx
-            .query_row(
-                "SELECT input_hash FROM retained_merge_materializations
-                 WHERE device_id = ?1 AND seq = 1",
-                [&stream_id],
-                |row| row.get(0),
-            )
-            .map_err(crate::database::DbError::from)?;
-        let old_hash = stored_hash.parse().map_err(|error| {
-            crate::database::DbError::Message(format!("stored retained input hash: {error}"))
-        })?;
-        let new_hash = crate::protocol::store_commit::ObjectHash::digest(&canonical_input);
-        let mut statement = tx
-            .prepare(
-                "SELECT indexed.object_id, remote.state
-                 FROM retained_replay_objects AS indexed
-                 JOIN remote_objects AS remote ON remote.object_id = indexed.object_id
-                 WHERE indexed.device_id = ?1 AND indexed.seq = 1
-                 ORDER BY indexed.object_id",
-            )
-            .map_err(crate::database::DbError::from)?;
-        let rows = statement
-            .query_map([&stream_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(crate::database::DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(crate::database::DbError::from)?;
-        drop(statement);
-        if rows.is_empty() {
-            return Err(crate::database::DbError::Message(
-                "retained Merge input has no indexed replay objects".to_string(),
-            ));
-        }
-        for (object_id, state) in rows {
-            let mut remote: crate::protocol::remote_object::RemoteObjectRecord =
-                serde_json::from_str(&state).map_err(|error| {
-                    crate::database::DbError::Message(format!(
-                        "parse retained replay object {object_id}: {error}"
-                    ))
-                })?;
-            let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
-                &mut remote
-            else {
-                return Err(crate::database::DbError::Message(format!(
-                    "retained replay object {object_id} is not shared"
-                )));
-            };
-            let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-                &mut record.state
-            else {
-                return Err(crate::database::DbError::Message(format!(
-                    "retained replay object {object_id} is not activated"
-                )));
-            };
-            let old_owner = ownership
-                .activated
-                .iter()
-                .find_map(|owner| match owner {
-                    crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                        crate::protocol::remote_object::RetainedReplayOwner::Commit {
-                            commit,
-                            input_hash,
-                        },
-                    ) if *input_hash == old_hash => Some((owner.clone(), commit.clone())),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    crate::database::DbError::Message(format!(
-                        "retained replay object {object_id} lacks its indexed owner"
-                    ))
-                })?;
-            ownership.activated.remove(&old_owner.0);
-            ownership.activated.insert(
-                crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                    crate::protocol::remote_object::RetainedReplayOwner::Commit {
-                        commit: old_owner.1,
-                        input_hash: new_hash,
-                    },
-                ),
-            );
-            tx.execute(
-                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-                rusqlite::params![
-                    object_id,
-                    serde_json::to_string(&remote).map_err(|error| {
-                        crate::database::DbError::Message(format!(
-                            "serialize rebound retained replay object: {error}"
-                        ))
-                    })?
-                ],
-            )
-            .map_err(crate::database::DbError::from)?;
-        }
-        tx.execute(
-            "UPDATE retained_merge_materializations
-             SET input_hash = ?2, canonical_input = ?3
-             WHERE device_id = ?1 AND seq = 1",
-            rusqlite::params![&stream_id, new_hash.to_string(), &canonical_input],
-        )
-        .map_err(crate::database::DbError::from)?;
-        tx.execute(
-            "UPDATE materialized_commits SET retained_input_hash = ?2
-             WHERE device_id = ?1 AND seq = 1",
-            rusqlite::params![&stream_id, new_hash.to_string()],
-        )
-        .map_err(crate::database::DbError::from)?;
-        tx.execute(
-            "UPDATE retained_replay_objects SET input_hash = ?2
-             WHERE device_id = ?1 AND seq = 1",
-            rusqlite::params![&stream_id, new_hash.to_string()],
-        )
-        .map_err(crate::database::DbError::from)?;
-        tx.commit().map_err(crate::database::DbError::from)
+    db.test_sql(move |database| {
+        database.replace_retained_merge_input(&stream_id, &canonical_input)
     })
     .await
     .expect("replace retained Merge input and its exact ownership closure");
@@ -305,17 +160,9 @@ async fn retained_store_package_pin(
     crate::protocol::remote_object::RemoteObjectRecord,
 ) {
     let stream_id = commit_stream_id(commit);
-    let sequence = commit.coord.sequence() as i64;
-    let (input_hash, canonical_input): (String, Vec<u8>) = db
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT input_hash, canonical_input FROM retained_merge_materializations \
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![stream_id, sequence],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+    let sequence = commit.coord.sequence();
+    let (input_hash, canonical_input) = db
+        .test_sql(move |database| database.retained_merge_input(&stream_id, sequence))
         .await
         .expect("load retained package input");
     let retained: serde_json::Value =
@@ -325,9 +172,7 @@ async fn retained_store_package_pin(
             .expect("parse retained Store package reference");
     let owner = crate::protocol::remote_object::RetainedReplayOwner::Commit {
         commit: commit.clone(),
-        input_hash: input_hash
-            .parse()
-            .expect("parse retained package input hash"),
+        input_hash,
     };
     let remote = stored_remote_object(db, &reference.object).await;
     (owner, reference, remote)
@@ -338,24 +183,9 @@ async fn replace_stored_remote_object(
     object: &crate::storage::ExactObjectRef,
     remote: &crate::protocol::remote_object::RemoteObjectRecord,
 ) {
-    let object_id = crate::protocol::remote_object::remote_object_id(object);
-    let state = serde_json::to_string(remote).expect("serialize test remote object");
-    db.call(move |conn| {
-        let updated = conn
-            .execute(
-                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-                rusqlite::params![object_id.to_string(), state],
-            )
-            .map_err(crate::database::DbError::from)?;
-        if updated != 1 {
-            return Err(crate::database::DbError::Message(
-                "test remote object disappeared".to_string(),
-            ));
-        }
-        Ok(())
-    })
-    .await
-    .expect("replace test remote object");
+    db.replace_remote_object_for_test(object.clone(), remote.clone())
+        .await
+        .expect("replace test remote object");
 }
 
 fn commit_stream_id(reference: &crate::protocol::store_commit::StoreBatchCommitRef) -> String {
@@ -1900,15 +1730,7 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position
 async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() {
     let target = open_test_db();
     let invalid_insert = target
-        .call(|conn| {
-            conn.execute(
-                "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
-                 VALUES ('invalid-device', -1, '{}')",
-                [],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.insert_invalid_materialized_commit())
         .await;
     assert!(invalid_insert.is_err());
     assert!(store_database(&target)
@@ -1963,22 +1785,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
 
     let queried_stream = stream_id.clone();
     let (canonical_input, input_hash, retained_ref) = target
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT canonical_input, input_hash, commit_ref \
-                 FROM retained_merge_materializations \
-                 WHERE device_id = ?1 AND seq = 1",
-                [queried_stream],
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(move |database| database.retained_materialization_input(&queried_stream, 1))
         .await
         .expect("read retained Merge materialization input");
     assert_eq!(
@@ -2111,14 +1918,8 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .collect::<Vec<_>>();
     let corrupt_stream = stream_id.clone();
     target
-        .call(move |conn| {
-            conn.execute(
-                "UPDATE retained_merge_materializations SET canonical_input = x'7b7d' \
-                 WHERE device_id = ?1 AND seq = 1",
-                [corrupt_stream],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
+        .test_sql(move |database| {
+            database.corrupt_retained_materialization_input(&corrupt_stream, 1)
         })
         .await
         .expect("corrupt retained Merge input");
@@ -2208,10 +2009,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     replace_stored_remote_object(&target, &second_package.object, &missing).await;
     let root = storage.root.clone();
     assert!(target
-        .call(move |conn| {
-            crate::database::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
@@ -2240,10 +2038,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     replace_stored_remote_object(&target, &second_package.object, &tampered).await;
     let root = storage.root.clone();
     assert!(target
-        .call(move |conn| {
-            crate::database::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
@@ -2264,28 +2059,11 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
     );
     replace_stored_remote_object(&target, &first_package.object, &invented).await;
-    let crate::protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
-        &second_owner;
-    let crate::protocol::store_commit::StoreCommitCoord {
-        stream_id,
-        sequence,
-    } = &commit.coord;
-    let stream_id = stream_id.to_string();
-    let sequence = i64::try_from(*sequence).expect("invented replay sequence fits SQLite");
-    let commit_ref = serde_json::to_string(commit).expect("serialize invented replay owner");
-    let input_hash = input_hash.to_string();
-    let first_object_id =
-        crate::protocol::remote_object::remote_object_id(&first_package.object).to_string();
+    let second_owner_for_insert = second_owner.clone();
+    let first_object = first_package.object.clone();
     target
-        .call(move |conn| {
-            conn.execute(
-                "INSERT INTO retained_replay_objects
-                 (device_id, seq, commit_ref, input_hash, object_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![stream_id, sequence, commit_ref, input_hash, first_object_id],
-            )
-            .map_err(crate::database::DbError::from)?;
-            Ok(())
+        .test_sql(move |database| {
+            database.insert_retained_replay_object(&second_owner_for_insert, &first_object)
         })
         .await
         .expect("invent replay ownership index row");
@@ -2302,10 +2080,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     );
     let root = storage.root.clone();
     assert!(target
-        .call(move |conn| {
-            crate::database::StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()
@@ -2334,7 +2109,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let target_path = target_dir.path().join("store.sqlite");
     let copied_path = target_path.clone();
     source
-        .call(move |conn| {
+        .test_sql(move |conn| {
             conn.execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
                 .map(|_| ())
                 .map_err(crate::database::DbError::from)
@@ -2353,18 +2128,14 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     .expect("open copied retained collision database");
     let conflicting_stream = stream_id.clone();
     target
-        .call(move |conn| {
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = 1",
-                [&conflicting_stream],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.execute("DELETE FROM notes WHERE id = 'rollback-row'", [])
-                .map_err(crate::database::DbError::from)?;
-            tx.commit().map_err(crate::database::DbError::from)
+        .test_sql(move |database| {
+            database.transaction(|transaction| {
+                transaction.delete_materialized_commit(&conflicting_stream, 1)?;
+                transaction
+                    .execute("DELETE FROM notes WHERE id = 'rollback-row'", [])
+                    .map_err(crate::database::DbError::from)?;
+                Ok(())
+            })
         })
         .await
         .expect("remove the locally materialized outcome while retaining its exact input");
@@ -2381,15 +2152,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'rollback-row'").await);
     let checked_stream = stream_id.clone();
     let materialized = target
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM materialized_commits \
-                 WHERE device_id = ?1 AND seq = 1)",
-                [checked_stream],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(move |database| database.materialized_commit_exists(&checked_stream, 1))
         .await
         .expect("read rolled-back materialization state");
     assert!(!materialized);
@@ -2442,45 +2205,32 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     let tables = target.synced_tables().to_vec();
     let write_id = target.new_write_id();
     target
-        .call(move |conn| {
-            crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                None,
-                write_id,
-                |tx| {
-                    let remote_row: bool = tx
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM notes WHERE id = 'remote')",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .map_err(crate::database::DbError::from)?;
-                    let materialized: Option<u64> = tx
-                        .query_row(
-                            "SELECT seq FROM materialized_commits WHERE device_id = ?1",
-                            [&stream_id],
-                            |row| row.get::<_, i64>(0).map(|seq| seq as u64),
-                        )
-                        .optional()
-                        .map_err(crate::database::DbError::from)?;
-                    assert!(remote_row, "the host transaction observes the remote row");
-                    assert_eq!(
-                        materialized,
-                        Some(1),
-                        "the same database cut observes the row's materialized position",
-                    );
-                    tx.execute(
-                        "INSERT INTO notes \
+        .test_sql(move |conn| {
+            conn.run_internal_store_write(&tables, None, write_id, |tx| {
+                let remote_row: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = 'remote')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                let materialized = tx.materialized_sequence(&stream_id)?;
+                assert!(remote_row, "the host transaction observes the remote row");
+                assert_eq!(
+                    materialized,
+                    Some(1),
+                    "the same database cut observes the row's materialized position",
+                );
+                tx.execute(
+                    "INSERT INTO notes \
                          (id, title, body, _updated_at, created_at) \
                          VALUES ('local', 'Local', NULL, \
                                  '0000000002000-0000-dev2', '2026-01-01')",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::database::DbError::from)
-                },
-            )
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
         })
         .await
         .expect("host write after remote apply");
@@ -3794,22 +3544,12 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         .clone();
     let remote = stored_remote_object(&db2, stored.object()).await;
     let stream_id = commit_stream_id(&commit);
-    let sequence = commit.coord.sequence() as i64;
-    let input_hash: crate::protocol::store_commit::ObjectHash = db2
-        .call(move |conn| {
-            let hash: String = conn
-                .query_row(
-                    "SELECT input_hash FROM retained_merge_materializations \
-                     WHERE device_id = ?1 AND seq = ?2",
-                    rusqlite::params![stream_id, sequence],
-                    |row| row.get(0),
-                )
-                .map_err(crate::database::DbError::from)?;
-            hash.parse().map_err(|error| {
-                crate::database::DbError::Message(format!(
-                    "parse retained blob input hash: {error}"
-                ))
-            })
+    let sequence = commit.coord.sequence();
+    let input_hash = db2
+        .test_sql(move |database| {
+            database
+                .retained_merge_input(&stream_id, sequence)
+                .map(|v| v.0)
         })
         .await
         .expect("load retained blob input hash");
@@ -3866,11 +3606,9 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact external audio row");
-    db1.call(move |conn| {
-        crate::database::Database::register_external_blob_on(conn, &reference, &source)
-    })
-    .await
-    .expect("register exact external audio fixture");
+    db1.test_sql(move |database| database.register_external_blob(&reference, &source))
+        .await
+        .expect("register exact external audio fixture");
     make_test_root_remote(&db1, &storage, &ld1, "n1").await;
     let audio_blob = db1
         .row_blob_ref("note_photos", "audio1")
@@ -3990,10 +3728,9 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     let blob_decls = source.blob_decls();
     let write_id = source.new_write_id();
     source
-        .call(move |conn| {
+        .test_sql(move |conn| {
             let routing = EncryptionService::from_key([42; 32]);
-            crate::database::StoreDatabase::run_store_write_transaction_on(
-                conn,
+            conn.run_host_store_write(
                 &tables,
                 &gates,
                 &blob_decls,
@@ -4047,17 +3784,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .await
     );
     let (routes, mirrors): (i64, i64) = target
-        .call(move |conn| {
-            let routes = conn.query_row("SELECT COUNT(*) FROM _coven_row_routes", [], |row| {
-                row.get(0)
-            })?;
-            let mirrors = conn.query_row(
-                "SELECT COUNT(*) FROM _coven_audience WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| row.get(0),
-            )?;
-            Ok((routes, mirrors))
-        })
+        .test_sql(move |database| database.scoped_routing_counts(circle_id))
         .await
         .expect("read pulled routing state");
     assert_eq!((routes, mirrors), (2, 2));
@@ -4214,10 +3941,9 @@ async fn author_scoped_write(store: &TestStore, db: &crate::database::Database, 
     let gates = db.gates();
     let blob_decls = db.blob_decls();
     let write_id = db.new_write_id();
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         let routing = EncryptionService::from_key([42; 32]);
-        crate::database::StoreDatabase::run_store_write_transaction_on(
-            conn,
+        conn.run_host_store_write(
             &tables,
             &gates,
             &blob_decls,
@@ -4398,11 +4124,9 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
         .await
         .expect("load exact external row blob reference");
     let external = external.clone();
-    db.call(move |conn| {
-        crate::database::Database::register_external_blob_on(conn, &reference, &external)
-    })
-    .await
-    .expect("register exact external blob reference");
+    db.test_sql(move |database| database.register_external_blob(&reference, &external))
+        .await
+        .expect("register exact external blob reference");
     let outgoing = capture_bytes(
         &db,
         &["UPDATE notes SET title = 'Changed', \
@@ -4530,11 +4254,9 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact external row blob reference");
-    db.call(move |conn| {
-        crate::database::Database::register_external_blob_on(conn, &reference, &source)
-    })
-    .await
-    .expect("register exact external audio fixture");
+    db.test_sql(move |database| database.register_external_blob(&reference, &source))
+        .await
+        .expect("register exact external audio fixture");
     make_test_root_remote(&db, &storage, &store_dir, "n1").await;
     let result = device
         .latest_local_store_position()
@@ -5103,7 +4825,7 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
     );
 
     let winner: String = db_c
-        .call(|conn| {
+        .test_sql(|conn| {
             conn.query_row(
                 "SELECT blob_id FROM note_photos WHERE id = 'ph1'",
                 [],
@@ -5902,17 +5624,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert!(error.to_string().contains("local blob cleanup"), "{error}");
     assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'cleanup01'").await);
     let pending_before_restart = target
-        .call(|conn| {
-            let mut statement = conn
-                .prepare("SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity")
-                .map_err(crate::database::DbError::from)?;
-            let identities = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(crate::database::DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(crate::database::DbError::from)?;
-            Ok(identities)
-        })
+        .test_sql(|database| database.cleanup_intent_copy_identities())
         .await
         .unwrap();
     assert_eq!(
@@ -5931,11 +5643,10 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
     let pending_after_restart: i64 = restarted
-        .call(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
-                row.get(0)
-            })
-            .map_err(crate::database::DbError::from)
+        .test_sql(|database| {
+            database.table_row_count(crate::database::DatabaseTestTable::named(
+                "local_cleanup_intents",
+            ))
         })
         .await
         .unwrap();
@@ -5960,15 +5671,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     )
     .await;
     target
-        .call(|conn| {
-            conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id, copy_identity) \
-                 VALUES ('photos', 'cleanup-race', 'local')",
-                [],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.insert_cleanup_intent("photos", "cleanup-race", "local"))
         .await
         .unwrap();
 
@@ -5994,44 +5697,32 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let insert_write_id = target.new_write_id();
     let update_write_id = target.new_write_id();
     let host_write = target
-        .call(move |conn| {
-            crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                None,
-                insert_write_id,
-                |tx| {
-                    tx.execute(
-                        "INSERT INTO note_photos \
+        .test_sql(move |conn| {
+            conn.run_internal_store_write(&tables, None, insert_write_id, |tx| {
+                tx.execute(
+                    "INSERT INTO note_photos \
                          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
                          VALUES ('new-row', 'n1', 'cover', 9, NULL, 'cleanup-race', \
                                  '0000000002000-0000-dev2', '2026-01-01')",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::database::DbError::from)
-                },
-            )
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
         })
         .await;
     let host_update = target
-        .call(move |conn| {
-            crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &update_tables,
-                None,
-                update_write_id,
-                |tx| {
-                    tx.execute(
-                        "UPDATE note_photos SET blob_id = 'cleanup-race', \
+        .test_sql(move |conn| {
+            conn.run_internal_store_write(&update_tables, None, update_write_id, |tx| {
+                tx.execute(
+                    "UPDATE note_photos SET blob_id = 'cleanup-race', \
                          _updated_at = '0000000002001-0000-dev2' \
                          WHERE id = 'existing-row'",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::database::DbError::from)
-                },
-            )
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
         })
         .await;
     resume_cleanup.notify_one();
@@ -6078,15 +5769,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     )
     .await;
     target
-        .call(|conn| {
-            conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id, copy_identity) \
-                 VALUES ('photos', 'shared-intent', 'local')",
-                [],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.insert_cleanup_intent("photos", "shared-intent", "local"))
         .await
         .unwrap();
 
@@ -6117,24 +5800,18 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     let tables = target.synced_tables().to_vec();
     let write_id = target.new_write_id();
     let host_re_reference = target
-        .call(move |conn| {
-            crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                None,
-                write_id,
-                |tx| {
-                    tx.execute(
-                        "INSERT INTO note_photos \
+        .test_sql(move |conn| {
+            conn.run_internal_store_write(&tables, None, write_id, |tx| {
+                tx.execute(
+                    "INSERT INTO note_photos \
                      (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
                      VALUES ('blocked-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
                              '0000000002000-0000-dev2', '2026-01-01')",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::database::DbError::from)
-                },
-            )
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
         })
         .await;
     assert!(

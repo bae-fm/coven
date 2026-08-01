@@ -4,7 +4,6 @@ use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
-use rusqlite::OptionalExtension;
 
 #[path = "tests/effective_access_failure.rs"]
 mod effective_access_failure;
@@ -312,10 +311,9 @@ async fn scoped_host_exec(database: &Database, sql: String) {
     let blob_decls = database.blob_decls();
     let write_id = database.new_write_id();
     database
-        .call(move |connection| {
+        .test_sql(move |connection| {
             let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-            StoreDatabase::run_store_write_transaction_on(
-                connection,
+            connection.run_host_store_write(
                 &tables,
                 &gates,
                 &blob_decls,
@@ -830,17 +828,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .is_err());
     let (public_circle_state, private_circle_state): (i64, i64) = member_database
-        .call(|connection| {
-            connection
-                .query_row(
-                    "SELECT
-                         (SELECT COUNT(*) FROM circle_current_state),
-                         (SELECT COUNT(*) FROM circle_access_cache)",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(DbError::from)
-        })
+        .test_sql(|database| database.circle_state_table_counts())
         .await
         .expect("count Circle state after Store membership removal");
     assert_eq!(public_circle_state, 1);
@@ -895,12 +883,10 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .expect("list reopened Circles after Store membership removal")
         .is_empty());
     let reopened_public_circle_state: i64 = reopened
-        .call(|connection| {
-            connection
-                .query_row("SELECT COUNT(*) FROM circle_current_state", [], |row| {
-                    row.get(0)
-                })
-                .map_err(DbError::from)
+        .test_sql(|database| {
+            database.table_row_count(crate::database::DatabaseTestTable::named(
+                "circle_current_state",
+            ))
         })
         .await
         .expect("count reopened public Circle state");
@@ -1096,45 +1082,8 @@ struct ScopedRoutingState {
 async fn scoped_routing_state(database: &Database, row_id: &str) -> ScopedRoutingState {
     let row_id = row_id.to_string();
     database
-        .call(move |connection| {
-            let routing_id = crate::sync::test_helpers::test_row_routing_id(
-                connection, [42; 32], "notes", &row_id,
-            )
-            .to_string();
-            let row = connection
-                .query_row(
-                    "SELECT audience, body, _updated_at FROM notes WHERE id = ?1",
-                    [&row_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let route = connection
-                .query_row(
-                    "SELECT routing_id, _updated_at
-                     FROM _coven_row_routes
-                     WHERE table_name = 'notes' AND row_id = ?1",
-                    [&row_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let mirror = connection
-                .query_row(
-                    "SELECT circle_id, _updated_at
-                     FROM _coven_audience
-                     WHERE routing_id = ?1",
-                    [&routing_id],
-                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?;
+        .test_sql(move |connection| {
+            let (row, route, mirror) = connection.scoped_note_routing_state(&row_id, [42; 32])?;
             Ok(ScopedRoutingState { row, route, mirror })
         })
         .await
@@ -1676,17 +1625,8 @@ async fn circle_control_activation_count(
     database: &Database,
     circle_id: crate::protocol::circle::CircleId,
 ) -> i64 {
-    let circle_id = circle_id.to_string();
     database
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                    [circle_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .test_sql(move |database| database.circle_control_activation_count(circle_id))
         .await
         .expect("count Circle control activations")
 }
@@ -1694,15 +1634,7 @@ async fn circle_control_activation_count(
 async fn row_blob_binding_count(database: &Database, row_id: &str) -> i64 {
     let row_id = row_id.to_string();
     database
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM row_blob_locators WHERE row_id = ?1",
-                    [row_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .test_sql(move |database| database.row_blob_binding_count(&row_id))
         .await
         .expect("count row blob bindings")
 }
@@ -1716,30 +1648,17 @@ async fn bind_row_blob(database: &Database, row_id: &str) {
     let row_id = row_id.to_string();
     let object_id = "0".repeat(64);
     database
-        .call(move |connection| {
-            connection
-                .execute(
-                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
-                    [&object_id],
-                )
-                .map_err(DbError::from)?;
-            connection
-                .execute(
-                    "INSERT INTO blob_locators (remote_object_id, locator_hash)
-                     VALUES (?1, ?2)",
-                    rusqlite::params![object_id, "1".repeat(64)],
-                )
-                .map_err(DbError::from)?;
-            connection
-                .execute(
-                    "INSERT INTO row_blob_locators
-                     (table_name, row_id, column_name, row_stamp, audience_authority,
-                      remote_object_id)
-                     VALUES ('notes', ?1, 'attachment', '0000000002000-0000-owner', '{}', ?2)",
-                    rusqlite::params![row_id, object_id],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
+        .test_sql(move |database| {
+            database.install_blob_binding(
+                &object_id,
+                "{}",
+                &"1".repeat(64),
+                "notes",
+                &row_id,
+                "attachment",
+                "0000000002000-0000-owner",
+                "{}",
+            )
         })
         .await
         .expect("bind row blob");
@@ -1915,10 +1834,9 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let circle_id = fixture.circle_id;
     let error = fixture
         .owner_database
-        .call(move |connection| {
+        .test_sql(move |connection| {
             let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-            StoreDatabase::run_store_write_transaction_on(
-                connection,
+            connection.run_host_store_write(
                 &tables,
                 &gates,
                 &blob_decls,

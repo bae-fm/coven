@@ -85,7 +85,7 @@ pub(crate) use materialization_models::{
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::{
-    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on,
+    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
 };
 pub(crate) use merge_materialization_transaction::{
     IncomingTimestampPolicy, MergeMaterializationTransaction, TableSchema, ValidatedChangeset,
@@ -273,7 +273,11 @@ impl StoreDatabase {
         E: Send + 'static,
     {
         self.connection
-            .call(move |connection| Ok(read(SqlReadContext::new(connection))))
+            .call(move |connection| {
+                host_sql_transaction::run_host_sql_read(connection, |connection| {
+                    read(SqlReadContext::new(connection))
+                })
+            })
             .await
     }
 

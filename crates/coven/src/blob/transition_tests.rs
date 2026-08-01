@@ -552,7 +552,7 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
 
 async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
     let (rt, ri) = (root_table.to_string(), root_id.to_string());
-    db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
+    db.test_sql(move |database| database.make_remote_intent_exists(&rt, &ri))
         .await
         .unwrap()
 }
@@ -560,18 +560,18 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
 async fn scoped_store_state(db: &Database) -> [i64; 4] {
     let mut counts = [0; 4];
     for (index, table) in [
-        "store_writes",
-        "store_write_partitions",
-        "_coven_row_routes",
-        "_coven_audience",
+        crate::database::DatabaseTestTable::named("store_writes"),
+        crate::database::DatabaseTestTable::named("store_write_partitions"),
+        crate::database::DatabaseTestTable::named("_coven_row_routes"),
+        crate::database::DatabaseTestTable::named("_coven_audience"),
     ]
     .into_iter()
     .enumerate()
     {
-        counts[index] = query_text(db, &format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"))
+        counts[index] = db
+            .test_sql(move |database| database.table_row_count(table))
             .await
-            .parse()
-            .expect("scoped Store table count is an integer");
+            .expect("read scoped Store table count");
     }
     counts
 }
@@ -581,38 +581,31 @@ async fn assert_scoped_flip_journaled_atomically(
     expected_changes: &[(&str, crate::changeset::ChangeOp)],
 ) {
     assert!(
-        row_exists(
-            db,
-            "SELECT 1 FROM store_write_partitions AS partition \
-             JOIN store_writes AS write USING (write_id) \
-             WHERE partition.audience = 'store'",
-        )
-        .await,
+        db.test_sql(|database| database.has_store_partition())
+            .await
+            .expect("inspect Store partition"),
         "the audience partition and its parent write commit together",
     );
+    let has_routes = db
+        .test_sql(|database| {
+            database.table_has_rows(crate::database::DatabaseTestTable::named(
+                "_coven_row_routes",
+            ))
+        })
+        .await
+        .expect("inspect scoped routes");
+    let has_mirrors = db
+        .test_sql(|database| {
+            database.table_has_rows(crate::database::DatabaseTestTable::named("_coven_audience"))
+        })
+        .await
+        .expect("inspect scoped mirrors");
     assert!(
-        !row_exists(db, "SELECT 1 FROM _coven_row_routes LIMIT 1").await
-            && !row_exists(db, "SELECT 1 FROM _coven_audience LIMIT 1").await,
+        !has_routes && !has_mirrors,
         "a boolean-gated Store row does not invent scoped row routes or mirrors",
     );
     let changesets = db
-        .call(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT partition.changeset
-                     FROM store_write_partitions AS partition
-                     JOIN store_writes AS write USING (write_id)
-                     WHERE partition.audience = 'store'
-                     ORDER BY write.ordinal DESC",
-                )
-                .map_err(crate::database::DbError::from)?;
-            let changesets = statement
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(crate::database::DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(crate::database::DbError::from)?;
-            Ok(changesets)
-        })
+        .test_sql(|database| database.store_partition_changesets())
         .await
         .expect("read routed Store partitions");
     let all_changes = changesets
@@ -660,26 +653,18 @@ async fn insert_published_drop_intent(
     locator_hash: ObjectHash,
     disposition: &str,
 ) {
-    let (ns, id, disp) = (
-        namespace.to_string(),
-        blob_id.to_string(),
-        disposition.to_string(),
-    );
-    let size = bytes.len() as i64;
-    let plaintext_hash = ObjectHash::digest(bytes).to_string();
-    let locator_hash = locator_hash.to_string();
-    db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO published_blob_drop_intents \
-             (seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![seq, ns, id, size, plaintext_hash, locator_hash, disp],
-        )
-        .map(|_| ())
-        .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("insert published blob drop intent");
+    let drop = crate::sync::cycle::DeferredLocalBlobDrop {
+        namespace: namespace.to_string(),
+        id: blob_id.to_string(),
+        size: bytes.len() as u64,
+        plaintext_hash: ObjectHash::digest(bytes),
+        locator_hash,
+        disposition: crate::sync::cycle::DeferredLocalBlobDisposition::from_db(disposition)
+            .expect("test drop disposition"),
+    };
+    db.test_sql(move |database| database.insert_published_blob_drop_intent(seq as u64, &drop))
+        .await
+        .expect("insert published blob drop intent");
 }
 
 #[tokio::test]
@@ -692,26 +677,17 @@ async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() 
     insert_published_drop_intent(&db, 1, "covers", "shared-id", b"second", second, "pin").await;
 
     let count = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM published_blob_drop_intents
-                 WHERE seq = 1 AND namespace = 'covers' AND blob_id = 'shared-id'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.published_blob_drop_intent_count(1, "covers", "shared-id"))
         .await
         .expect("count exact drop intents");
     assert_eq!(count, 2);
 }
 
 async fn drop_intent_present(db: &Database, blob_id: &str) -> bool {
-    row_exists(
-        db,
-        &format!("SELECT 1 FROM published_blob_drop_intents WHERE blob_id = '{blob_id}'"),
-    )
-    .await
+    let blob_id = blob_id.to_string();
+    db.test_sql(move |database| database.published_blob_drop_intent_exists(&blob_id))
+        .await
+        .expect("inspect published blob drop intent")
 }
 
 async fn publish_fixture_position(
@@ -2746,15 +2722,8 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     .await;
     // Enqueue an upload with no intent to model impossible durable state directly.
     let row = photo_ref(&db, "photoaaa").await;
-    db.call(move |conn| {
-        crate::database::CloudOutboxRecords::new(conn).enqueue_upload(
-            "notes",
-            "n1",
-            &row,
-            &src,
-            true,
-            "0000000001000-0000-A",
-        )
+    db.test_sql(move |database| {
+        database.enqueue_blob_upload("notes", "n1", &row, &src, true, "0000000001000-0000-A")
     })
     .await
     .unwrap();
@@ -2947,7 +2916,7 @@ async fn make_local_commit_failure_removes_materialized_files() {
         &bytes,
     )
     .await;
-    db.call(|connection| {
+    db.test_sql(|connection| {
         connection
             .execute_batch(
                 "CREATE TRIGGER reject_make_local_gate_update

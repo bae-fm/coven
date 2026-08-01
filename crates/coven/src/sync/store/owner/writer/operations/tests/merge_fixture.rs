@@ -322,34 +322,16 @@ pub(super) async fn stored_remote_object(
     db: &Database,
     object: &crate::storage::ExactObjectRef,
 ) -> crate::protocol::remote_object::RemoteObjectRecord {
-    let object_id = crate::protocol::remote_object::remote_object_id(object);
-    db.call(move |conn| {
-        let encoded: String = conn
-            .query_row(
-                "SELECT state FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(crate::DbError::from)?;
-        serde_json::from_str(&encoded).map_err(|error| crate::DbError::Message(error.to_string()))
-    })
-    .await
-    .expect("load stored remote object")
+    db.remote_object_for_test(object.clone())
+        .await
+        .expect("load stored remote object")
 }
 
 pub(super) async fn remote_object_exists(
     db: &Database,
     object: &crate::storage::ExactObjectRef,
 ) -> bool {
-    let object_id = crate::protocol::remote_object::remote_object_id(object);
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(crate::DbError::from)
-    })
-    .await
-    .expect("check stored remote object")
+    db.remote_object_exists_for_test(object.clone())
+        .await
+        .expect("check stored remote object")
 }

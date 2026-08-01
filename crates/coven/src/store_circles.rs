@@ -53,6 +53,16 @@ impl StoreCircles {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn install_test_active_circle(
+        &self,
+        label: &str,
+    ) -> Result<crate::CircleId, crate::database::DbError> {
+        self.database
+            .install_test_active_circle(label.to_string())
+            .await
+    }
+
     pub(crate) async fn rename(
         &self,
         circle_id: crate::CircleId,

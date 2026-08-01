@@ -71,12 +71,10 @@ impl ReclaimJourneyFixture {
             .publish_acknowledgement(coverage)
             .await
             .expect("acknowledge covering snapshot");
-        db.call(|connection| {
-            let transaction = connection
-                .unchecked_transaction()
-                .map_err(crate::database::DbError::from)?;
-            StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
-            transaction.commit().map_err(crate::database::DbError::from)
+        db.test_sql(|database| {
+            database.transaction(|transaction| {
+                transaction.remove_retained_replay_ownership_from_snapshot()
+            })
         })
         .await
         .expect("release retained replay ownership");
@@ -409,14 +407,9 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         Err(StoreProtocolError::InvalidSignature)
     ));
 
-    db.call(|connection| {
-        let transaction = connection
-            .unchecked_transaction()
-            .map_err(crate::database::DbError::from)?;
-        crate::database::StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(
-            &transaction,
-        )?;
-        transaction.commit().map_err(crate::database::DbError::from)
+    db.test_sql(|database| {
+        database
+            .transaction(|transaction| transaction.remove_retained_replay_ownership_from_snapshot())
     })
     .await
     .expect("release retained replay package ownership");
@@ -533,14 +526,9 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .expect("load covering acknowledgement")
         .expect("covering acknowledgement exists")
         .reference;
-    db.call(|connection| {
-        let transaction = connection
-            .unchecked_transaction()
-            .map_err(crate::database::DbError::from)?;
-        crate::database::StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(
-            &transaction,
-        )?;
-        transaction.commit().map_err(crate::database::DbError::from)
+    db.test_sql(|database| {
+        database
+            .transaction(|transaction| transaction.remove_retained_replay_ownership_from_snapshot())
     })
     .await
     .expect("release target retained replay ownership");
@@ -628,31 +616,9 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         DurableStoreReclaimOperation::Authorized { activation, .. } => activation.commit().clone(),
         _ => unreachable!("fixture has an activated reclaim"),
     };
-    let StoreCommitCoord {
-        stream_id: activation_stream,
-        sequence: activation_sequence,
-    } = activation_commit.coord;
-    db.call(move |connection| {
-        let removed = connection
-            .execute(
-                "DELETE FROM materialized_commits \
-                     WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
-                rusqlite::params![
-                    activation_stream.to_string(),
-                    i64::try_from(activation_sequence).expect("activation sequence fits i64"),
-                    serde_json::to_string(&activation_commit).expect("serialize activation"),
-                ],
-            )
-            .map_err(crate::database::DbError::from)?;
-        if removed != 1 {
-            return Err(crate::database::DbError::Message(
-                "reclaim activation materialization was not removed".to_string(),
-            ));
-        }
-        Ok(())
-    })
-    .await
-    .expect("retract reclaim activation materialization");
+    db.test_sql(move |database| database.delete_exact_materialized_commit(&activation_commit))
+        .await
+        .expect("retract reclaim activation materialization");
 
     assert!(
         reclaim.execute_delete(authorized).await.is_err(),

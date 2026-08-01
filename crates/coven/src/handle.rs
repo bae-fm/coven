@@ -233,6 +233,14 @@ impl CovenHandle {
     }
 
     #[cfg(test)]
+    pub(crate) async fn install_test_active_circle(
+        &self,
+        label: &str,
+    ) -> Result<crate::CircleId, crate::database::DbError> {
+        self.circles.install_test_active_circle(label).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn publish_test_store(
         &self,
         store: &crate::sync::test_helpers::TestStore,
@@ -268,6 +276,42 @@ impl CovenHandle {
         write_id: &crate::WriteId,
     ) -> Result<i64, crate::database::DbError> {
         self.rows.write_blob_lease_count_for_test(write_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cleanup_intent_count_for_test(
+        &self,
+        namespace: String,
+        blob_id: String,
+    ) -> Result<i64, crate::database::DbError> {
+        self.rows
+            .cleanup_intent_count_for_test(namespace, blob_id)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn coven_table_exists_for_test(
+        &self,
+        table: crate::database::DatabaseTestTable,
+    ) -> Result<bool, crate::database::DbError> {
+        self.rows.coven_table_exists_for_test(table).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_store_write_failure_trigger_for_test(
+        &self,
+    ) -> Result<(), crate::database::DbError> {
+        self.rows
+            .install_store_write_failure_trigger_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_blob_facts_for_test(
+        &self,
+        write_id: crate::WriteId,
+    ) -> Result<String, crate::database::DbError> {
+        self.rows.write_blob_facts_for_test(write_id).await
     }
 
     #[cfg(test)]
@@ -2750,29 +2794,11 @@ mod tests {
                 .expect("read completed circle operations")
                 .is_empty());
 
-            let circle = circle_id.to_string();
-            db.call(move |conn| {
-                let activated: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                    [&circle],
-                    |row| row.get(0),
-                )?;
-                let active_access: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM circle_access_cache
-                 WHERE circle_id = ?1 AND disposition = 'active'",
-                    [&circle],
-                    |row| row.get(0),
-                )?;
-                let pending: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
-                    [&circle],
-                    |row| row.get(0),
-                )?;
-                assert_eq!((activated, active_access, pending), (2, 2, 0));
-                Ok::<_, crate::DbError>(())
-            })
-            .await
-            .expect("read activated circle state");
+            let counts = db
+                .test_sql(move |database| database.circle_state_counts(circle_id))
+                .await
+                .expect("read activated circle state");
+            assert_eq!(counts, (2, 2, 0));
         }))
         .await;
     }

@@ -763,7 +763,7 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     // Completing is not enough: the joining device has to hold the row the
     // owner's intervening commit carried, which is what converging over that
     // commit rather than stepping past it means.
-    let joined_db = rusqlite::Connection::open(config.store_dir.db_path())
+    let joined_db = crate::database::DatabaseImageTest::open(&config.store_dir.db_path())
         .expect("open the joined device's database");
     assert_eq!(
         joined_db

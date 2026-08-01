@@ -546,9 +546,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let write_id = db.new_write_id();
     let captured_write_id = write_id.clone();
     let routing = EncryptionService::from_key([42; 32]);
-    db.call(move |connection| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            connection,
+    db.test_sql(move |connection| {
+        connection.run_internal_store_write(
             &tables,
             Some(&routing),
             captured_write_id,
@@ -690,9 +689,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let late_write_id = concurrent_db.new_write_id();
     let captured_late_write_id = late_write_id.clone();
     concurrent_db
-        .call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
+        .test_sql(move |connection| {
+            connection.run_internal_store_write(
                 &concurrent_tables,
                 Some(&EncryptionService::from_key([42; 32])),
                 captured_late_write_id,
@@ -807,39 +805,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{injected}"
     );
     let partial_state = member_db
-        .call({
+        .test_sql({
             let blob_id = blob_id.to_string();
-            move |connection| {
-                connection
-                    .query_row(
-                        "SELECT
-                           EXISTS(SELECT 1 FROM documents WHERE id = ?1),
-                           EXISTS(
-                               SELECT 1 FROM circle_bootstrap_coverage WHERE circle_id = ?2
-                           ),
-                           EXISTS(
-                               SELECT 1 FROM circle_control_activations
-                               WHERE circle_id = ?2 AND control_coord = ?3
-                           ),
-                           EXISTS(
-                               SELECT 1 FROM remote_objects WHERE object_id = ?4
-                           )",
-                        rusqlite::params![
-                            blob_id,
-                            circle_id.to_string(),
-                            encoded_target_control,
-                            target_blob_object,
-                        ],
-                        |row| {
-                            Ok((
-                                row.get::<_, bool>(0)?,
-                                row.get::<_, bool>(1)?,
-                                row.get::<_, bool>(2)?,
-                                row.get::<_, bool>(3)?,
-                            ))
-                        },
-                    )
-                    .map_err(DbError::from)
+            move |database| {
+                database.circle_bootstrap_failure_state(
+                    &blob_id,
+                    circle_id,
+                    &encoded_target_control,
+                    target_blob_object,
+                )
             }
         })
         .await
@@ -861,16 +835,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         member_pull.held_positions
     );
     let installed_ids = member_db
-        .call(|connection| {
-            let mut statement = connection
-                .prepare("SELECT id FROM documents ORDER BY id")
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
-            Ok(rows)
+        .test_sql(|database| {
+            database
+                .query("SELECT id FROM documents ORDER BY id", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(DbError::from)
         })
         .await
         .expect("list installed recipient rows");
@@ -879,7 +849,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "recipient rows after bootstrap replay: {installed_ids:?}"
     );
     let installed_row = member_db
-        .call({
+        .test_sql({
             let blob_id = blob_id.to_string();
             move |connection| {
                 connection
@@ -911,7 +881,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
     );
     let installed_late_row = member_db
-        .call({
+        .test_sql({
             let late_id = late_id.to_string();
             move |connection| {
                 connection
@@ -1087,21 +1057,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("list completed Circle operations")
         .is_empty());
-    let object_id = crate::protocol::remote_object::remote_object_id(&bootstrap.image.object);
     let record = db
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .remote_object_for_test(bootstrap.image.object.clone())
         .await
         .expect("load bootstrap image ownership");
-    let record: crate::protocol::remote_object::RemoteObjectRecord =
-        serde_json::from_str(&record).expect("parse bootstrap image ownership");
     assert!(matches!(
         record,
         crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(ref shared)
@@ -1110,25 +1069,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 crate::protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
             )
     ));
-    let blob_object_id = crate::protocol::remote_object::remote_object_id(
-        blob.stored()
-            .expect("Circle bootstrap row blob has an exact locator")
-            .object(),
-    );
+    let blob_object = blob
+        .stored()
+        .expect("Circle bootstrap row blob has an exact locator")
+        .object()
+        .clone();
     let blob_record = db
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [blob_object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .remote_object_for_test(blob_object)
         .await
         .expect("read bootstrap blob ownership");
-    let blob_record: crate::protocol::remote_object::RemoteObjectRecord =
-        serde_json::from_str(&blob_record).expect("parse bootstrap blob ownership");
     let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(blob_record) =
         blob_record
     else {
@@ -1264,9 +1213,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let write_id = db.new_write_id();
     let captured_write_id = write_id.clone();
     let routing = EncryptionService::from_key([42; 32]);
-    db.call(move |connection| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            connection,
+    db.test_sql(move |connection| {
+        connection.run_internal_store_write(
             &tables,
             Some(&routing),
             captured_write_id,
@@ -1391,7 +1339,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         tempfile::tempdir().expect("create candidate base database directory");
     let candidate_base_path = candidate_base_temp.path().join("pre-close.sqlite3");
     let copied_path = candidate_base_path.clone();
-    db.call(move |connection| {
+    db.test_sql(move |connection| {
         connection
             .execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
             .map(|_| ())
@@ -1687,7 +1635,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )],
     ));
     assert!(db
-        .call(|connection| {
+        .test_sql(|connection| {
             connection
                 .query_row(
                     "SELECT EXISTS(
@@ -1926,10 +1874,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         "the successor bootstrap covers exactly the accepted close cutoff"
     );
     let retained_bootstrap = db
-        .call({
+        .test_sql({
             let control = successor.control.coord.clone();
-            move |connection| {
-                let bootstraps = StoreDatabase::circle_bootstrap_replay_inputs_on(connection)?;
+            move |database| {
+                let bootstraps = database.circle_bootstrap_replay_inputs()?;
                 Ok(bootstraps.into_iter().find_map(|(_, bootstrap)| {
                     (bootstrap.circle_id() == circle_id && bootstrap.control() == &control)
                         .then_some(bootstrap)
@@ -1944,12 +1892,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_bootstrap.image.image_hash,
         "the retained bootstrap image hashes to its recorded image hash"
     );
-    let (_image_temp, image_dir) = temp_store_dir();
-    let image_path = image_dir.as_ref().join("successor-bootstrap-image.sqlite3");
-    std::fs::write(&image_path, retained_bootstrap.image_bytes())
-        .expect("write the successor bootstrap image");
-    let image =
-        rusqlite::Connection::open(&image_path).expect("open the successor bootstrap image");
+    let image = crate::database::DatabaseImageTest::from_bytes(retained_bootstrap.image_bytes())
+        .expect("open the successor bootstrap image");
     let converges: bool = image
         .query_row(
             "SELECT EXISTS(
@@ -2043,30 +1987,16 @@ async fn uploaded_circle_candidate_fails_when_its_ownership_record_is_missing() 
     let (_store, _signer, mut journal) =
         persist_merge_operation(&db, "circle-missing-candidate-ownership").await;
     let step = "access-leaf-0";
-    let object_id = crate::protocol::remote_object::remote_object_id(
-        journal
-            .operation()
-            .prepared_objects
-            .get(step)
-            .expect("operation carries its access leaf")
-            .reference(),
-    );
-    db.call(move |conn| {
-        let deleted = conn
-            .execute(
-                "DELETE FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if deleted != 1 {
-            return Err(DbError::Message(
-                "expected candidate ownership record was absent before deletion".to_string(),
-            ));
-        }
-        Ok(())
-    })
-    .await
-    .expect("remove candidate ownership record");
+    let object = journal
+        .operation()
+        .prepared_objects
+        .get(step)
+        .expect("operation carries its access leaf")
+        .reference()
+        .clone();
+    db.delete_remote_object_for_test(object)
+        .await
+        .expect("remove candidate ownership record");
     journal.operation_mut().uploaded.insert(step.to_string());
 
     let error = crate::database::StoreDatabase::new(&db)
@@ -2397,9 +2327,8 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     let member_circle_id = fixture.circle_id;
     fixture
         .member_db
-        .call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
+        .test_sql(move |connection| {
+            connection.run_internal_store_write(
                 &member_tables,
                 Some(&EncryptionService::from_key([42; 32])),
                 captured_member_write_id,
@@ -2606,9 +2535,8 @@ async fn publish_owner_circle_row(fixture: &ClosingFounderCircle, row_id: &str, 
     let stamp = stamp.to_string();
     fixture
         .db
-        .call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
+        .test_sql(move |connection| {
+            connection.run_internal_store_write(
                 &tables,
                 Some(&routing),
                 captured_write_id,
@@ -2646,7 +2574,7 @@ async fn member_has_row(fixture: &ClosingFounderCircle, row_id: &str) -> bool {
     let row_id = row_id.to_string();
     fixture
         .member_db
-        .call(move |connection| {
+        .test_sql(move |connection| {
             connection
                 .query_row(
                     "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -3738,23 +3666,17 @@ async fn capture_circle_document(
     let audience_value = circle_id.to_string();
     let row_id = row_id.to_string();
     let stamp = stamp.to_string();
-    db.call(move |connection| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            connection,
-            &tables,
-            Some(&routing),
-            captured,
-            |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO documents (id, audience, _updated_at)
+    db.test_sql(move |connection| {
+        connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO documents (id, audience, _updated_at)
                          VALUES (?1, ?2, ?3)",
-                        rusqlite::params![row_id, audience_value, stamp],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            },
-        )
+                    rusqlite::params![row_id, audience_value, stamp],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
     })
     .await
     .expect("capture Circle document row");
@@ -3763,7 +3685,7 @@ async fn capture_circle_document(
 
 async fn document_present(db: &Database, row_id: &str) -> bool {
     let row_id = row_id.to_string();
-    db.call(move |connection| {
+    db.test_sql(move |connection| {
         connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
@@ -3777,18 +3699,10 @@ async fn document_present(db: &Database, row_id: &str) -> bool {
 }
 
 async fn circle_bootstrap_coverage_count(db: &Database, circle_id: CircleId) -> i64 {
-    let circle_id = circle_id.to_string();
-    db.call(move |connection| {
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                [circle_id],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)
-    })
-    .await
-    .expect("count Circle bootstrap coverage")
+    crate::database::StoreDatabase::new(db)
+        .circle_bootstrap_coverage_count_for_test(circle_id)
+        .await
+        .expect("count Circle bootstrap coverage")
 }
 
 /// Pull every Store commit onto the silent participant's device from its own
@@ -4436,25 +4350,10 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
     );
 
     // Forge an exclusions row directly — no verified outcome names this device.
-    let circle_id = fixture.circle_id.to_string();
+    let circle_id = fixture.circle_id;
     fixture
         .silent_db
-        .call(move |conn| {
-            conn.execute(
-                "INSERT INTO circle_close_exclusions
-                 (circle_id, close_id, excluded_registration, successor_control, activating_commit)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    circle_id,
-                    "\"0000000000000000000000000000000000000000000000000000000000000000\"",
-                    "{\"forged\":\"registration\"}",
-                    "{\"forged\":\"control\"}",
-                    "{\"forged\":\"commit\"}",
-                ],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
+        .test_sql(move |database| database.forge_circle_close_exclusion(circle_id))
         .await
         .expect("forge the exclusion row");
 

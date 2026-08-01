@@ -334,59 +334,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         },
     );
     owner_db
-        .call(move |connection| {
-            let rows = {
-                let mut statement = connection
-                    .prepare("SELECT commit_ref, state FROM store_device_state_snapshots")
-                    .map_err(crate::database::DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(crate::database::DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(crate::database::DbError::from)?;
-                rows
-            };
-            for (commit, encoded) in rows {
-                let state: crate::protocol::store_commit::ResolvedStoreDeviceState =
-                    serde_json::from_str(&encoded).map_err(|error| {
-                        crate::database::DbError::Message(format!(
-                            "parse test Store device snapshot: {error}"
-                        ))
-                    })?;
-                let mut forged_registration = state
-                    .devices
-                    .values()
-                    .next()
-                    .ok_or_else(|| {
-                        crate::database::DbError::Message(
-                            "test Store device snapshot has no registration".to_string(),
-                        )
-                    })?
-                    .registration
-                    .clone();
-                forged_registration.device_id = forged_device_id;
-                let forged = state
-                    .activate_registration(forged_registration.clone(), None)
-                    .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-                connection
-                    .execute(
-                        "UPDATE store_device_state_snapshots SET state = ?1 \
-                         WHERE commit_ref = ?2",
-                        rusqlite::params![
-                            serde_json::to_string(&forged).map_err(|error| {
-                                crate::database::DbError::Message(format!(
-                                    "serialize forged Store device snapshot: {error}"
-                                ))
-                            })?,
-                            commit,
-                        ],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-            }
-            Ok(())
-        })
+        .test_sql(move |database| database.forge_device_in_state_snapshots(forged_device_id))
         .await
         .expect("tamper local Store device projection");
 

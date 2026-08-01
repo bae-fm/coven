@@ -3,12 +3,12 @@
 use crate::storage::StoreObjectError;
 
 #[cfg(test)]
-use crate::database::{Database, StoreDatabase};
+use crate::database::Database;
 #[cfg(test)]
 use crate::keys::UserKeypair;
 #[cfg(test)]
 use crate::protocol::store_commit::{
-    owner_recovery_semantic_prefix, ObjectHash, OwnerRecoveryPosition, StoreCommitCoord,
+    owner_recovery_semantic_prefix, OwnerRecoveryPosition, StoreCommitCoord,
     StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
 #[cfg(test)]
@@ -118,86 +118,14 @@ mod tests {
         panic!("recovery commit is materialized")
     }
 
-    #[derive(Clone, Copy)]
-    enum RetainedRegistrationTamper {
-        CanonicalRegistration,
-        ActivationAuthority,
-    }
-
     async fn tamper_retained_recovery_registration(
         db: &Database,
         reference: &StoreBatchCommitRef,
-        tamper: RetainedRegistrationTamper,
+        tamper: crate::database::RetainedRegistrationTamper,
     ) {
-        let StoreCommitCoord {
-            stream_id,
-            sequence,
-        } = &reference.coord;
-        let stream_id = stream_id.to_string();
-        let sequence = i64::try_from(*sequence).expect("recovery sequence fits SQLite");
-        db.call(move |conn| {
-            let (commit_ref, canonical_input): (String, Vec<u8>) = conn
-                .query_row(
-                    "SELECT commit_ref, canonical_input
-                     FROM retained_merge_materializations
-                     WHERE device_id = ?1 AND seq = ?2",
-                    (&stream_id, sequence),
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(crate::database::DbError::from)?;
-            let mut input: serde_json::Value = serde_json::from_slice(&canonical_input)
-                .expect("parse retained recovery materialization");
-            let registration = input
-                .get_mut("activation")
-                .and_then(|value| value.get_mut("registrations"))
-                .and_then(|value| value.get_mut("registrations"))
-                .and_then(serde_json::Value::as_array_mut)
-                .and_then(|values| values.first_mut())
-                .expect("retained recovery registration");
-            match tamper {
-                RetainedRegistrationTamper::CanonicalRegistration => registration
-                    .get_mut("canonical_registration")
-                    .and_then(serde_json::Value::as_array_mut)
-                    .expect("canonical recovery registration bytes")
-                    .push(serde_json::Value::from(b' ')),
-                RetainedRegistrationTamper::ActivationAuthority => {
-                    let recovery = registration
-                        .get_mut("authority")
-                        .and_then(|value| value.get_mut("recovery"))
-                        .and_then(serde_json::Value::as_object_mut)
-                        .expect("retained recovery authority");
-                    recovery.insert(
-                        "recovery_id".to_string(),
-                        serde_json::Value::String("0".repeat(64)),
-                    );
-                }
-            }
-            let canonical_input = serde_json::to_vec(&input)
-                .expect("serialize tampered retained recovery materialization");
-            let input_hash = ObjectHash::digest(&canonical_input).to_string();
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
-                (&stream_id, sequence),
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "UPDATE retained_merge_materializations
-                 SET input_hash = ?3, canonical_input = ?4
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![&stream_id, sequence, &input_hash, &canonical_input],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.execute(
-                "INSERT INTO materialized_commits
-                 (device_id, seq, commit_ref, retained_commit_ref, retained_input_hash)
-                 VALUES (?1, ?2, ?3, ?3, ?4)",
-                rusqlite::params![&stream_id, sequence, &commit_ref, &input_hash],
-            )
-            .map_err(crate::database::DbError::from)?;
-            tx.commit().map_err(crate::database::DbError::from)
+        let reference = reference.clone();
+        db.test_sql(move |database| {
+            database.tamper_retained_recovery_registration(&reference, tamper)
         })
         .await
         .expect("install tampered retained recovery registration");
@@ -272,20 +200,10 @@ mod tests {
     #[tokio::test]
     async fn recovery_materialization_reopens_its_retained_introduced_author() {
         let (_store, db, registration, reference) = recovered_author().await;
-        let device_id = registration.device_id.to_string();
-        let registration_hash = registration.registration_hash.to_string();
-        db.call(move |conn| {
-            conn.execute(
-                "UPDATE store_device_registration_activations
-                 SET registration_bytes = X'00'
-                 WHERE device_id = ?1 AND registration_hash = ?2",
-                (&device_id, &registration_hash),
-            )
-            .map_err(crate::database::DbError::from)?;
-            Ok(())
-        })
-        .await
-        .expect("corrupt activated recovery registration fixture");
+        let registration = registration.clone();
+        db.test_sql(move |conn| conn.corrupt_store_device_registration_bytes(&registration))
+            .await
+            .expect("corrupt activated recovery registration fixture");
 
         let frontier = crate::database::StoreDatabase::new(&db)
             .materialized_frontier()
@@ -301,13 +219,13 @@ mod tests {
         tamper_retained_recovery_registration(
             &db,
             &reference,
-            RetainedRegistrationTamper::CanonicalRegistration,
+            crate::database::RetainedRegistrationTamper::CanonicalRegistration,
         )
         .await;
 
         let root = store.root.clone();
-        db.call(move |conn| {
-            StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root).map(drop)
+        db.test_sql(move |database| {
+            database.load_retained_merge_replay_inputs(&root).map(drop)
         })
         .await
         .expect_err(
@@ -321,13 +239,13 @@ mod tests {
         tamper_retained_recovery_registration(
             &db,
             &reference,
-            RetainedRegistrationTamper::ActivationAuthority,
+            crate::database::RetainedRegistrationTamper::ActivationAuthority,
         )
         .await;
 
         let root = store.root.clone();
-        db.call(move |conn| {
-            StoreDatabase::load_retained_merge_replay_inputs_on(conn, &root).map(drop)
+        db.test_sql(move |database| {
+            database.load_retained_merge_replay_inputs(&root).map(drop)
         })
             .await
             .expect_err(

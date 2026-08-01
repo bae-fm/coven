@@ -1437,17 +1437,17 @@ mod derived_state_tests {
         let owner_pubkey = crate::keys::public_key_hex(&owner);
         let db = crate::sync::test_helpers::open_test_db();
         let state = db
-            .call(|conn| {
-                crate::database::apply_coven_routing_schema(conn)
-                    .map_err(crate::database::DbError::from)?;
-                let (circle_id, _) =
-                    crate::sync::test_helpers::install_test_active_circle(conn, "derived-state");
-                crate::database::StoreDatabase::circle_current_state_on(conn, circle_id)?
-                    .ok_or_else(|| {
-                        crate::database::DbError::Message(
-                            "installed active circle has no current state".to_string(),
-                        )
-                    })
+            .test_sql(|database| {
+                database.apply_coven_routing_schema()?;
+                let (circle_id, _) = crate::sync::test_helpers::install_test_active_circle(
+                    &database,
+                    "derived-state",
+                );
+                database.circle_current_state(circle_id)?.ok_or_else(|| {
+                    crate::database::DbError::Message(
+                        "installed active circle has no current state".to_string(),
+                    )
+                })
             })
             .await
             .expect("install and read the active current state");
@@ -1456,20 +1456,17 @@ mod derived_state_tests {
 
     async fn installed_inactive_state() -> CircleCurrentState {
         let db = crate::sync::test_helpers::open_test_db();
-        db.call(|conn| {
-            crate::database::apply_coven_routing_schema(conn)
-                .map_err(crate::database::DbError::from)?;
+        db.test_sql(|database| {
+            database.apply_coven_routing_schema()?;
             let (circle_id, _) = crate::sync::test_helpers::install_test_inactive_circle(
-                conn,
+                &database,
                 "derived-state-inactive",
             );
-            crate::database::StoreDatabase::circle_current_state_on(conn, circle_id)?.ok_or_else(
-                || {
-                    crate::database::DbError::Message(
-                        "installed inactive circle has no current state".to_string(),
-                    )
-                },
-            )
+            database.circle_current_state(circle_id)?.ok_or_else(|| {
+                crate::database::DbError::Message(
+                    "installed inactive circle has no current state".to_string(),
+                )
+            })
         })
         .await
         .expect("install and read the inactive current state")

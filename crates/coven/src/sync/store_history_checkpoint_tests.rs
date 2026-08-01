@@ -229,22 +229,9 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     let (db, store, _device_id, _membership, _temp, store_dir) = published_history(1).await;
     let retained = retained_history(&db, &store).await;
     let reference = retained[0].commit_ref().clone();
-    let stream_id = reference.coord.stream_id.to_string();
-    let sequence = reference.coord.sequence;
-    db.call(move |conn| {
-        conn.pragma_update(None, "foreign_keys", "OFF")
-            .map_err(crate::database::DbError::from)?;
-        conn.execute(
-            "DELETE FROM retained_merge_materializations WHERE device_id = ?1 AND seq = ?2",
-            rusqlite::params![
-                stream_id,
-                i64::try_from(sequence).expect("test sequence fits")
-            ],
-        )
-        .map_err(crate::database::DbError::from)?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(crate::database::DbError::from)?;
-        Ok(())
+    let reference = reference.clone();
+    db.test_sql(move |database| {
+        database.delete_retained_materialization_without_foreign_keys(&reference)
     })
     .await
     .expect("remove retained frontier row");
@@ -264,22 +251,9 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
         let encoded =
             serde_json::to_string(retained[0].commit_ref()).expect("serialize commit ref");
         if delete_state {
-            db.call(move |conn| {
-                let deleted = conn
-                    .execute(
-                        "DELETE FROM store_device_state_snapshots WHERE commit_ref = ?1",
-                        [encoded],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                if deleted != 1 {
-                    return Err(crate::database::DbError::Message(
-                        "checkpoint state sabotage found no exact row".to_string(),
-                    ));
-                }
-                Ok(())
-            })
-            .await
-            .expect("delete checkpoint state");
+            db.test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
+                .await
+                .expect("delete checkpoint state");
         } else {
             let state = store_database(&db)
                 .resolved_store_device_state(&retained[0].history_summary().post_state)
@@ -306,24 +280,9 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             let forged = state
                 .activate_owner_recovery(grant, activation)
                 .expect("construct another canonical device state");
-            let encoded_state =
-                serde_json::to_string(&forged).expect("serialize forged canonical device state");
-            db.call(move |conn| {
-                let updated = conn
-                    .execute(
-                        "UPDATE store_device_state_snapshots SET state = ?1 WHERE commit_ref = ?2",
-                        rusqlite::params![encoded_state, encoded],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                if updated != 1 {
-                    return Err(crate::database::DbError::Message(
-                        "checkpoint state forgery found no exact row".to_string(),
-                    ));
-                }
-                Ok(())
-            })
-            .await
-            .expect("forge canonical checkpoint state");
+            db.test_sql(move |conn| conn.replace_device_state_snapshot(&encoded, &forged))
+                .await
+                .expect("forge canonical checkpoint state");
         }
         let error = prepare_sabotaged_successor(&db, &store, &store_dir).await;
         assert!(

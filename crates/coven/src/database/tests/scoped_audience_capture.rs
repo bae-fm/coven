@@ -8,16 +8,20 @@ fn routing_keyring() -> MasterKeyring {
 }
 
 fn routing_id(conn: &rusqlite::Connection, table: &str, row_id: &str) -> String {
-    crate::sync::test_helpers::test_row_routing_id(conn, [7; 32], table, row_id).to_string()
+    let database = crate::database::DatabaseTestSql::new(conn);
+    crate::sync::test_helpers::test_row_routing_id(&database, [7; 32], table, row_id).to_string()
 }
 
 fn seed_store_root(conn: &rusqlite::Connection) {
-    crate::sync::test_helpers::install_test_store_root_authority(conn, "scoped-routing-root");
+    let database = crate::database::DatabaseTestSql::new(conn);
+    crate::sync::test_helpers::install_test_store_root_authority(&database, "scoped-routing-root");
 }
 
 fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {
     seed_store_root(conn);
-    let (circle_id, control) = crate::sync::test_helpers::install_test_active_circle(conn, label);
+    let database = crate::database::DatabaseTestSql::new(conn);
+    let (circle_id, control) =
+        crate::sync::test_helpers::install_test_active_circle(&database, label);
     (
         circle_id.to_string(),
         serde_json::to_string(&control).expect("serialize active Circle control"),
@@ -677,8 +681,9 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
     let unknown_circle = crate::CircleId::from_bytes([3; 16]).to_string();
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
     seed_store_root(&authority);
+    let database = crate::database::DatabaseTestSql::new(&authority);
     let (inactive_circle, _) =
-        crate::sync::test_helpers::install_test_inactive_circle(&authority, "inactive-circle");
+        crate::sync::test_helpers::install_test_inactive_circle(&database, "inactive-circle");
     drop(authority);
 
     for (id, audience, expected_error) in [

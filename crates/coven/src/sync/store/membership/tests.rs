@@ -890,7 +890,7 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     floor.sort_by_key(|reference| reference.coord.stream_key());
     let rejected_key =
         crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_second_membership_floor \
                  BEFORE INSERT ON protocol_state \
@@ -927,7 +927,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .clone();
     let rejected_key =
         crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_anchor_cursor \
              BEFORE INSERT ON protocol_state \

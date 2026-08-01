@@ -26,12 +26,7 @@ pub(super) async fn initialize_exact_store(
 }
 
 pub(super) async fn remove_exact_store_root(db: &Database) {
-    db.call(|connection| {
-        connection
-            .execute("DELETE FROM store_protocol_root_authority", [])
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("remove exact Store root authority");
+    db.test_sql(|database| database.remove_store_protocol_root())
+        .await
+        .expect("remove exact Store root authority");
 }

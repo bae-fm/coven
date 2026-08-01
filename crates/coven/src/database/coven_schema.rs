@@ -795,6 +795,21 @@ pub(crate) fn all_table_names() -> std::collections::BTreeSet<&'static str> {
     all_coven_table_names()
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct DatabaseTestTable(pub(super) &'static str);
+
+#[cfg(test)]
+impl DatabaseTestTable {
+    pub(crate) fn named(name: &'static str) -> Self {
+        assert!(
+            all_coven_table_names().contains(name),
+            "{name:?} is not a Coven-owned table"
+        );
+        Self(name)
+    }
+}
+
 pub(crate) fn live_coven_schema_manifest(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<CovenSchemaManifest> {

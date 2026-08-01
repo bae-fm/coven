@@ -214,23 +214,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .await
         .expect("retain post-exclusion snapshot membership authority");
     let live_evidence = owner_db
-        .call(|connection| {
-            connection
-                .query_row(
-                    "SELECT exclusion_ref, accepted_cut, activation_commit, activation_head
-                         FROM store_author_exclusion_activations",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )
-                .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.author_exclusion_activation_evidence())
         .await
         .expect("read live author exclusion evidence");
 
@@ -256,17 +240,10 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .publish_acknowledgement(snapshot_coverage)
         .await
         .expect("acknowledge author exclusion snapshot");
-    let image_path = directory.path().join("inspected.db");
-    std::fs::write(&image_path, &image).expect("write author exclusion snapshot image");
-    let image =
-        rusqlite::Connection::open(&image_path).expect("open author exclusion snapshot image");
+    let image = crate::database::DatabaseImageTest::from_bytes(&image)
+        .expect("open author exclusion snapshot image");
     let stored: (String, String, String, String) = image
-        .query_row(
-            "SELECT exclusion_ref, accepted_cut, activation_commit, activation_head
-                 FROM store_author_exclusion_activations",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
+        .author_exclusion_activation_evidence()
         .expect("snapshot carries author exclusion evidence");
     assert_eq!(stored, live_evidence);
     assert_eq!(
@@ -274,8 +251,6 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
             .expect("parse snapshotted exclusion reference"),
         exclusion,
     );
-    drop(image);
-
     for tamper in [
         AuthorExclusionLocatorTamper::Missing,
         AuthorExclusionLocatorTamper::ExclusionReference,
@@ -994,19 +969,7 @@ async fn assert_terminal_merge_transaction_rollback(
         }
         TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
             peer_db
-                .call(|connection| {
-                    connection
-                        .execute_batch(
-                            "CREATE TRIGGER delete_retracted_device_state_early
-                                 AFTER DELETE ON materialized_commits
-                                 BEGIN
-                                   DELETE FROM store_device_state_snapshots
-                                   WHERE commit_ref = OLD.commit_ref;
-                                 END;",
-                        )
-                        .map_err(crate::database::DbError::from)?;
-                    Ok(())
-                })
+                .test_sql(|database| database.install_retracted_device_state_failure_trigger())
                 .await
                 .expect("install early device-state deletion trigger");
         }
@@ -1046,7 +1009,7 @@ async fn assert_terminal_merge_transaction_rollback(
     ));
     assert_eq!(
         peer_db
-            .call(|connection| {
+            .test_sql(|connection| {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM notes WHERE id IN (
@@ -1210,27 +1173,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         )
         .await;
         let (local_status, local_partitions, local_changeset_bytes) = peer_db
-            .call(|connection| {
-                connection
-                    .query_row(
-                        "SELECT status,
-                                    (SELECT COUNT(*) FROM store_write_partitions p
-                                     WHERE p.write_id = w.write_id),
-                                    (SELECT COALESCE(SUM(length(changeset)), 0)
-                                     FROM store_write_partitions p
-                                     WHERE p.write_id = w.write_id)
-                             FROM store_writes w ORDER BY ordinal DESC LIMIT 1",
-                        [],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                            ))
-                        },
-                    )
-                    .map_err(crate::database::DbError::from)
-            })
+            .test_sql(|database| database.latest_local_write_facts())
             .await
             .expect("load local-only replay input");
         assert_eq!(local_status, "\"local_only\"");
@@ -1280,7 +1223,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         };
         assert_eq!(witness.original_position(), &original);
         let row_count = peer_db
-            .call(|connection| {
+            .test_sql(|connection| {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM notes WHERE id = 'excluded-peer-note'",
@@ -1293,7 +1236,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .expect("count retracted host row");
         assert_eq!(row_count, 0);
         let local_row_count = peer_db
-            .call(|connection| {
+            .test_sql(|connection| {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM notes
@@ -1307,7 +1250,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .expect("count retained local-only host row");
         assert_eq!(local_row_count, 1);
         let surviving_row_count = peer_db
-            .call(|connection| {
+            .test_sql(|connection| {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM notes WHERE id = 'surviving-owner-note'",
@@ -1346,18 +1289,9 @@ async fn run_excluded_author_candidate_cleanup_case(
             }) if current == witness
         ));
         let prepared_count = reopened
-            .call({
+            .test_sql({
                 let write_id = write_id.clone();
-                move |connection| {
-                    connection
-                        .query_row(
-                            "SELECT COUNT(*) FROM store_writes
-                                 WHERE write_id = ?1 AND prepared IS NOT NULL",
-                            [write_id.as_str()],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .map_err(crate::database::DbError::from)
-                }
+                move |database| database.prepared_write_count(&write_id)
             })
             .await
             .expect("count retracted candidate preparation");
@@ -1534,36 +1468,8 @@ async fn run_excluded_author_candidate_cleanup_case(
             .collect::<Vec<_>>();
         let indexed_write_id = write_id.clone();
         peer_db
-            .call(move |connection| {
-                let tx = connection
-                    .unchecked_transaction()
-                    .map_err(crate::database::DbError::from)?;
-                for (index, record) in records.into_iter().enumerate() {
-                    let object_id = record.object_id();
-                    tx.execute(
-                        "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                        rusqlite::params![
-                            object_id.to_string(),
-                            serde_json::to_string(&record).map_err(|error| {
-                                crate::database::DbError::Message(error.to_string())
-                            })?
-                        ],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                    tx.execute(
-                        "INSERT INTO store_write_blobs
-                             (write_id, audience, locator_hash, remote_object_id, spool_path)
-                             VALUES (?1, 'store', ?2, ?3, NULL)",
-                        rusqlite::params![
-                            indexed_write_id.as_str(),
-                            ObjectHash::digest(format!("indexed shared blob {index}").as_bytes())
-                                .to_string(),
-                            object_id.to_string(),
-                        ],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                }
-                tx.commit().map_err(crate::database::DbError::from)
+            .test_sql(move |database| {
+                database.install_indexed_shared_blobs(&indexed_write_id, records)
             })
             .await
             .expect("index shared blobs under excluded candidate");
@@ -1616,52 +1522,27 @@ async fn run_excluded_author_candidate_cleanup_case(
                 .all(|target| &target.object != object));
         }
         let indexed = indexed_shared_blobs.clone();
-        reopened
-            .call(move |connection| {
-                for (index, (object_id, _)) in indexed.into_iter().enumerate() {
-                    let state: String = connection
-                        .query_row(
-                            "SELECT state FROM remote_objects WHERE object_id = ?1",
-                            [object_id.to_string()],
-                            |row| row.get(0),
-                        )
-                        .map_err(crate::database::DbError::from)?;
-                    let record: crate::protocol::remote_object::RemoteObjectRecord =
-                        serde_json::from_str(&state).map_err(|error| {
-                            crate::database::DbError::Message(error.to_string())
-                        })?;
-                    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
-                        record
-                    else {
-                        return Err(crate::database::DbError::Message(
-                            "indexed blob changed remote-object domain".to_string(),
-                        ));
-                    };
-                    match (index, record.state) {
-                        (
-                            0,
-                            crate::protocol::remote_object::OwnedObjectState::RetirementPending {
-                                ..
-                            },
-                        ) => {}
-                        (
-                            1,
-                            crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
-                                ownership,
-                            },
-                        ) if ownership.pending.is_empty() && ownership.activated.len() == 1 => {}
-                        _ => {
-                            return Err(crate::database::DbError::Message(
-                                "excluded candidate retained indexed shared blob ownership"
-                                    .to_string(),
-                            ));
-                        }
-                    }
+        for (index, (_, object)) in indexed.into_iter().enumerate() {
+            let record = reopened
+                .remote_object_for_test(object)
+                .await
+                .expect("load indexed shared blob ownership transition");
+            let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = record
+            else {
+                panic!("indexed blob changed remote-object domain");
+            };
+            match (index, record.state) {
+                (0, crate::protocol::remote_object::OwnedObjectState::RetirementPending { .. }) => {
                 }
-                Ok(())
-            })
-            .await
-            .expect("verify indexed shared blob ownership transition");
+                (
+                    1,
+                    crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                        ownership,
+                    },
+                ) if ownership.pending.is_empty() && ownership.activated.len() == 1 => {}
+                _ => panic!("excluded candidate retained indexed shared blob ownership"),
+            }
+        }
     }
     publish_after_absent_proof_detached(
         head_publication,
@@ -1691,54 +1572,31 @@ async fn run_excluded_author_candidate_cleanup_case(
         );
     }
     if cleanup_pending && sabotage_activation_head {
-        let candidate_object_id =
-            crate::protocol::remote_object::remote_object_id(&candidate_ref.object);
+        let mut remote = reopened
+            .remote_object_for_test(candidate_ref.object.clone())
+            .await
+            .expect("load cleanup candidate ownership");
+        {
+            let crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) =
+                &mut remote
+            else {
+                panic!("cleanup candidate is not a commit");
+            };
+            let crate::protocol::remote_object::CandidateCommitState::CleanupPending {
+                proof:
+                    crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                        activation_head,
+                        ..
+                    },
+            } = &mut record.state
+            else {
+                panic!("cleanup candidate has no author-exclusion proof");
+            };
+            activation_head.head_hash =
+                ObjectHash::digest(b"different durable author-exclusion activation head");
+        }
         reopened
-            .call(move |connection| {
-                let state: String = connection
-                    .query_row(
-                        "SELECT state FROM remote_objects WHERE object_id = ?1",
-                        [candidate_object_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                let mut remote: crate::protocol::remote_object::RemoteObjectRecord =
-                    serde_json::from_str(&state)
-                        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-                let crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) =
-                    &mut remote
-                else {
-                    return Err(crate::database::DbError::Message(
-                        "cleanup candidate is not a commit".to_string(),
-                    ));
-                };
-                let crate::protocol::remote_object::CandidateCommitState::CleanupPending {
-                    proof:
-                        crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                            activation_head,
-                            ..
-                        },
-                } = &mut record.state
-                else {
-                    return Err(crate::database::DbError::Message(
-                        "cleanup candidate has no author-exclusion proof".to_string(),
-                    ));
-                };
-                activation_head.head_hash =
-                    ObjectHash::digest(b"different durable author-exclusion activation head");
-                connection
-                    .execute(
-                        "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-                        (
-                            candidate_object_id.to_string(),
-                            serde_json::to_string(&remote).map_err(|error| {
-                                crate::database::DbError::Message(error.to_string())
-                            })?,
-                        ),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                Ok(())
-            })
+            .replace_remote_object_for_test(candidate_ref.object.clone(), remote)
             .await
             .expect("sabotage durable activation head");
         assert!(crate::database::StoreDatabase::new(&reopened)

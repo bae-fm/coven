@@ -72,15 +72,13 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-snapshot-device");
     let (root_ref, _) = initialize(&db, &storage, &signer).await;
-    db.call(|conn| {
-        crate::database::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("apply routing schema");
+    db.test_sql(|database| database.apply_coven_routing_schema())
+        .await
+        .expect("apply routing schema");
     let (circle_id, control) = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn, "snap",
+                &conn, "snap",
             ))
         })
         .await
@@ -157,15 +155,13 @@ async fn non_member_cannot_decrypt_circle_snapshot() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-snapshot-outsider");
     let (root_ref, device_id) = initialize(&db, &storage, &signer).await;
-    db.call(|conn| {
-        crate::database::apply_coven_routing_schema(conn).map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("apply routing schema");
+    db.test_sql(|database| database.apply_coven_routing_schema())
+        .await
+        .expect("apply routing schema");
     let (circle_id, _control) = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn, "snap",
+                &conn, "snap",
             ))
         })
         .await

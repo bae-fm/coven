@@ -12,37 +12,22 @@ async fn raw_changeset(db: &crate::database::Database, tables: &[&str], sql: &st
         .map(|table| table.to_string())
         .collect::<Vec<_>>();
     let sql = sql.to_string();
-    db.call(move |conn| {
-        let mut session =
-            rusqlite::session::Session::new(conn).map_err(crate::database::DbError::from)?;
-        for table in tables {
-            session
-                .attach(Some(table.as_str()))
-                .map_err(crate::database::DbError::from)?;
-        }
-        conn.execute_batch(&sql)
-            .map_err(crate::database::DbError::from)?;
-        let mut bytes = Vec::new();
-        session
-            .changeset_strm(&mut bytes)
-            .map_err(crate::database::DbError::from)?;
-        Ok(bytes)
-    })
-    .await
-    .expect("capture raw changeset")
+    db.test_sql(move |database| database.capture_changeset(&tables, &[sql]))
+        .await
+        .expect("capture raw changeset")
 }
 
 async fn apply_result(
     db: &crate::database::Database,
     bytes: &[u8],
 ) -> Result<(), crate::database::DbError> {
-    use crate::database::resolve_and_apply_changeset;
-
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.call(move |conn| {
-        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+    db.test_sql(move |database| {
+        database
+            .apply_changeset(&bytes, &tables, receiver_wall_ms)
+            .map(|_| ())
     })
     .await
 }
@@ -237,8 +222,6 @@ async fn lww_later_update_wins() {
 
 #[tokio::test]
 async fn lww_earlier_update_loses() {
-    use crate::database::resolve_and_apply_changeset;
-
     // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
     let src = open_test_db();
     exec(
@@ -281,8 +264,9 @@ async fn lww_earlier_update_loses() {
     let tables = test_synced_tables();
     let receiver_wall_ms = target.receive_wall_ms();
     let winners = target
-        .call(move |conn| {
-            resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
+        .test_sql(move |database| {
+            database
+                .apply_changeset(&bytes, &tables, receiver_wall_ms)
                 .map(|result| result.winning_rows)
         })
         .await
@@ -501,11 +485,6 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 
 #[tokio::test]
 async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changeset() {
-    use std::sync::Arc;
-
-    use crate::database::TableSchema;
-    use crate::database::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
-
     let source = open_test_db();
     exec(
         &source,
@@ -537,27 +516,15 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
     let tables = test_synced_tables();
     let receiver_wall_ms = target.receive_wall_ms();
     target
-        .call(move |conn| {
-            let schema = Arc::new(TableSchema::from_db(conn, &tables)?);
-            let tx = conn.unchecked_transaction()?;
-            let child = ValidatedChangeset::new(child, schema.clone())
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-            let child_result =
-                resolve_and_apply_changeset_with_schema_on(&tx, child, receiver_wall_ms)?;
-            assert!(child_result.had_fk_violations);
-
-            let parent = ValidatedChangeset::new(parent, schema)
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
-            let parent_result =
-                resolve_and_apply_changeset_with_schema_on(&tx, parent, receiver_wall_ms)?;
-            assert!(!parent_result.had_fk_violations);
-            let violations: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-                [],
-                |row| row.get(0),
+        .test_sql(move |database| {
+            let (results, violations) = database.apply_changesets_atomically(
+                vec![child, parent],
+                &tables,
+                receiver_wall_ms,
             )?;
+            assert!(results[0].had_fk_violations);
+            assert!(!results[1].had_fk_violations);
             assert!(!violations);
-            tx.commit()?;
             Ok(())
         })
         .await
@@ -572,12 +539,12 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
 /// Apply a changeset and report whether it had FK violations, through the same
 /// plain-`call` apply path as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
-    use crate::database::resolve_and_apply_changeset;
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.call(move |conn| {
-        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
+    db.test_sql(move |database| {
+        database
+            .apply_changeset(&bytes, &tables, receiver_wall_ms)
             .map(|r| r.had_fk_violations)
     })
     .await

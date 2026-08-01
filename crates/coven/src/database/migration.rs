@@ -17,6 +17,50 @@ use rusqlite::Connection;
 
 use crate::database::DbError;
 
+/// Host SQL inside one schema-migration transaction.
+///
+/// The database retains the connection and transaction boundary; migration
+/// code can transform the host schema without opening, retaining, or passing a
+/// SQLite connection.
+pub struct MigrationContext<'connection> {
+    connection: &'connection Connection,
+}
+
+impl MigrationContext<'_> {
+    fn new(connection: &Connection) -> MigrationContext<'_> {
+        MigrationContext { connection }
+    }
+
+    pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
+    where
+        P: rusqlite::Params,
+    {
+        self.connection.execute(sql, params)
+    }
+
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        self.connection.execute_batch(sql)
+    }
+
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.connection.query_row(sql, params, map)
+    }
+
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: rusqlite::Params,
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.connection.prepare(sql)?;
+        let values = statement.query_map(params, map)?.collect();
+        values
+    }
+}
+
 /// One ordered step in the host's synced-schema ladder.
 pub struct Migration {
     /// 1-based, contiguous across the registered set. A gap, duplicate, or a set
@@ -33,7 +77,9 @@ pub struct Migration {
 /// `Send`: the bootstrap paths (`join`/`restore`) hold the slice across an
 /// `.await`, and a host that spawns those futures on a multi-threaded runtime
 /// needs them to stay `Send`.
-type MigrationFn = Box<dyn Fn(&Connection) -> Result<(), DbError> + Send + Sync>;
+type MigrationFn = Box<
+    dyn for<'connection> Fn(&MigrationContext<'connection>) -> Result<(), DbError> + Send + Sync,
+>;
 
 /// How a migration applies its change to the synced schema.
 pub enum MigrationStep {
@@ -51,7 +97,7 @@ impl MigrationStep {
     fn apply(&self, conn: &Connection) -> Result<(), DbError> {
         match self {
             Self::Sql(sql) => conn.execute_batch(sql.as_ref()).map_err(DbError::from),
-            Self::Run(run) => run(conn),
+            Self::Run(run) => run(&MigrationContext::new(conn)),
         }
     }
 }
@@ -70,7 +116,10 @@ impl Migration {
     /// express.
     pub fn run<F>(version: u32, name: &'static str, f: F) -> Self
     where
-        F: Fn(&Connection) -> Result<(), DbError> + Send + Sync + 'static,
+        F: for<'connection> Fn(&MigrationContext<'connection>) -> Result<(), DbError>
+            + Send
+            + Sync
+            + 'static,
     {
         Migration {
             version,

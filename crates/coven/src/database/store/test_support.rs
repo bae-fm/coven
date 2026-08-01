@@ -23,6 +23,91 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn cleanup_intent_count_for_test(
+        &self,
+        namespace: String,
+        blob_id: String,
+    ) -> Result<i64, DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM local_cleanup_intents
+                         WHERE namespace = ?1 AND blob_id = ?2",
+                        (&namespace, &blob_id),
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn coven_table_exists_for_test(
+        &self,
+        table: crate::database::DatabaseTestTable,
+    ) -> Result<bool, DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                         )",
+                        [table.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER fail_store_write_journal
+                         BEFORE INSERT ON store_writes
+                         BEGIN
+                           SELECT RAISE(ABORT, 'injected Store write journal failure');
+                         END;",
+                    )
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn write_blob_facts_for_test(
+        &self,
+        write_id: WriteId,
+    ) -> Result<String, DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
+                        [write_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn install_test_active_circle(
+        &self,
+        label: String,
+    ) -> Result<crate::protocol::circle::CircleId, DbError> {
+        self.connection
+            .call(move |connection| {
+                let database = crate::database::DatabaseTestSql::new(connection);
+                let (circle_id, _) =
+                    crate::sync::test_helpers::install_test_active_circle(&database, &label);
+                Ok(circle_id)
+            })
+            .await
+    }
+
     pub(crate) async fn insert_write_status_for_test(
         &self,
         write_id: WriteId,

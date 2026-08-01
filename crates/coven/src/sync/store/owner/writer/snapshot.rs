@@ -1450,21 +1450,10 @@ mod tests {
         .await
         .expect("publish first snapshot");
         assert_eq!(first.generation, 0);
-        let image_object_id = crate::protocol::remote_object::remote_object_id(&first.image.object);
         let image_ownership = db
-            .call(move |connection| {
-                connection
-                    .query_row(
-                        "SELECT state FROM remote_objects WHERE object_id = ?1",
-                        [image_object_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .map_err(crate::database::DbError::from)
-            })
+            .remote_object_for_test(first.image.object.clone())
             .await
             .expect("load published snapshot image ownership");
-        let image_ownership: crate::protocol::remote_object::RemoteObjectRecord =
-            serde_json::from_str(&image_ownership).expect("parse snapshot image ownership");
         assert!(matches!(
             image_ownership,
             crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
@@ -1511,12 +1500,10 @@ mod tests {
             .expect("resume second snapshot publication")
             .expect("publish staged second snapshot");
         let published_generations = db
-            .call(|connection| {
-                connection
-                    .query_row("SELECT COUNT(*) FROM published_store_snapshot", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map_err(crate::database::DbError::from)
+            .test_sql(|database| {
+                database.table_row_count(crate::database::DatabaseTestTable::named(
+                    "published_store_snapshot",
+                ))
             })
             .await
             .expect("count published Store snapshot generations");

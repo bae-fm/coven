@@ -19,15 +19,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let stream_id = commit_stream(&fixture.commit_ref);
     let retained_input: Vec<u8> = fixture
         .db
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT canonical_input FROM retained_merge_materializations
-                 WHERE device_id = ?1 AND seq = 1",
-                [stream_id],
-                |row| row.get(0),
-            )
-            .map_err(crate::DbError::from)
-        })
+        .test_sql(move |database| database.retained_canonical_input(&stream_id, 1))
         .await
         .expect("load retained local package application");
     let retained_input: serde_json::Value =
@@ -206,14 +198,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     let write_id = fixture.write_id.clone();
     let retains_prepared = fixture
         .db
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT prepared IS NOT NULL FROM store_writes WHERE write_id = ?1",
-                [write_id.as_str()],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(crate::DbError::from)
-        })
+        .test_sql(move |database| database.write_retains_prepared(&write_id))
         .await
         .expect("check durable losing candidate");
     assert!(retains_prepared);
@@ -826,15 +811,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
     let fixture = prepared_write_fixture().await;
     fixture
         .db
-        .call(|conn| {
-            conn.execute_batch(
-                "CREATE TEMP TRIGGER fail_outbound_completion \
-                 BEFORE UPDATE OF prepared ON store_writes \
-                 WHEN OLD.prepared IS NOT NULL AND NEW.prepared IS NULL \
-                 BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;",
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.install_outbound_completion_failure_trigger())
         .await
         .expect("install completion fault");
     let first = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
@@ -868,7 +845,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
 
     fixture
         .db
-        .call(|conn| {
+        .test_sql(|conn| {
             conn.execute_batch("DROP TRIGGER fail_outbound_completion")
                 .map_err(crate::database::DbError::from)
         })
@@ -959,19 +936,9 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .value
             .write_id
             .clone();
-        db.call(move |conn| {
-            match invalid_root {
-                Some(value) => conn.execute(
-                    "UPDATE store_protocol_root_authority SET store_root_hash = ?1",
-                    [value],
-                ),
-                None => conn.execute("DELETE FROM store_protocol_root_authority", []),
-            }
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("make root unusable");
+        db.test_sql(move |conn| conn.replace_store_root_hash(invalid_root))
+            .await
+            .expect("make root unusable");
         drop(db);
 
         let reopened = open();
@@ -1102,7 +1069,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         crate::database::BlockedWriteDiscard::Discarded(vec![first.clone(), second.clone()])
     );
     let note_count: i64 = db
-        .call(|conn| {
+        .test_sql(|conn| {
             conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
                 .map_err(crate::database::DbError::from)
         })

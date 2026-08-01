@@ -441,7 +441,7 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
                 .locator_hash(),
         )
         .expect("exact cache path");
-    db.call(|conn| {
+    db.test_sql(|conn| {
         conn.execute(
             "UPDATE note_photos SET _updated_at = '0000000002000-0000-dev1' WHERE id = 'stale-materialized-row'",
             [],
@@ -527,7 +527,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let second_hash = crate::blob::content_hash(second_bytes);
     let second_size = second_bytes.len() as i64;
     let id_for_update = id.to_string();
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute(
             "UPDATE note_photos
              SET size = ?1, hash = ?2, _updated_at = '0000000002000-0000-dev1'
@@ -643,7 +643,7 @@ async fn plant_browsable_blob_row(db: &Database, blob_id: &str, cloud_path: &str
     let cloud_path = cloud_path.to_string();
     let size = bytes.len() as u64;
     let hash = crate::blob::content_hash(bytes);
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES (?1, 'browsable-test', 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -726,7 +726,7 @@ async fn bind_stored_blob_to_row(
     let stamp_table = table.to_string();
     let stamp_id = id.to_string();
     let row_stamp = db
-        .call(move |conn| {
+        .test_sql(move |conn| {
             conn.query_row(
                 &format!(
                     "SELECT _updated_at FROM {} WHERE id = ?1",
@@ -739,31 +739,17 @@ async fn bind_stored_blob_to_row(
         })
         .await
         .expect("load exact row stamp for blob binding");
-    db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-            rusqlite::params![object_id, state],
+    db.test_sql(move |database| {
+        database.install_blob_binding(
+            &object_id,
+            &state,
+            &locator_hash,
+            &table_for_insert,
+            &id_for_insert,
+            "id",
+            &row_stamp,
+            &authority,
         )
-        .map_err(crate::database::DbError::from)?;
-        conn.execute(
-            "INSERT INTO blob_locators (locator_hash, remote_object_id) VALUES (?1, ?2)",
-            rusqlite::params![locator_hash, record.object_id().to_string()],
-        )
-        .map_err(crate::database::DbError::from)?;
-        conn.execute(
-            "INSERT INTO row_blob_locators
-             (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-             VALUES (?1, ?2, 'id', ?3, ?4, ?5)",
-            rusqlite::params![
-                table_for_insert,
-                id_for_insert,
-                row_stamp,
-                authority,
-                record.object_id().to_string()
-            ],
-        )
-        .map_err(crate::database::DbError::from)?;
-        Ok(())
     })
     .await
     .expect("install exact remote blob binding");
@@ -2345,9 +2331,10 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     // its exact locator.
     let local_reference_for_transition = local_reference.clone();
     let note_id = format!("note-{}", blob.id);
-    db.call(move |conn| {
-        Database::clear_external_blob_on(conn, &local_reference_for_transition)?;
-        conn.execute("UPDATE notes SET shared = 1 WHERE id = ?1", [note_id])
+    db.test_sql(move |database| {
+        database.clear_external_blob(&local_reference_for_transition)?;
+        database
+            .execute("UPDATE notes SET shared = 1 WHERE id = ?1", [note_id])
             .map_err(crate::database::DbError::from)?;
         Ok(())
     })
@@ -2923,7 +2910,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     let id = "dup0aaaa";
     let local_hash = crate::blob::content_hash(b"LOCAL-STORE-BYTES");
     let remote_hash = crate::blob::content_hash(b"REMOTE-CLOUD-BYTES");
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('note-local', 'x', 0, '0000000001000-0000-dev1', '2026-01-01'), \
@@ -3413,7 +3400,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     let lazy_bytes = [7u8; 500];
     let lazy_hash = crate::blob::content_hash(&lazy_bytes);
-    db2.call(move |conn| {
+    db2.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO note_covers \
              (id, note_id, size, hash, _updated_at, created_at) \

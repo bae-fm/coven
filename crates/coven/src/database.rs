@@ -134,6 +134,14 @@ mod store_ack_records;
 mod store_authority_records;
 mod store_coordinates;
 mod store_reclaim_records;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+pub(crate) use coven_schema::DatabaseTestTable;
+#[cfg(test)]
+pub(crate) use test_support::{
+    DatabaseImageTest, DatabaseTestSql, OutboxAttempt, RetainedRegistrationTamper,
+};
 mod write_lifecycle;
 mod write_models;
 
@@ -172,7 +180,7 @@ pub(crate) use local_store_identity::{
 pub(crate) use migration::{
     ensure_schema_supported, run_migrations_in_transaction, supported_version,
 };
-pub use migration::{Migration, MigrationError, MigrationStep};
+pub use migration::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub(crate) use operation_models::{
     DurableCircleSnapshotPublication, DurableDeviceRegistration, DurableMembershipMutation,
     DurableSnapshotPublication, LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState,
@@ -218,7 +226,9 @@ pub(crate) use store::{
     store_package_is_retained_for_replay_for_test, AuthorExclusionLocatorTamper,
 };
 #[cfg(test)]
-pub(crate) use store::{resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on};
+pub(crate) use store::{
+    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
+};
 pub use store::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, SqlReadContext, WriteBatch};
 pub(crate) use store_authority_records::{
@@ -256,7 +266,7 @@ const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 thread_local! {
     /// How many Coven-owned write operations are on the current call stack.
     ///
-    /// The host-SQL authorizer denies statements that mutate Coven's reserved
+    /// The host-SQL authorizer denies statements that access Coven's reserved
     /// tables, but Coven's own entry points are documented to run inside the
     /// host's write closure (`register_external_blob`, `enqueue_blob_delete`,
     /// `clear_external_blob` all bind to the row version the same write
@@ -292,7 +302,7 @@ pub(crate) fn authorize_host_sql(
         return Authorization::Allow;
     }
 
-    let mutates_coven_table = match context.action {
+    let accesses_coven_table = match context.action {
         AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
         | AuthAction::CreateTable { table_name }
@@ -300,6 +310,7 @@ pub(crate) fn authorize_host_sql(
         | AuthAction::CreateVtable { table_name, .. }
         | AuthAction::DropVtable { table_name, .. } => is_reserved_table_name(table_name),
         AuthAction::Update { table_name, .. }
+        | AuthAction::Read { table_name, .. }
         | AuthAction::CreateIndex { table_name, .. }
         | AuthAction::DropIndex { table_name, .. }
         | AuthAction::CreateTrigger { table_name, .. }
@@ -307,7 +318,7 @@ pub(crate) fn authorize_host_sql(
         | AuthAction::AlterTable { table_name, .. } => is_reserved_table_name(table_name),
         _ => false,
     };
-    if mutates_coven_table
+    if accesses_coven_table
         || context
             .database_name
             .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))

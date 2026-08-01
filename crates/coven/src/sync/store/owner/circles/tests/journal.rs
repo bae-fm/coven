@@ -15,13 +15,8 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
     let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
-    db.call(move |conn| {
-        conn.execute(
-            "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
-            rusqlite::params![expected_operation_id.as_str(), payload],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+    db.test_sql(move |database| {
+        database.replace_circle_operation_payload(&expected_operation_id, &payload)
     })
     .await
     .expect("install mismatched Circle operation payload");
@@ -43,13 +38,8 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     replacement.circle_id = replacement_circle_id;
     replacement.operation_mut().creation.circle_id = replacement_circle_id;
     let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
-    db.call(move |conn| {
-        conn.execute(
-            "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
-            rusqlite::params![expected_operation_id.as_str(), payload],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+    db.test_sql(move |database| {
+        database.replace_circle_operation_payload(&expected_operation_id, &payload)
     })
     .await
     .expect("install mismatched Circle operation payload");

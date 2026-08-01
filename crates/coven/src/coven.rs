@@ -601,9 +601,18 @@ mod tests {
     }
 
     fn precreate_database(dir: &StoreDir, sql: &str) {
-        let conn = rusqlite::Connection::open(dir.db_path()).expect("precreate store database");
-        conn.execute_batch(sql)
+        let database = crate::database::DatabaseImageTest::open(&dir.db_path())
+            .expect("precreate store database");
+        database
+            .execute_batch(sql)
             .expect("seed pre-existing database state");
+    }
+
+    fn precreate_interrupted_coven_database(dir: &StoreDir) {
+        crate::database::DatabaseImageTest::open(&dir.db_path())
+            .expect("precreate interrupted Coven database")
+            .create_interrupted_coven_schema()
+            .expect("seed interrupted Coven schema");
     }
 
     #[test]
@@ -637,13 +646,7 @@ mod tests {
     fn interrupted_coven_schema_without_a_marker_is_rejected() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        precreate_database(
-            &dir,
-            "CREATE TABLE protocol_state (
-                 key TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
-             ) STRICT;",
-        );
+        precreate_interrupted_coven_database(&dir);
 
         let error = match open_gated_roots_at(dir) {
             Ok(_) => panic!("partial Coven schema has no valid initialization commit"),
@@ -1185,34 +1188,20 @@ mod tests {
         let namespace = namespace.to_string();
         let id = id.to_string();
         handle
-            .sql(move |sql| {
-                sql.query_row(
-                    "SELECT count(*) FROM local_cleanup_intents \
-                         WHERE namespace = ?1 AND blob_id = ?2",
-                    params![namespace, id],
-                    |row| row.get(0),
-                )
-                .map_err(CovenError::from)
-            })
+            .cleanup_intent_count_for_test(namespace, id)
             .await
             .expect("count cleanup intents")
-            .value
     }
 
     #[tokio::test]
     async fn builder_open_runs_coven_and_host_migrations() {
         let (_tmp, handle) = open_files_handle();
-        let has_coven_table: i64 = handle
-            .sql(|sql| {
-                sql.query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'protocol_state'",
-                    [],
-                    |row| row.get(0),
-                ).map_err(CovenError::from)
-            })
+        let has_coven_table = handle
+            .coven_table_exists_for_test(crate::database::DatabaseTestTable::named(
+                "protocol_state",
+            ))
             .await
-            .expect("query coven table")
-            .value;
+            .expect("query coven table");
         let has_host_table: i64 = handle
             .sql(|sql| {
                 sql.query_row(
@@ -1225,7 +1214,7 @@ mod tests {
             .await
             .expect("query host table")
             .value;
-        assert_eq!(has_coven_table, 1);
+        assert!(has_coven_table);
         assert_eq!(has_host_table, 1);
     }
 
@@ -1642,11 +1631,10 @@ mod tests {
             .create_test_store("lib-test", signer)
             .await
             .expect("create exact test Store");
-        let authority =
-            rusqlite::Connection::open(dir.db_path()).expect("open Circle authority database");
-        let (destination_circle, _) =
-            crate::sync::test_helpers::install_test_active_circle(&authority, "blob-circle");
-        drop(authority);
+        let destination_circle = handle
+            .install_test_active_circle("blob-circle")
+            .await
+            .expect("install Circle authority");
 
         let bytes = b"remote-only-circle-blob".to_vec();
         let hash = crate::blob::content_hash(&bytes);
@@ -1865,15 +1853,10 @@ mod tests {
             .await
             .expect("connect the exact test Store");
         let before = outbound_blob_spools(&fixture.dir);
-        rusqlite::Connection::open(fixture.dir.db_path())
-            .expect("open database for journal fault")
-            .execute_batch(
-                "CREATE TRIGGER fail_audience_move_journal
-                 BEFORE INSERT ON store_writes
-                 BEGIN
-                   SELECT RAISE(ABORT, 'injected Store write journal failure');
-                 END;",
-            )
+        fixture
+            .handle
+            .install_store_write_failure_trigger_for_test()
+            .await
             .expect("install Store write journal fault");
 
         let destination_circle_value = fixture.destination_circle.to_string();
@@ -1932,15 +1915,10 @@ mod tests {
         std::fs::create_dir_all(sibling.parent().expect("sibling has a parent"))
             .expect("create Local blob directory");
         std::fs::write(&sibling, b"unrelated").expect("write unrelated Local file");
-        rusqlite::Connection::open(fixture.dir.db_path())
-            .expect("open database for Local journal fault")
-            .execute_batch(
-                "CREATE TRIGGER fail_local_audience_move_journal
-                 BEFORE INSERT ON store_writes
-                 BEGIN
-                   SELECT RAISE(ABORT, 'injected Local Store write journal failure');
-                 END;",
-            )
+        fixture
+            .handle
+            .install_store_write_failure_trigger_for_test()
+            .await
             .expect("install Local Store write journal fault");
 
         let result = fixture
@@ -1986,7 +1964,7 @@ mod tests {
             crate::blob::RowBlobAuthority::Remote(_)
         ));
 
-        rusqlite::Connection::open(fixture.dir.db_path())
+        crate::database::DatabaseImageTest::open(&fixture.dir.db_path())
             .expect("open database to remove Local journal fault")
             .execute_batch("DROP TRIGGER fail_local_audience_move_journal")
             .expect("remove Local Store write journal fault");
@@ -2054,17 +2032,9 @@ mod tests {
             })
             .await
             .expect("commit audience move after staging its destination blob");
-        let write_id = receipt.write_id.to_string();
         let blob_facts = fixture
             .handle
-            .sql_read(move |conn| {
-                conn.query_row(
-                    "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
-                    [write_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(CovenError::from)
-            })
+            .write_blob_facts_for_test(receipt.write_id.clone())
             .await
             .expect("read durable move blob facts");
         let blob_facts: serde_json::Value =

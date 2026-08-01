@@ -123,15 +123,18 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         row_id: &str,
         path: &Path,
     ) -> Result<(), DbError> {
-        let declared = self.blob_table(table)?;
-        let reference = Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
-        if reference.blob().provenance != Provenance::UserProvided {
-            return Err(DbError::Message(format!(
-                "table {table:?} declares host-provided blobs, which Coven copies; \
-                 an external file registration on it would never be read"
-            )));
-        }
-        Database::register_external_blob_on(self.transaction, &reference, path)
+        crate::database::with_coven_sql_authority(|| {
+            let declared = self.blob_table(table)?;
+            let reference =
+                Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
+            if reference.blob().provenance != Provenance::UserProvided {
+                return Err(DbError::Message(format!(
+                    "table {table:?} declares host-provided blobs, which Coven copies; \
+                     an external file registration on it would never be read"
+                )));
+            }
+            Database::register_external_blob_on(self.transaction, &reference, path)
+        })
     }
 
     pub fn enqueue_blob_delete(&self, blob: &crate::RowBlobRef) -> Result<(), DbError> {
@@ -142,12 +145,17 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
                 blob.blob().namespace
             ))
         })?;
-        CloudOutboxRecords::new(self.transaction).enqueue_delete(stored, &self.stamp())
+        crate::database::with_coven_sql_authority(|| {
+            CloudOutboxRecords::new(self.transaction).enqueue_delete(stored, &self.stamp())
+        })
     }
 
     pub fn clear_external_blob(&self, table: &str, row_id: &str) -> Result<(), DbError> {
-        let declared = self.blob_table(table)?;
-        let reference = Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
-        Database::clear_external_blob_on(self.transaction, &reference)
+        crate::database::with_coven_sql_authority(|| {
+            let declared = self.blob_table(table)?;
+            let reference =
+                Database::row_blob_ref_on(self.transaction, self.gates, declared, row_id)?;
+            Database::clear_external_blob_on(self.transaction, &reference)
+        })
     }
 }

@@ -195,7 +195,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let storage = Arc::new(cycle_test_store(&db, &keypair).await);
     storage.open_into(&db).await.expect("open exact test Store");
     let stored = create_exact_blob(&storage, "photos", "maintenance", b"maintenance").await;
-    db.call(move |conn| crate::database::CloudOutboxRecords::new(conn).enqueue_delete(&stored, T0))
+    db.test_sql(move |database| database.enqueue_blob_delete(&stored, T0))
         .await
         .expect("queue exact maintenance tombstone");
     let home = InMemoryCloudHome::new();
@@ -1152,22 +1152,20 @@ fn exercise_cancellation_against_inflight_registration<'a>(
 
 async fn make_remote_intent_present(db: &Database, root_table: &str, root_id: &str) -> bool {
     let (rt, ri) = (root_table.to_string(), root_id.to_string());
-    db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
+    db.test_sql(move |database| database.make_remote_intent_exists(&rt, &ri))
         .await
         .expect("make_remote intent lookup")
 }
 
 async fn pending_write_count(db: &Database) -> i64 {
-    db.call(|conn| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM store_writes WHERE status = '\"pending\"'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("pending write count")
+    i64::try_from(
+        StoreDatabase::new(db)
+            .pending_writes()
+            .await
+            .expect("pending writes")
+            .len(),
+    )
+    .expect("pending write count fits SQLite integer")
 }
 
 /// Queue a pending upload whose source file doesn't exist, so the cycle's drain
@@ -1190,8 +1188,8 @@ async fn seed_pending_upload(db: &Database) {
         .row_blob_ref("note_photos", "pending-blob")
         .await
         .expect("resolve exact pending blob row");
-    db.call(move |conn| {
-        crate::database::CloudOutboxRecords::new(conn).enqueue_upload(
+    db.test_sql(move |database| {
+        database.enqueue_blob_upload(
             "notes",
             "pending-root",
             &row,
@@ -1626,12 +1624,11 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         failed.is_offline(),
         "snapshot host-blob provider transport is offline: {failed}",
     );
-    let installed_bindings: i64 = db
-        .call(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM row_blob_locators", [], |row| {
-                row.get(0)
-            })
-            .map_err(crate::database::DbError::from)
+    let installed_bindings = db
+        .test_sql(|database| {
+            database.table_row_count(crate::database::DatabaseTestTable::named(
+                "row_blob_locators",
+            ))
         })
         .await
         .expect("count activated snapshot blob bindings");
@@ -2048,13 +2045,14 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
     .await
     .expect("publish coalesced shared snapshot blob");
     assert_eq!(interceptor.rejected_blobs().len(), 1);
-    let (bindings, objects): (i64, i64) = db
-        .call(|conn| {
+    let (bindings, objects) = db
+        .test_sql(|database| {
             Ok((
-                conn.query_row("SELECT COUNT(*) FROM row_blob_locators", [], |row| {
-                    row.get(0)
-                })?,
-                conn.query_row("SELECT COUNT(*) FROM blob_locators", [], |row| row.get(0))?,
+                database.table_row_count(crate::database::DatabaseTestTable::named(
+                    "row_blob_locators",
+                ))?,
+                database
+                    .table_row_count(crate::database::DatabaseTestTable::named("blob_locators"))?,
             ))
         })
         .await
@@ -2094,24 +2092,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         ),
     )
     .await;
-    let external_path_for_registration = external_path
-        .to_str()
-        .expect("external snapshot path is UTF-8")
-        .to_string();
-    let plaintext_hash = crate::blob::content_hash(b"AUDIO");
-    db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO local_blob_refs
-             (table_name, row_id, column_name, row_stamp, namespace, blob_id,
-              path, plaintext_size, plaintext_hash)
-             VALUES ('note_photos', 'audio1', 'id', '0000000001000-0000-M',
-                     'audio', 'audio1', ?1, 5, ?2)",
-            rusqlite::params![external_path_for_registration, plaintext_hash],
-        )?;
-        Ok(())
-    })
-    .await
-    .expect("register external snapshot blob");
+    register_external_blob(&db, "note_photos", "audio1", &external_path).await;
     storage.open_into(&db).await.expect("open user blob Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -2191,22 +2172,17 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let audience =
         serde_json::to_string(&crate::protocol::audience_package::PackageAudience::Store)
             .expect("serialize Store audience");
-    db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-            rusqlite::params![object_id, state],
-        )?;
-        conn.execute(
-            "INSERT INTO blob_locators (locator_hash, remote_object_id) VALUES (?1, ?2)",
-            rusqlite::params![locator_hash, record.object_id().to_string()],
-        )?;
-        conn.execute(
-            "INSERT INTO row_blob_locators
-             (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-             VALUES ('note_photos', 'audio1', 'id', '0000000001000-0000-M', ?1, ?2)",
-            rusqlite::params![audience, record.object_id().to_string()],
-        )?;
-        Ok(())
+    db.test_sql(move |database| {
+        database.install_blob_binding(
+            &object_id,
+            &state,
+            &locator_hash,
+            "note_photos",
+            "audio1",
+            "id",
+            "0000000001000-0000-M",
+            &audience,
+        )
     })
     .await
     .expect("install exact activated user blob binding");
@@ -2427,14 +2403,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         Some(owner_pk.clone()),
     );
     let cursor_count = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_cursor/%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.protocol_state_prefix_count("membership_head_cursor/"))
         .await
         .unwrap();
     assert_eq!(cursor_count, 1);
@@ -2615,14 +2584,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         Some(owner_pk.clone()),
     );
     let cursor_count = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_cursor/%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.protocol_state_prefix_count("membership_head_cursor/"))
         .await
         .unwrap();
     assert_eq!(cursor_count, 1);
@@ -2688,14 +2650,7 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
         None,
     );
     let watermark_count = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_seq/%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+        .test_sql(|database| database.protocol_state_prefix_count("membership_head_seq/"))
         .await
         .unwrap();
     assert_eq!(watermark_count, 0);
@@ -3610,16 +3565,14 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         pending_write_count(&db).await > 0,
         "the host-blob changeset stays queued while sealing is paused",
     );
-    let activated_bindings: i64 = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM row_blob_locators
-                 WHERE table_name = 'note_photos' AND row_id = 'hponly'
-                   AND column_name = 'id' AND row_stamp = '0000000001000-0000-M'",
-                [],
-                |row| row.get(0),
+    let activated_bindings = db
+        .test_sql(|database| {
+            database.exact_row_blob_locator_count(
+                "note_photos",
+                "hponly",
+                "id",
+                "0000000001000-0000-M",
             )
-            .map_err(crate::database::DbError::from)
         })
         .await
         .expect("count exact host-blob bindings");
@@ -3627,17 +3580,14 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         activated_bindings, 0,
         "rotation pause installs no activated host-blob binding",
     );
-    let exact_outbox_rows: i64 = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM cloud_outbox
-                 WHERE operation = 'upload' AND table_name = 'note_photos'
-                   AND row_id = 'hponly' AND column_name = 'id'
-                   AND row_stamp = '0000000001000-0000-M'",
-                [],
-                |row| row.get(0),
+    let exact_outbox_rows = db
+        .test_sql(|database| {
+            database.exact_upload_outbox_count(
+                "note_photos",
+                "hponly",
+                "id",
+                "0000000001000-0000-M",
             )
-            .map_err(crate::database::DbError::from)
         })
         .await
         .expect("count exact host-blob upload handoffs");
@@ -4944,17 +4894,9 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         .expect("preparation-failure write is pending")
         .write_id;
 
-    db.call(|conn| {
-        conn.execute_batch(
-            "CREATE TEMP TRIGGER fail_outbound_preparation \
-             BEFORE UPDATE OF prepared ON store_writes \
-             WHEN OLD.prepared IS NULL AND NEW.prepared IS NOT NULL \
-             BEGIN SELECT RAISE(ABORT, 'injected Store preparation failure'); END;",
-        )
-        .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("install Store preparation fault");
+    db.test_sql(|database| database.install_outbound_preparation_failure_trigger())
+        .await
+        .expect("install Store preparation fault");
     storage.open_into(&db).await.expect("open exact test Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -4989,7 +4931,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         crate::WriteStatus::Pending,
     );
 
-    db.call(|conn| {
+    db.test_sql(|conn| {
         conn.execute_batch("DROP TRIGGER fail_outbound_preparation")
             .map_err(crate::database::DbError::from)
     })

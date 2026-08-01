@@ -290,7 +290,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .to_str()
             .expect("temporary database path is UTF-8")
             .to_string();
-        seed.call(move |connection| {
+        seed.test_sql(move |connection| {
             connection
                 .execute("VACUUM INTO ?1", [destination])
                 .map(|_| ())
@@ -366,15 +366,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         .is_none());
     for object_id in losing_object_ids {
         let exists = loser_db
-            .call(move |connection| {
-                connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map_err(crate::DbError::from)
-            })
+            .remote_object_id_exists_for_test(object_id)
             .await
             .expect("read losing acknowledgement candidate ownership");
         assert!(!exists);
@@ -709,46 +701,30 @@ async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()
         head_hash: losing.head.head_hash(),
         object: losing.prepared_head.reference().clone(),
     };
-    db.call(move |conn| {
-        let object_id = crate::protocol::remote_object::remote_object_id(&head.object);
-        let encoded: String = conn
-            .query_row(
-                "SELECT state FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(crate::DbError::from)?;
-        let mut remote: crate::protocol::remote_object::RemoteObjectRecord =
-            serde_json::from_str(&encoded).map_err(|error| {
-                crate::DbError::Message(format!("parse test head ownership: {error}"))
-            })?;
+    let mut remote = db
+        .remote_object_for_test(head.object.clone())
+        .await
+        .expect("load test head ownership");
+    {
         let crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
             &mut remote
         else {
-            return Err(crate::DbError::Message(
-                "test head is not retained authority".to_string(),
-            ));
+            panic!("test head is not retained authority");
         };
         let crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
             former_candidates,
         } = &mut record.state
         else {
-            return Err(crate::DbError::Message(
-                "test head is not proven uncreated".to_string(),
-            ));
+            panic!("test head is not proven uncreated");
         };
         let Some(nonactivation) = former_candidates.first_mut() else {
-            return Err(crate::DbError::Message(
-                "test head has no loss proof".to_string(),
-            ));
+            panic!("test head has no loss proof");
         };
         let crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
             winner_head,
         } = nonactivation.proof_mut_for_test()
         else {
-            return Err(crate::DbError::Message(
-                "test head has a non-Merge loss proof".to_string(),
-            ));
+            panic!("test head has a non-Merge loss proof");
         };
         let tampered_bytes = b"different winner at the same head slot";
         winner_head.object = crate::storage::ExactObjectRef::new(
@@ -756,23 +732,11 @@ async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()
             tampered_bytes.len() as u64,
             crate::protocol::store_commit::ObjectHash::digest(tampered_bytes),
         );
-        remote.validate().map_err(|error| {
-            crate::DbError::Message(format!("validate test head ownership: {error}"))
-        })?;
-        conn.execute(
-            "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
-            (
-                object_id.to_string(),
-                serde_json::to_string(&remote).map_err(|error| {
-                    crate::DbError::Message(format!("serialize test head ownership: {error}"))
-                })?,
-            ),
-        )
-        .map_err(crate::DbError::from)?;
-        Ok(())
-    })
-    .await
-    .expect("install mismatched durable head proof");
+        remote.validate().expect("validate test head ownership");
+    }
+    db.replace_remote_object_for_test(head.object, remote)
+        .await
+        .expect("install mismatched durable head proof");
 
     assert!(Box::pin(drain(&device)).await.is_err());
     assert_eq!(
@@ -883,9 +847,9 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let db = open(&path, "circle-ack-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn,
+                &conn,
                 "ack-circle",
             ))
         })
@@ -924,9 +888,9 @@ async fn inactive_circle_stages_no_acknowledgement() {
     let db = open(&path, "inactive-circle-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_inactive_circle(
-                conn,
+                &conn,
                 "inactive-circle",
             ))
         })
@@ -962,9 +926,9 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let db = open(&path, "circle-ack-restart");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn,
+                &conn,
                 "restart-circle",
             ))
         })
@@ -1016,9 +980,9 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-collision");
     let device = initialize(&db, &storage, &signer).await;
-    db.call(|conn| {
+    db.test_sql(|conn| {
         Ok(crate::sync::test_helpers::install_test_active_circle(
-            conn,
+            &conn,
             "collision-circle",
         ))
     })
@@ -1034,19 +998,10 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
 
     // Read the exact slot the staged Circle acknowledgement reserved, then occupy
     // it with different bytes before the drain uploads its object.
-    let prepared_object: String = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT prepared_object FROM outbound_circle_acks",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
+    let prepared = db
+        .test_sql(|database| database.staged_circle_acknowledgement_object())
         .await
         .expect("read staged Circle acknowledgement object");
-    let prepared: crate::storage::PreparedExactObject =
-        serde_json::from_str(&prepared_object).expect("parse staged Circle acknowledgement object");
     let sabotage = b"different bytes at the reserved Circle acknowledgement slot".to_vec();
     let sabotage_ref = crate::storage::ExactObjectRef::new(
         prepared.reference().slot().clone(),

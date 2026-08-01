@@ -29,7 +29,7 @@ impl DatabaseConnection {
         })
     }
 
-    pub(crate) async fn call<F, R>(&self, f: F) -> Result<R, DbError>
+    pub(super) async fn call<F, R>(&self, f: F) -> Result<R, DbError>
     where
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,

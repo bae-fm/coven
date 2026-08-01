@@ -295,7 +295,7 @@ impl Database {
     /// Hands `f` to the connection thread and awaits its reply, so the SQL runs
     /// off the async executor.
     #[cfg(test)]
-    pub(crate) async fn call<F, R>(&self, f: F) -> Result<R, DbError>
+    pub(super) async fn call<F, R>(&self, f: F) -> Result<R, DbError>
     where
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,

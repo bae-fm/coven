@@ -860,8 +860,9 @@ mod tests {
                 )
                 .expect("insert protocol state");
         }
+        let database = crate::database::DatabaseTestSql::new(connection);
         crate::sync::test_helpers::install_test_store_root_authority(
-            connection,
+            &database,
             "retained-replay-fixture",
         );
         let cursor = founder_membership_cursor_key(connection)

@@ -6,9 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
 
-use crate::database::resolve_and_apply_changeset;
 use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
@@ -132,7 +131,7 @@ pub(crate) fn test_founder_provider_admin(
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn install_test_store_root_authority(
-    conn: &Connection,
+    database: &crate::database::DatabaseTestSql<'_>,
     label: &str,
 ) -> crate::protocol::store_commit::ObjectHash {
     use crate::protocol::store_commit::{
@@ -151,13 +150,11 @@ pub(crate) fn install_test_store_root_authority(
     .expect("fixed test signing key is 64 bytes");
     let signer = UserKeypair::from_signing_key_bytes(&keypair_bytes)
         .expect("fixed test signing key is valid");
-    let sync_routing_hash: ObjectHash = crate::database::required_protocol_state_on(
-        conn,
-        crate::database::SYNC_ROUTING_HASH_STATE_KEY,
-    )
-    .expect("test Store has a sync-routing hash")
-    .parse()
-    .expect("test Store sync-routing hash is valid");
+    let sync_routing_hash: ObjectHash = database
+        .required_protocol_state(crate::database::SYNC_ROUTING_HASH_STATE_KEY)
+        .expect("test Store has a sync-routing hash")
+        .parse()
+        .expect("test Store sync-routing hash is valid");
     let root_slot = ObjectSlot::logical(
         crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
     )
@@ -198,30 +195,21 @@ pub(crate) fn install_test_store_root_authority(
     let bytes = root.to_bytes();
     let hash = root.object_hash();
     let object = ExactObjectRef::new(root_slot, bytes.len() as u64, ObjectHash::digest(&bytes));
-    conn.execute(
-        "INSERT INTO store_protocol_root_authority
-         (singleton, store_root_hash, store_protocol_root_bytes, store_root_object)
-         VALUES (1, ?1, ?2, ?3)
-         ON CONFLICT(singleton) DO NOTHING",
-        rusqlite::params![
-            hash.to_string(),
-            bytes,
-            serde_json::to_string(&object).expect("serialize test Store root object")
-        ],
-    )
-    .expect("install test Store root authority");
+    database
+        .install_store_root_authority(hash, &bytes, &object)
+        .expect("install test Store root authority");
     hash
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn install_test_active_circle(
-    conn: &Connection,
+    database: &crate::database::DatabaseTestSql<'_>,
     label: &str,
 ) -> (
     crate::protocol::circle::CircleId,
     crate::protocol::circle::CircleControlCoord,
 ) {
-    install_test_circle_current_state(conn, label, true)
+    install_test_circle_current_state(database, label, true)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -238,18 +226,18 @@ pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn install_test_inactive_circle(
-    conn: &Connection,
+    database: &crate::database::DatabaseTestSql<'_>,
     label: &str,
 ) -> (
     crate::protocol::circle::CircleId,
     crate::protocol::circle::CircleControlCoord,
 ) {
-    install_test_circle_current_state(conn, label, false)
+    install_test_circle_current_state(database, label, false)
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 fn install_test_circle_current_state(
-    conn: &Connection,
+    database: &crate::database::DatabaseTestSql<'_>,
     label: &str,
     active: bool,
 ) -> (
@@ -591,36 +579,17 @@ fn install_test_circle_current_state(
         .expect("derive test Circle current state");
     let control_coord =
         serde_json::to_string(&control.coord).expect("serialize test Circle control coordinate");
-    conn.execute(
-        "INSERT INTO circle_control_activations
-         (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)
-         VALUES (?1, ?2, ?3, 1, ?4, ?5)",
-        rusqlite::params![
-            creation.circle_id.to_string(),
+    database
+        .install_circle_current_state(
+            creation.circle_id,
             &control_coord,
-            format!("{label}-device"),
-            ObjectHash::digest(format!("{label} commit").as_bytes()).to_string(),
+            &format!("{label}-device"),
+            ObjectHash::digest(format!("{label} commit").as_bytes()),
             &control.bytes,
-        ],
-    )
-    .expect("insert test Circle activation");
-    if active {
-        conn.execute(
-            "INSERT INTO circle_access_cache
-             (circle_id, control_coord, owner_pubkey, disposition)
-             VALUES (?1, ?2, ?3, 'active')",
-            rusqlite::params![creation.circle_id.to_string(), &control_coord, owner_pubkey,],
+            active.then_some(owner_pubkey.as_str()),
+            &serde_json::to_vec(&current).expect("serialize test Circle current state"),
         )
-        .expect("insert test Circle access history");
-    }
-    conn.execute(
-        "INSERT INTO circle_current_state (circle_id, state) VALUES (?1, ?2)",
-        rusqlite::params![
-            creation.circle_id.to_string(),
-            serde_json::to_vec(&current).expect("serialize test Circle current state"),
-        ],
-    )
-    .expect("insert test Circle current state");
+        .expect("install test Circle state");
     assert_eq!(
         creation
             .resolved_roster()
@@ -633,20 +602,14 @@ fn install_test_circle_current_state(
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn test_row_routing_id(
-    conn: &Connection,
+    database: &crate::database::DatabaseTestSql<'_>,
     generation_one_key: [u8; 32],
     table: &str,
     row_id: &str,
 ) -> crate::protocol::circle::RowRoutingId {
-    let root_hash: crate::protocol::store_commit::ObjectHash = conn
-        .query_row(
-            "SELECT store_root_hash FROM store_protocol_root_authority WHERE singleton = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .expect("test Store root authority is installed")
-        .parse()
-        .expect("test Store root hash is valid");
+    let root_hash = database
+        .store_root_hash()
+        .expect("test Store root authority is installed");
     let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
     let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
         .expect("test keyring has one generation-one key");
@@ -861,7 +824,7 @@ pub(crate) async fn plant_blob_row_with_size_hash(
     let note = format!("note-{blob_id}");
     let blob_id = blob_id.to_string();
     let hash = hash.map(str::to_string);
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES (?1, 'read-test', ?2, '0000000001000-0000-dev1', '2026-01-01')",
@@ -886,7 +849,7 @@ pub(crate) async fn plant_blob_row_with_size_hash(
 /// running the whole transition.
 pub(crate) async fn set_blob_remote(db: &Database, blob_id: &str, remote: bool) {
     let note = format!("note-{blob_id}");
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.execute(
             "UPDATE notes SET shared = ?1 WHERE id = ?2",
             (remote as i64, note.as_str()),
@@ -920,7 +883,7 @@ pub(crate) fn test_migrations() -> Vec<Migration> {
 
 /// Create the synthetic test schema on a connection. Run as the host migration
 /// step for [`open_test_db`] (see [`test_migrations`]).
-pub(crate) fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
+pub(crate) fn create_synced_schema(conn: &crate::MigrationContext<'_>) -> Result<(), DbError> {
     conn.execute_batch(
         "CREATE TABLE notes (
             id TEXT PRIMARY KEY,
@@ -1003,7 +966,10 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 /// Used only by the register-clock tests (`hlc_register_tests`).
 pub(crate) fn open_test_db_with_hlc(
     hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
-    seed: impl Fn(&Connection) -> Result<(), DbError> + Send + Sync + 'static,
+    seed: impl for<'connection> Fn(&crate::MigrationContext<'connection>) -> Result<(), DbError>
+        + Send
+        + Sync
+        + 'static,
 ) -> Database {
     let migrations = vec![Migration::run(1, "test-schema", move |conn| {
         create_synced_schema(conn)?;
@@ -1024,7 +990,7 @@ pub(crate) fn open_test_db_with_hlc(
 /// Run a write statement on the test database (blocking on the current runtime).
 pub(crate) async fn exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
-    db.call(move |conn| conn.execute_batch(&sql).map_err(DbError::from))
+    db.test_sql(move |conn| conn.execute_batch(&sql).map_err(DbError::from))
         .await
         .unwrap_or_else(|e| panic!("exec failed: {e}"));
 }
@@ -1033,14 +999,10 @@ pub(crate) async fn host_exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
-    db.call(move |conn| {
-        crate::database::StoreDatabase::run_prepared_blob_transition_transaction_on(
-            conn,
-            &tables,
-            None,
-            write_id,
-            |tx| tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from),
-        )
+    db.test_sql(move |conn| {
+        conn.run_prepared_blob_transition_write(&tables, None, write_id, |tx| {
+            tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
+        })
     })
     .await
     .unwrap_or_else(|e| panic!("exec failed: {e}"));
@@ -1049,7 +1011,7 @@ pub(crate) async fn host_exec(db: &Database, sql: &str) {
 /// Query a single text value from the test database.
 pub(crate) async fn query_text(db: &Database, sql: &str) -> String {
     let sql = sql.to_string();
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.query_row(&sql, [], |r| r.get::<_, String>(0))
             .map_err(DbError::from)
     })
@@ -1060,7 +1022,7 @@ pub(crate) async fn query_text(db: &Database, sql: &str) -> String {
 /// Whether a row exists for `sql` (a `SELECT 1 ...`).
 pub(crate) async fn row_exists(db: &Database, sql: &str) -> bool {
     let sql = sql.to_string();
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         conn.query_row(&sql, [], |_| Ok(()))
             .optional()
             .map(|o| o.is_some())
@@ -1085,22 +1047,9 @@ pub(crate) async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
         .iter()
         .map(|table| table.name().to_string())
         .collect();
-    db.call(move |conn| {
-        let mut session = rusqlite::session::Session::new(conn).map_err(DbError::from)?;
-        for table in tables {
-            session
-                .attach(Some(table.as_str()))
-                .map_err(DbError::from)?;
-        }
-        for statement in statements {
-            conn.execute_batch(&statement).map_err(DbError::from)?;
-        }
-        let mut bytes = Vec::new();
-        session.changeset_strm(&mut bytes).map_err(DbError::from)?;
-        Ok(bytes)
-    })
-    .await
-    .unwrap_or_else(|error| panic!("capture failed: {error}"))
+    db.test_sql(move |database| database.capture_changeset(&tables, &statements))
+        .await
+        .unwrap_or_else(|error| panic!("capture failed: {error}"))
 }
 
 /// Apply a changeset to the test database with the production conflict-resolving
@@ -1111,8 +1060,10 @@ pub(crate) async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTab
     let bytes = bytes.to_vec();
     let tables = tables.to_vec();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.call(move |conn| {
-        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+    db.test_sql(move |database| {
+        database
+            .apply_changeset(&bytes, &tables, receiver_wall_ms)
+            .map(|_| ())
     })
     .await
     .expect("apply changeset");
@@ -2509,7 +2460,7 @@ pub(crate) async fn register_external_blob(
         .await
         .expect("load exact Local row blob reference");
     let path = path.to_path_buf();
-    db.call(move |conn| Database::register_external_blob_on(conn, &reference, &path))
+    db.test_sql(move |database| database.register_external_blob(&reference, &path))
         .await
         .expect("register exact external blob reference");
 }

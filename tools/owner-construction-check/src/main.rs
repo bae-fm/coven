@@ -230,6 +230,7 @@ fn check(root: &Path, check_database_boundary: bool) -> Result<CheckResult, Stri
 
 fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundaryViolation> {
     let mut violations = BTreeSet::new();
+    let coven_tables = collect_coven_table_names(files);
     for file in files {
         if file.relative_path == "crates/coven/src/database.rs"
             || file.relative_path.starts_with("crates/coven/src/database/")
@@ -238,6 +239,7 @@ fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundary
         }
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
+            coven_tables: &coven_tables,
             violations: &mut violations,
         };
         visitor.visit_file(&file.syntax);
@@ -247,6 +249,7 @@ fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundary
 
 struct DatabaseBoundaryVisitor<'a> {
     path: &'a str,
+    coven_tables: &'a BTreeSet<String>,
     violations: &'a mut BTreeSet<DatabaseBoundaryViolation>,
 }
 
@@ -261,6 +264,13 @@ impl DatabaseBoundaryVisitor<'_> {
 }
 
 impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        if node.path().is_ident("doc") {
+            return;
+        }
+        visit::visit_attribute(self, node);
+    }
+
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         let mut capabilities = BTreeSet::new();
         collect_forbidden_sqlite_imports(&node.tree, false, false, &mut capabilities);
@@ -283,6 +293,91 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
         }
         visit::visit_macro(self, node);
     }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if let Some(table) = coven_table_in_sql(&node.value(), self.coven_tables) {
+            self.record(&format!("Coven-owned SQL for table {table}"), node.span());
+        }
+        visit::visit_lit_str(self, node);
+    }
+}
+
+fn collect_coven_table_names(files: &[RustFile]) -> BTreeSet<String> {
+    let mut tables = BTreeSet::new();
+    for file in files {
+        if file.relative_path != "crates/coven/src/database/coven_schema.rs" {
+            continue;
+        }
+        for item in &file.syntax.items {
+            let syn::Item::Macro(item) = item else {
+                continue;
+            };
+            if !matches!(
+                item.ident.as_ref().map(ToString::to_string).as_deref(),
+                Some("coven_tables" | "coven_routing_tables")
+            ) {
+                continue;
+            }
+            collect_table_macro_invocations(item.mac.tokens.clone(), &mut tables);
+        }
+    }
+    tables
+}
+
+fn collect_table_macro_invocations(
+    tokens: proc_macro2::TokenStream,
+    tables: &mut BTreeSet<String>,
+) {
+    let tokens = tokens.into_iter().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        let proc_macro2::TokenTree::Group(group) = token else {
+            continue;
+        };
+        let is_table_invocation = index >= 3
+            && matches!(&tokens[index - 3], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '$')
+            && matches!(&tokens[index - 2], proc_macro2::TokenTree::Ident(ident) if ident == "visit")
+            && matches!(&tokens[index - 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '!');
+        if is_table_invocation {
+            if let Some(proc_macro2::TokenTree::Ident(table)) = group.stream().into_iter().next() {
+                tables.insert(table.to_string());
+            }
+        }
+        collect_table_macro_invocations(group.stream(), tables);
+    }
+}
+
+fn coven_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a str> {
+    let words = sql
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let has = |word: &str| words.iter().any(|candidate| candidate == word);
+    let has_pair = |first: &str, second: &str| {
+        words
+            .windows(2)
+            .any(|pair| pair[0] == first && pair[1] == second)
+    };
+    let is_sql = has_pair("insert", "into")
+        || has_pair("delete", "from")
+        || has_pair("alter", "table")
+        || has_pair("drop", "table")
+        || has_pair("drop", "trigger")
+        || has_pair("drop", "index")
+        || has_pair("create", "table")
+        || has_pair("create", "trigger")
+        || has_pair("create", "index")
+        || has_pair("replace", "into")
+        || (has("select") && has("from"))
+        || has("update")
+        || sql.trim_start().to_ascii_lowercase().starts_with("pragma ");
+    if !is_sql {
+        return None;
+    }
+    tables
+        .iter()
+        .find(|table| words.iter().any(|word| word == table.as_str()))
+        .map(String::as_str)
 }
 
 const FORBIDDEN_SQLITE_CAPABILITIES: &[(&str, &str)] = &[
@@ -801,6 +896,58 @@ mod tests {
     }
 
     #[test]
+    fn every_raw_sqlite_ownership_path_is_rejected() {
+        let source = syn::parse_file(
+            r#"
+            use rusqlite::{Connection as SqlConnection, Transaction};
+            use rusqlite::session::Session;
+            use rusqlite::*;
+            use rusqlite as sqlite;
+            fn qualified() -> rusqlite::Result<()> {
+                let _ = rusqlite::Connection::open_in_memory()?;
+                Ok(())
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+            syntax: source,
+        }];
+        let violations = find_database_boundary_violations(&files);
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.kind.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "raw SQLite connection",
+                "raw SQLite crate import",
+                "raw SQLite session",
+                "raw SQLite transaction",
+                "raw SQLite wildcard import",
+            ]),
+        );
+    }
+
+    #[test]
+    fn database_implementation_owns_raw_sqlite() {
+        let source = syn::parse_file(
+            r#"
+            use rusqlite::{Connection, Transaction};
+            fn transact(connection: &Connection, transaction: &Transaction<'_>) {}
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/database/transaction.rs".to_string(),
+            syntax: source,
+        }];
+
+        assert!(find_database_boundary_violations(&files).is_empty());
+    }
+
+    #[test]
     fn host_sql_and_query_values_are_allowed_outside_the_database_module() {
         let source = syn::parse_file(
             r#"
@@ -836,5 +983,55 @@ mod tests {
         }];
 
         assert!(find_database_boundary_violations(&files).is_empty());
+    }
+
+    #[test]
+    fn coven_owned_sql_is_rejected_outside_database() {
+        let schema = syn::parse_file(
+            r#"
+            macro_rules! coven_tables {
+                ($visit:ident) => {
+                    $visit!(protocol_state, "key TEXT PRIMARY KEY");
+                };
+            }
+            macro_rules! coven_routing_tables {
+                ($visit:ident) => {
+                    $visit!(_coven_row_audiences, "table_name TEXT NOT NULL");
+                };
+            }
+            "#,
+        )
+        .expect("parse schema fixture");
+        let leak = syn::parse_file(
+            r#"
+            fn leak(database: DatabaseTestSql<'_>) {
+                database.execute("DELETE FROM protocol_state", []).unwrap();
+                database.query("SELECT * FROM _coven_row_audiences", [], |_| Ok(())).unwrap();
+            }
+            "#,
+        )
+        .expect("parse leak fixture");
+        let files = vec![
+            RustFile {
+                relative_path: "crates/coven/src/database/coven_schema.rs".to_string(),
+                syntax: schema,
+            },
+            RustFile {
+                relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+                syntax: leak,
+            },
+        ];
+
+        let violations = find_database_boundary_violations(&files);
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.kind.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "Coven-owned SQL for table _coven_row_audiences",
+                "Coven-owned SQL for table protocol_state",
+            ]),
+        );
     }
 }

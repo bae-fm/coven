@@ -253,17 +253,9 @@ async fn discard_circle_operation(
 }
 
 async fn remote_object_exists(db: &Database, object: &ExactObjectRef) -> bool {
-    let object_id = crate::protocol::remote_object::remote_object_id(object);
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-            [object_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("check stored remote object")
+    db.remote_object_exists_for_test(object.clone())
+        .await
+        .expect("check stored remote object")
 }
 
 async fn exact_object_present(home: &InMemoryCloudHome, reference: &ExactObjectRef) -> bool {
@@ -772,17 +764,9 @@ fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitio
 }
 
 async fn activation_count(db: &Database, circle_id: CircleId) -> i64 {
-    let circle_id = circle_id.to_string();
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-            [circle_id],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("count circle activations")
+    db.test_sql(move |database| database.circle_control_activation_count(circle_id))
+        .await
+        .expect("count circle activations")
 }
 
 fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOperationJournal) {

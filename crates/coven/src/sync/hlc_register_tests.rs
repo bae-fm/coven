@@ -99,14 +99,10 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .await
         .expect("install B's active exact device fixture");
     let active_device_count = db_a
-        .call(|connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM store_device_registration_activations",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(crate::database::DbError::from)
+        .test_sql(|database| {
+            database.table_row_count(crate::database::DatabaseTestTable::named(
+                "store_device_registration_activations",
+            ))
         })
         .await
         .expect("count A's activated devices");
@@ -261,23 +257,17 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let stamper = target.stamper();
     let write_id = target.new_write_id();
     let host_stamp = target
-        .call(move |conn| {
-            crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                None,
-                write_id,
-                |tx| {
-                    let stamp = stamper.stamp();
-                    tx.execute(
-                        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+        .test_sql(move |conn| {
+            conn.run_internal_store_write(&tables, None, write_id, |tx| {
+                let stamp = stamper.stamp();
+                tx.execute(
+                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                          VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
-                        [stamp.as_str()],
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                    Ok::<String, crate::database::DbError>(stamp)
-                },
-            )
+                    [stamp.as_str()],
+                )
+                .map_err(crate::database::DbError::from)?;
+                Ok::<String, crate::database::DbError>(stamp)
+            })
         })
         .await
         .expect("queued host write commits");
@@ -799,12 +789,9 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         .await
         .expect("read exact local device id")
         .expect("founder device registration is active");
-    exec(
-        &db,
-        "CREATE TRIGGER block_protocol_state_insert BEFORE INSERT ON protocol_state \
-         BEGIN SELECT RAISE(ABORT, 'forced set_protocol_state failure'); END;",
-    )
-    .await;
+    db.test_sql(|database| database.install_protocol_state_insert_failure_trigger())
+        .await
+        .expect("install protocol_state fault");
 
     // A local insert gives the cycle a pending Store write. The trigger also blocks
     // the unconditional HLC high-water persist, so the cycle fails after the write

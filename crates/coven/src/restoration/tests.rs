@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use crate::blob::{CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::config::HomeStorage;
-use crate::database::{Database, DbError};
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::joining::MembershipFloor;
@@ -935,23 +935,10 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     );
 
     let failed_registration = {
-        let connection =
-            rusqlite::Connection::open(store_dir.db_path()).expect("open failed restore database");
+        let connection = crate::database::DatabaseImageTest::open(&store_dir.db_path())
+            .expect("open failed restore database");
         connection
-            .query_row(
-                "SELECT r.device_id, r.registration_bytes, a.activation_authority \
-                 FROM local_store_device_registration r \
-                 JOIN store_device_registration_activations a ON a.device_id = r.device_id \
-                 WHERE r.singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
+            .local_recovery_registration_evidence()
             .expect("load activated recovery registration after config failure")
     };
     let candidate_prefix = "store-v1/candidates/";
@@ -1054,23 +1041,10 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     assert_eq!(retry.device_id, "device-late");
 
     let retried_registration = {
-        let connection =
-            rusqlite::Connection::open(store_dir.db_path()).expect("open retried restore database");
+        let connection = crate::database::DatabaseImageTest::open(&store_dir.db_path())
+            .expect("open retried restore database");
         connection
-            .query_row(
-                "SELECT r.device_id, r.registration_bytes, a.activation_authority \
-                 FROM local_store_device_registration r \
-                 JOIN store_device_registration_activations a ON a.device_id = r.device_id \
-                 WHERE r.singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
+            .local_recovery_registration_evidence()
             .expect("load retried recovery registration")
     };
     assert_eq!(retried_registration, failed_registration);
@@ -1209,17 +1183,7 @@ async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
         .expect("load recovered Store device identity")
         .expect("recovered Store device identity exists");
     let activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation = restored
-        .call(move |connection| {
-            let authority: String = connection
-                .query_row(
-                    "SELECT activation_authority FROM store_device_registration_activations \
-                     WHERE device_id = ?1",
-                    [store_device_id],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            serde_json::from_str(&authority).map_err(|error| DbError::Message(error.to_string()))
-        })
+        .test_sql(move |database| database.store_device_registration_activation(&store_device_id))
         .await
         .expect("load config device activation");
     assert!(matches!(
@@ -1423,15 +1387,7 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
     );
     let imported_snapshot = expected_latest_snapshot.expect("continued snapshot reference");
     let (successor_generation, successor_bytes) = db_b
-        .call(|conn| {
-            conn.query_row(
-                "SELECT generation, meta_bytes FROM published_store_snapshot \
-                 ORDER BY generation DESC LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .map_err(DbError::from)
-        })
+        .test_sql(|database| database.latest_published_store_snapshot())
         .await
         .expect("read continued snapshot stream");
     let successor: crate::protocol::store_commit::SnapshotMeta =
@@ -1781,30 +1737,12 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .await
         .expect("export exact activated continuation");
     let materialized_commits_without_device_state = db_owner
-        .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM materialized_commits AS commits \
-                 LEFT JOIN store_device_state_snapshots AS states \
-                   ON states.commit_ref = commits.commit_ref \
-                 WHERE states.commit_ref IS NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(DbError::from)
-        })
+        .test_sql(|database| database.materialized_commits_without_device_state_count())
         .await
         .expect("verify source device-state snapshots");
     assert_eq!(materialized_commits_without_device_state, 0);
     let published_snapshot_bytes = db_owner
-        .call(|conn| {
-            conn.query_row(
-                "SELECT meta_bytes FROM published_store_snapshot \
-                 ORDER BY generation DESC LIMIT 1",
-                [],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .map_err(DbError::from)
-        })
+        .test_sql(|database| database.latest_published_store_snapshot_bytes())
         .await
         .expect("read published snapshot metadata");
     let published_snapshot: crate::protocol::store_commit::SnapshotMeta =
@@ -1898,7 +1836,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     )
     .expect("open restored database");
     let (restored_notes, restored_photos, restored_parent_links, foreign_key_violations) = restored
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok((
                 conn.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
                     row.get::<_, i64>(0)
@@ -1932,24 +1870,10 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         (1, 1, 1, 0)
     );
     let restored_device_snapshots = restored
-        .call(|conn| {
-            let mut statement = conn
-                .prepare("SELECT commit_ref FROM store_device_state_snapshots")
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
-            Ok(rows)
-        })
+        .test_sql(|database| database.store_device_state_snapshot_refs())
         .await
         .expect("load restored device-state snapshots")
         .into_iter()
-        .map(|encoded| {
-            serde_json::from_str::<crate::protocol::store_commit::StoreBatchCommitRef>(&encoded)
-                .expect("parse restored device-state snapshot reference")
-        })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(restored_device_snapshots, expected_device_snapshots);
     host_exec(

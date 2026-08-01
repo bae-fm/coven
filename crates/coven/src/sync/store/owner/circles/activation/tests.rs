@@ -505,9 +505,9 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
 
     let db = crate::sync::test_helpers::open_test_db();
     let circle_id = db
-        .call(|conn| {
+        .test_sql(|conn| {
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn,
+                &conn,
                 "current-control-conflict",
             )
             .0)
@@ -515,18 +515,9 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         .await
         .expect("install founder current state");
     let founder = db
-        .call(move |conn| {
-            let payload = conn
-                .query_row(
-                    "SELECT state FROM circle_current_state WHERE circle_id = ?1",
-                    [circle_id.to_string()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(crate::database::DbError::from)?;
-            serde_json::from_slice::<CircleCurrentState>(&payload).map_err(|error| {
-                crate::database::DbError::Message(format!(
-                    "parse test Circle current state: {error}"
-                ))
+        .test_sql(move |database| {
+            database.circle_current_state(circle_id)?.ok_or_else(|| {
+                crate::database::DbError::Message("test Circle current state is absent".to_string())
             })
         })
         .await

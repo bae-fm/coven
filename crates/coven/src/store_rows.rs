@@ -180,6 +180,42 @@ impl StoreRows {
     }
 
     #[cfg(test)]
+    pub(crate) async fn cleanup_intent_count_for_test(
+        &self,
+        namespace: String,
+        blob_id: String,
+    ) -> Result<i64, crate::database::DbError> {
+        self.database
+            .cleanup_intent_count_for_test(namespace, blob_id)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn coven_table_exists_for_test(
+        &self,
+        table: crate::database::DatabaseTestTable,
+    ) -> Result<bool, crate::database::DbError> {
+        self.database.coven_table_exists_for_test(table).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_store_write_failure_trigger_for_test(
+        &self,
+    ) -> Result<(), crate::database::DbError> {
+        self.database
+            .install_store_write_failure_trigger_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_blob_facts_for_test(
+        &self,
+        write_id: crate::WriteId,
+    ) -> Result<String, crate::database::DbError> {
+        self.database.write_blob_facts_for_test(write_id).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn execute_sql_with_blob_staging_for_test(
         &self,
         blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,

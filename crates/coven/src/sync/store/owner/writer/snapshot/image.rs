@@ -1,8 +1,6 @@
 /// Snapshot image creation, Store snapshot bootstrap, and blob installation.
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -530,14 +528,13 @@ mod tests {
         let blob_decls = source.blob_decls();
         let write_id = source.new_write_id();
         source
-            .call(move |connection| {
+            .test_sql(move |connection| {
                 let routing = crate::encryption::EncryptionService::from_key([42; 32]);
                 let (circle, _) = crate::sync::test_helpers::install_test_active_circle(
-                    connection,
+                    &connection,
                     "snapshot-route-circle",
                 );
-                crate::database::StoreDatabase::run_store_write_transaction_on(
-                    connection,
+                connection.run_host_store_write(
                     &tables,
                     &gates,
                     &blob_decls,
@@ -717,16 +714,15 @@ mod tests {
                 )
                 .expect("insert scoped Store row into Circle bootstrap");
             connection
-                .execute(
-                    "INSERT INTO _coven_row_routes VALUES (?1, 'documents', ?2, ?3)",
-                    (&store_routing_id, store_row_id, store_row_stamp),
+                .install_row_route(
+                    &store_routing_id,
+                    "documents",
+                    store_row_id,
+                    store_row_stamp,
                 )
                 .expect("insert scoped Store row route into Circle bootstrap");
             connection
-                .execute(
-                    "INSERT INTO _coven_audience VALUES (?1, NULL, ?2)",
-                    (&store_routing_id, store_row_stamp),
-                )
+                .install_audience_mirror(&store_routing_id, None, store_row_stamp)
                 .expect("insert scoped Store audience mirror into Circle bootstrap");
         });
         let reference = circle_bootstrap_reference(&source, &image);
@@ -785,10 +781,10 @@ mod tests {
         .await
         .expect("create Circle bootstrap unscoped-row Store");
         let circle_id = source
-            .call(|connection| {
+            .test_sql(|connection| {
                 Ok::<_, crate::database::DbError>(
                     crate::sync::test_helpers::install_test_active_circle(
-                        connection,
+                        &connection,
                         "circle-bootstrap-unscoped",
                     )
                     .0,
@@ -864,19 +860,16 @@ mod tests {
     }
 
     fn edit_snapshot_image(
-        image_dir: &Path,
+        _image_dir: &Path,
         image: Vec<u8>,
-        edit: impl FnOnce(&Connection),
+        edit: impl FnOnce(&crate::database::DatabaseImageTest),
     ) -> Vec<u8> {
-        let edited_path = image_dir.join("edited.db");
-        std::fs::write(&edited_path, image).expect("write edited snapshot image");
-        let connection = Connection::open(&edited_path).expect("open edited snapshot image");
+        let connection = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open edited snapshot image");
         edit(&connection);
         connection
-            .close()
-            .map_err(|(_, error)| error)
-            .expect("close edited snapshot image");
-        std::fs::read(&edited_path).expect("read edited snapshot image")
+            .into_bytes()
+            .expect("serialize edited snapshot image")
     }
 
     async fn publish_scoped_snapshot(
@@ -914,38 +907,14 @@ mod tests {
             ScopedSnapshotImage::UnauthenticatedRoute => {
                 edit_snapshot_image(image_dir.path(), image, |connection| {
                     connection
-                        .execute(
-                            "UPDATE _coven_row_routes
-                         SET routing_id =
-                             '0000000000000000000000000000000000000000000000000000000000000000'
-                         WHERE table_name = 'documents'",
-                            [],
-                        )
+                        .corrupt_document_route_id()
                         .expect("tamper private route id");
                 })
             }
             ScopedSnapshotImage::CircleRow => {
                 let route = source
-                    .call(|connection| {
-                        connection
-                            .query_row(
-                                "SELECT document.audience, route.routing_id, route._updated_at
-                                 FROM documents AS document
-                                 JOIN _coven_row_routes AS route
-                                   ON route.table_name = 'documents'
-                                  AND route.row_id = document.id
-                                 WHERE document.id =
-                                     '2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7'",
-                                [],
-                                |row| {
-                                    Ok((
-                                        row.get::<_, String>(0)?,
-                                        row.get::<_, String>(1)?,
-                                        row.get::<_, String>(2)?,
-                                    ))
-                                },
-                            )
-                            .map_err(crate::database::DbError::from)
+                    .test_sql(|database| {
+                        database.document_circle_route("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
                     })
                     .await
                     .expect("load Circle row route");
@@ -962,9 +931,11 @@ mod tests {
                         )
                         .expect("insert Circle row into Store snapshot");
                     connection
-                        .execute(
-                            "INSERT INTO _coven_row_routes VALUES (?1, 'documents', ?2, ?3)",
-                            (&route.1, "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7", &route.2),
+                        .install_row_route(
+                            &route.1,
+                            "documents",
+                            "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                            &route.2,
                         )
                         .expect("insert Circle private route into Store snapshot");
                 })
@@ -972,36 +943,14 @@ mod tests {
             ScopedSnapshotImage::InvalidCircleMirror => {
                 edit_snapshot_image(image_dir.path(), image, |connection| {
                     connection
-                        .execute(
-                            "UPDATE _coven_audience
-                             SET circle_id = 'local'
-                             WHERE routing_id = (
-                                 SELECT routing_id
-                                 FROM _coven_audience
-                                 WHERE circle_id IS NOT NULL
-                                 ORDER BY routing_id
-                                 LIMIT 1
-                             )",
-                            [],
-                        )
+                        .replace_first_circle_audience(Some("local"))
                         .expect("replace Circle mirror with Local audience");
                 })
             }
             ScopedSnapshotImage::OrphanStoreMirror => {
                 edit_snapshot_image(image_dir.path(), image, |connection| {
                     connection
-                        .execute(
-                            "UPDATE _coven_audience
-                             SET circle_id = NULL
-                             WHERE routing_id = (
-                                 SELECT routing_id
-                                 FROM _coven_audience
-                                 WHERE circle_id IS NOT NULL
-                                 ORDER BY routing_id
-                                 LIMIT 1
-                             )",
-                            [],
-                        )
+                        .replace_first_circle_audience(None)
                         .expect("replace Circle mirror with orphan Store audience");
                 })
             }
@@ -1078,18 +1027,15 @@ mod tests {
             )
             .await
             .expect("create scoped snapshot image");
-        let inspected_path = image_dir.path().join("inspected.db");
-        std::fs::write(&inspected_path, image).expect("write inspected scoped snapshot");
-        let inspected = Connection::open(inspected_path).expect("open inspected scoped snapshot");
+        let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open inspected scoped snapshot");
         let routes = inspected
-            .query_row("SELECT COUNT(*) FROM _coven_row_routes", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .coven_table_row_count(crate::database::DatabaseTestTable::named(
+                "_coven_row_routes",
+            ))
             .expect("count snapshot private routes");
         let mirrors = inspected
-            .query_row("SELECT COUNT(*) FROM _coven_audience", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .coven_table_row_count(crate::database::DatabaseTestTable::named("_coven_audience"))
             .expect("count snapshot audience mirrors");
         let materialized: (i64, i64) = inspected
             .query_row(
@@ -1128,57 +1074,43 @@ mod tests {
             )
             .await
             .expect("create Circle snapshot image");
-        let inspected_path = image_dir.path().join("circle.db");
-        std::fs::write(&inspected_path, image).expect("write inspected Circle snapshot");
-        let inspected = Connection::open(inspected_path).expect("open inspected Circle snapshot");
-        let rows = inspected
+        let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open inspected Circle snapshot");
+        let materialized = inspected
             .query_row(
                 "SELECT
                      (SELECT group_concat(body, ',') FROM documents),
-                     (SELECT group_concat(body, ',') FROM paragraphs),
-                     (SELECT COUNT(*) FROM _coven_row_routes),
-                     (SELECT COUNT(*) FROM _coven_audience),
-                     (SELECT COUNT(*) FROM circle_current_state),
-                     (SELECT COUNT(*) FROM protocol_state),
-                     (SELECT COUNT(*) FROM remote_objects),
-                     (SELECT COUNT(*) FROM blob_locators),
-                     (SELECT COUNT(*) FROM row_blob_locators),
-                     (SELECT COUNT(*) FROM retained_merge_materializations),
-                     (SELECT COUNT(*) FROM retained_replay_objects)",
+                     (SELECT group_concat(body, ',') FROM paragraphs)",
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, i64>(8)?,
-                        row.get::<_, i64>(9)?,
-                        row.get::<_, i64>(10)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .expect("inspect Circle snapshot rows");
         assert_eq!(
-            rows,
+            materialized,
             (
                 "Circle document".to_string(),
-                "Circle paragraph".to_string(),
-                2,
-                2,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
+                "Circle paragraph".to_string()
             )
         );
+        for (table, expected) in [
+            ("_coven_row_routes", 2),
+            ("_coven_audience", 2),
+            ("circle_current_state", 0),
+            ("protocol_state", 0),
+            ("remote_objects", 0),
+            ("blob_locators", 0),
+            ("row_blob_locators", 0),
+            ("retained_merge_materializations", 0),
+            ("retained_replay_objects", 0),
+        ] {
+            assert_eq!(
+                inspected
+                    .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
+                    .expect("count Circle snapshot Coven rows"),
+                expected,
+                "unexpected {table} row count"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1225,14 +1157,13 @@ mod tests {
         let write_id = source.new_write_id();
         let write_tables = tables.clone();
         let circle_id = source
-            .call(move |connection| {
+            .test_sql(move |connection| {
                 let routing = crate::encryption::EncryptionService::from_key([42; 32]);
                 let (circle_id, _) = crate::sync::test_helpers::install_test_active_circle(
-                    connection,
+                    &connection,
                     "snapshot-parent-circle",
                 );
-                StoreDatabase::run_store_write_transaction_on(
-                    connection,
+                connection.run_host_store_write(
                     &write_tables,
                     &gates,
                     &blob_decls,
@@ -1302,17 +1233,13 @@ mod tests {
             Some(&routing_key),
         )
         .expect("verify Circle bootstrap with its required Store parent");
-        let inspected_path = image_dir.path().join("circle-parent.db");
-        std::fs::write(&inspected_path, image).expect("write inspected Circle parent snapshot");
-        let inspected =
-            Connection::open(inspected_path).expect("open inspected Circle parent snapshot");
+        let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open inspected Circle parent snapshot");
         let rows = inspected
             .query_row(
                 "SELECT
                      (SELECT group_concat(name, ',') FROM folders),
                      (SELECT group_concat(body, ',') FROM documents),
-                     (SELECT COUNT(*) FROM _coven_row_routes),
-                     (SELECT COUNT(*) FROM _coven_audience),
                      (SELECT COUNT(*) FROM pragma_foreign_key_check)",
                 [],
                 |row| {
@@ -1320,15 +1247,29 @@ mod tests {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
             .expect("inspect Circle parent snapshot rows");
         assert_eq!(
             rows,
-            ("kept".to_string(), "Circle document".to_string(), 1, 1, 0,)
+            ("kept".to_string(), "Circle document".to_string(), 0,)
+        );
+        assert_eq!(
+            inspected
+                .coven_table_row_count(crate::database::DatabaseTestTable::named(
+                    "_coven_row_routes",
+                ))
+                .expect("count Circle parent routes"),
+            1
+        );
+        assert_eq!(
+            inspected
+                .coven_table_row_count(
+                    crate::database::DatabaseTestTable::named("_coven_audience",)
+                )
+                .expect("count Circle parent audiences"),
+            1
         );
     }
 
@@ -1344,18 +1285,8 @@ mod tests {
         .expect("create invalid-live-route Store");
         seed_scoped_snapshot_rows(&source).await;
         source
-            .call(|connection| {
-                connection
-                    .execute(
-                        "UPDATE _coven_row_routes
-                         SET routing_id =
-                             '0000000000000000000000000000000000000000000000000000000000000000'
-                         WHERE table_name = 'documents'
-                           AND row_id = '01890a5d-ac96-774b-bcce-b302099c3f74'",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::database::DbError::from)
+            .test_sql(|connection| {
+                connection.corrupt_live_document_route_id("01890a5d-ac96-774b-bcce-b302099c3f74")
             })
             .await
             .expect("corrupt live private route");
@@ -1440,10 +1371,9 @@ mod tests {
         let write_id = source.new_write_id();
         let write_tables = source_tables.clone();
         source
-            .call(move |connection| {
+            .test_sql(move |connection| {
                 let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-                StoreDatabase::run_store_write_transaction_on(
-                    connection,
+                connection.run_host_store_write(
                     &write_tables,
                     &gates,
                     &blob_decls,
@@ -1687,17 +1617,13 @@ mod tests {
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create scoped snapshot image");
-        let scoped_path = image_dir.path().join("scoped.db");
-        std::fs::write(&scoped_path, image).expect("write scoped snapshot image");
-        let scoped = Connection::open(&scoped_path).expect("open scoped snapshot image");
-        let mut statement = scoped
-            .prepare("SELECT commit_ref FROM store_device_state_snapshots ORDER BY commit_ref")
-            .expect("query scoped device states");
-        let actual = statement
-            .query_map([], |row| row.get::<_, String>(0))
+        let scoped = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open scoped snapshot image");
+        let actual = scoped
+            .store_device_state_snapshot_refs()
             .expect("read scoped device states")
-            .collect::<rusqlite::Result<BTreeSet<_>>>()
-            .expect("collect scoped device states");
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
     }
 
@@ -1892,25 +1818,18 @@ mod tests {
             .await
             .expect("publish snapshot materialization fixture");
         let live_counts = source
-            .call(|connection| {
-                let materialized = connection
-                    .query_row("SELECT COUNT(*) FROM materialized_commits", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map_err(crate::database::DbError::from)?;
-                let retained = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM retained_merge_materializations",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                let replay_objects = connection
-                    .query_row("SELECT COUNT(*) FROM retained_replay_objects", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map_err(crate::database::DbError::from)?;
-                Ok::<_, crate::database::DbError>((materialized, retained, replay_objects))
+            .test_sql(|database| {
+                Ok((
+                    database.table_row_count(crate::database::DatabaseTestTable::named(
+                        "materialized_commits",
+                    ))?,
+                    database.table_row_count(crate::database::DatabaseTestTable::named(
+                        "retained_merge_materializations",
+                    ))?,
+                    database.table_row_count(crate::database::DatabaseTestTable::named(
+                        "retained_replay_objects",
+                    ))?,
+                ))
             })
             .await
             .expect("count live materialization graph");
@@ -1925,22 +1844,14 @@ mod tests {
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create materialization snapshot");
-        let inspection_dir = tempfile::tempdir().expect("snapshot inspection directory");
-        let inspection_path = inspection_dir.path().join("snapshot.db");
-        std::fs::write(&inspection_path, image).expect("write inspected snapshot");
-        let snapshot = Connection::open(inspection_path).expect("open inspected snapshot");
-        for table in [
-            "materialized_commits",
-            "retained_replay_objects",
-            "retained_merge_materializations",
-        ] {
-            let count = snapshot
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .expect("count snapshot materialization table");
-            assert_eq!(count, 0, "snapshot removes {table}");
-        }
+        let snapshot = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open inspected snapshot");
+        assert_eq!(
+            snapshot
+                .materialization_graph_counts()
+                .expect("count snapshot materialization graph"),
+            (0, 0, 0)
+        );
         let foreign_key_violations = snapshot
             .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
                 row.get::<_, i64>(0)
@@ -2016,60 +1927,30 @@ mod tests {
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create blob snapshot");
-        let snapshot_dir = tempfile::tempdir().expect("snapshot inspection directory");
-        let snapshot_path = snapshot_dir.path().join("snapshot.db");
-        std::fs::write(&snapshot_path, image).expect("write inspected snapshot");
-        let snapshot = Connection::open(snapshot_path).expect("open inspected snapshot");
-        let graph: (String, String, String, String, String, String) = snapshot
-            .query_row(
-                "SELECT binding.table_name, binding.row_id, binding.column_name,
-                        binding.row_stamp, locator.locator_hash, remote.object_id
-                 FROM row_blob_locators AS binding
-                 JOIN blob_locators AS locator
-                   ON locator.remote_object_id = binding.remote_object_id
-                 JOIN remote_objects AS remote
-                   ON remote.object_id = locator.remote_object_id",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
+        let snapshot = crate::database::DatabaseImageTest::from_bytes(&image)
+            .expect("open inspected snapshot");
+        let graph = snapshot
+            .snapshot_blob_graph()
             .expect("read closed snapshot blob graph");
         assert_eq!(graph.0, "note_photos");
         assert_eq!(graph.1, "photo1");
         assert_eq!(graph.2, "id");
         assert_eq!(graph.3, "0000000001000-0000-owner");
         assert_eq!(graph.4.len(), 64);
-        assert_eq!(graph.5.len(), 64);
-        let remote_state: String = snapshot
-            .query_row(
-                "SELECT state FROM remote_objects WHERE object_id = ?1",
-                [&graph.5],
-                |row| row.get(0),
-            )
-            .expect("read snapshot remote blob state");
+        assert_eq!(graph.5.object_id().to_string().len(), 64);
         assert!(
-            !remote_state.contains(source_dir.storage_dir().to_string_lossy().as_ref()),
+            !serde_json::to_string(&graph.5)
+                .expect("serialize snapshot remote blob")
+                .contains(source_dir.storage_dir().to_string_lossy().as_ref()),
             "snapshot remote blob state must not carry its source StoreDir",
         );
-        let remote: crate::protocol::remote_object::RemoteObjectRecord =
-            serde_json::from_str(&remote_state).expect("parse snapshot remote blob state");
         assert!(matches!(
-            remote.bytes().stored(),
+            graph.5.bytes().stored(),
             crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
         ));
         for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
-            let count: i64 = snapshot
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
+            let count = snapshot
+                .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
                 .expect("count snapshot blob ownership table");
             assert_eq!(count, 1, "snapshot carries one {table} row");
         }
@@ -2185,47 +2066,14 @@ mod tests {
             )
             .expect("activate existing blob graph object");
         {
-            let connection = Connection::open(&image_path).expect("open blob graph image");
-            crate::database::apply_coven_schema(&connection).expect("apply blob graph schema");
+            let connection = crate::database::DatabaseImageTest::open(&image_path)
+                .expect("open blob graph image");
             connection
-                .execute(
-                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                    rusqlite::params![
-                        existing_remote.object_id().to_string(),
-                        serde_json::to_string(&existing_remote)
-                            .expect("serialize existing blob graph object"),
-                    ],
-                )
-                .expect("install existing blob graph object");
+                .apply_coven_schema()
+                .expect("apply blob graph schema");
             connection
-                .execute(
-                    "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)",
-                    rusqlite::params![
-                        existing_remote.object_id().to_string(),
-                        existing.blob().locator().locator_hash().to_string(),
-                    ],
-                )
-                .expect("install existing blob graph locator");
-            connection
-                .execute(
-                    "INSERT INTO row_blob_locators
-                     (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        existing.table(),
-                        existing.row_id(),
-                        existing.column(),
-                        existing.row_stamp(),
-                        serde_json::to_string(&crate::protocol::audience_package::PackageAudience::Store)
-                            .expect("serialize existing blob graph audience"),
-                        existing_remote.object_id().to_string(),
-                    ],
-                )
-                .expect("install existing blob graph row binding");
-            connection
-                .close()
-                .map_err(|(_, error)| error)
-                .expect("close blob graph image");
+                .install_snapshot_blob_binding(&existing, &existing_remote)
+                .expect("install existing blob graph binding");
         }
         let image = std::fs::read(&image_path).expect("read blob graph image");
 

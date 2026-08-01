@@ -47,12 +47,12 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(store.home.exact_create_count(), creates_before);
     let local_registrations = table_count(
         &opened_db,
-        "SELECT COUNT(*) FROM local_store_device_registration",
+        crate::database::DatabaseTestTable::named("local_store_device_registration"),
     )
     .await;
     let activations = table_count(
         &opened_db,
-        "SELECT COUNT(*) FROM store_device_registration_activations",
+        crate::database::DatabaseTestTable::named("store_device_registration_activations"),
     )
     .await;
     assert_eq!(local_registrations, 1);
@@ -67,7 +67,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(
         table_count(
             &opened_db,
-            "SELECT COUNT(*) FROM local_store_device_registration",
+            crate::database::DatabaseTestTable::named("local_store_device_registration"),
         )
         .await,
         local_registrations,
@@ -75,20 +75,20 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(
         table_count(
             &opened_db,
-            "SELECT COUNT(*) FROM store_device_registration_activations",
+            crate::database::DatabaseTestTable::named("store_device_registration_activations"),
         )
         .await,
         activations,
     );
 }
 
-async fn table_count(db: &crate::database::Database, sql: &'static str) -> i64 {
-    db.call(move |conn| {
-        conn.query_row(sql, [], |row| row.get(0))
-            .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("count lifecycle rows")
+async fn table_count(
+    db: &crate::database::Database,
+    table: crate::database::DatabaseTestTable,
+) -> i64 {
+    db.test_sql(move |database| database.table_row_count(table))
+        .await
+        .expect("count lifecycle rows")
 }
 
 #[tokio::test]

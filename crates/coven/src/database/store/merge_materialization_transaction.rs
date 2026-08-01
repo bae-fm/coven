@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 #[cfg(test)]
 pub(crate) use changeset_application::{
-    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on,
+    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
 };
 pub(crate) use changeset_application::{ValidatedChangeset, WinningRow};
 pub(crate) use conflict::{IncomingTimestampPolicy, TableSchema};

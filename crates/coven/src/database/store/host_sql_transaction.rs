@@ -2,28 +2,27 @@ use crate::database::{authorize_host_sql, DbError};
 
 pub(super) struct HostSqlTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
+    authorization: HostSqlAuthorization<'transaction>,
+}
+
+struct HostSqlAuthorization<'connection> {
+    connection: &'connection rusqlite::Connection,
     authorizer_installed: bool,
 }
 
-impl<'transaction, 'connection> HostSqlTransaction<'transaction, 'connection> {
-    pub(super) fn begin(
-        transaction: &'transaction rusqlite::Transaction<'connection>,
-    ) -> Result<Self, DbError> {
-        transaction
+impl<'connection> HostSqlAuthorization<'connection> {
+    fn begin(connection: &'connection rusqlite::Connection) -> Result<Self, DbError> {
+        connection
             .authorizer(Some(authorize_host_sql))
             .map_err(DbError::from)?;
         Ok(Self {
-            transaction,
+            connection,
             authorizer_installed: true,
         })
     }
 
-    pub(super) fn run<R, E>(
-        mut self,
-        f: impl FnOnce(&rusqlite::Transaction<'connection>) -> Result<R, E>,
-    ) -> Result<R, E> {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self.transaction)));
+    fn run<R>(mut self, f: impl FnOnce() -> R) -> R {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         self.remove_authorizer();
         match outcome {
             Ok(result) => result,
@@ -33,19 +32,46 @@ impl<'transaction, 'connection> HostSqlTransaction<'transaction, 'connection> {
 
     fn remove_authorizer(&mut self) {
         self.authorizer_installed = false;
-        if let Err(error) = self.transaction.authorizer(
+        if let Err(error) = self.connection.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
         ) {
-            panic!("failed to remove host SQL gate-baseline guard: {error}");
+            panic!("failed to remove host SQL authorization: {error}");
         }
     }
 }
 
-impl Drop for HostSqlTransaction<'_, '_> {
+impl Drop for HostSqlAuthorization<'_> {
     fn drop(&mut self) {
         if self.authorizer_installed {
             self.remove_authorizer();
         }
+    }
+}
+
+pub(super) fn run_host_sql_read<R, E>(
+    connection: &rusqlite::Connection,
+    read: impl FnOnce(&rusqlite::Connection) -> Result<R, E>,
+) -> Result<Result<R, E>, DbError> {
+    let authorization = HostSqlAuthorization::begin(connection)?;
+    Ok(authorization.run(|| read(connection)))
+}
+
+impl<'transaction, 'connection> HostSqlTransaction<'transaction, 'connection> {
+    pub(super) fn begin(
+        transaction: &'transaction rusqlite::Transaction<'connection>,
+    ) -> Result<Self, DbError> {
+        Ok(Self {
+            transaction,
+            authorization: HostSqlAuthorization::begin(transaction)?,
+        })
+    }
+
+    pub(super) fn run<R, E>(
+        self,
+        f: impl FnOnce(&rusqlite::Transaction<'connection>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let transaction = self.transaction;
+        self.authorization.run(|| f(transaction))
     }
 }
 
@@ -117,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn host_sql_cannot_mutate_coven_owned_tables() {
+    fn host_sql_cannot_read_or_mutate_coven_owned_tables() {
         let conn = Connection::open_in_memory().expect("open");
         crate::database::apply_coven_schema(&conn).expect("install Coven schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
@@ -136,6 +162,19 @@ mod tests {
             .expect_err("host SQL must not write Coven bookkeeping");
         assert!(error.to_string().contains("not authorized"));
 
+        let error = HostSqlTransaction::begin(&tx)
+            .expect("install authorizer")
+            .run(|transaction| {
+                transaction
+                    .query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .expect_err("host SQL must not read Coven bookkeeping");
+        assert!(error.to_string().contains("not authorized"));
+
         let stored: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -146,6 +185,19 @@ mod tests {
             )
             .expect("query protocol state after refused host write");
         assert!(!stored);
+        tx.rollback().expect("finish host SQL transaction test");
+
+        let error = run_host_sql_read(&conn, |connection| {
+            connection
+                .query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .expect("install host read authorizer")
+        .expect_err("host read API must not expose Coven bookkeeping");
+        assert!(error.to_string().contains("not authorized"));
     }
 
     /// Coven's own entry points are documented to run inside the host's write

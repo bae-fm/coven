@@ -258,23 +258,17 @@ async fn capture_document(
     let stamp = stamp.to_string();
     fixture
         .db
-        .call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
-                &tables,
-                Some(&routing),
-                captured,
-                |transaction| {
-                    transaction
-                        .execute(
-                            "INSERT INTO documents (id, audience, _updated_at)
+        .test_sql(move |connection| {
+            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
                              VALUES (?1, ?2, ?3)",
-                            rusqlite::params![row_id, audience_value, stamp],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                },
-            )
+                        rusqlite::params![row_id, audience_value, stamp],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
         })
         .await
         .expect("capture document row");
@@ -697,7 +691,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     );
     let received = fixture
         .member_db
-        .call(|connection| {
+        .test_sql(|connection| {
             connection
                 .query_row(
                     "SELECT EXISTS(
@@ -751,8 +745,8 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
     // projection: the accepted row is present, the unpublished row is absent.
     let cutoff = fixture
         .db
-        .call(|conn| {
-            let refs = crate::database::StoreDatabase::materialized_frontier_on(conn, None)?;
+        .test_sql(|database| {
+            let refs = database.materialized_frontier()?;
             crate::protocol::store_commit::CommitFrontier::from_refs(refs)
                 .map_err(|error| DbError::Message(error.to_string()))
         })
@@ -767,7 +761,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         .authorize_writer()
         .await
         .expect("authorize the successor bootstrap cut");
-    let (image_temp, image_dir) = temp_store_dir();
+    let (_image_temp, image_dir) = temp_store_dir();
     let cut = authorized
         .circles()
         .snapshots()
@@ -779,20 +773,13 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         )
         .await
         .expect("cut the successor bootstrap from accepted history");
-    let image_path = image_temp.path().join("close-cut-image.sqlite3");
-    std::fs::write(&image_path, &cut.snapshot.db_image).expect("write the bootstrap image");
-    let image = rusqlite::Connection::open(&image_path).expect("open the bootstrap image");
-    let installed_ids = {
-        let mut statement = image
-            .prepare("SELECT id FROM documents ORDER BY id")
-            .expect("prepare image row query");
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("query image rows")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect image rows");
-        rows
-    };
+    let image = crate::database::DatabaseImageTest::from_bytes(&cut.snapshot.db_image)
+        .expect("open the bootstrap image");
+    let installed_ids = image
+        .query("SELECT id FROM documents ORDER BY id", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .expect("query image rows");
     assert!(
         installed_ids.iter().any(|id| id == published_id),
         "the accepted Circle row is present in the projection image: {installed_ids:?}"
@@ -1005,23 +992,17 @@ async fn write_circle_document(
     let audience = Some(circle_id.to_string());
     let id = id.to_string();
     let updated_at = updated_at.to_string();
-    db.call(move |connection| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            connection,
-            &tables,
-            Some(&routing),
-            write_id,
-            |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO documents (id, audience, _updated_at)
+    db.test_sql(move |connection| {
+        connection.run_internal_store_write(&tables, Some(&routing), write_id, |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO documents (id, audience, _updated_at)
                          VALUES (?1, ?2, ?3)",
-                        rusqlite::params![id, audience, updated_at],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            },
-        )
+                    rusqlite::params![id, audience, updated_at],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
     })
     .await
     .expect("capture Circle content");
@@ -1459,27 +1440,21 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         let tables = db.synced_tables().to_vec();
         let routing = routing.clone();
         let audience = Some(circle_id.to_string());
-        db.call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
-                &tables,
-                Some(&routing),
-                write_id,
-                |transaction| {
-                    transaction
-                        .execute(
-                            "INSERT INTO documents (id, audience, _updated_at)
+        db.test_sql(move |connection| {
+            connection.run_internal_store_write(&tables, Some(&routing), write_id, |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
                              VALUES (?1, ?2, ?3)",
-                            rusqlite::params![
-                                "00000000-0000-4000-8000-000000000090",
-                                audience,
-                                "0000000002000-0000-owner"
-                            ],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                },
-            )
+                        rusqlite::params![
+                            "00000000-0000-4000-8000-000000000090",
+                            audience,
+                            "0000000002000-0000-owner"
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
         })
         .await
         .expect("capture old-epoch Circle content");
@@ -2231,7 +2206,7 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     member_pull(&fixture, &member_storage, &member_store_dir).await;
     let member_coverage = fixture
         .member_db
-        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
         .await
         .expect("read member Circle bootstrap coverage")
         .expect("the member's projection seeded from a real bootstrap coverage row");
@@ -2522,10 +2497,10 @@ async fn pending_circle_snapshot(
 async fn release_retained_replay_ownership(fixture: &RotationFixture) {
     fixture
         .db
-        .call(|connection| {
-            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-            StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(&transaction)?;
-            transaction.commit().map_err(DbError::from)
+        .test_sql(|database| {
+            database.transaction(|transaction| {
+                transaction.remove_retained_replay_ownership_from_snapshot()
+            })
         })
         .await
         .expect("release retained replay ownership");
@@ -2638,14 +2613,10 @@ async fn capture_document_with_file(
     );
     fixture
         .db
-        .call(move |connection| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                connection,
-                &tables,
-                Some(&routing),
-                captured,
-                |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
-            )
+        .test_sql(move |connection| {
+            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+                transaction.execute_batch(&insert).map_err(DbError::from)
+            })
         })
         .await
         .expect("capture document and its file row");
@@ -2679,10 +2650,9 @@ async fn move_document_audience(
         .host_write_blob_staging(tokio::runtime::Handle::current(), fixture.store_dir.clone());
     fixture
         .db
-        .call(move |connection| {
+        .test_sql(move |connection| {
             let routing = EncryptionService::from_key([42; 32]);
-            StoreDatabase::run_store_write_transaction_on(
-                connection,
+            connection.run_host_store_write(
                 &tables,
                 &gates,
                 &blob_decls,
@@ -2884,7 +2854,7 @@ async fn document_file_stamp(fixture: &RotationFixture, file_id: &str) -> String
     let file_id = file_id.to_string();
     fixture
         .db
-        .call(move |connection| {
+        .test_sql(move |connection| {
             connection
                 .query_row(
                     "SELECT _updated_at FROM document_files WHERE id = ?1",
@@ -3411,7 +3381,7 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
     );
     let row_present = fixture
         .db
-        .call(|connection| {
+        .test_sql(|connection| {
             connection
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM documents WHERE id = '00000000-0000-4000-8000-0000000000c1')",
@@ -3492,7 +3462,7 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
     // recorded — the coverage its acknowledgements will name.
     let member_coverage = fixture
         .member_db
-        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
         .await
         .expect("read member Circle bootstrap coverage")
         .expect("the member's projection seeded from a real bootstrap coverage row");
@@ -3562,18 +3532,9 @@ async fn bootstrap_image_present(
     fixture: &RotationFixture,
     image_object: &crate::storage::ExactObjectRef,
 ) -> bool {
-    let object_id = crate::protocol::remote_object::remote_object_id(image_object);
     fixture
         .db
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                    [object_id.to_string()],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .remote_object_exists_for_test(image_object.clone())
         .await
         .expect("read bootstrap image ownership presence")
 }
@@ -3586,7 +3547,7 @@ async fn member_seed_image(
 ) -> crate::storage::ExactObjectRef {
     fixture
         .member_db
-        .call(move |conn| StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id))
+        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
         .await
         .expect("read member Circle bootstrap coverage")
         .expect("the member's projection seeded from a real bootstrap coverage row")
@@ -3600,22 +3561,11 @@ async fn bootstrap_image_owner_count(
     fixture: &RotationFixture,
     image_object: &crate::storage::ExactObjectRef,
 ) -> usize {
-    let object_id = crate::protocol::remote_object::remote_object_id(image_object);
     let record = fixture
         .db
-        .call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT state FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)
-        })
+        .remote_object_for_test(image_object.clone())
         .await
         .expect("load bootstrap image ownership");
-    let record: crate::protocol::remote_object::RemoteObjectRecord =
-        serde_json::from_str(&record).expect("parse bootstrap image ownership");
     let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record else {
         panic!("a live bootstrap image is a shared object");
     };
@@ -3643,24 +3593,12 @@ async fn live_bootstrap_images(
 ) -> Vec<(crate::storage::ExactObjectRef, usize)> {
     let records = fixture
         .db
-        .call(|connection| {
-            let mut statement = connection
-                .prepare("SELECT state FROM remote_objects ORDER BY object_id")
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
-            Ok(rows)
-        })
+        .remote_objects_for_test()
         .await
         .expect("read remote object records");
     records
         .into_iter()
-        .filter_map(|raw| {
-            let record: crate::protocol::remote_object::RemoteObjectRecord =
-                serde_json::from_str(&raw).expect("parse remote object record");
+        .filter_map(|record| {
             let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
             else {
                 return None;

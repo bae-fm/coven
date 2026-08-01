@@ -29,7 +29,6 @@ use crate::sync::test_helpers::{
     exact_tombstone_key, exec, open_test_db, open_test_db_with_blob, plaintext_cipher,
     plant_blob_row, pubkey_hex, TestStore,
 };
-use rusqlite::OptionalExtension;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -150,19 +149,10 @@ async fn gc_tombstones_without_live_refs(
 
 /// Read back `(attempt_count, last_error, last_attempt_at)` for a delete entry, or
 /// `None` if it was removed.
-async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox \
-             WHERE id = ?1 AND operation = 'delete'",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("query delete outbox entry")
+async fn get_delete(db: &Database, id: i64) -> Option<crate::database::OutboxAttempt> {
+    db.test_sql(move |database| database.delete_outbox_attempt(id))
+        .await
+        .expect("query delete outbox entry")
 }
 
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
@@ -276,11 +266,9 @@ async fn enqueue_delete(
 ) {
     let stored = stored.clone();
     let created_at = created_at.to_string();
-    db.call(move |conn| {
-        crate::database::CloudOutboxRecords::new(conn).enqueue_delete(&stored, &created_at)
-    })
-    .await
-    .expect("enqueue exact blob deletion");
+    db.test_sql(move |database| database.enqueue_blob_delete(&stored, &created_at))
+        .await
+        .expect("enqueue exact blob deletion");
 }
 
 async fn enqueue_local_upload(
@@ -299,15 +287,8 @@ async fn enqueue_local_upload(
         .await
         .expect("write upload source");
     let root_id = format!("note-{blob_id}");
-    db.call(move |conn| {
-        crate::database::CloudOutboxRecords::new(conn).enqueue_upload(
-            "notes",
-            &root_id,
-            &row,
-            &source_path,
-            false,
-            T0,
-        )
+    db.test_sql(move |database| {
+        database.enqueue_blob_upload("notes", &root_id, &row, &source_path, false, T0)
     })
     .await
     .expect("enqueue exact Local row upload");
@@ -329,31 +310,25 @@ async fn insert_local_blob_row(
     let cloud_path = cloud_path.map(str::to_string);
     let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
     let hash = crate::protocol::store_commit::ObjectHash::digest(bytes).to_string();
-    db.call(move |conn| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            conn,
-            &tables,
-            None,
-            write_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO notes
+    db.test_sql(move |conn| {
+        conn.run_internal_store_write(&tables, None, write_id, |tx| {
+            tx.execute(
+                "INSERT INTO notes
                      (id, title, body, shared, _updated_at, created_at)
                      VALUES (?1, 'blob root', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-                    [root_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT INTO note_photos
+                [root_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO note_photos
                      (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at)
                      VALUES (?1, ?2, 'cover', ?3, ?4, ?5, ?6,
                              '0000000001000-0000-dev1', '2026-01-01')",
-                    rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
-                )
-                .map_err(DbError::from)?;
-                Ok(())
-            },
-        )
+                rusqlite::params![row_id, root_id, size, hash, cloud_path, blob_id],
+            )
+            .map_err(DbError::from)?;
+            Ok(())
+        })
     })
     .await
     .expect("insert journaled Local blob row");
@@ -818,8 +793,8 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .expect("write upload source");
     let enqueue_row = row.clone();
     let enqueue_path = source_path.clone();
-    db.call(move |conn| {
-        crate::database::CloudOutboxRecords::new(conn).enqueue_upload(
+    db.test_sql(move |database| {
+        database.enqueue_blob_upload(
             "notes",
             "note-upload-row",
             &enqueue_row,
@@ -1077,17 +1052,9 @@ async fn corrupt_delete_backoff_timestamp_case() {
     // The later row carries an attempt count, so a *parseable* recent timestamp
     // would hold it inside its backoff window. Its corruption must be found
     // before the earlier healthy row produces a remote effect.
-    Box::pin(db.call(|conn| {
-        conn.execute(
-            "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1 \
-             WHERE id = 2 AND operation = 'delete'",
-            [],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    }))
-    .await
-    .expect("corrupt last_attempt_at");
+    Box::pin(db.test_sql(|database| database.corrupt_delete_outbox_attempt_time(2)))
+        .await
+        .expect("corrupt last_attempt_at");
 
     let clock = FixedClock(at("2024-06-01T00:00:10Z"));
     let pending_rotation = PendingRotation::none();

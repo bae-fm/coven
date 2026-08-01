@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 
 use super::upload::{drain_uploads, DrainOutcome};
 use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
@@ -334,7 +333,7 @@ async fn plant_uploads(
         .collect::<Vec<_>>();
     fixture
         .db
-        .call(move |conn| {
+        .test_sql(move |conn| {
             conn.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES (?1, 'upload', 0, '0000000001000-0000-test', '2024-01-01')",
@@ -373,7 +372,7 @@ async fn plant_uploads(
         let registered = path.clone();
         fixture
             .db
-            .call(move |conn| Database::register_external_blob_on(conn, &row, &registered))
+            .test_sql(move |database| database.register_external_blob(&row, &registered))
             .await
             .expect("register exact source authority");
         paths.push(path);
@@ -427,23 +426,11 @@ async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::database::Out
         .expect("upload journal exists")
 }
 
-async fn journal_attempt(
-    fixture: &UploadFixture,
-    blob_id: &str,
-) -> (i64, Option<String>, Option<String>) {
+async fn journal_attempt(fixture: &UploadFixture, blob_id: &str) -> crate::database::OutboxAttempt {
     let blob_id = blob_id.to_string();
     fixture
         .db
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT attempt_count, last_error, last_attempt_at
-                 FROM cloud_outbox WHERE operation = 'upload' AND row_id = ?1",
-                [blob_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(DbError::from)
-        })
+        .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
         .await
         .expect("read journal attempt")
         .expect("journal exists")
@@ -718,16 +705,7 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     let entry_id = entry.id;
     fixture
         .db
-        .call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox
-                 SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
-                 WHERE id = ?1 AND operation = 'upload'",
-                [entry_id],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
+        .test_sql(move |database| database.corrupt_upload_outbox_attempt_time(entry_id))
         .await
         .expect("corrupt last_attempt_at");
 
@@ -843,17 +821,17 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     let rollback_path = paths[0].clone();
     fixture
         .db
-        .call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            crate::database::CloudOutboxRecords::new(&tx).enqueue_upload(
-                "notes",
-                ROOT_ID,
-                &rollback_row,
-                &rollback_path,
-                false,
-                T0,
-            )?;
-            tx.rollback().map_err(DbError::from)
+        .test_sql(move |database| {
+            database.rolled_back_transaction(|transaction| {
+                transaction.enqueue_blob_upload(
+                    "notes",
+                    ROOT_ID,
+                    &rollback_row,
+                    &rollback_path,
+                    false,
+                    T0,
+                )
+            })
         })
         .await
         .unwrap();
@@ -866,11 +844,10 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
 
     fixture
         .db
-        .call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            crate::database::CloudOutboxRecords::new(&tx)
-                .enqueue_upload("notes", ROOT_ID, &row, &paths[0], false, T0)?;
-            tx.commit().map_err(DbError::from)
+        .test_sql(move |database| {
+            database.transaction(|transaction| {
+                transaction.enqueue_blob_upload("notes", ROOT_ID, &row, &paths[0], false, T0)
+            })
         })
         .await
         .unwrap();
@@ -897,7 +874,7 @@ async fn plant_local_rows(
         .collect::<Vec<_>>();
     fixture
         .db
-        .call(move |conn| {
+        .test_sql(move |conn| {
             conn.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES (?1, 'upload', 0, '0000000001000-0000-test', '2024-01-01')",
@@ -931,7 +908,7 @@ async fn plant_local_rows(
         let registered = path.clone();
         fixture
             .db
-            .call(move |conn| Database::register_external_blob_on(conn, &row, &registered))
+            .test_sql(move |database| database.register_external_blob(&row, &registered))
             .await
             .unwrap();
         paths.push(path);

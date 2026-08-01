@@ -86,8 +86,9 @@ async fn capture_scoped_write_then_reopen(
     let circle_label = format!("{name}-circle");
     let (circle_id, _control) = db
         .call(move |conn| {
+            let database = crate::database::DatabaseTestSql::new(conn);
             Ok(crate::sync::test_helpers::install_test_active_circle(
-                conn,
+                &database,
                 &circle_label,
             ))
         })
@@ -363,10 +364,15 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
     .expect("install scoped Store authority");
     let (first, second) = db
         .call(|conn| {
-            let (first, _) =
-                crate::sync::test_helpers::install_test_active_circle(conn, "circle-only-first");
-            let (second, _) =
-                crate::sync::test_helpers::install_test_active_circle(conn, "circle-only-second");
+            let database = crate::database::DatabaseTestSql::new(conn);
+            let (first, _) = crate::sync::test_helpers::install_test_active_circle(
+                &database,
+                "circle-only-first",
+            );
+            let (second, _) = crate::sync::test_helpers::install_test_active_circle(
+                &database,
+                "circle-only-second",
+            );
             Ok((first, second))
         })
         .await
@@ -502,10 +508,13 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     .expect("install scoped Store authority");
     let (source, destination) = db
         .call(|conn| {
+            let database = crate::database::DatabaseTestSql::new(conn);
             let (source, _) =
-                crate::sync::test_helpers::install_test_active_circle(conn, "move-source");
-            let (destination, _) =
-                crate::sync::test_helpers::install_test_active_circle(conn, "move-destination");
+                crate::sync::test_helpers::install_test_active_circle(&database, "move-source");
+            let (destination, _) = crate::sync::test_helpers::install_test_active_circle(
+                &database,
+                "move-destination",
+            );
             Ok((source, destination))
         })
         .await
@@ -666,10 +675,13 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     .expect("install scoped Store authority");
     let (source, destination) = db
         .call(|conn| {
-            let (source, _) =
-                crate::sync::test_helpers::install_test_active_circle(conn, "relationship-source");
+            let database = crate::database::DatabaseTestSql::new(conn);
+            let (source, _) = crate::sync::test_helpers::install_test_active_circle(
+                &database,
+                "relationship-source",
+            );
             let (destination, _) = crate::sync::test_helpers::install_test_active_circle(
-                conn,
+                &database,
                 "relationship-destination",
             );
             Ok((source, destination))
