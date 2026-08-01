@@ -386,7 +386,7 @@ impl StoreDatabase {
                                             id: blob.id.clone(),
                                         });
                                     }
-                                    crate::blob::local_cleanup::record_obsolete_copy_intents_on(
+                                    super::local_blob_cleanup::record_obsolete_copy_intents_on(
                                         transaction,
                                         &blob_decls,
                                         intent,

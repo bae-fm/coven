@@ -1,6 +1,5 @@
 use super::support::advance_max_updated_at;
 use super::*;
-use crate::blob::local_cleanup;
 use crate::blob::local_cleanup::intents_from_changes as local_blob_cleanup_intents;
 
 pub(crate) enum Readiness {
@@ -159,7 +158,7 @@ fn apply_merge_subset_on(
     let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
         .map_err(|error| DbError::Message(error.to_string()))?;
     for intent in cleanup {
-        local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
+        store_transaction.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
     }
     Ok(MergeSubsetOutcome::Applied(winning_rows))
 }
@@ -456,7 +455,7 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         .map_err(|error| DbError::Message(error.to_string()))?;
     returned_changes.extend(removal_changes);
     for intent in removal_cleanup {
-        local_cleanup::record_obsolete_copy_intents_on(conn, blob_decls, &intent)?;
+        store_transaction.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
     }
     if package_reported_fk_violation {
         let violations: bool = conn

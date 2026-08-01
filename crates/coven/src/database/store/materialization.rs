@@ -227,7 +227,7 @@ impl StoreDatabase {
                         )
                         .map_err(|error| DbError::Message(error.to_string()))?
                         {
-                            crate::blob::local_cleanup::record_obsolete_copy_intents_on(
+                            super::local_blob_cleanup::record_obsolete_copy_intents_on(
                                 &tx,
                                 &blob_decls,
                                 &intent,

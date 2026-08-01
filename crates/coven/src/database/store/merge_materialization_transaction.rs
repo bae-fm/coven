@@ -41,6 +41,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 }
 
 impl MergeMaterializationTransaction<'_, '_> {
+    pub(crate) fn record_obsolete_blob_cleanup_intent(
+        &self,
+        declarations: &crate::blob::decl::BlobDecls,
+        intent: &crate::blob::local_cleanup::LocalBlobCleanupIntent,
+    ) -> Result<(), DbError> {
+        super::local_blob_cleanup::record_obsolete_copy_intents_on(
+            self.transaction,
+            declarations,
+            intent,
+        )
+    }
+
     pub(super) fn record_materialized_merge_commit(
         &self,
         root: &crate::protocol::store_commit::StoreRootRef,
