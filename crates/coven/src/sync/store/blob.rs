@@ -995,25 +995,9 @@ impl StoreBlobCache {
                 )))
             }
         }
-        let parent = source.parent().ok_or_else(|| {
-            BlobCacheError::Io(format!("cached blob has no parent: {}", source.display()))
-        })?;
-        tokio::fs::File::open(parent)
+        crate::atomic_file::sync_parent_dir(source)
             .await
-            .map_err(|error| {
-                BlobCacheError::Io(format!(
-                    "open cached blob parent {}: {error}",
-                    parent.display()
-                ))
-            })?
-            .sync_all()
-            .await
-            .map_err(|error| {
-                BlobCacheError::Io(format!(
-                    "sync cached blob parent {}: {error}",
-                    parent.display()
-                ))
-            })
+            .map_err(BlobCacheError::Io)
     }
 
     pub(crate) async fn pin(

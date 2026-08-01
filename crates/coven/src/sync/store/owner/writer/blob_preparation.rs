@@ -556,15 +556,7 @@ async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> R
         }
         Err(error) => return Err(format!("remove prepared blob {}: {error}", path.display())),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("prepared blob has no parent: {}", path.display()))?;
-    tokio::fs::File::open(parent)
-        .await
-        .map_err(|error| format!("open prepared blob parent {}: {error}", parent.display()))?
-        .sync_all()
-        .await
-        .map_err(|error| format!("sync prepared blob parent {}: {error}", parent.display()))
+    crate::atomic_file::sync_parent_dir(path).await
 }
 
 pub(crate) fn prepare_partition_blob_locator(

@@ -8,6 +8,8 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 
+use crate::atomic_file::{sync_parent_dir, sync_parent_dir_blocking};
+
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
 /// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
 /// destination.
@@ -166,6 +168,10 @@ impl AtomicStagedFile {
         file.write_all(bytes)
             .await
             .map_err(|error| format!("write staged blob {}: {error}", path.display()))?;
+        // Raw fsync: this writes an already-open blob stage that a later rename
+        // publishes, so there is no whole-buffer `write_atomic` to route
+        // through. The stage's own parent-directory flush happens at commit.
+        #[allow(clippy::disallowed_methods)]
         file.sync_all()
             .await
             .map_err(|error| format!("fsync staged blob {}: {error}", path.display()))
@@ -202,6 +208,10 @@ impl AtomicStagedFile {
             })?;
             written += chunk.len() as u64;
         }
+        // Raw fsync: the payload arrives as a stream of chunks, so it is never
+        // in one buffer that `write_atomic` could install. The rename that
+        // publishes this stage flushes the parent directory.
+        #[allow(clippy::disallowed_methods)]
         file.sync_all().await.map_err(|error| {
             StreamWriteError::Local(format!("fsync staged blob {}: {error}", path.display()))
         })?;
@@ -247,6 +257,10 @@ impl AtomicStagedFile {
                 })?;
                 written += chunk.len() as u64;
             }
+            // Raw fsync: the bytes come off a caller-supplied byte stream, so
+            // the stage is filled incrementally and cannot go through
+            // `write_atomic`. Publication flushes the parent directory.
+            #[allow(clippy::disallowed_methods)]
             file.sync_all().await.map_err(|error| {
                 AtomicChunkWriteError::Local(format!(
                     "fsync staged blob {}: {error}",
@@ -318,6 +332,10 @@ impl AtomicStagedFile {
                         format!("write temp pin {}: {error}", staged.path.display())
                     })?;
             }
+            // Raw fsync: this copies a source file through a fixed buffer while
+            // hashing it, so the contents are never held whole for
+            // `write_atomic`. The commit that follows flushes the parent.
+            #[allow(clippy::disallowed_methods)]
             staged
                 .file_mut()
                 .sync_all()
@@ -878,28 +896,6 @@ pub(super) async fn remove_file(path: &Path) -> Result<bool, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(format!("remove file {}: {error}", path.display())),
     }
-}
-
-pub(super) async fn sync_parent_dir(path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("path has no parent dir: {}", path.display()))?;
-    let dir = tokio::fs::File::open(parent)
-        .await
-        .map_err(|e| format!("open parent dir {} to fsync: {e}", parent.display()))?;
-    dir.sync_all()
-        .await
-        .map_err(|e| format!("fsync parent dir {}: {e}", parent.display()))
-}
-
-fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("path has no parent dir: {}", path.display()))?;
-    let dir = std::fs::File::open(parent)
-        .map_err(|error| format!("open parent dir {} to fsync: {error}", parent.display()))?;
-    dir.sync_all()
-        .map_err(|error| format!("fsync parent dir {}: {error}", parent.display()))
 }
 
 /// Every committed file under `dir` as `(path, mtime_ms, size)`.

@@ -434,28 +434,7 @@ impl StagedAudienceBlobFile {
                 ));
             }
         }
-        let parent = self.path.parent().ok_or_else(|| {
-            format!(
-                "staged audience blob has no parent: {}",
-                self.path.display()
-            )
-        })?;
-        tokio::fs::File::open(parent)
-            .await
-            .map_err(|error| {
-                format!(
-                    "open staged audience blob parent {}: {error}",
-                    parent.display()
-                )
-            })?
-            .sync_all()
-            .await
-            .map_err(|error| {
-                format!(
-                    "sync staged audience blob parent {}: {error}",
-                    parent.display()
-                )
-            })
+        crate::atomic_file::sync_parent_dir(&self.path).await
     }
 }
 
