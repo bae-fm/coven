@@ -2658,17 +2658,50 @@ def lexical_call_candidates(
 
 def call_components(
     records: list[dict[str, Any]],
+    *,
+    collapse_nested: bool = False,
 ) -> list[dict[str, Any]]:
     symbols = {record["symbol"] for record in records}
-    graph = {
-        record["symbol"]: sorted(
-            {
-                edge["symbol"]
-                for edge in record["callees"]
-                if edge["symbol"] in symbols
-            }
-        )
+    records_by_symbol = {
+        record["symbol"]: record
         for record in records
+    }
+    anchor_by_symbol: dict[str, str] = {}
+    for record in records:
+        current = record
+        visited: set[str] = set()
+        while (
+            collapse_nested
+            and current.get("kind") in {"closure", "async-block"}
+            and current["symbol"] not in visited
+        ):
+            visited.add(current["symbol"])
+            parent = records_by_symbol.get(current.get("enclosing_callable"))
+            if parent is None:
+                break
+            current = parent
+        anchor_by_symbol[record["symbol"]] = current["symbol"]
+
+    anchors = set(anchor_by_symbol.values())
+    graph = {
+        anchor: set()
+        for anchor in anchors
+    }
+    directly_recursive: set[str] = set()
+    for record in records:
+        source = anchor_by_symbol[record["symbol"]]
+        for edge in record["callees"]:
+            if edge["symbol"] not in symbols:
+                continue
+            target = anchor_by_symbol[edge["symbol"]]
+            if source == target:
+                if record["symbol"] == edge["symbol"]:
+                    directly_recursive.add(source)
+                continue
+            graph[source].add(target)
+    graph = {
+        symbol: sorted(callees)
+        for symbol, callees in graph.items()
     }
     reversed_graph = {
         symbol: []
@@ -2700,7 +2733,7 @@ def call_components(
             )
 
     assigned: set[str] = set()
-    member_groups: list[list[str]] = []
+    anchor_groups: list[list[str]] = []
     for root in reversed(finish_order):
         if root in assigned:
             continue
@@ -2714,13 +2747,31 @@ def call_components(
                 if caller not in assigned:
                     assigned.add(caller)
                     pending.append(caller)
-        member_groups.append(sorted(members))
+        anchor_groups.append(sorted(members))
+
+    lexical_members: dict[str, list[str]] = {
+        anchor: []
+        for anchor in anchors
+    }
+    for symbol, anchor in anchor_by_symbol.items():
+        lexical_members[anchor].append(symbol)
+    member_groups = [
+        sorted(
+            symbol
+            for anchor in anchor_group
+            for symbol in lexical_members[anchor]
+        )
+        for anchor_group in anchor_groups
+    ]
 
     symbol_to_component: dict[str, str] = {}
-    for members in member_groups:
+    anchor_to_component: dict[str, str] = {}
+    for anchor_group, members in zip(anchor_groups, member_groups):
         component = members[0]
         for member in members:
             symbol_to_component[member] = component
+        for anchor in anchor_group:
+            anchor_to_component[anchor] = component
 
     outgoing: dict[str, set[str]] = {
         members[0]: set()
@@ -2731,9 +2782,9 @@ def call_components(
         for members in member_groups
     }
     for caller, callees in graph.items():
-        caller_component = symbol_to_component[caller]
+        caller_component = anchor_to_component[caller]
         for callee in callees:
-            callee_component = symbol_to_component[callee]
+            callee_component = anchor_to_component[callee]
             if caller_component == callee_component:
                 continue
             outgoing[caller_component].add(callee_component)
@@ -2764,14 +2815,13 @@ def call_components(
     if processed != len(outgoing):
         raise RuntimeError("collapsed call graph still contains a cycle")
 
-    records_by_symbol = {
-        record["symbol"]: record
-        for record in records
-    }
     components = []
-    for members in member_groups:
+    for anchor_group, members in zip(anchor_groups, member_groups):
         component = members[0]
-        recursive = len(members) > 1 or component in graph[component]
+        recursive = (
+            len(anchor_group) > 1
+            or any(anchor in directly_recursive for anchor in anchor_group)
+        )
         for member in members:
             records_by_symbol[member]["component"] = component
             records_by_symbol[member]["bottom_up_rank"] = ranks[component]
@@ -4105,7 +4155,7 @@ def build_graph_data(
         for record in records
         if record["symbol"] not in construction_boundaries
     ]
-    components = call_components(workflow_records)
+    components = call_components(workflow_records, collapse_nested=True)
     component_records = {
         component["id"]: [
             records_by_symbol[symbol]

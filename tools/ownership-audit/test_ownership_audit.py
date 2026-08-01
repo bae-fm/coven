@@ -1391,7 +1391,7 @@ class SemanticIndexTests(unittest.TestCase):
         self.assertEqual([owner["label"] for owner in owners], ["Store"])
         self.assertEqual(graph["summary"]["unbound"], 0)
 
-    def test_nested_unowned_stateful_callable_blocks_its_parent(self):
+    def test_nested_unowned_stateful_callable_is_part_of_its_parent(self):
         parent = self.graph_record("sample::run")
         closure = self.graph_record(
             "sample::run::<closure@1:1>",
@@ -1402,24 +1402,18 @@ class SemanticIndexTests(unittest.TestCase):
         graph = ownership_audit.build_graph_data(
             {"callables": [parent, closure], "reach_throughs": {}}
         )
-        parent_node = next(
+        workflow = next(
             node
             for node in graph["nodes"]
-            if any(
-                callable_record["symbol"] == parent["symbol"]
-                for callable_record in node["callables"]
-            )
+            if node["kind"] == "unbound"
         )
-        closure_node = next(
-            node
-            for node in graph["nodes"]
-            if any(
-                callable_record["symbol"] == closure["symbol"]
-                for callable_record in node["callables"]
-            )
+        self.assertEqual(
+            {record["symbol"] for record in workflow["callables"]},
+            {parent["symbol"], closure["symbol"]},
         )
-        self.assertTrue(closure_node["ready"])
-        self.assertEqual(parent_node["blockers"], [closure_node["id"]])
+        self.assertTrue(workflow["ready"])
+        self.assertEqual(workflow["effects"], ["database-read"])
+        self.assertEqual(graph["summary"]["ready"], 1)
 
     def test_ready_group_keeps_adjacent_receiver_as_candidate_not_owner(self):
         owner = self.graph_record(
