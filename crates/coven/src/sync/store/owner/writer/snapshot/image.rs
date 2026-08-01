@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::database::Database;
-use crate::migration::Migration;
 use crate::storage::{StorageError, SyncStorage};
 use crate::sync::session::SyncedTable;
+use crate::Migration;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -69,7 +69,7 @@ pub enum SnapshotError {
     /// The snapshot's synced-schema version is newer than this binary's top
     /// migration, so its DB image carries columns this binary's tables lack. The
     /// generation is refused before its image is downloaded; the same refusal is
-    /// the at-open backstop in [`crate::migration::run_migrations`].
+    /// the at-open backstop in [`crate::database::run_migrations_in_transaction`].
     #[error(
         "snapshot schema version {snapshot_version} is newer than this binary supports \
          ({supported}); update the app"

@@ -14,7 +14,6 @@ use crate::blob::{CacheFill, Provenance};
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::migration::Migration;
 use crate::protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::protocol::store_commit::StoreDeviceHead;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -24,6 +23,7 @@ use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::store::{
     HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
 };
+use crate::Migration;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
@@ -3944,7 +3944,7 @@ fn open_scoped_circle_test_db() -> crate::database::Database {
             )
             .inherits_audience_through("note_id"),
         ],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "scoped Circle schema",
             "CREATE TABLE notes (
@@ -4184,7 +4184,7 @@ fn scoped_fk_circle_db() -> crate::database::Database {
             )
             .inherits_audience_through("note_id"),
         ],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "scoped foreign-key schema",
             "CREATE TABLE notes (

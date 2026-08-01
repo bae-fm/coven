@@ -504,7 +504,7 @@ fn open_routing_db() -> Database {
             crate::sync::session::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "Circle routing schema",
             "CREATE TABLE documents (

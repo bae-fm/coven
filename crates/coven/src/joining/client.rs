@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
+use crate::database::supported_version;
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
@@ -16,7 +17,6 @@ use crate::joining::{InviteCode, MembershipFloor};
 use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
-use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -26,6 +26,7 @@ use crate::sync::store::{
     bootstrap_from_snapshot, BootstrapResult, InviteError, PullError, SnapshotBlobReconcile,
     SnapshotError,
 };
+use crate::Migration;
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an

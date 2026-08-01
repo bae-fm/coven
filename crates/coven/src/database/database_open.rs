@@ -324,7 +324,7 @@ impl DatabaseCore {
         // migration ladder (that writes), but refuse a schema newer than this binary
         // knows — the same policy `run_migrations` applies — because the gate and blob
         // models below are resolved against a schema this binary must understand.
-        let schema_version = crate::migration::ensure_schema_supported(&conn, migrations)?;
+        let schema_version = crate::database::ensure_schema_supported(&conn, migrations)?;
 
         // Reads only (PRAGMA table_info): assert the host tables the writer created
         // still present the synced-table contract, so a wrong schema fails loud at

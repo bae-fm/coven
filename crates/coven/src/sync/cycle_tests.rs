@@ -1991,7 +1991,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
                     .with_id_column("blob_id"),
             ),
     ];
-    let migrations = vec![crate::migration::Migration::sql(
+    let migrations = vec![crate::Migration::sql(
         1,
         "shared snapshot blob",
         "CREATE TABLE assets (

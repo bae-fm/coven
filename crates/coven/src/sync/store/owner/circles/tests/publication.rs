@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
     Vec<crate::sync::session::SyncedTable>,
-    Vec<crate::migration::Migration>,
+    Vec<crate::Migration>,
 ) {
     (
         vec![crate::sync::session::SyncedTable::new(
@@ -11,7 +11,7 @@ fn circle_routing_test_schema() -> (
             crate::sync::session::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "Circle routing schema",
             "CREATE TABLE documents (
@@ -471,7 +471,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .scoped_by("audience")
         .carries_blob(blob_decl)],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "Circle member bootstrap schema",
             "CREATE TABLE documents (
@@ -517,7 +517,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             crate::blob::Provenance::HostProvided,
             crate::blob::CacheFill::CacheEager,
         ))],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "Circle member bootstrap schema",
             "CREATE TABLE documents (
@@ -628,7 +628,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             crate::blob::Provenance::HostProvided,
             crate::blob::CacheFill::CacheEager,
         ))],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "Circle member bootstrap schema",
             "CREATE TABLE documents (

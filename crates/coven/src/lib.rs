@@ -26,7 +26,6 @@ pub(crate) mod identity_custody;
 pub(crate) mod joining;
 pub(crate) mod keyring_backend;
 pub(crate) mod keys;
-pub(crate) mod migration;
 pub(crate) mod oauth;
 pub(crate) mod protocol;
 mod read_handle;
@@ -70,6 +69,7 @@ pub use database::exercise_exact_outbound_blob_graph;
 pub use database::{
     DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext, WriteBatch,
 };
+pub use database::{Migration, MigrationError, MigrationStep};
 #[cfg(any(test, feature = "test-utils"))]
 pub use encryption::EncryptionService;
 pub use encryption::{EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE};
@@ -99,7 +99,6 @@ pub use keys::{
     keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
     IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
 };
-pub use migration::{Migration, MigrationStep};
 #[cfg(any(test, feature = "oauth-providers"))]
 pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]

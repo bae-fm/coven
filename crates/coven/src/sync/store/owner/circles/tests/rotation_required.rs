@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::sync::cycle::{init_sync_over_storage, StoreInitialization, SyncComponents};
 use crate::sync::test_helpers::TestDevice;
 
-fn circle_routing_migrations() -> Vec<crate::migration::Migration> {
-    vec![crate::migration::Migration::sql(
+fn circle_routing_migrations() -> Vec<crate::Migration> {
+    vec![crate::Migration::sql(
         1,
         "Circle routing schema",
         "CREATE TABLE documents (

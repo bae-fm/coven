@@ -15,12 +15,12 @@ use crate::encryption::MasterKeyring;
 use crate::identity_custody::IdentityCustody;
 use crate::joining::{bootstrap_and_save_store, BootstrapCleanup, BootstrapError};
 use crate::keys::{StoreKeys, UserKeypair};
-use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
 use crate::sync::session::SyncedTable;
+use crate::Migration;
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they

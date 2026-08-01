@@ -265,7 +265,7 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
 
 fn scoped_replay_schema() -> (
     Vec<crate::sync::session::SyncedTable>,
-    Vec<crate::migration::Migration>,
+    Vec<crate::Migration>,
 ) {
     (
         vec![crate::sync::session::SyncedTable::new(
@@ -273,7 +273,7 @@ fn scoped_replay_schema() -> (
             crate::sync::session::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
-        vec![crate::migration::Migration::sql(
+        vec![crate::Migration::sql(
             1,
             "scoped replay schema",
             "CREATE TABLE notes (

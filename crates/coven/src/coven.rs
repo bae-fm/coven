@@ -13,10 +13,10 @@ use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
-use crate::migration::{Migration, MigrationError};
 use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
 use crate::sync::session::SyncedTable;
+use crate::{Migration, MigrationError};
 
 pub type CovenResult<T> = Result<T, CovenError>;
 

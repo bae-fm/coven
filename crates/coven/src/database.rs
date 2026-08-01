@@ -71,7 +71,6 @@ use std::sync::Arc;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::encryption::EncryptionService;
-use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::protocol::circle::Audience;
 use crate::protocol::membership::{
@@ -123,6 +122,7 @@ mod database_runtime;
 mod local_state;
 mod local_store_identity;
 mod make_remote;
+mod migration;
 mod operation_models;
 mod prepared_audience_objects;
 mod remote_object_records;
@@ -156,6 +156,10 @@ pub(crate) use local_store_identity::local_merge_stream_id_on;
 pub(crate) use local_store_identity::{
     local_activated_registration_ref_on, local_store_authority_on,
 };
+pub(crate) use migration::{
+    ensure_schema_supported, run_migrations_in_transaction, supported_version,
+};
+pub use migration::{Migration, MigrationError, MigrationStep};
 pub(crate) use operation_models::{
     DurableCircleSnapshotPublication, DurableDeviceRegistration, DurableMembershipMutation,
     DurableSnapshotPublication, LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState,

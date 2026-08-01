@@ -1093,7 +1093,7 @@ async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_devi
 struct OwnerRecoveryRestoreFixture {
     code: String,
     tables: Vec<crate::sync::session::SyncedTable>,
-    migrations: Vec<crate::migration::Migration>,
+    migrations: Vec<crate::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
 }

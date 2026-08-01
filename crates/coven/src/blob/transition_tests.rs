@@ -26,7 +26,6 @@ use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
-use crate::migration::Migration;
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
@@ -40,6 +39,7 @@ use crate::sync::test_helpers::{
     open_test_db_with_blob, open_test_db_with_user_and_host_blobs, plaintext_cipher, query_text,
     register_external_blob, remote_root_db, row_exists, temp_store_dir, TestStore,
 };
+use crate::Migration;
 
 async fn make_remote(
     db: &Database,

@@ -12,10 +12,10 @@ use crate::database::resolve_and_apply_changeset;
 use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
-use crate::migration::Migration;
 use crate::protocol::store_commit::ObjectHash;
 use crate::store_dir::StoreDir;
 use crate::sync::session::{BlobDecl, SyncedTable};
+use crate::Migration;
 
 #[cfg(test)]
 pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {

@@ -592,20 +592,16 @@ async fn restart_seeds_past_within_bound_synced_row() {
 #[tokio::test]
 async fn returned_stamper_shares_seeded_clock() {
     let seeded_floor = "9000000000000-0005-dev-a";
-    let migrations = vec![crate::migration::Migration::run(
-        1,
-        "test-schema",
-        move |conn| {
-            create_synced_schema(conn)?;
-            conn.execute(
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    let migrations = vec![crate::Migration::run(1, "test-schema", move |conn| {
+        create_synced_schema(conn)?;
+        conn.execute(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
-                [seeded_floor],
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        },
-    )];
+            [seeded_floor],
+        )
+        .map(|_| ())
+        .map_err(crate::database::DbError::from)
+    })];
     let (db, stamper) = crate::database::Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
