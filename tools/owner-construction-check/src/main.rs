@@ -152,23 +152,57 @@ struct Violation {
     child: String,
 }
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct DatabaseBoundaryViolation {
+    path: String,
+    line: usize,
+    kind: String,
+}
+
+struct CheckResult {
+    owner_construction: Vec<Violation>,
+    database_boundary: Vec<DatabaseBoundaryViolation>,
+}
+
 fn main() {
-    let root = std::env::args_os()
-        .nth(1)
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    let database_boundary = arguments
+        .next_if(|argument| argument == "--database-boundary")
+        .is_some();
+    let root = arguments
+        .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    match check(&root) {
-        Ok(violations) if violations.is_empty() => {}
-        Ok(violations) => {
-            for violation in violations {
+    if arguments.next().is_some() {
+        eprintln!("usage: owner-construction-check [--database-boundary] [root]");
+        std::process::exit(2);
+    }
+    match check(&root, database_boundary) {
+        Ok(result)
+            if result.owner_construction.is_empty() && result.database_boundary.is_empty() => {}
+        Ok(result) => {
+            for violation in &result.owner_construction {
                 eprintln!(
                     "{}:{}: owner constructor {} constructs retained owner {}",
                     violation.path, violation.line, violation.parent, violation.child
                 );
             }
-            eprintln!(
-                "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
-            );
+            for violation in &result.database_boundary {
+                eprintln!(
+                    "{}:{}: {} is forbidden outside the database module",
+                    violation.path, violation.line, violation.kind
+                );
+            }
+            if !result.owner_construction.is_empty() {
+                eprintln!(
+                    "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
+                );
+            }
+            if !result.database_boundary.is_empty() {
+                eprintln!(
+                    "database operations retain SQLite state and expose domain methods; move raw SQLite and SQL under crates/coven/src/database"
+                );
+            }
             std::process::exit(1);
         }
         Err(error) => {
@@ -178,18 +212,126 @@ fn main() {
     }
 }
 
-fn check(root: &Path) -> Result<Vec<Violation>, String> {
+fn check(root: &Path, check_database_boundary: bool) -> Result<CheckResult, String> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
     let owners = infer_owners(&structs);
     let constructors = collect_constructors(&files, &owners);
     let free_constructors = collect_free_constructors(&files, &owners);
-    Ok(find_violations(
-        &files,
-        &owners,
-        &constructors,
-        &free_constructors,
-    ))
+    Ok(CheckResult {
+        owner_construction: find_violations(&files, &owners, &constructors, &free_constructors),
+        database_boundary: if check_database_boundary {
+            find_database_boundary_violations(&files)
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundaryViolation> {
+    let mut violations = BTreeSet::new();
+    for file in files {
+        if file.relative_path == "crates/coven/src/database.rs"
+            || file.relative_path.starts_with("crates/coven/src/database/")
+        {
+            continue;
+        }
+        let mut visitor = DatabaseBoundaryVisitor {
+            path: &file.relative_path,
+            violations: &mut violations,
+        };
+        visitor.visit_file(&file.syntax);
+    }
+    violations.into_iter().collect()
+}
+
+struct DatabaseBoundaryVisitor<'a> {
+    path: &'a str,
+    violations: &'a mut BTreeSet<DatabaseBoundaryViolation>,
+}
+
+impl DatabaseBoundaryVisitor<'_> {
+    fn record(&mut self, kind: &str, span: Span) {
+        self.violations.insert(DatabaseBoundaryViolation {
+            path: self.path.to_string(),
+            line: span.start().line,
+            kind: kind.to_string(),
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if use_tree_names_rusqlite(&node.tree) {
+            self.record("raw SQLite path", node.span());
+        }
+        visit::visit_item_use(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if node
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == "rusqlite")
+        {
+            self.record("raw SQLite path", node.span());
+        }
+        visit::visit_path(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == "rusqlite")
+        {
+            self.record("raw SQLite path", node.span());
+        }
+        visit::visit_macro(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if sql_statement(&node.value()) {
+            self.record("SQL statement", node.span());
+        }
+        visit::visit_lit_str(self, node);
+    }
+}
+
+fn use_tree_names_rusqlite(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => path.ident == "rusqlite",
+        syn::UseTree::Name(name) => name.ident == "rusqlite",
+        syn::UseTree::Rename(rename) => rename.ident == "rusqlite",
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_names_rusqlite),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn sql_statement(value: &str) -> bool {
+    let Some(keyword) = value.trim_start().split_ascii_whitespace().next() else {
+        return false;
+    };
+    matches!(
+        keyword.to_ascii_uppercase().as_str(),
+        "ALTER"
+            | "ATTACH"
+            | "BEGIN"
+            | "COMMIT"
+            | "CREATE"
+            | "DELETE"
+            | "DETACH"
+            | "DROP"
+            | "INSERT"
+            | "PRAGMA"
+            | "REPLACE"
+            | "ROLLBACK"
+            | "SELECT"
+            | "UPDATE"
+            | "VACUUM"
+            | "WITH"
+    )
 }
 
 fn rust_files(root: &Path) -> Result<Vec<RustFile>, String> {
@@ -602,5 +744,28 @@ mod tests {
         let violations = find_violations(&files, &owners, &constructors, &free_constructors);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].child, "Child");
+    }
+
+    #[test]
+    fn sqlite_types_and_sql_are_rejected_outside_the_database_module() {
+        let source = syn::parse_file(
+            r#"
+            use rusqlite::Connection;
+            fn leak(conn: &Connection) { conn.execute("DELETE FROM notes", []).unwrap(); }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+            syntax: source,
+        }];
+        let violations = find_database_boundary_violations(&files);
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.kind.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["raw SQLite path", "SQL statement"]),
+        );
     }
 }
