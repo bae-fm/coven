@@ -92,6 +92,8 @@ use crate::sync::session::SyncedTable;
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 
+pub use rusqlite;
+
 mod blob_bindings;
 mod blob_declarations;
 mod blob_records;
@@ -218,7 +220,7 @@ pub(crate) use store::{
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on};
 pub use store::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
-pub use store::{SqlContext, WriteBatch};
+pub use store::{SqlContext, SqlReadContext, WriteBatch};
 pub(crate) use store_authority_records::{
     ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,

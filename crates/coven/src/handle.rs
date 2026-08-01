@@ -329,7 +329,9 @@ impl CovenHandle {
 
     pub async fn sql_read<F, R>(&self, read: F) -> crate::CovenResult<R>
     where
-        F: FnOnce(&rusqlite::Connection) -> crate::CovenResult<R> + Send + 'static,
+        F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> crate::CovenResult<R>
+            + Send
+            + 'static,
         R: Send + 'static,
     {
         self.rows.read(read).await

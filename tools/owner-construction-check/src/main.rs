@@ -262,76 +262,107 @@ impl DatabaseBoundaryVisitor<'_> {
 
 impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        if use_tree_names_rusqlite(&node.tree) {
-            self.record("raw SQLite path", node.span());
+        let mut capabilities = BTreeSet::new();
+        collect_forbidden_sqlite_imports(&node.tree, false, false, &mut capabilities);
+        for capability in capabilities {
+            self.record(capability, node.span());
         }
         visit::visit_item_use(self, node);
     }
 
     fn visit_path(&mut self, node: &'ast syn::Path) {
-        if node
-            .segments
-            .first()
-            .is_some_and(|segment| segment.ident == "rusqlite")
-        {
-            self.record("raw SQLite path", node.span());
+        if let Some(capability) = forbidden_sqlite_path(node) {
+            self.record(capability, node.span());
         }
         visit::visit_path(self, node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if node
-            .path
-            .segments
-            .first()
-            .is_some_and(|segment| segment.ident == "rusqlite")
-        {
-            self.record("raw SQLite path", node.span());
+        if let Some(capability) = forbidden_sqlite_path(&node.path) {
+            self.record(capability, node.span());
         }
         visit::visit_macro(self, node);
     }
-
-    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
-        if sql_statement(&node.value()) {
-            self.record("SQL statement", node.span());
-        }
-        visit::visit_lit_str(self, node);
-    }
 }
 
-fn use_tree_names_rusqlite(tree: &syn::UseTree) -> bool {
+const FORBIDDEN_SQLITE_CAPABILITIES: &[(&str, &str)] = &[
+    ("Connection", "raw SQLite connection"),
+    ("Session", "raw SQLite session"),
+    ("Transaction", "raw SQLite transaction"),
+];
+
+fn collect_forbidden_sqlite_imports(
+    tree: &syn::UseTree,
+    under_rusqlite: bool,
+    under_database: bool,
+    capabilities: &mut BTreeSet<&'static str>,
+) {
     match tree {
-        syn::UseTree::Path(path) => path.ident == "rusqlite",
-        syn::UseTree::Name(name) => name.ident == "rusqlite",
-        syn::UseTree::Rename(rename) => rename.ident == "rusqlite",
-        syn::UseTree::Group(group) => group.items.iter().any(use_tree_names_rusqlite),
-        syn::UseTree::Glob(_) => false,
+        syn::UseTree::Path(path) => collect_forbidden_sqlite_imports(
+            &path.tree,
+            under_rusqlite || path.ident == "rusqlite",
+            under_database || path.ident == "database",
+            capabilities,
+        ),
+        syn::UseTree::Name(name) => {
+            if under_rusqlite {
+                if let Some((_, kind)) = FORBIDDEN_SQLITE_CAPABILITIES
+                    .iter()
+                    .find(|(capability, _)| name.ident == *capability)
+                {
+                    capabilities.insert(*kind);
+                }
+            } else if name.ident == "rusqlite" && !under_database {
+                capabilities.insert("raw SQLite crate import");
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if under_rusqlite {
+                if let Some((_, kind)) = FORBIDDEN_SQLITE_CAPABILITIES
+                    .iter()
+                    .find(|(capability, _)| rename.ident == *capability)
+                {
+                    capabilities.insert(*kind);
+                }
+            } else if rename.ident == "rusqlite" && !under_database {
+                capabilities.insert("raw SQLite crate import");
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_forbidden_sqlite_imports(
+                    item,
+                    under_rusqlite,
+                    under_database,
+                    capabilities,
+                );
+            }
+        }
+        syn::UseTree::Glob(_) if under_rusqlite => {
+            capabilities.insert("raw SQLite wildcard import");
+        }
+        syn::UseTree::Glob(_) => {}
     }
 }
 
-fn sql_statement(value: &str) -> bool {
-    let Some(keyword) = value.trim_start().split_ascii_whitespace().next() else {
-        return false;
-    };
-    matches!(
-        keyword.to_ascii_uppercase().as_str(),
-        "ALTER"
-            | "ATTACH"
-            | "BEGIN"
-            | "COMMIT"
-            | "CREATE"
-            | "DELETE"
-            | "DETACH"
-            | "DROP"
-            | "INSERT"
-            | "PRAGMA"
-            | "REPLACE"
-            | "ROLLBACK"
-            | "SELECT"
-            | "UPDATE"
-            | "VACUUM"
-            | "WITH"
-    )
+fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
+    let mut under_rusqlite = false;
+    for segment in &path.segments {
+        if segment.ident == "rusqlite" {
+            under_rusqlite = true;
+            continue;
+        }
+        if !under_rusqlite {
+            continue;
+        }
+        if let Some((_, kind)) = FORBIDDEN_SQLITE_CAPABILITIES
+            .iter()
+            .find(|(name, _)| segment.ident == *name)
+        {
+            return Some(*kind);
+        }
+    }
+    None
 }
 
 fn rust_files(root: &Path) -> Result<Vec<RustFile>, String> {
@@ -747,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_types_and_sql_are_rejected_outside_the_database_module() {
+    fn sqlite_connection_is_rejected_outside_the_database_module() {
         let source = syn::parse_file(
             r#"
             use rusqlite::Connection;
@@ -765,7 +796,45 @@ mod tests {
                 .iter()
                 .map(|violation| violation.kind.as_str())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["raw SQLite path", "SQL statement"]),
+            BTreeSet::from(["raw SQLite connection"]),
         );
+    }
+
+    #[test]
+    fn host_sql_and_query_values_are_allowed_outside_the_database_module() {
+        let source = syn::parse_file(
+            r#"
+            fn read(context: SqlReadContext<'_>) -> rusqlite::Result<String> {
+                context.query_row(
+                    "SELECT body FROM notes WHERE id = ?1",
+                    rusqlite::params!["note-id"],
+                    |row: &rusqlite::Row<'_>| row.get(0),
+                )
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/handle.rs".to_string(),
+            syntax: source,
+        }];
+
+        assert!(find_database_boundary_violations(&files).is_empty());
+    }
+
+    #[test]
+    fn database_owned_sqlite_reexport_is_allowed() {
+        let source = syn::parse_file(
+            r#"
+            pub use database::rusqlite;
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/lib.rs".to_string(),
+            syntax: source,
+        }];
+
+        assert!(find_database_boundary_violations(&files).is_empty());
     }
 }

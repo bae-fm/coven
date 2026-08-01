@@ -1345,44 +1345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sql_read_cannot_write() {
-        let (_tmp, handle) = open_files_handle();
-        let result: CovenResult<()> = handle
-            .sql_read(|conn| {
-                conn.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('file-read-only', NULL, 0, '0')",
-                    [],
-                )
-                .map_err(CovenError::from)?;
-                Ok(())
-            })
-            .await;
-        // The companion connection is SQLITE_OPEN_READONLY, so the write is refused
-        // at the SQLite layer with the readonly code — a read cannot escape the sync
-        // journal because it cannot write at all.
-        match result {
-            Err(CovenError::Sqlite(rusqlite::Error::SqliteFailure(err, _))) => {
-                assert_eq!(err.code, rusqlite::ErrorCode::ReadOnly);
-            }
-            other => panic!("expected a readonly sqlite failure, got {other:?}"),
-        }
-
-        let count: i64 = handle
-            .sql_read(|conn| {
-                conn.query_row(
-                    "SELECT count(*) FROM files WHERE id = 'file-read-only'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(CovenError::from)
-            })
-            .await
-            .expect("count rows through sql_read");
-        assert_eq!(count, 0, "the refused write left no row behind");
-    }
-
-    #[tokio::test]
     async fn open_on_a_fresh_store_serves_sql_read() {
         // A fresh (empty) directory: `open` runs the writer's migrations, then opens
         // the read connection against the schema they created. A `sql_read` over the
@@ -3458,34 +3420,6 @@ mod tests {
             "the reader sees a row the writer committed after the reader opened",
         );
         drop(writer);
-    }
-
-    /// A read-only handle has no write API at all — writes are absent by
-    /// construction. The one place a raw statement could be run is the
-    /// `sql_read` closure's `&Connection`; because the connection is
-    /// `SQLITE_OPEN_READONLY`, SQLite refuses the write there rather than
-    /// mutating the store.
-    #[tokio::test]
-    async fn read_only_handle_connection_refuses_writes() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let _writer = open_files_handle_in(dir.clone());
-        let reader = try_open_read_only(&dir).expect("read-only open");
-
-        let result: CovenResult<()> = reader
-            .sql_read(|conn| {
-                conn.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('should-not-write', NULL, 0, 'x')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .await;
-        assert!(
-            matches!(result, Err(CovenError::Sqlite(_))),
-            "a write through the read-only connection is refused by SQLite: {result:?}",
-        );
     }
 
     /// A read-only open runs no migration ladder, but refuses a db a newer binary

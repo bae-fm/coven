@@ -75,7 +75,7 @@ pub(crate) use blob_transitions::MaterializedLocalBlob;
 pub(crate) use candidate_records::select_author_exclusion_activation_locator;
 pub(crate) use candidate_records::CandidateCleanupObject;
 pub(crate) use device_join::DeviceJoinJournalStore;
-pub use host_sql::SqlContext;
+pub use host_sql::{SqlContext, SqlReadContext};
 pub(crate) use host_write_capture::HostWriteBlobTransaction;
 pub use host_write_operation::WriteBatch;
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};
@@ -268,12 +268,12 @@ impl StoreDatabase {
 
     pub(crate) async fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
     where
-        F: FnOnce(&rusqlite::Connection) -> Result<R, E> + Send + 'static,
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: Send + 'static,
     {
         self.connection
-            .call(move |connection| Ok(read(connection)))
+            .call(move |connection| Ok(read(SqlReadContext::new(connection))))
             .await
     }
 

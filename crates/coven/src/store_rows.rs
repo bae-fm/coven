@@ -1,5 +1,5 @@
 use crate::database::{HostWriteError, HostWriteOperation};
-use crate::{SqlContext, WriteBatch, WriteReceipt};
+use crate::{SqlContext, SqlReadContext, WriteBatch, WriteReceipt};
 
 use crate::database::StoreDatabase;
 use crate::store_dir::StoreDir;
@@ -50,7 +50,7 @@ impl StoreRows {
 
     pub(crate) async fn read<F, R>(&self, read: F) -> CovenResult<R>
     where
-        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
         self.read_database

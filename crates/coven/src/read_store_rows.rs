@@ -1,5 +1,5 @@
 use crate::database::StoreDatabase;
-use crate::{CovenError, CovenResult};
+use crate::{CovenError, CovenResult, SqlReadContext};
 
 #[derive(Clone)]
 pub(crate) struct ReadStoreRows {
@@ -13,7 +13,7 @@ impl ReadStoreRows {
 
     pub(crate) async fn read<F, R>(&self, read: F) -> CovenResult<R>
     where
-        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
         self.database.read(read).await.map_err(CovenError::from)?

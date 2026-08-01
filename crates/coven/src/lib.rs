@@ -47,7 +47,7 @@ mod write;
 #[cfg(test)]
 mod blob_facade_tests;
 
-pub use rusqlite;
+pub use database::rusqlite;
 
 pub use atomic_file::{write_atomic, write_atomic_io, WriteError};
 pub use blob::{
@@ -68,7 +68,8 @@ pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
 #[doc(hidden)]
 pub use database::exercise_exact_outbound_blob_graph;
 pub use database::{
-    DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext, WriteBatch,
+    DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext,
+    SqlReadContext, WriteBatch,
 };
 pub use database::{Migration, MigrationError, MigrationStep};
 #[cfg(any(test, feature = "test-utils"))]

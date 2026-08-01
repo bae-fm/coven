@@ -5,6 +5,45 @@ use crate::database::{CloudOutboxRecords, Database, DbError};
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::{Provenance, SyncedTable};
 
+/// Host SQL against Coven's retained database connection.
+///
+/// The connection remains private. This context exposes query operations while
+/// preventing callers from changing connection configuration or starting an
+/// independent transaction.
+///
+/// ```compile_fail
+/// fn cannot_write(sql: coven::SqlReadContext<'_>) {
+///     sql.execute("DELETE FROM notes", []);
+/// }
+/// ```
+pub struct SqlReadContext<'connection> {
+    connection: &'connection rusqlite::Connection,
+}
+
+impl<'connection> SqlReadContext<'connection> {
+    pub(super) fn new(connection: &'connection rusqlite::Connection) -> Self {
+        Self { connection }
+    }
+
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.connection.query_row(sql, params, map)
+    }
+
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: rusqlite::Params,
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.connection.prepare(sql)?;
+        let values = statement.query_map(params, map)?.collect();
+        values
+    }
+}
+
 /// Host SQL inside one journaled write transaction.
 ///
 /// The underlying transaction remains private so host SQL cannot remove

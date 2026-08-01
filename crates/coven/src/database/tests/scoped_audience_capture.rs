@@ -53,7 +53,7 @@ struct ReparentRollbackState {
 }
 
 fn reparent_rollback_state(
-    conn: &rusqlite::Connection,
+    conn: &crate::SqlReadContext<'_>,
     transaction_id: &str,
 ) -> rusqlite::Result<ReparentRollbackState> {
     let (account, requirement) = conn.query_row(
@@ -72,25 +72,23 @@ fn reparent_rollback_state(
     let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
         row.get::<_, i64>(0)
     })?;
-    let routes = conn
-        .prepare(
-            "SELECT routing_id, table_name, row_id FROM _coven_row_routes
+    let routes = conn.query(
+        "SELECT routing_id, table_name, row_id FROM _coven_row_routes
                  ORDER BY routing_id",
-        )?
-        .query_map([], |row| {
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mirror = conn
-        .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        },
+    )?;
+    let mirror = conn.query(
+        "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )?;
     Ok(ReparentRollbackState {
         account,
         requirement,
@@ -114,64 +112,65 @@ struct ScopedAncestorRollbackState {
 }
 
 fn scoped_ancestor_rollback_state(
-    conn: &rusqlite::Connection,
+    conn: &crate::SqlReadContext<'_>,
 ) -> rusqlite::Result<ScopedAncestorRollbackState> {
-    let folders = conn
-        .prepare("SELECT id, name, _updated_at FROM folders ORDER BY id")?
-        .query_map([], |row| {
+    let folders = conn.query(
+        "SELECT id, name, _updated_at FROM folders ORDER BY id",
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let documents = conn
-        .prepare("SELECT id, folder_id, audience, _updated_at FROM documents ORDER BY id")?
-        .query_map([], |row| {
+        },
+    )?;
+    let documents = conn.query(
+        "SELECT id, folder_id, audience, _updated_at FROM documents ORDER BY id",
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let details = conn
-        .prepare("SELECT id, document_id, _updated_at FROM details ORDER BY id")?
-        .query_map([], |row| {
+        },
+    )?;
+    let details = conn.query(
+        "SELECT id, document_id, _updated_at FROM details ORDER BY id",
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        },
+    )?;
     let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
         row.get::<_, i64>(0)
     })?;
     let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
         row.get::<_, i64>(0)
     })?;
-    let routes = conn
-        .prepare(
-            "SELECT table_name, row_id, routing_id FROM _coven_row_routes
+    let routes = conn.query(
+        "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  ORDER BY table_name, row_id",
-        )?
-        .query_map([], |row| {
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mirror = conn
-        .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        },
+    )?;
+    let mirror = conn.query(
+        "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )?;
     Ok(ScopedAncestorRollbackState {
         folders,
         documents,
@@ -241,23 +240,21 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let affected_write_id = write_id.clone();
     let partitions = handle
         .sql_read(move |conn| {
-            let mut statement = conn.prepare(
+            conn.query(
                 "SELECT audience, control_coord, changeset
                  FROM store_write_partitions
                  WHERE write_id = ?1
                  ORDER BY audience",
-            )?;
-            let rows = statement
-                .query_map([write_id], |row| {
+                [write_id],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(Into::into);
-            rows
+                },
+            )
+            .map_err(Into::into)
         })
         .await
         .expect("read durable audience partitions");
@@ -330,26 +327,23 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
 
     let routes = handle
         .sql_read(|conn| {
-            let mut statement = conn.prepare(
+            let routes = conn.query(
                 "SELECT routing_id, table_name, row_id
                  FROM _coven_row_routes ORDER BY row_id",
-            )?;
-            let routes = statement
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut mirror = conn
-                .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?;
-            let mirror = mirror
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+            )?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
             Ok((routes, mirror))
         })
         .await
@@ -447,12 +441,11 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
                 conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-            let mirror = conn
-                .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
             Ok((writes, partitions, mirror))
         })
         .await
@@ -499,12 +492,11 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
                 conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
                     row.get::<_, i64>(0)
                 })?;
-            let mirror = conn
-                .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
             Ok((audience, child_count, writes, partitions, mirror))
         })
         .await
@@ -550,34 +542,29 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
-            let mut statement = conn.prepare(
+            let rows = conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
+                [move_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )?;
-            let rows = statement
-                .query_map([move_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let routes = conn
-                .prepare(
-                    "SELECT routing_id, table_name, row_id
+            let routes = conn.query(
+                "SELECT routing_id, table_name, row_id
                      FROM _coven_row_routes ORDER BY row_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mirror = conn
-                .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+            )?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
             Ok((audience, child_count, rows, routes, mirror))
         })
         .await
@@ -833,33 +820,31 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
 
     let before_failure = handle
         .sql_read(|conn| {
-            let routes = conn
-                .prepare(
-                    "SELECT routing_id, table_name, row_id, _updated_at
+            let routes = conn.query(
+                "SELECT routing_id, table_name, row_id, _updated_at
                      FROM _coven_row_routes ORDER BY routing_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mirror = conn
-                .prepare(
-                    "SELECT routing_id, circle_id, _updated_at
+                },
+            )?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id, _updated_at
                      FROM _coven_audience ORDER BY routing_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+            )?;
             let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
                 row.get::<_, i64>(0)
             })?;
@@ -899,33 +884,31 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
                 [],
                 |row| row.get::<_, String>(0),
             )?;
-            let routes = conn
-                .prepare(
-                    "SELECT routing_id, table_name, row_id, _updated_at
+            let routes = conn.query(
+                "SELECT routing_id, table_name, row_id, _updated_at
                      FROM _coven_row_routes ORDER BY routing_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mirror = conn
-                .prepare(
-                    "SELECT routing_id, circle_id, _updated_at
+                },
+            )?;
+            let mirror = conn.query(
+                "SELECT routing_id, circle_id, _updated_at
                      FROM _coven_audience ORDER BY routing_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+            )?;
             let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
                 row.get::<_, i64>(0)
             })?;
@@ -961,30 +944,24 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     let local_write_id = local_move.write_id.to_string();
     let (local_partitions, local_store_bytes, local_routes, local_mirror_count) = handle
         .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = conn.query(
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([&local_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [&local_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             let store_bytes = conn.query_row(
                 "SELECT changeset FROM store_writes WHERE write_id = ?1",
                 [&local_write_id],
                 |row| row.get::<_, Vec<u8>>(0),
             )?;
-            let routes = conn
-                .prepare(
-                    "SELECT routing_id, row_id FROM _coven_row_routes
+            let routes = conn.query(
+                "SELECT routing_id, row_id FROM _coven_row_routes
                      WHERE row_id IN ('local-move-account', 'local-move-transaction')
                      ORDER BY row_id",
-                )?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
             let mirror_count = conn.query_row(
                 "SELECT count(*) FROM _coven_audience audience
                  JOIN _coven_row_routes route USING (routing_id)
@@ -1060,37 +1037,28 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     let store_write_id = store_move.write_id.to_string();
     let (store_partitions, store_routes, store_mirror) = handle
         .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = conn.query(
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([store_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let routes = conn
-                .prepare(
-                    "SELECT routing_id, row_id FROM _coven_row_routes
+                [store_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
+            let routes = conn.query(
+                "SELECT routing_id, row_id FROM _coven_row_routes
                      WHERE row_id IN ('store-move-account', 'store-move-transaction')
                      ORDER BY row_id",
-                )?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mirror = conn
-                .prepare(
-                    "SELECT audience.routing_id, audience.circle_id
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            let mirror = conn.query(
+                "SELECT audience.routing_id, audience.circle_id
                      FROM _coven_audience audience
                      JOIN _coven_row_routes route USING (routing_id)
                      WHERE route.row_id IN ('store-move-account', 'store-move-transaction')
                      ORDER BY audience.routing_id",
-                )?
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )?;
             Ok((partitions, routes, mirror))
         })
         .await
@@ -1156,15 +1124,12 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     ];
     let (delete_partitions, host_count, route_count, mirror_count) = handle
         .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = conn.query(
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([delete_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [delete_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             let host_count = conn.query_row(
                 "SELECT
                     (SELECT count(*) FROM accounts WHERE id = 'deleted-account') +
@@ -1312,14 +1277,12 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
     let write_id = moved.write_id.to_string();
     let partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -1440,13 +1403,12 @@ async fn every_outgoing_synced_fk_matches_its_child_audience() {
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
-            let audiences = conn
-                .prepare(
-                    "SELECT audience FROM store_write_partitions
+            let audiences = conn.query(
+                "SELECT audience FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([allowed_write_id], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [allowed_write_id],
+                |row| row.get::<_, String>(0),
+            )?;
             Ok((host_rows, audiences))
         })
         .await
@@ -1676,19 +1638,19 @@ async fn inherited_reparenting_materializes_subtree() {
 
     let before_routes = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  WHERE table_name IN ('transactions', 'line_items')
                  ORDER BY table_name, row_id",
-            )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
             .map_err(Into::into)
         })
         .await
@@ -1708,29 +1670,25 @@ async fn inherited_reparenting_materializes_subtree() {
     let write_id = moved.write_id.to_string();
     let (partitions, after_routes) = handle
         .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = conn.query(
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let after_routes = conn
-                .prepare(
-                    "SELECT table_name, row_id, routing_id FROM _coven_row_routes
+                [write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
+            let after_routes = conn.query(
+                "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
-                )?
-                .query_map([], |row| {
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                     ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+            )?;
             Ok((partitions, after_routes))
         })
         .await
@@ -1778,15 +1736,12 @@ async fn inherited_reparenting_materializes_subtree() {
     let local_write_id = to_local.write_id.to_string();
     let (local_partitions, local_state) = handle
         .sql_read(move |conn| {
-            let partitions = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = conn.query(
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )?
-                .query_map([local_write_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                [local_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             let state = conn.query_row(
                 "SELECT account_id, requirement_id,
                         (SELECT count(*) FROM line_items
@@ -1843,14 +1798,12 @@ async fn inherited_reparenting_materializes_subtree() {
     let store_write_id = to_store.write_id.to_string();
     let store_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([store_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [store_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -1882,7 +1835,12 @@ async fn inherited_reparenting_materializes_subtree() {
     }
 
     let invalid_before = handle
-        .sql_read(move |conn| Ok(reparent_rollback_state(conn, "invalid-target-transaction")?))
+        .sql_read(move |conn| {
+            Ok(reparent_rollback_state(
+                &conn,
+                "invalid-target-transaction",
+            )?)
+        })
         .await
         .expect("read state before invalid reparent");
     let invalid_error = handle
@@ -1904,7 +1862,12 @@ async fn inherited_reparenting_materializes_subtree() {
         "invalid reparent surfaced the wrong error: {invalid_error}"
     );
     let invalid_after = handle
-        .sql_read(move |conn| Ok(reparent_rollback_state(conn, "invalid-target-transaction")?))
+        .sql_read(move |conn| {
+            Ok(reparent_rollback_state(
+                &conn,
+                "invalid-target-transaction",
+            )?)
+        })
         .await
         .expect("read state after invalid reparent");
     assert_eq!(invalid_after, invalid_before);
@@ -1912,7 +1875,7 @@ async fn inherited_reparenting_materializes_subtree() {
     let journal_before = handle
         .sql_read(move |conn| {
             Ok(reparent_rollback_state(
-                conn,
+                &conn,
                 "journal-failure-transaction",
             )?)
         })
@@ -1946,7 +1909,7 @@ async fn inherited_reparenting_materializes_subtree() {
     let journal_after = handle
         .sql_read(move |conn| {
             Ok(reparent_rollback_state(
-                conn,
+                &conn,
                 "journal-failure-transaction",
             )?)
         })
@@ -1960,19 +1923,19 @@ async fn inherited_reparenting_materializes_subtree() {
 
     let final_routes = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
-            )?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
             .map_err(Into::into)
         })
         .await
@@ -2054,14 +2017,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let seed_write_id = seeded.write_id.to_string();
     let local_only_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1",
-            )?
-            .query_map([seed_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [seed_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2097,14 +2058,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let write_id = moved.write_id.to_string();
     let partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2162,14 +2121,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let sibling_circle = circle_b.clone();
     let sibling_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([sibling_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [sibling_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2231,14 +2188,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let local_write_id = moved_local.write_id.to_string();
     let local_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([local_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [local_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2273,7 +2228,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     }
 
     let rollback_before = handle
-        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn)?))
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(&conn)?))
         .await
         .expect("read state before ancestor retraction failure");
     let fault = rusqlite::Connection::open(store_dir.db_path()).expect("open fault injector");
@@ -2301,7 +2256,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .to_string()
         .contains("forced scoped ancestor journal failure"));
     let rollback_after = handle
-        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn)?))
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(&conn)?))
         .await
         .expect("read state after ancestor retraction failure");
     assert_eq!(rollback_after, rollback_before);
@@ -2324,14 +2279,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let sibling_local_write_id = moved_sibling_local.write_id.to_string();
     let sibling_local_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([sibling_local_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [sibling_local_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2375,14 +2328,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let store_write_id = moved_store.write_id.to_string();
     let store_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([store_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [store_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
@@ -2422,14 +2373,12 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
     let delete_write_id = deleted_store.write_id.to_string();
     let delete_partitions = handle
         .sql_read(move |conn| {
-            conn.prepare(
+            conn.query(
                 "SELECT audience, changeset FROM store_write_partitions
                  WHERE write_id = ?1 ORDER BY audience",
-            )?
-            .query_map([delete_write_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
+                [delete_write_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
             .map_err(Into::into)
         })
         .await
