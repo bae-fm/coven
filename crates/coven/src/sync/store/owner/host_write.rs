@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::OptionalExtension;
-
 use crate::blob::locator::RemoteAudience;
 use crate::blob::{Provenance, RowBlobAuthority};
-use crate::database::StoreDatabase;
 use crate::database::{
-    load_activated_registration_on, local_activated_registration_ref_on, DbError,
-    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination,
+    DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
+    StoreWriteBlobMoveDestination,
 };
 use crate::storage::{BlobSpoolProtection, BlobWriteAuthority, SyncStorage};
 use crate::store_dir::StoreDir;
@@ -39,7 +36,7 @@ impl HostWriteBlobStaging {
 
     pub(crate) fn stage_audience_move_blobs_on(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
@@ -47,7 +44,7 @@ impl HostWriteBlobStaging {
         self.runtime.block_on(async {
             let mut files = StagedAudienceBlobFiles::new();
             let result = self
-                .stage_audience_move_blobs_inner(tx, facts, moves, partitions, &mut files)
+                .stage_audience_move_blobs_inner(transaction, facts, moves, partitions, &mut files)
                 .await;
             match result {
                 Ok(()) => Ok(files),
@@ -93,15 +90,12 @@ impl HostWriteBlobStaging {
 
     async fn stage_audience_move_blobs_inner(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
         files: &mut StagedAudienceBlobFiles,
     ) -> Result<(), DbError> {
-        let storage = self.storage.as_ref();
-        let store_root = &self.store_root;
-        let store_dir = &self.store_dir;
         let moved_rows = audience_moves_by_row(moves)?;
         if moved_rows.is_empty() {
             return Ok(());
@@ -115,13 +109,7 @@ impl HostWriteBlobStaging {
                 })
         });
         let registration = if remote_destination_exists {
-            let reference = local_activated_registration_ref_on(tx)?.ok_or_else(|| {
-                DbError::Message(
-                    "audience blob move has no activated local Store registration".to_string(),
-                )
-            })?;
-            let registration = load_activated_registration_on(tx, store_root, &reference)?;
-            Some((reference, registration))
+            Some(transaction.local_activated_registration(&self.store_root)?)
         } else {
             None
         };
@@ -134,10 +122,8 @@ impl HostWriteBlobStaging {
             let source = source_authority(fact, &audience_move.source)?;
             match &audience_move.destination {
                 crate::protocol::circle::Audience::Local => {
-                    stage_local_destination(
-                        tx, storage, store_root, store_dir, fact, &source, files,
-                    )
-                    .await?;
+                    self.stage_local_destination(transaction, fact, &source, files)
+                        .await?;
                     fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
                 }
                 destination => {
@@ -147,7 +133,7 @@ impl HostWriteBlobStaging {
                     let authority = BlobWriteAuthority::new(registration_ref, registration)
                         .map_err(|error| move_materialization_error(fact, error.to_string()))?;
                     let (audience, protection) =
-                        destination_protection(tx, storage, destination, partitions, fact)?;
+                        self.destination_protection(transaction, destination, partitions, fact)?;
                     let locator = super::writer::blob_preparation::prepare_partition_blob_locator(
                         fact,
                         audience.clone(),
@@ -155,18 +141,14 @@ impl HostWriteBlobStaging {
                         &authority,
                     )
                     .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-                    let spool_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
-                    let source_path = move_source_plaintext(
-                        tx,
-                        storage,
-                        store_root,
-                        store_dir,
-                        fact,
-                        &source,
-                        &spool_path,
-                    )
-                    .await?;
-                    let spool_write = storage
+                    let spool_path = self
+                        .store_dir
+                        .outbound_blob_spool_path(locator.locator_hash());
+                    let source_path = self
+                        .move_source_plaintext(transaction, fact, &source, &spool_path)
+                        .await?;
+                    let spool_write = self
+                        .storage
                         .seal_blob_to_spool(
                             &locator,
                             &authority,
@@ -190,6 +172,214 @@ impl HostWriteBlobStaging {
             }
         }
         Ok(())
+    }
+
+    fn destination_protection(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        destination: &crate::protocol::circle::Audience,
+        partitions: &[AudiencePartition],
+        fact: &StoreWriteBlobFact,
+    ) -> Result<(RemoteAudience, BlobSpoolProtection), DbError> {
+        match destination {
+            crate::protocol::circle::Audience::Store => self
+                .storage
+                .store_blob_protection()
+                .map(|protection| (RemoteAudience::Store, protection))
+                .map_err(|error| move_materialization_error(fact, error.to_string())),
+            crate::protocol::circle::Audience::Circle(circle_id) => {
+                let partition = partitions
+                    .iter()
+                    .find(|partition| partition.audience == *destination)
+                    .ok_or_else(|| {
+                        move_materialization_error(
+                            fact,
+                            format!("destination Circle {circle_id} has no audience partition"),
+                        )
+                    })?;
+                let control = partition.control.as_ref().ok_or_else(|| {
+                    move_materialization_error(
+                        fact,
+                        format!("destination Circle {circle_id} has no exact control"),
+                    )
+                })?;
+                let (encryption, _) = transaction
+                    .circle_publication_context(*circle_id, control.coordinate())
+                    .map_err(|error| move_materialization_error(fact, error))?;
+                Ok((
+                    RemoteAudience::Circle(*circle_id),
+                    BlobSpoolProtection::Opaque(encryption),
+                ))
+            }
+            crate::protocol::circle::Audience::Local => {
+                unreachable!("Local handled before protection")
+            }
+        }
+    }
+
+    fn opening_protection(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        fact: &StoreWriteBlobFact,
+        source: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<BlobSpoolProtection, DbError> {
+        match source
+            .opening_authority(stored)
+            .map_err(|error| move_materialization_error(fact, error))?
+        {
+            crate::blob::BlobOpeningAuthority::Store => self
+                .storage
+                .store_blob_protection()
+                .map_err(|error| move_materialization_error(fact, error)),
+            crate::blob::BlobOpeningAuthority::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            } => transaction
+                .circle_blob_opening_key(&self.store_root, circle_id, control, key_fingerprint)
+                .map(BlobSpoolProtection::Opaque)
+                .map_err(|error| move_materialization_error(fact, error)),
+        }
+    }
+
+    async fn move_source_plaintext(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        fact: &StoreWriteBlobFact,
+        source: &RowBlobAuthority,
+        spool_path: &Path,
+    ) -> Result<MoveSourcePlaintext, DbError> {
+        if let Some(path) = self.local_source_path(transaction, fact, source)? {
+            match tokio::fs::metadata(&path).await {
+                Ok(metadata) if metadata.is_file() => {
+                    ExactMovePlaintext::new(fact, &path).verify().await?;
+                    return Ok(MoveSourcePlaintext::Existing(path));
+                }
+                Ok(_) => {
+                    return Err(move_materialization_error(
+                        fact,
+                        format!("blob source is not a file: {}", path.display()),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(move_materialization_error(
+                        fact,
+                        format!("inspect blob source {}: {error}", path.display()),
+                    ));
+                }
+            }
+        }
+        if source == &RowBlobAuthority::Local {
+            return Err(move_materialization_error(
+                fact,
+                "Local source plaintext is unavailable",
+            ));
+        }
+        let previous = fact.previous.as_ref().ok_or_else(|| {
+            move_materialization_error(fact, "remote source has no exact prior blob locator")
+        })?;
+        let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
+        let destination = spool_path.with_extension("move-plaintext");
+        let staged = self
+            .storage
+            .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
+            .await
+            .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+        Ok(MoveSourcePlaintext::Downloaded(staged))
+    }
+
+    async fn stage_local_destination(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        fact: &StoreWriteBlobFact,
+        source: &RowBlobAuthority,
+        files: &mut StagedAudienceBlobFiles,
+    ) -> Result<(), DbError> {
+        let destination = match fact.blob.provenance {
+            Provenance::HostProvided => self
+                .store_dir
+                .local_blob_path(&fact.blob.namespace, &fact.blob.id)
+                .map_err(|error| move_materialization_error(fact, error.to_string()))?,
+            Provenance::UserProvided => transaction
+                .external_local_path(fact)
+                .map_err(|error| move_materialization_error(fact, error))?
+                .ok_or_else(|| {
+                    move_materialization_error(
+                        fact,
+                        "UserProvided Local destination has no registered file path",
+                    )
+                })?,
+        };
+        match tokio::fs::metadata(&destination).await {
+            Ok(metadata) if metadata.is_file() => {
+                ExactMovePlaintext::new(fact, &destination).verify().await?;
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(move_materialization_error(
+                    fact,
+                    format!("Local destination is not a file: {}", destination.display()),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(move_materialization_error(
+                    fact,
+                    format!(
+                        "inspect Local destination {}: {error}",
+                        destination.display()
+                    ),
+                ));
+            }
+        }
+        if source == &RowBlobAuthority::Local {
+            return Err(move_materialization_error(
+                fact,
+                "Local source plaintext is unavailable",
+            ));
+        }
+        let previous = fact.previous.as_ref().ok_or_else(|| {
+            move_materialization_error(fact, "remote source has no exact prior blob locator")
+        })?;
+        let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
+        let staged = self
+            .storage
+            .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
+            .await
+            .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+        match fact.blob.provenance {
+            Provenance::HostProvided => staged
+                .commit()
+                .await
+                .map_err(|error| move_materialization_error(fact, error))?,
+            Provenance::UserProvided => staged
+                .commit_new()
+                .await
+                .map_err(|error| move_materialization_error(fact, error.to_string()))?,
+        }
+        files.created.push(StagedAudienceBlobFile::new(destination));
+        Ok(())
+    }
+
+    fn local_source_path(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        fact: &StoreWriteBlobFact,
+        source: &RowBlobAuthority,
+    ) -> Result<Option<PathBuf>, DbError> {
+        match fact.blob.provenance {
+            Provenance::HostProvided => self
+                .store_dir
+                .local_blob_path(&fact.blob.namespace, &fact.blob.id)
+                .map(Some)
+                .map_err(|error| move_materialization_error(fact, error.to_string())),
+            Provenance::UserProvided if source == &RowBlobAuthority::Local => transaction
+                .external_local_path(fact)
+                .map_err(|error| move_materialization_error(fact, error)),
+            Provenance::UserProvided => Ok(fact.external_path.clone()),
+        }
     }
 }
 
@@ -319,45 +509,6 @@ fn source_authority(
     }
 }
 
-fn destination_protection(
-    tx: &rusqlite::Transaction<'_>,
-    storage: &dyn SyncStorage,
-    destination: &crate::protocol::circle::Audience,
-    partitions: &[AudiencePartition],
-    fact: &StoreWriteBlobFact,
-) -> Result<(RemoteAudience, BlobSpoolProtection), DbError> {
-    match destination {
-        crate::protocol::circle::Audience::Store => storage
-            .store_blob_protection()
-            .map(|protection| (RemoteAudience::Store, protection))
-            .map_err(|error| move_materialization_error(fact, error.to_string())),
-        crate::protocol::circle::Audience::Circle(circle_id) => {
-            let partition = partitions
-                .iter()
-                .find(|partition| partition.audience == *destination)
-                .ok_or_else(|| {
-                    move_materialization_error(
-                        fact,
-                        format!("destination Circle {circle_id} has no audience partition"),
-                    )
-                })?;
-            let control = partition.control.as_ref().ok_or_else(|| {
-                move_materialization_error(
-                    fact,
-                    format!("destination Circle {circle_id} has no exact control"),
-                )
-            })?;
-            let (encryption, _) =
-                StoreDatabase::circle_publication_context_on(tx, *circle_id, control.coordinate())?;
-            Ok((
-                RemoteAudience::Circle(*circle_id),
-                BlobSpoolProtection::Opaque(encryption),
-            ))
-        }
-        crate::protocol::circle::Audience::Local => unreachable!("Local handled before protection"),
-    }
-}
-
 enum MoveSourcePlaintext {
     Existing(PathBuf),
     Downloaded(crate::storage::StagedBlobFile),
@@ -370,201 +521,6 @@ impl MoveSourcePlaintext {
             Self::Downloaded(staged) => staged.path(),
         }
     }
-}
-
-async fn move_source_plaintext(
-    tx: &rusqlite::Transaction<'_>,
-    storage: &dyn SyncStorage,
-    store_root: &crate::protocol::store_commit::StoreRootRef,
-    store_dir: &StoreDir,
-    fact: &StoreWriteBlobFact,
-    source: &RowBlobAuthority,
-    spool_path: &Path,
-) -> Result<MoveSourcePlaintext, DbError> {
-    if let Some(path) = local_source_path(tx, store_dir, fact, source)? {
-        match tokio::fs::metadata(&path).await {
-            Ok(metadata) if metadata.is_file() => {
-                ExactMovePlaintext::new(fact, &path).verify().await?;
-                return Ok(MoveSourcePlaintext::Existing(path));
-            }
-            Ok(_) => {
-                return Err(move_materialization_error(
-                    fact,
-                    format!("blob source is not a file: {}", path.display()),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(move_materialization_error(
-                    fact,
-                    format!("inspect blob source {}: {error}", path.display()),
-                ));
-            }
-        }
-    }
-    if source == &RowBlobAuthority::Local {
-        return Err(move_materialization_error(
-            fact,
-            "Local source plaintext is unavailable",
-        ));
-    }
-    let previous = fact.previous.as_ref().ok_or_else(|| {
-        move_materialization_error(fact, "remote source has no exact prior blob locator")
-    })?;
-    let protection = crate::sync::store::blob::opening_protection_on(
-        tx,
-        storage,
-        store_root,
-        source,
-        &previous.stored,
-    )
-    .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-    let destination = spool_path.with_extension("move-plaintext");
-    let staged = storage
-        .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
-        .await
-        .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-    Ok(MoveSourcePlaintext::Downloaded(staged))
-}
-
-async fn stage_local_destination(
-    tx: &rusqlite::Transaction<'_>,
-    storage: &dyn SyncStorage,
-    store_root: &crate::protocol::store_commit::StoreRootRef,
-    store_dir: &StoreDir,
-    fact: &StoreWriteBlobFact,
-    source: &RowBlobAuthority,
-    files: &mut StagedAudienceBlobFiles,
-) -> Result<(), DbError> {
-    let destination = match fact.blob.provenance {
-        Provenance::HostProvided => store_dir
-            .local_blob_path(&fact.blob.namespace, &fact.blob.id)
-            .map_err(|error| move_materialization_error(fact, error.to_string()))?,
-        Provenance::UserProvided => external_local_path_on(tx, fact)?.ok_or_else(|| {
-            move_materialization_error(
-                fact,
-                "UserProvided Local destination has no registered file path",
-            )
-        })?,
-    };
-    match tokio::fs::metadata(&destination).await {
-        Ok(metadata) if metadata.is_file() => {
-            ExactMovePlaintext::new(fact, &destination).verify().await?;
-            return Ok(());
-        }
-        Ok(_) => {
-            return Err(move_materialization_error(
-                fact,
-                format!("Local destination is not a file: {}", destination.display()),
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(move_materialization_error(
-                fact,
-                format!(
-                    "inspect Local destination {}: {error}",
-                    destination.display()
-                ),
-            ));
-        }
-    }
-    if source == &RowBlobAuthority::Local {
-        return Err(move_materialization_error(
-            fact,
-            "Local source plaintext is unavailable",
-        ));
-    }
-    let previous = fact.previous.as_ref().ok_or_else(|| {
-        move_materialization_error(fact, "remote source has no exact prior blob locator")
-    })?;
-    let protection = crate::sync::store::blob::opening_protection_on(
-        tx,
-        storage,
-        store_root,
-        source,
-        &previous.stored,
-    )
-    .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-    let staged = storage
-        .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
-        .await
-        .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-    match fact.blob.provenance {
-        Provenance::HostProvided => staged
-            .commit()
-            .await
-            .map_err(|error| move_materialization_error(fact, error))?,
-        Provenance::UserProvided => staged
-            .commit_new()
-            .await
-            .map_err(|error| move_materialization_error(fact, error.to_string()))?,
-    }
-    files
-        .created
-        .push(StagedAudienceBlobFile::new(destination.clone()));
-    Ok(())
-}
-
-fn local_source_path(
-    tx: &rusqlite::Transaction<'_>,
-    store_dir: &StoreDir,
-    fact: &StoreWriteBlobFact,
-    source: &RowBlobAuthority,
-) -> Result<Option<PathBuf>, DbError> {
-    match fact.blob.provenance {
-        Provenance::HostProvided => store_dir
-            .local_blob_path(&fact.blob.namespace, &fact.blob.id)
-            .map(Some)
-            .map_err(|error| move_materialization_error(fact, error.to_string())),
-        Provenance::UserProvided if source == &RowBlobAuthority::Local => {
-            external_local_path_on(tx, fact)
-        }
-        Provenance::UserProvided => Ok(fact.external_path.clone()),
-    }
-}
-
-fn external_local_path_on(
-    tx: &rusqlite::Transaction<'_>,
-    fact: &StoreWriteBlobFact,
-) -> Result<Option<PathBuf>, DbError> {
-    let stored = tx
-        .query_row(
-            "SELECT path, plaintext_size, plaintext_hash
-             FROM local_blob_refs
-             WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
-               AND namespace = ?4 AND blob_id = ?5
-             ORDER BY row_stamp DESC LIMIT 1",
-            rusqlite::params![
-                fact.table,
-                fact.row_id,
-                fact.column,
-                fact.blob.namespace,
-                fact.blob.id,
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(DbError::from)?;
-    let Some((path, size, hash)) = stored else {
-        return Ok(None);
-    };
-    let size = u64::try_from(size).map_err(|_| {
-        move_materialization_error(fact, "registered external blob has a negative size")
-    })?;
-    if size != fact.plaintext_size || hash != fact.plaintext_hash.to_string() {
-        return Err(move_materialization_error(
-            fact,
-            "registered external blob identity differs from the moved row",
-        ));
-    }
-    Ok(Some(PathBuf::from(path)))
 }
 
 struct ExactMovePlaintext<'a> {

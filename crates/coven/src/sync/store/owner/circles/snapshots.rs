@@ -10,8 +10,8 @@ use crate::KeyFingerprint;
 use tracing::warn;
 
 use crate::sync::store::owner::snapshot::{
-    coverage_dominates, drain_snapshot_spool_cleanup, publication_error,
-    verify_circle_bootstrap_image, CreatedSnapshot, SnapshotCut, SnapshotError,
+    coverage_dominates, publication_error, verify_circle_bootstrap_image, CreatedSnapshot,
+    SnapshotCut, SnapshotError,
 };
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
@@ -163,7 +163,8 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 .await
                 .map_err(publication_error)?
             {
-                match self.publish_durable(pending).await {
+                let publication = self.writer.snapshot_publication().await;
+                match publication.resume_circle(pending).await {
                     Ok(meta) => tracing::info!(
                         circle_id = %input.circle_id,
                         generation = meta.generation,
@@ -284,13 +285,12 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let root = &self.root;
         let registration_ref = self.registration_ref.clone();
         let device_signer = self.device_signer.clone();
-        let _publication = database.snapshot_publication_permit().await;
-        drain_snapshot_spool_cleanup(database).await?;
+        let bootstrap_verifier = self.writer.circle_bootstrap_verifier();
+        let publication = self.writer.snapshot_publication().await;
+        publication.drain_spool_cleanup().await?;
         // The image references only already-published Circle blobs, verified exact —
         // the same closure a member-addition bootstrap image carries.
-        let blobs = self
-            .writer
-            .circle_bootstrap_verifier()
+        let blobs = bootstrap_verifier
             .verify_snapshot_blobs(circle_id, &snapshot)
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
@@ -426,31 +426,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                     "staged Circle snapshot publication row is absent".to_string(),
                 )
             })?;
-        self.publish_durable(pending).await
-    }
-
-    async fn publish_durable(
-        &self,
-        pending: crate::database::DurableCircleSnapshotPublication,
-    ) -> Result<CircleSnapshotMeta, SnapshotError> {
-        // `create_protocol_object` reads the stored bytes back and refuses different
-        // bytes at the slot, so the exact ciphertext of the image and metadata is
-        // durable before completion; the sealed plaintext binding was established at
-        // prepare time, so no epoch key is needed to confirm the upload.
-        self.storage
-            .create_protocol_object(&pending.image.prepared)
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        self.storage
-            .create_protocol_object(&pending.meta.prepared)
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        self.database
-            .complete_circle_snapshot_publication(pending.reference)
-            .await
-            .map_err(publication_error)?;
-        drain_snapshot_spool_cleanup(&self.database).await?;
-        Ok(pending.meta.value)
+        publication.publish_circle(pending).await
     }
 }
 

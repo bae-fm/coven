@@ -3,8 +3,6 @@
 use futures_util::stream::TryStreamExt;
 
 use crate::blob::{RowBlobAuthority, RowBlobRef};
-use crate::encryption::KeyFingerprint;
-use crate::protocol::circle::CircleId;
 use crate::protocol::store_commit::StoreRootRef;
 use crate::storage::{BlobSpoolProtection, StorageError, SyncStorage};
 use crate::store_dir::StoreDir;
@@ -38,79 +36,20 @@ impl std::fmt::Display for BlobDownloadFailureCause {
     }
 }
 
-enum BlobOpeningAuthority<'a> {
-    Store,
-    Circle {
-        circle_id: CircleId,
-        control: &'a crate::protocol::circle::CircleControlCoord,
-        key_fingerprint: KeyFingerprint,
-    },
-}
-
 fn blob_opening_authority<'a>(
     authority: &'a RowBlobAuthority,
     stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<BlobOpeningAuthority<'a>, BlobCacheError> {
-    match authority {
-        RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
-            Err(BlobCacheError::LocalityUnresolved {
-                id: stored.locator().blob_id().to_string(),
-            })
-        }
-        RowBlobAuthority::Remote(crate::protocol::audience_package::PackageAudience::Store) => {
-            Ok(BlobOpeningAuthority::Store)
-        }
-        RowBlobAuthority::Remote(crate::protocol::audience_package::PackageAudience::Circle {
-            circle_id,
-            control,
-            key_fingerprint,
-        }) => {
-            if stored.locator().audience()
-                != crate::blob::locator::RemoteAudience::Circle(*circle_id)
-                || stored.locator().key_fingerprint() != Some(*key_fingerprint)
-            {
-                return Err(BlobCacheError::Storage(StorageError::InvalidContent(
-                    format!(
-                        "Circle {circle_id} blob locator audience or key differs from its exact activated authority"
-                    ),
-                )));
+) -> Result<crate::blob::BlobOpeningAuthority<'a>, BlobCacheError> {
+    authority
+        .opening_authority(stored)
+        .map_err(|error| match error {
+            crate::blob::BlobOpeningAuthorityError::LocalityUnresolved { id } => {
+                BlobCacheError::LocalityUnresolved { id }
             }
-            Ok(BlobOpeningAuthority::Circle {
-                circle_id: *circle_id,
-                control,
-                key_fingerprint: *key_fingerprint,
-            })
-        }
-    }
-}
-
-pub(crate) fn opening_protection_on(
-    conn: &rusqlite::Connection,
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    authority: &RowBlobAuthority,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<BlobSpoolProtection, BlobCacheError> {
-    match blob_opening_authority(authority, stored)? {
-        BlobOpeningAuthority::Store => storage
-            .store_blob_protection()
-            .map_err(BlobCacheError::Storage),
-        BlobOpeningAuthority::Circle {
-            circle_id,
-            control,
-            key_fingerprint,
-        } => {
-            let encryption = StoreDatabase::circle_blob_opening_key_on(
-                conn,
-                root,
-                circle_id,
-                control,
-                key_fingerprint,
-            )
-            .map_err(BlobCacheError::Metadata)?;
-            Ok(BlobSpoolProtection::Opaque(encryption))
-        }
-    }
+            error @ crate::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch { .. } => {
+                BlobCacheError::Storage(StorageError::InvalidContent(error.to_string()))
+            }
+        })
 }
 
 enum BlobSource {
@@ -559,12 +498,12 @@ impl<'storage> RemoteBlobSource<'storage> {
         stored: &crate::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
         match blob_opening_authority(authority, stored)? {
-            BlobOpeningAuthority::Store => self
+            crate::blob::BlobOpeningAuthority::Store => self
                 .storage
                 .as_ref()
                 .store_blob_protection()
                 .map_err(BlobCacheError::Storage),
-            BlobOpeningAuthority::Circle {
+            crate::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,

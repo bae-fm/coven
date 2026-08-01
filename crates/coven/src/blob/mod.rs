@@ -379,6 +379,27 @@ pub enum RowBlobAuthority {
     Remote(crate::protocol::audience_package::PackageAudience),
 }
 
+pub(crate) enum BlobOpeningAuthority<'a> {
+    Store,
+    Circle {
+        circle_id: crate::protocol::circle::CircleId,
+        control: &'a crate::protocol::circle::CircleControlCoord,
+        key_fingerprint: crate::encryption::KeyFingerprint,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BlobOpeningAuthorityError {
+    #[error("blob {id} has no exact remote authority")]
+    LocalityUnresolved { id: String },
+    #[error(
+        "Circle {circle_id} blob locator audience or key differs from its exact activated authority"
+    )]
+    CircleAuthorityMismatch {
+        circle_id: crate::protocol::circle::CircleId,
+    },
+}
+
 impl<'de> serde::Deserialize<'de> for RowBlobRef {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -431,6 +452,40 @@ impl RowBlobAuthority {
                 circle_id,
                 ..
             }) => crate::protocol::circle::Audience::Circle(*circle_id),
+        }
+    }
+
+    pub(crate) fn opening_authority<'a>(
+        &'a self,
+        stored: &locator::StoredBlobRef,
+    ) -> Result<BlobOpeningAuthority<'a>, BlobOpeningAuthorityError> {
+        match self {
+            Self::Local | Self::PendingRemote(_) => {
+                Err(BlobOpeningAuthorityError::LocalityUnresolved {
+                    id: stored.locator().blob_id().to_string(),
+                })
+            }
+            Self::Remote(crate::protocol::audience_package::PackageAudience::Store) => {
+                Ok(BlobOpeningAuthority::Store)
+            }
+            Self::Remote(crate::protocol::audience_package::PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            }) => {
+                if stored.locator().audience() != locator::RemoteAudience::Circle(*circle_id)
+                    || stored.locator().key_fingerprint() != Some(*key_fingerprint)
+                {
+                    return Err(BlobOpeningAuthorityError::CircleAuthorityMismatch {
+                        circle_id: *circle_id,
+                    });
+                }
+                Ok(BlobOpeningAuthority::Circle {
+                    circle_id: *circle_id,
+                    control,
+                    key_fingerprint: *key_fingerprint,
+                })
+            }
         }
     }
 }

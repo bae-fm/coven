@@ -1924,7 +1924,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         Arc::new(RwLock::new(CloudCipher::Encrypted(
             EncryptionService::from_key([12u8; 32]),
         ))),
-        keypair,
+        keypair.clone(),
         Arc::new(Hlc::new(
             "M".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
@@ -1957,13 +1957,21 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     drop(db);
 
     let reopened = open();
-    assert!(crate::sync::store::drain_outbound_store_snapshot(
-        &storage.storage,
-        &crate::database::StoreDatabase::new(&reopened),
+    let store = crate::sync::store::Store::load(
+        crate::database::StoreDatabase::new(&reopened),
+        storage.storage.clone(),
+        keypair,
     )
     .await
-    .expect("drain cleanup after restart")
-    .is_none());
+    .expect("load snapshot cleanup Store after restart");
+    assert!(store
+        .authorize_writer()
+        .await
+        .expect("authorize snapshot cleanup writer after restart")
+        .resume_snapshot_publication()
+        .await
+        .expect("drain cleanup after restart")
+        .is_none());
     assert!(!spool.exists());
     assert!(store_database(&reopened)
         .snapshot_blob_spool_cleanup_paths()

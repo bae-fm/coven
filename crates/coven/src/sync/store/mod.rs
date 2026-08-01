@@ -108,8 +108,6 @@ pub(crate) use owner::reclaim::{
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
     StoreReclaimError,
 };
-#[cfg(test)]
-pub(crate) use owner::snapshot::drain_outbound_store_snapshot;
 #[doc(hidden)]
 pub(crate) use owner::snapshot::{
     bootstrap_from_snapshot, BootstrapResult, SnapshotBlobReconcile, SnapshotError,

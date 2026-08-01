@@ -37,7 +37,9 @@ pub(crate) fn replay_retained_merge_projection_on(
                 bootstrap.circle_id()
             ))
         })?;
-        apply_circle_bootstrap_projection_on(&replay, synced_tables, activation_commit, bootstrap)?;
+        let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+        install_circle_bootstrap_image_on(&tx, synced_tables, activation_commit, bootstrap)?;
+        tx.commit().map_err(DbError::from)?;
         if circle_bootstrap_cuts
             .insert(
                 bootstrap.circle_id(),
@@ -365,17 +367,6 @@ pub(crate) fn replay_retained_merge_projection_on(
         tx.commit().map_err(DbError::from)?;
     }
     Ok(replay)
-}
-
-fn apply_circle_bootstrap_projection_on(
-    replay: &rusqlite::Connection,
-    synced_tables: &[SyncedTable],
-    activation_commit: &StoreBatchCommitRef,
-    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
-) -> Result<(), DbError> {
-    let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-    install_circle_bootstrap_image_on(&tx, synced_tables, activation_commit, bootstrap)?;
-    tx.commit().map_err(DbError::from)
 }
 
 /// Install one verified Circle image's rows, routes, and blob graph onto `conn`

@@ -216,6 +216,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.root()
     }
 
+    pub(crate) async fn snapshot_publication(&self) -> snapshot::AuthorizedSnapshotPublication<'_> {
+        snapshot::AuthorizedSnapshotPublication::begin(&self.database, self.storage.as_ref()).await
+    }
+
+    pub(crate) async fn resume_snapshot_publication(
+        &self,
+    ) -> Result<Option<crate::protocol::store_commit::SnapshotMeta>, snapshot::SnapshotError> {
+        self.snapshot_publication().await.resume_store().await
+    }
+
     fn protocol_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
         &self.history.verified_root_object().value
     }

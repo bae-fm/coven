@@ -24,6 +24,103 @@ enum StoreWriteSqlAuthority {
     Coven,
 }
 
+pub(crate) struct HostWriteBlobTransaction<'transaction, 'connection> {
+    transaction: &'transaction rusqlite::Transaction<'connection>,
+}
+
+impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
+    fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
+        Self { transaction }
+    }
+
+    pub(crate) fn local_activated_registration(
+        &self,
+        root: &crate::protocol::store_commit::StoreRootRef,
+    ) -> Result<
+        (
+            crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        ),
+        DbError,
+    > {
+        let reference =
+            local_activated_registration_ref_on(self.transaction)?.ok_or_else(|| {
+                DbError::Message(
+                    "audience blob move has no activated local Store registration".to_string(),
+                )
+            })?;
+        let registration = load_activated_registration_on(self.transaction, root, &reference)?;
+        Ok((reference, registration))
+    }
+
+    pub(crate) fn circle_publication_context(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        expected_control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        StoreDatabase::circle_publication_context_on(self.transaction, circle_id, expected_control)
+    }
+
+    pub(crate) fn circle_blob_opening_key(
+        &self,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        circle_id: crate::protocol::circle::CircleId,
+        expected_control: &crate::protocol::circle::CircleControlCoord,
+        expected_key_fingerprint: crate::KeyFingerprint,
+    ) -> Result<EncryptionService, DbError> {
+        StoreDatabase::circle_blob_opening_key_on(
+            self.transaction,
+            root,
+            circle_id,
+            expected_control,
+            expected_key_fingerprint,
+        )
+    }
+
+    pub(crate) fn external_local_path(
+        &self,
+        fact: &StoreWriteBlobFact,
+    ) -> Result<Option<PathBuf>, DbError> {
+        let stored = self
+            .transaction
+            .query_row(
+                "SELECT path, plaintext_size, plaintext_hash
+                 FROM local_blob_refs
+                 WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                   AND namespace = ?4 AND blob_id = ?5
+                 ORDER BY row_stamp DESC LIMIT 1",
+                rusqlite::params![
+                    fact.table,
+                    fact.row_id,
+                    fact.column,
+                    fact.blob.namespace,
+                    fact.blob.id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((path, size, hash)) = stored else {
+            return Ok(None);
+        };
+        let size = u64::try_from(size).map_err(|_| {
+            DbError::Message("registered external blob has a negative size".to_string())
+        })?;
+        if size != fact.plaintext_size || hash != fact.plaintext_hash.to_string() {
+            return Err(DbError::Message(
+                "registered external blob identity differs from the moved row".to_string(),
+            ));
+        }
+        Ok(Some(PathBuf::from(path)))
+    }
+}
+
 impl StoreDatabase {
     fn drain_host_change_journal_on(
         session: &mut rusqlite::session::Session<'_>,
@@ -546,16 +643,19 @@ impl StoreDatabase {
             });
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
-                (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => Some(
-                    staging
-                        .stage_audience_move_blobs_on(
-                            &tx,
-                            &mut blob_facts,
-                            &partitioned.moves,
-                            &partitioned.partitions,
-                        )
-                        .map_err(E::from)?,
-                ),
+                (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
+                    let blob_transaction = HostWriteBlobTransaction::new(&tx);
+                    Some(
+                        staging
+                            .stage_audience_move_blobs_on(
+                                &blob_transaction,
+                                &mut blob_facts,
+                                &partitioned.moves,
+                                &partitioned.partitions,
+                            )
+                            .map_err(E::from)?,
+                    )
+                }
                 (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
                     crate::sync::HostWriteBlobStaging::record_prepared_transition_local_blob_moves(
                         &mut blob_facts,
