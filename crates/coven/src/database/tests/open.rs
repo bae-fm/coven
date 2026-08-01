@@ -914,6 +914,38 @@ async fn database_open_rejects_host_declared_reserved_tables() {
     }
 }
 
+#[test]
+fn database_open_rejects_host_triggers_using_coven_cleanup_guard_names() {
+    let result = Database::open(
+        Path::new(":memory:"),
+        vec![SyncedTable::new(
+            "notes",
+            crate::sync::session::RowIdentity::SharedKey,
+        )],
+        BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::one_at_a_time(),
+        "reserved-cleanup-trigger".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+        &[Migration::sql(
+            1,
+            "reserved cleanup trigger",
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TRIGGER coven_cleanup_guard_forged
+             BEFORE INSERT ON notes
+             BEGIN SELECT 1; END;",
+        )],
+    );
+
+    let error = match result {
+        Ok(_) => panic!("host migration must not reserve a Coven cleanup guard name"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("coven_cleanup_guard_forged"), "{error}");
+}
+
 #[tokio::test]
 async fn database_open_rejects_empty_synced_table_name() {
     let result = Database::open(

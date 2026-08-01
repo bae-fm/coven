@@ -2078,7 +2078,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
-         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+         VALUES ('n1', 'Remote', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     exec(
@@ -2093,6 +2093,11 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     )
     .await;
     register_external_blob(&db, "note_photos", "audio1", &external_path).await;
+    exec(
+        &db,
+        "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
+    )
+    .await;
     storage.open_into(&db).await.expect("open user blob Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)

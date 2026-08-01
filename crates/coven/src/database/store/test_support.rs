@@ -77,6 +77,16 @@ impl StoreDatabase {
             .await
     }
 
+    pub(crate) async fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.connection
+            .call(move |connection| {
+                connection
+                    .execute_batch("DROP TRIGGER fail_store_write_journal")
+                    .map_err(DbError::from)
+            })
+            .await
+    }
+
     pub(crate) async fn write_blob_facts_for_test(
         &self,
         write_id: WriteId,

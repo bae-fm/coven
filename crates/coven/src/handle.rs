@@ -307,6 +307,15 @@ impl CovenHandle {
     }
 
     #[cfg(test)]
+    pub(crate) async fn remove_store_write_failure_trigger_for_test(
+        &self,
+    ) -> Result<(), crate::database::DbError> {
+        self.rows
+            .remove_store_write_failure_trigger_for_test()
+            .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn write_blob_facts_for_test(
         &self,
         write_id: crate::WriteId,

@@ -243,4 +243,63 @@ mod tests {
             .expect("query protocol state after the authorized Coven write");
         assert!(stored, "the Coven-owned write commits");
     }
+
+    #[test]
+    fn coven_cleanup_guards_can_read_bookkeeping_but_host_sql_cannot_impersonate_them() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::database::apply_coven_schema(&conn).expect("install Coven schema");
+        conn.execute_batch(
+            "CREATE TABLE notes (id TEXT PRIMARY KEY) STRICT;
+             CREATE TEMP TRIGGER coven_cleanup_guard_insert_notes
+             BEFORE INSERT ON notes
+             WHEN EXISTS(SELECT 1 FROM local_cleanup_intents WHERE blob_id = NEW.id)
+             BEGIN SELECT RAISE(ABORT, 'cleanup in progress'); END;",
+        )
+        .expect("install Coven cleanup guard");
+        let tx = conn.unchecked_transaction().expect("begin transaction");
+
+        HostSqlTransaction::begin(&tx)
+            .expect("install authorizer")
+            .run(|transaction| {
+                transaction
+                    .execute("INSERT INTO notes (id) VALUES ('allowed')", [])
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .expect("Coven cleanup guard may inspect its bookkeeping");
+
+        let direct_read = HostSqlTransaction::begin(&tx)
+            .expect("install authorizer")
+            .run(|transaction| {
+                transaction
+                    .query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            });
+        assert!(direct_read.is_err());
+
+        let impersonation = HostSqlTransaction::begin(&tx)
+            .expect("install authorizer")
+            .run(|transaction| {
+                transaction
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER coven_cleanup_guard_forged
+                         BEFORE INSERT ON notes
+                         BEGIN SELECT 1; END;",
+                    )
+                    .map_err(DbError::from)
+            });
+        assert!(impersonation.is_err());
+
+        let removal = HostSqlTransaction::begin(&tx)
+            .expect("install authorizer")
+            .run(|transaction| {
+                transaction
+                    .execute_batch("DROP TRIGGER COVEN_CLEANUP_GUARD_INSERT_NOTES")
+                    .map_err(DbError::from)
+            });
+        assert!(removal.is_err());
+    }
 }

@@ -262,6 +262,12 @@ pub(crate) const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
 pub(crate) const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub(crate) const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
+const COVEN_CLEANUP_GUARD_PREFIX: &str = "coven_cleanup_guard_";
+
+fn is_coven_cleanup_guard_name(name: &str) -> bool {
+    name.get(..COVEN_CLEANUP_GUARD_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(COVEN_CLEANUP_GUARD_PREFIX))
+}
 
 thread_local! {
     /// How many Coven-owned write operations are on the current call stack.
@@ -302,7 +308,8 @@ pub(crate) fn authorize_host_sql(
         return Authorization::Allow;
     }
 
-    let accesses_coven_table = match context.action {
+    let runs_from_coven_cleanup_guard = context.accessor.is_some_and(is_coven_cleanup_guard_name);
+    let mut accesses_coven_table = match context.action {
         AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
         | AuthAction::CreateTable { table_name }
@@ -318,7 +325,18 @@ pub(crate) fn authorize_host_sql(
         | AuthAction::AlterTable { table_name, .. } => is_reserved_table_name(table_name),
         _ => false,
     };
+    if runs_from_coven_cleanup_guard {
+        accesses_coven_table = false;
+    }
+    let changes_coven_cleanup_guard = match context.action {
+        AuthAction::CreateTempTrigger { trigger_name, .. }
+        | AuthAction::CreateTrigger { trigger_name, .. }
+        | AuthAction::DropTempTrigger { trigger_name, .. }
+        | AuthAction::DropTrigger { trigger_name, .. } => is_coven_cleanup_guard_name(trigger_name),
+        _ => false,
+    };
     if accesses_coven_table
+        || changes_coven_cleanup_guard
         || context
             .database_name
             .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))

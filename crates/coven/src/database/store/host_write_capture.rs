@@ -15,17 +15,11 @@ use crate::database::{
 use crate::encryption::EncryptionService;
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
 
-use super::host_sql_transaction::HostSqlTransaction;
 use super::*;
 
 enum AudienceBlobMoveMaterialization<'a> {
     Host(&'a crate::sync::HostWriteBlobStaging),
     PreparedTransition,
-}
-
-enum StoreWriteSqlAuthority {
-    Host,
-    Coven,
 }
 
 pub(crate) struct HostWriteBlobTransaction<'transaction, 'connection> {
@@ -566,7 +560,6 @@ impl StoreDatabase {
             blob_decls,
             routing_encryption,
             blob_staging.map(AudienceBlobMoveMaterialization::Host),
-            StoreWriteSqlAuthority::Host,
             write_id,
             f,
         )
@@ -579,7 +572,6 @@ impl StoreDatabase {
         blob_decls: &BlobDecls,
         routing_encryption: Option<&EncryptionService>,
         blob_materialization: Option<AudienceBlobMoveMaterialization<'_>>,
-        sql_authority: StoreWriteSqlAuthority,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -594,12 +586,7 @@ impl StoreDatabase {
                 .map_err(DbError::from)
                 .map_err(E::from)?;
             let mut journal = attach_session(&tx, synced_tables).map_err(E::from)?;
-            let value = match sql_authority {
-                StoreWriteSqlAuthority::Host => {
-                    HostSqlTransaction::begin(&tx).map_err(E::from)?.run(f)?
-                }
-                StoreWriteSqlAuthority::Coven => f(&tx)?,
-            };
+            let value = f(&tx)?;
             let mut captured =
                 Self::drain_host_change_journal(&mut journal, synced_tables).map_err(E::from)?;
             validate_scoped_foreign_key_audiences(&tx, gates)
@@ -782,7 +769,6 @@ impl StoreDatabase {
             &blob_decls,
             routing_encryption,
             blob_materialization,
-            StoreWriteSqlAuthority::Coven,
             write_id,
             f,
         )

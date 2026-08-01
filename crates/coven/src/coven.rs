@@ -1964,9 +1964,10 @@ mod tests {
             crate::blob::RowBlobAuthority::Remote(_)
         ));
 
-        crate::database::DatabaseImageTest::open(&fixture.dir.db_path())
-            .expect("open database to remove Local journal fault")
-            .execute_batch("DROP TRIGGER fail_local_audience_move_journal")
+        fixture
+            .handle
+            .remove_store_write_failure_trigger_for_test()
+            .await
             .expect("remove Local Store write journal fault");
         std::fs::write(&destination, b"remote-only-circle-blob")
             .expect("model an exact file left by failed cleanup");

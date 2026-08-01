@@ -6,6 +6,7 @@ use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::WriteReceipt;
 
+use super::host_sql_transaction::HostSqlTransaction;
 use super::{SqlContext, StoreDatabase};
 
 pub struct WriteBatch {
@@ -366,8 +367,11 @@ impl StoreDatabase {
                             Ok(())
                         })?;
 
+                        let host_sql = HostSqlTransaction::begin(transaction)?;
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            sql(SqlContext::new(transaction, stamper, &tables, &gates))
+                            host_sql.run(|transaction| {
+                                sql(SqlContext::new(transaction, stamper, &tables, &gates))
+                            })
                         })) {
                             Ok(Ok(value)) => {
                                 for (blob, intent) in deleted.iter().zip(&cleanup_intents) {

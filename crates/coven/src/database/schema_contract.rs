@@ -38,6 +38,8 @@ pub(super) fn validate_host_synced_tables(
     conn: &Connection,
     synced_tables: &[SyncedTable],
 ) -> Result<(), DbError> {
+    validate_host_trigger_names(conn)?;
+
     // Which table owns each declared blob namespace, so a second table claiming an
     // already-owned namespace is caught here. A blob's namespace is part of its
     // address; two tables sharing one makes `row_for_blob_in_namespace` resolve to
@@ -79,6 +81,28 @@ pub(super) fn validate_host_synced_tables(
                      {namespace:?}; a namespace must be owned by exactly one table"
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_trigger_names(conn: &Connection) -> Result<(), DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT name FROM main.sqlite_schema WHERE type = 'trigger'
+             UNION ALL
+             SELECT name FROM temp.sqlite_schema WHERE type = 'trigger'",
+        )
+        .map_err(DbError::from)?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?;
+    for name in names {
+        let name = name.map_err(DbError::from)?;
+        if is_coven_cleanup_guard_name(&name) {
+            return Err(DbError::Message(format!(
+                "host trigger {name:?} uses a name reserved for Coven blob cleanup guards"
+            )));
         }
     }
     Ok(())

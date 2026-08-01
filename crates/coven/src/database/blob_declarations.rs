@@ -383,7 +383,10 @@ impl BlobDecls {
                 ("insert", "BEFORE INSERT".to_string()),
                 ("update", format!("BEFORE UPDATE OF {id_ident}")),
             ] {
-                let trigger = quote_ident(&format!("coven_cleanup_guard_{trigger_kind}_{table}"));
+                let trigger = quote_ident(&format!(
+                    "{}{trigger_kind}_{table}",
+                    super::COVEN_CLEANUP_GUARD_PREFIX
+                ));
                 conn.execute_batch(&format!(
                     "CREATE TEMP TRIGGER {trigger} \
                      {event_clause} ON main.{table_ident} \
