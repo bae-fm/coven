@@ -28,7 +28,6 @@ mod protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
 pub(super) mod protocol_root;
 mod registration_object;
-mod retained_replay;
 #[cfg(test)]
 use owner::reclaim;
 use owner::snapshot;
@@ -123,11 +122,6 @@ pub(crate) use owner::{
 };
 pub(crate) use owner::{RestoringStore, StoreRegistrationError};
 pub(crate) use protocol_root::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};
-pub(crate) use retained_replay::{
-    copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
-    GENERATION_ZERO,
-};
 
 #[cfg(test)]
 pub(crate) async fn push_circle_snapshots_for_test(

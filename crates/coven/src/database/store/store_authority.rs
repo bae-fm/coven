@@ -1,8 +1,8 @@
 use crate::database::*;
+use crate::database::{RetainedReplayAuthority, RetainedReplayGenesisAuthority, GENERATION_ZERO};
 use crate::protocol::store_commit::{
     ResolvedStoreDeviceState, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
 };
-use crate::sync::{RetainedReplayAuthority, RetainedReplayGenesisAuthority, GENERATION_ZERO};
 use rusqlite::OptionalExtension;
 
 use super::*;

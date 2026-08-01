@@ -89,10 +89,6 @@ use crate::protocol::store_commit::{
 use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
-use crate::sync::store::{
-    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority,
-};
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -196,6 +192,20 @@ pub(crate) use schema_introspection::{
     create_table_sql, foreign_key_edges, quote_ident, rewrite_create_into_schema, table_columns,
     CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
 };
+pub(crate) use store::{
+    copy_table_with_conflicts, projection_table_names,
+    validate_merge_generation_zero_preconditions, BlockedWriteDiscard, CandidateCleanupObject,
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, HostWriteBlobTransaction,
+    HostWriteError, HostWriteOperation, IncomingTimestampPolicy, MaterializedLocalBlob,
+    MergeCandidateAbandonmentPreparation, MergeMaterializationTransaction, OutboxEntry,
+    OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
+    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
+    SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime,
+    StoreReclaimJournalError, StoreWritePreparation, TableSchema, ValidatedChangeset,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
+};
 #[cfg(test)]
 pub(crate) use store::{
     record_verified_circle_activations_for_test, select_author_exclusion_activation_locator,
@@ -203,17 +213,6 @@ pub(crate) use store::{
 };
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on};
-pub(crate) use store::{
-    BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
-    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
-    IncomingTimestampPolicy, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation,
-    MergeMaterializationTransaction, OutboxEntry, OutboxOperation, OutboxUploadState,
-    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
-    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection,
-    StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation, TableSchema,
-    ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
-};
 pub use store::{ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, WriteBatch};
 pub(crate) use store_authority_records::{

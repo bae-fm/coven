@@ -3269,7 +3269,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             );
         }
         let founder = self.commit_verifier.load_founder_registration().await?;
-        let authority = retained_replay::RetainedReplaySnapshotAuthority {
+        let authority = crate::database::RetainedReplaySnapshotAuthority {
             store_root: self.root.reference().clone(),
             founder_registration: StoreDeviceRegistrationRef::from_registration(
                 &founder.value,

@@ -33,7 +33,6 @@ use crate::sync::session::SyncedTable;
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
-use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 pub(super) use authorized::AuthorizedPull;
 

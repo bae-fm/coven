@@ -13,7 +13,7 @@ pub(crate) fn replay_retained_merge_projection_on(
     include_local_write_overlays: bool,
     local_store_membership: LocalStoreMembership,
 ) -> Result<rusqlite::Connection, DbError> {
-    super::retained_replay::validate_merge_generation_zero_preconditions(live)?;
+    crate::database::validate_merge_generation_zero_preconditions(live)?;
     let baseline = crate::database::StoreDatabase::generation_zero_replay_baseline_on(live)?;
     let replay = baseline.open_image()?;
     replay
@@ -402,18 +402,14 @@ pub(crate) fn install_circle_bootstrap_image_on(
         // installs onto an empty replay base, where nothing conflicts. Data tables
         // carry no circle rows on a Store image, so they insert exactly once.
         let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
-        super::super::retained_replay::copy_table_with_conflicts(
-            &source,
-            conn,
-            table,
-            ignore_existing,
-        )
-        .map_err(|error| {
-            DbError::Message(format!(
-                "install exact Circle {} bootstrap table {table}: {error}",
-                bootstrap.circle_id()
-            ))
-        })?;
+        crate::database::copy_table_with_conflicts(&source, conn, table, ignore_existing).map_err(
+            |error| {
+                DbError::Message(format!(
+                    "install exact Circle {} bootstrap table {table}: {error}",
+                    bootstrap.circle_id()
+                ))
+            },
+        )?;
     }
     install_circle_bootstrap_remote_objects_on(conn, activation_commit, bootstrap)?;
     for binding in &bootstrap.reference().blobs {

@@ -160,7 +160,7 @@ impl StoreDatabase {
                                 .map_err(DbError::from)?;
                         }
                         let mut tables =
-                            crate::sync::projection_table_names(gates.has_scoped_graph());
+                            crate::database::projection_table_names(gates.has_scoped_graph());
                         tables.extend(
                             synced_tables
                                 .iter()
@@ -178,7 +178,7 @@ impl StoreDatabase {
                             .map_err(DbError::from)?;
                         }
                         for table in &tables {
-                            crate::sync::copy_table_with_conflicts(
+                            crate::database::copy_table_with_conflicts(
                                 &replay, &tx, table, false,
                             )?;
                         }

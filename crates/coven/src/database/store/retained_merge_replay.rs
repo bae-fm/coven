@@ -1,5 +1,6 @@
 use crate::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::database::*;
+use crate::database::{RetainedReplayAuthority, RetainedReplayBaseline};
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::membership::{AuthorHead, MembershipEntry};
 use crate::protocol::remote_object::{
@@ -12,7 +13,6 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::PreparedExactObject;
 use crate::sync::VerifiedCircleActivations;
-use crate::sync::{RetainedReplayAuthority, RetainedReplayBaseline};
 use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};

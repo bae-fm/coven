@@ -2754,13 +2754,11 @@ mod tests {
             .expect("load installed snapshot replay baseline");
         assert_eq!(baseline.exact_cut, published_snapshot.coverage);
         match &baseline.authority {
-            crate::sync::store::retained_replay::RetainedReplayAuthority::StableSnapshot(
-                authority,
-            ) => {
+            crate::database::RetainedReplayAuthority::StableSnapshot(authority) => {
                 assert_eq!(authority.store_root, store.root);
                 assert_eq!(authority.metadata, published_snapshot);
             }
-            crate::sync::store::retained_replay::RetainedReplayAuthority::Genesis(_) => {
+            crate::database::RetainedReplayAuthority::Genesis(_) => {
                 panic!("snapshot bootstrap installed a genesis replay baseline")
             }
         }
@@ -2768,8 +2766,7 @@ mod tests {
             .validate_image()
             .expect("validate snapshot replay baseline");
         let mut tampered = baseline.authority.clone();
-        let crate::sync::store::retained_replay::RetainedReplayAuthority::StableSnapshot(authority) =
-            &mut tampered
+        let crate::database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
         else {
             panic!("snapshot bootstrap installed a genesis replay baseline")
         };

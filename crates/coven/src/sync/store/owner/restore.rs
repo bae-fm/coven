@@ -1081,7 +1081,7 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn generation_zero_replay_baseline_for_test(
         &self,
-    ) -> Result<crate::sync::RetainedReplayBaseline, crate::database::DbError> {
+    ) -> Result<crate::database::RetainedReplayBaseline, crate::database::DbError> {
         self.database
             .generation_zero_replay_baseline_for_test()
             .await

@@ -15,7 +15,7 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
     VerifiedStoreBatchCommit,
 };
-use crate::sync::store::membership::OWNER_PUBKEY_STATE_KEY;
+use crate::sync::OWNER_PUBKEY_STATE_KEY;
 
 pub(crate) const GENERATION_ZERO: u64 = 0;
 

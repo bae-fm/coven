@@ -2,12 +2,12 @@ use super::*;
 
 #[derive(Debug)]
 pub(crate) struct VerifiedStoreSnapshotStability {
-    authority: super::retained_replay::RetainedReplaySnapshotAuthority,
+    authority: crate::database::RetainedReplaySnapshotAuthority,
 }
 
 impl VerifiedStoreSnapshotStability {
     pub(crate) fn from_authority(
-        authority: super::retained_replay::RetainedReplaySnapshotAuthority,
+        authority: crate::database::RetainedReplaySnapshotAuthority,
     ) -> Result<Self, StorePullError> {
         authority
             .validate()
@@ -15,7 +15,7 @@ impl VerifiedStoreSnapshotStability {
         Ok(Self { authority })
     }
 
-    pub(crate) fn into_authority(self) -> super::retained_replay::RetainedReplaySnapshotAuthority {
+    pub(crate) fn into_authority(self) -> crate::database::RetainedReplaySnapshotAuthority {
         self.authority
     }
 }

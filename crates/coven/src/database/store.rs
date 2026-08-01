@@ -33,6 +33,7 @@ mod publication;
 pub(super) mod publication_state;
 pub(super) mod reclaim;
 mod retained_merge_replay;
+mod retained_replay;
 mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
@@ -93,6 +94,11 @@ pub(crate) use reclaim::journal::{
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
 };
 pub(crate) use retained_merge_replay::RetainedMergeMaterializationCache;
+pub(crate) use retained_replay::{
+    copy_table_with_conflicts, projection_table_names,
+    validate_merge_generation_zero_preconditions, RetainedReplayAuthority, RetainedReplayBaseline,
+    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+};
 pub(super) use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
 };
@@ -587,7 +593,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn generation_zero_replay_baseline_for_test(
         &self,
-    ) -> Result<crate::sync::RetainedReplayBaseline, DbError> {
+    ) -> Result<crate::database::RetainedReplayBaseline, DbError> {
         self.connection
             .call(Self::generation_zero_replay_baseline_on)
             .await

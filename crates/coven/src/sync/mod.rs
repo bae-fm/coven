@@ -37,17 +37,15 @@ pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use session::{BlobDecl, RowIdentity, SyncedTable};
 pub use status::DeviceActivity;
 pub(crate) use store::{
-    apply_prepared_merge_materialization_on, copy_table_with_conflicts,
-    create_circle_snapshot_with_host_blobs, create_snapshot_with_host_blobs,
-    projection_table_names, replay_retained_merge_projection_on, verify_store_snapshot_bytes,
-    ApplyOutcome, CircleAuthoringState, CircleCurrentState, CircleOperationIntent,
-    CircleOperationJournal, CirclePackageAccess, CreatedSnapshot, DeviceJoinBootstrapPlan,
-    HostWriteBlobStaging, LocalCircleExclusion, LocalStoreMembership, OwnerPromotionJournal,
-    OwnerPromotionJournalTransition, PreparedCircleOperation, PreparedMergeMaterialization,
-    PreparedStoreOperationCommit, RetainedReplayAuthority, RetainedReplayBaseline,
-    RetainedReplayGenesisAuthority, Store, StoreCreationAttempt, StoreError,
-    StoreMembershipJournalCompletion, VerifiedCircleActivations, VerifiedCircleImage,
-    VerifiedCircleReference, VerifiedStreamActivations, GENERATION_ZERO, OWNER_PUBKEY_STATE_KEY,
+    apply_prepared_merge_materialization_on, create_circle_snapshot_with_host_blobs,
+    create_snapshot_with_host_blobs, replay_retained_merge_projection_on,
+    verify_store_snapshot_bytes, ApplyOutcome, CircleAuthoringState, CircleCurrentState,
+    CircleOperationIntent, CircleOperationJournal, CirclePackageAccess, CreatedSnapshot,
+    DeviceJoinBootstrapPlan, HostWriteBlobStaging, LocalCircleExclusion, LocalStoreMembership,
+    OwnerPromotionJournal, OwnerPromotionJournalTransition, PreparedCircleOperation,
+    PreparedMergeMaterialization, PreparedStoreOperationCommit, Store, StoreCreationAttempt,
+    StoreError, StoreMembershipJournalCompletion, VerifiedCircleActivations, VerifiedCircleImage,
+    VerifiedCircleReference, VerifiedStreamActivations, OWNER_PUBKEY_STATE_KEY,
     STORE_CREATION_ATTEMPT_STATE_KEY,
 };
 pub use store::{BlobCacheError, BlobStream};
