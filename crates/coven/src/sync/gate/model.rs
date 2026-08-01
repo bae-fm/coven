@@ -11,9 +11,8 @@ use tracing::warn;
 
 use super::outbound::{query_column_text, resolve_root};
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::{
-    foreign_key_edges, quote_ident, ForeignKeyEdge, RowIdentity, SyncedTable,
-};
+use crate::database::{foreign_key_edges, quote_ident, ForeignKeyEdge};
+use crate::sync::session::{RowIdentity, SyncedTable};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {

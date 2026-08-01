@@ -730,7 +730,7 @@ async fn bind_stored_blob_to_row(
             conn.query_row(
                 &format!(
                     "SELECT _updated_at FROM {} WHERE id = ?1",
-                    crate::sync::session::quote_ident(&stamp_table)
+                    crate::database::quote_ident(&stamp_table)
                 ),
                 [stamp_id],
                 |row| row.get::<_, String>(0),

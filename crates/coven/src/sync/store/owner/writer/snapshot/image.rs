@@ -961,7 +961,7 @@ pub(crate) fn verify_circle_bootstrap_image(
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM {}",
-                    crate::sync::session::quote_ident(&table)
+                    crate::database::quote_ident(&table)
                 ),
                 [],
                 |row| row.get(0),
@@ -1075,7 +1075,7 @@ fn clear_non_synced(
     for table in cleared_materialization_tables {
         tx.execute_batch(&format!(
             "DELETE FROM {}",
-            crate::sync::session::quote_ident(table)
+            crate::database::quote_ident(table)
         ))
         .map_err(|error| SnapshotError::ClearFailed(format!("clear {table}: {error}")))?;
     }
@@ -1108,7 +1108,7 @@ fn clear_non_synced(
         }
         tx.execute_batch(&format!(
             "DELETE FROM {}",
-            crate::sync::session::quote_ident(&table)
+            crate::database::quote_ident(&table)
         ))
         .map_err(|e| SnapshotError::ClearFailed(format!("clear {table}: {e}")))?;
     }
@@ -1175,8 +1175,8 @@ fn scope_authenticated_blob_graph(
                  (table_name, row_id, column_name, row_stamp)
                  SELECT ?1, id, ?2, _updated_at FROM {}
                  WHERE {} IS NOT NULL",
-                crate::sync::session::quote_ident(table.name()),
-                crate::sync::session::quote_ident(&declaration.id_column),
+                crate::database::quote_ident(table.name()),
+                crate::database::quote_ident(&declaration.id_column),
             ),
             rusqlite::params![table.name(), &declaration.id_column],
         )

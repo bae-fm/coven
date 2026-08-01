@@ -136,8 +136,11 @@ impl StoreDatabase {
         synced_tables: &[SyncedTable],
     ) -> Result<Vec<u8>, DbError> {
         let captured = Self::drain_host_change_journal_on(session)?;
-        crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        crate::database::changeset_identity::validate_changeset_row_identities(
+            &captured,
+            synced_tables,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(captured)
     }
 
@@ -310,10 +313,10 @@ impl StoreDatabase {
                 }
                 let sql = format!(
                     "UPDATE {} SET {} = ?1 WHERE {} = ?2 AND {} < ?1",
-                    crate::sync::session::quote_ident(table),
-                    crate::sync::session::quote_ident("_updated_at"),
-                    crate::sync::session::quote_ident("id"),
-                    crate::sync::session::quote_ident("_updated_at"),
+                    crate::database::quote_ident(table),
+                    crate::database::quote_ident("_updated_at"),
+                    crate::database::quote_ident("id"),
+                    crate::database::quote_ident("_updated_at"),
                 );
                 let updated = tx
                     .execute(&sql, rusqlite::params![audience_move.stamp, row_id])

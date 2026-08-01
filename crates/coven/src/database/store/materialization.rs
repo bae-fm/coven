@@ -173,7 +173,7 @@ impl StoreDatabase {
                         for table in tables.iter().rev() {
                             tx.execute_batch(&format!(
                                 "DELETE FROM {}",
-                                crate::sync::session::quote_ident(table)
+                                crate::database::quote_ident(table)
                             ))
                             .map_err(DbError::from)?;
                         }

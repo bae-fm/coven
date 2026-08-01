@@ -54,7 +54,7 @@ impl<'storage> PullPackageMaterializer<'storage> {
         let changeset =
             match ValidatedChangeset::new(package.changeset().to_vec(), self.schema.clone()) {
                 Ok(changeset) => changeset,
-                Err(crate::sync::session::ChangesetIdentityError::Row(error)) => {
+                Err(crate::database::ChangesetIdentityError::Row(error)) => {
                     return Ok(Err(HeldStorePositionReason::InvalidRowIdentity {
                         table: error.table().to_string(),
                         reason: error.to_string(),

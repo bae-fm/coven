@@ -98,7 +98,7 @@ use crate::protocol::store_commit::{
 use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
-use crate::sync::session::{quote_ident, SyncedTable};
+use crate::sync::session::SyncedTable;
 use crate::sync::store::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority,
@@ -108,6 +108,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 mod blob_bindings;
 mod blob_records;
+mod changeset_identity;
 mod circle_operation_records;
 #[cfg(test)]
 mod cloud_outbox;
@@ -125,6 +126,7 @@ mod operation_models;
 mod prepared_audience_objects;
 mod remote_object_records;
 mod schema_contract;
+mod schema_introspection;
 mod snapshot_objects;
 mod snapshot_records;
 pub(crate) mod store;
@@ -136,6 +138,7 @@ mod write_lifecycle;
 mod write_models;
 
 pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
+pub(crate) use changeset_identity::ChangesetIdentityError;
 pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
 };
@@ -161,6 +164,9 @@ pub(crate) use prepared_audience_objects::{
 use schema_contract::validate_host_synced_tables;
 pub(crate) use schema_contract::DurablePreparedProtocolObject;
 pub(crate) use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+pub(crate) use schema_introspection::{
+    foreign_key_edges, quote_ident, table_columns, ForeignKeyEdge, ForeignKeySchemaError,
+};
 #[cfg(test)]
 pub(crate) use store::{
     record_verified_circle_activations_for_test, select_author_exclusion_activation_locator,

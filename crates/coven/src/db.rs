@@ -968,10 +968,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
         apply_coven_schema(&conn).expect("apply coven schema");
         for name in table_names() {
-            let sql = format!(
-                "PRAGMA table_list({})",
-                crate::sync::session::quote_ident(name)
-            );
+            let sql = format!("PRAGMA table_list({})", crate::database::quote_ident(name));
             let mut stmt = conn.prepare(&sql).expect("prepare table_list");
             let strict: i64 = stmt
                 .query_row([], |row| row.get(5))
@@ -1216,10 +1213,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
         apply_coven_routing_schema(&conn).expect("apply routing schema");
         for name in ["_coven_audience", "_coven_row_routes"] {
-            let sql = format!(
-                "PRAGMA table_list({})",
-                crate::sync::session::quote_ident(name)
-            );
+            let sql = format!("PRAGMA table_list({})", crate::database::quote_ident(name));
             let (wr, strict): (i64, i64) = conn
                 .query_row(&sql, [], |row| Ok((row.get(4)?, row.get(5)?)))
                 .expect("table_list");

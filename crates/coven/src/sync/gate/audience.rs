@@ -12,10 +12,10 @@ use super::outbound::{
     FullStateDirection,
 };
 use super::{query_mapped_rows, query_row_optional, GateError};
+use crate::database::quote_ident;
 use crate::protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
 };
-use crate::sync::session::quote_ident;
 use crate::sync::store::CircleCurrentState;
 
 pub(crate) fn is_routing_table(table: &str) -> bool {

@@ -37,9 +37,9 @@ use rusqlite::Connection;
 use tracing::warn;
 
 use crate::changeset::value_ref_to_string;
-use crate::database::DbError;
+use crate::database::{table_columns, DbError};
 use crate::sync::hlc::Timestamp;
-use crate::sync::session::{table_columns, SyncedTable};
+use crate::sync::session::SyncedTable;
 
 /// Schema info for all synced tables: maps table name to column indices. Built
 /// once before an apply and moved (owned) into the conflict closure, which must

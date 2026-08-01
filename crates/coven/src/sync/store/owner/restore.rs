@@ -1350,8 +1350,8 @@ impl<'storage> RestoringStore<'storage> {
                 }
                 let sql = format!(
                     "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
-                    crate::sync::session::quote_ident(table.name()),
-                    crate::sync::session::quote_ident(&declaration.id_column),
+                    crate::database::quote_ident(table.name()),
+                    crate::database::quote_ident(&declaration.id_column),
                 );
                 let mut statement = conn.prepare(&sql).map_err(crate::database::DbError::from)?;
                 let ids = statement

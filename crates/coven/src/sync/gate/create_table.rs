@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 use super::{query_row_optional, GateError};
-use crate::sync::session::quote_ident;
+use crate::database::quote_ident;
 
 /// `CREATE TABLE` text for `table` from `sqlite_master`.
 pub(super) fn create_table_sql(conn: &Connection, table: &str) -> Result<String, GateError> {

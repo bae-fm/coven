@@ -22,7 +22,7 @@ pub(super) fn scan_max_updated_at(
     for t in synced_tables {
         let sql = format!(
             "SELECT MAX(_updated_at) FROM {} WHERE substr(_updated_at, 1, 13) <= ?1",
-            crate::sync::session::quote_ident(t.name())
+            crate::database::quote_ident(t.name())
         );
         let value: Option<String> = conn
             .query_row(&sql, [&seed_bound], |r| r.get::<_, Option<String>>(0))

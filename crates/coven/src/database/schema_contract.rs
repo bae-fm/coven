@@ -111,7 +111,7 @@ pub(super) fn validate_existing_row_identities(
     }
     let sql = format!(
         "SELECT id FROM {}",
-        crate::sync::session::quote_ident(table.name())
+        crate::database::quote_ident(table.name())
     );
     let mut statement = conn.prepare(&sql).map_err(DbError::from)?;
     let ids = statement
@@ -166,10 +166,7 @@ pub(super) fn validate_synced_table_contract(
         Some(true) => {}
     }
 
-    let sql = format!(
-        "PRAGMA table_info({})",
-        crate::sync::session::quote_ident(table)
-    );
+    let sql = format!("PRAGMA table_info({})", crate::database::quote_ident(table));
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let mut columns = Vec::new();
     let rows = stmt
@@ -266,10 +263,7 @@ pub(super) fn declared_as_text(declared_type: &str) -> bool {
 /// synced table no migration created — which the caller reports as its own
 /// contract error rather than folding into "not STRICT".
 pub(super) fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbError> {
-    let sql = format!(
-        "PRAGMA table_list({})",
-        crate::sync::session::quote_ident(table)
-    );
+    let sql = format!("PRAGMA table_list({})", crate::database::quote_ident(table));
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
     let rows = stmt
         .query_map([], |row| {

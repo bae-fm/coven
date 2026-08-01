@@ -368,7 +368,7 @@ impl StoreDatabase {
                             }
                             let sql = format!(
                                 "UPDATE {} SET _updated_at = ?1 WHERE id = ?2 AND _updated_at = ?3",
-                                crate::sync::session::quote_ident(reference.table())
+                                crate::database::quote_ident(reference.table())
                             );
                             let updated = transaction
                                 .execute(
@@ -451,8 +451,8 @@ fn write_gate(
     transaction.execute(
         &format!(
             "UPDATE {} SET {} = ?1, _updated_at = ?2 WHERE id = ?3",
-            crate::sync::session::quote_ident(root_table),
-            crate::sync::session::quote_ident(gate_column),
+            crate::database::quote_ident(root_table),
+            crate::database::quote_ident(gate_column),
         ),
         (remote as i64, stamp, root_id),
     )?;

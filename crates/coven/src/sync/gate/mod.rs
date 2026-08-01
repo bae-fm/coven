@@ -84,10 +84,10 @@ pub(crate) use model::{from_tables_call_count, reset_from_tables_call_count};
 pub(crate) use outbound::attach_empty_clone;
 pub(crate) use outbound::query_truth;
 
-/// [`crate::sync::session::table_columns`] with its `rusqlite::Error` adapted
+/// [`crate::database::table_columns`] with its `rusqlite::Error` adapted
 /// into the gate's error at the boundary.
 fn gate_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
-    crate::sync::session::table_columns(conn, table)
+    crate::database::table_columns(conn, table)
         .map_err(|e| GateError::Sql(format!("read columns of {table}"), e))
 }
 

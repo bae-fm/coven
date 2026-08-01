@@ -14,8 +14,8 @@ use super::model::{
     foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
+use crate::database::quote_ident;
 use crate::protocol::circle::Audience;
-use crate::sync::session::quote_ident;
 
 #[derive(Clone, Copy)]
 enum OutboundScope {

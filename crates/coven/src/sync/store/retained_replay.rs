@@ -197,7 +197,7 @@ fn validate_must_be_empty_replay_tables(
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM {}",
-                    crate::sync::session::quote_ident(table)
+                    crate::database::quote_ident(table)
                 ),
                 [],
                 |row| row.get(0),
@@ -488,7 +488,7 @@ impl RetainedReplayBaseline {
                         .query_row(
                             &format!(
                                 "SELECT COUNT(*) FROM {}",
-                                crate::sync::session::quote_ident(&table)
+                                crate::database::quote_ident(&table)
                             ),
                             [],
                             |row| row.get(0),
@@ -593,10 +593,7 @@ pub(crate) fn copy_table_with_conflicts(
     table: &str,
     ignore_existing: bool,
 ) -> Result<(), DbError> {
-    let pragma = format!(
-        "PRAGMA table_info({})",
-        crate::sync::session::quote_ident(table)
-    );
+    let pragma = format!("PRAGMA table_info({})", crate::database::quote_ident(table));
     let mut column_statement = source.prepare(&pragma).map_err(DbError::from)?;
     let columns = column_statement
         .query_map([], |row| row.get::<_, String>(1))
@@ -611,12 +608,12 @@ pub(crate) fn copy_table_with_conflicts(
     }
     let quoted_columns = columns
         .iter()
-        .map(|column| crate::sync::session::quote_ident(column))
+        .map(|column| crate::database::quote_ident(column))
         .collect::<Vec<_>>()
         .join(", ");
     let select = format!(
         "SELECT {quoted_columns} FROM {}",
-        crate::sync::session::quote_ident(table)
+        crate::database::quote_ident(table)
     );
     let mut source_statement = source.prepare(&select).map_err(DbError::from)?;
     let rows = source_statement
@@ -640,7 +637,7 @@ pub(crate) fn copy_table_with_conflicts(
     };
     let insert = format!(
         "{verb} INTO {} ({quoted_columns}) VALUES ({placeholders})",
-        crate::sync::session::quote_ident(table)
+        crate::database::quote_ident(table)
     );
     for values in rows {
         target
@@ -672,7 +669,7 @@ fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError
         transaction
             .execute_batch(&format!(
                 "DELETE FROM {}",
-                crate::sync::session::quote_ident(&table)
+                crate::database::quote_ident(&table)
             ))
             .map_err(DbError::from)?;
     }

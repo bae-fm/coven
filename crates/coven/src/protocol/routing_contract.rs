@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::store_commit::ObjectHash;
-use crate::sync::session::{foreign_key_edges, GateRole, RowIdentity, SyncedTable};
+use crate::database::foreign_key_edges;
+use crate::sync::session::{GateRole, RowIdentity, SyncedTable};
 
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
 
@@ -14,7 +15,7 @@ pub(crate) enum SyncRoutingContractError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
-    ForeignKey(#[from] crate::sync::session::ForeignKeySchemaError),
+    ForeignKey(#[from] crate::database::ForeignKeySchemaError),
     #[error("synced table {child_table:?} has a foreign key to undeclared table {parent_table:?}")]
     UndeclaredForeignKeyTarget {
         child_table: String,
@@ -392,10 +393,7 @@ fn live_columns(
     conn: &rusqlite::Connection,
     table: &str,
 ) -> Result<BTreeMap<String, CanonicalColumn>, SyncRoutingContractError> {
-    let sql = format!(
-        "PRAGMA table_info({})",
-        crate::sync::session::quote_ident(table)
-    );
+    let sql = format!("PRAGMA table_info({})", crate::database::quote_ident(table));
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -438,7 +436,7 @@ fn canonical_unique_parent_keys(
 ) -> Result<Vec<CanonicalUniqueKey>, SyncRoutingContractError> {
     let sql = format!(
         "PRAGMA index_list({})",
-        crate::sync::session::quote_ident(parent_table)
+        crate::database::quote_ident(parent_table)
     );
     let mut statement = conn.prepare(&sql)?;
     let indexes = statement
@@ -457,7 +455,7 @@ fn canonical_unique_parent_keys(
         }
         let sql = format!(
             "PRAGMA index_xinfo({})",
-            crate::sync::session::quote_ident(&index_name)
+            crate::database::quote_ident(&index_name)
         );
         let mut statement = conn.prepare(&sql)?;
         let rows = statement
