@@ -289,7 +289,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(contains_bytes(&store.2, b"store-account"));
     assert!(!contains_bytes(&store.2, b"circle-account"));
     assert!(!contains_bytes(&store.2, b"local-account"));
-    let store_changes = crate::changeset::walk(&store.2).expect("walk Store partition");
+    let store_changes = crate::database::walk_changeset(&store.2).expect("walk Store partition");
     for routing_id in [&store_account_route, &circle_account_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
@@ -303,7 +303,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(contains_bytes(&circle.2, b"circle-account"));
     assert!(!contains_bytes(&circle.2, b"store-account"));
     assert!(!contains_bytes(&circle.2, b"local-account"));
-    let circle_changes = crate::changeset::walk(&circle.2).expect("walk Circle partition");
+    let circle_changes = crate::database::walk_changeset(&circle.2).expect("walk Circle partition");
     assert!(circle_changes.iter().any(|change| {
         change.table == "_coven_row_routes"
             && change.op == crate::changeset::ChangeOp::Insert
@@ -314,7 +314,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(contains_bytes(&local.2, b"local-account"));
     assert!(!contains_bytes(&local.2, b"store-account"));
     assert!(!contains_bytes(&local.2, b"circle-account"));
-    let local_changes = crate::changeset::walk(&local.2).expect("walk Local partition");
+    let local_changes = crate::database::walk_changeset(&local.2).expect("walk Local partition");
     assert!(has_change(
         &local_changes,
         "accounts",
@@ -618,7 +618,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .iter()
         .find(|(audience, _)| audience == &circle_id)
         .expect("Circle destination partition");
-    let circle_changes = crate::changeset::walk(&circle.1).expect("walk Circle partition");
+    let circle_changes = crate::database::walk_changeset(&circle.1).expect("walk Circle partition");
     assert!(circle_changes.iter().any(|change| {
         change.table == "accounts"
             && change.op == crate::changeset::ChangeOp::Insert
@@ -640,7 +640,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("Store audience mirror partition");
-    let store_changes = crate::changeset::walk(&store.1).expect("walk Store partition");
+    let store_changes = crate::database::walk_changeset(&store.1).expect("walk Store partition");
     assert!(store_changes
         .iter()
         .all(|change| change.table != "accounts" && change.table != "transactions"));
@@ -1016,7 +1016,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         "the host database is already the Local materialization"
     );
     let store_mirror_retract =
-        crate::changeset::walk(&local_partition("store").1).expect("walk Store mirror");
+        crate::database::walk_changeset(&local_partition("store").1).expect("walk Store mirror");
     for route in [&local_move_account_route, &local_move_transaction_route] {
         assert!(has_change(
             &store_mirror_retract,
@@ -1108,8 +1108,8 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             .all(|(audience, _)| audience != &circle_id),
         "a move must not publish deletes to its old Circle"
     );
-    let store_destination =
-        crate::changeset::walk(&store_partition("store").1).expect("walk Store destination");
+    let store_destination = crate::database::walk_changeset(&store_partition("store").1)
+        .expect("walk Store destination");
     assert!(has_change(
         &store_destination,
         "accounts",
@@ -1193,8 +1193,8 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} Circle-delete partition"))
     };
-    let circle_delete =
-        crate::changeset::walk(&delete_partition(&circle_id).1).expect("walk Circle delete");
+    let circle_delete = crate::database::walk_changeset(&delete_partition(&circle_id).1)
+        .expect("walk Circle delete");
     for (table, row_id) in [
         ("accounts", "deleted-account"),
         ("transactions", "deleted-transaction"),
@@ -1213,7 +1213,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         "routing metadata must never be deleted through a private audience"
     );
     let store_delete =
-        crate::changeset::walk(&delete_partition("store").1).expect("walk Store delete");
+        crate::database::walk_changeset(&delete_partition("store").1).expect("walk Store delete");
     for route in [&deleted_account_route, &deleted_transaction_route] {
         assert!(has_change(
             &store_delete,
@@ -1326,7 +1326,7 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
         .expect("read scoped sibling move partitions");
 
     for (audience, changeset) in partitions {
-        let changes = crate::changeset::walk(&changeset)
+        let changes = crate::database::walk_changeset(&changeset)
             .unwrap_or_else(|error| panic!("walk {audience} partition: {error}"));
         assert!(
             !changes.iter().any(|change| {
@@ -1742,8 +1742,10 @@ async fn inherited_reparenting_materializes_subtree() {
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} reparent partition"))
     };
-    let store = crate::changeset::walk(&partition("store").1).expect("walk Store audience mirror");
-    let circle = crate::changeset::walk(&partition(&circle_b).1).expect("walk Circle insert");
+    let store =
+        crate::database::walk_changeset(&partition("store").1).expect("walk Store audience mirror");
+    let circle =
+        crate::database::walk_changeset(&partition(&circle_b).1).expect("walk Circle insert");
     for (table, id) in [
         ("transactions", "to-circle-transaction"),
         ("line_items", "to-circle-transaction-line"),
@@ -1859,7 +1861,7 @@ async fn inherited_reparenting_materializes_subtree() {
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} Circle-to-Store partition"))
     };
-    let store_destination = crate::changeset::walk(&store_partition("store").1)
+    let store_destination = crate::database::walk_changeset(&store_partition("store").1)
         .expect("walk Circle-to-Store destination");
     assert!(
         store_partitions
@@ -2066,8 +2068,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .expect("read Local-only ancestor journal");
     assert_eq!(local_only_partitions.len(), 1);
     assert_eq!(local_only_partitions[0].0, "local");
-    let local_seed =
-        crate::changeset::walk(&local_only_partitions[0].1).expect("walk Local-only journal");
+    let local_seed = crate::database::walk_changeset(&local_only_partitions[0].1)
+        .expect("walk Local-only journal");
     for (table, id) in [
         ("documents", "moving-document"),
         ("details", "moving-detail"),
@@ -2113,7 +2115,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
             .find(|(candidate, _)| candidate == audience)
             .unwrap_or_else(|| panic!("missing {audience} scoped ancestor partition"))
     };
-    let store = crate::changeset::walk(&partition("store").1)
+    let store = crate::database::walk_changeset(&partition("store").1)
         .expect("walk required ancestor Store partition");
     assert!(has_change(
         &store,
@@ -2121,8 +2123,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         crate::changeset::ChangeOp::Insert,
         "required-folder"
     ));
-    let circle =
-        crate::changeset::walk(&partition(&circle_id).1).expect("walk Circle descendant partition");
+    let circle = crate::database::walk_changeset(&partition(&circle_id).1)
+        .expect("walk Circle descendant partition");
     assert!(
         partitions.iter().all(|(audience, _)| audience != "local"),
         "a move must not publish deletes to its old Local audience"
@@ -2176,7 +2178,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .iter()
         .find(|(audience, _)| audience == &sibling_circle)
         .expect("Circle B sibling partition");
-    let sibling = crate::changeset::walk(&sibling.1).expect("walk Circle B sibling insert");
+    let sibling =
+        crate::database::walk_changeset(&sibling.1).expect("walk Circle B sibling insert");
     for (table, id) in [
         ("documents", "sibling-document"),
         ("details", "sibling-detail"),
@@ -2192,7 +2195,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("Store ancestor partition for Circle B insert");
-    let sibling_store = crate::changeset::walk(&sibling_store.1)
+    let sibling_store = crate::database::walk_changeset(&sibling_store.1)
         .expect("walk Store ancestor partition for Circle B insert");
     assert!(has_change(
         &sibling_store,
@@ -2201,7 +2204,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         "required-folder"
     ));
     for (_, changeset) in &sibling_partitions {
-        let changes = crate::changeset::walk(changeset).expect("walk sibling partition");
+        let changes = crate::database::walk_changeset(changeset).expect("walk sibling partition");
         for (table, id) in [
             ("documents", "moving-document"),
             ("details", "moving-detail"),
@@ -2253,7 +2256,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         "the host database is already the Local materialization"
     );
     for (_, changeset) in &local_partitions {
-        let changes = crate::changeset::walk(changeset).expect("walk Circle-to-Local partition");
+        let changes =
+            crate::database::walk_changeset(changeset).expect("walk Circle-to-Local partition");
         assert!(!has_change(
             &changes,
             "folders",
@@ -2336,8 +2340,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("Store ancestor retraction partition");
-    let store_retraction =
-        crate::changeset::walk(&store_retraction.1).expect("walk Store ancestor retraction");
+    let store_retraction = crate::database::walk_changeset(&store_retraction.1)
+        .expect("walk Store ancestor retraction");
     assert!(has_change(
         &store_retraction,
         "folders",
@@ -2393,8 +2397,8 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
             .all(|(audience, _)| audience != "local"),
         "a move must not publish deletes to its old Local audience"
     );
-    let store_destination =
-        crate::changeset::walk(&store_destination.1).expect("walk Store descendant destination");
+    let store_destination = crate::database::walk_changeset(&store_destination.1)
+        .expect("walk Store descendant destination");
     for (table, id) in [
         ("folders", "required-folder"),
         ("documents", "moving-document"),
@@ -2435,7 +2439,7 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         .find(|(audience, _)| audience == "store")
         .expect("Store descendant delete partition");
     let store_delete =
-        crate::changeset::walk(&store_delete.1).expect("walk Store descendant delete");
+        crate::database::walk_changeset(&store_delete.1).expect("walk Store descendant delete");
     for (table, id) in [
         ("folders", "required-folder"),
         ("documents", "moving-document"),

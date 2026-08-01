@@ -66,11 +66,11 @@ impl<'storage> PullPackageMaterializer<'storage> {
                     )))
                 }
             };
-        let changes = match crate::changeset::walk(changeset.bytes()) {
+        let changes = match crate::database::walk_changeset(changeset.bytes()) {
             Ok(changes) => changes,
             Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
         };
-        let old_changes = match crate::changeset::walk_old(changeset.bytes()) {
+        let old_changes = match crate::database::walk_old_changeset(changeset.bytes()) {
             Ok(changes) => changes,
             Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
         };

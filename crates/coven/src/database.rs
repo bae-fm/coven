@@ -108,6 +108,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 mod blob_bindings;
 mod blob_records;
+mod changeset;
 mod changeset_identity;
 mod circle_operation_records;
 #[cfg(test)]
@@ -138,6 +139,9 @@ mod write_lifecycle;
 mod write_models;
 
 pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
+pub(crate) use changeset::{
+    value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset,
+};
 pub(crate) use changeset_identity::ChangesetIdentityError;
 pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,

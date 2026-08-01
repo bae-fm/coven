@@ -506,7 +506,7 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
     drop(primary_key_tx);
     drop(primary_key_session);
     let primary_key_changes =
-        crate::changeset::walk(&primary_key_changes).expect("walk primary-key update");
+        crate::database::walk_changeset(&primary_key_changes).expect("walk primary-key update");
     assert_eq!(
         primary_key_changes
             .iter()
@@ -531,7 +531,7 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
         .expect("same-id upsert");
     let upsert_changes = capture_changeset(&mut upsert_session).expect("capture upsert");
     drop(upsert_tx);
-    let upsert_changes = crate::changeset::walk(&upsert_changes).expect("walk upsert");
+    let upsert_changes = crate::database::walk_changeset(&upsert_changes).expect("walk upsert");
     assert_eq!(upsert_changes.len(), 1);
     assert_eq!(upsert_changes[0].op, crate::changeset::ChangeOp::Update);
     assert_eq!(upsert_changes[0].pk(), Some("old"));

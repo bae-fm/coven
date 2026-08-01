@@ -34,7 +34,7 @@ use tracing::warn;
 use super::conflict::{
     arbitrate_row_conflict, compare_lww_stamps, IncomingTimestampPolicy, LwwComparison, TableSchema,
 };
-use crate::changeset::{value_ref_to_string, UpdateValue};
+use crate::database::changeset::{value_ref_to_string, UpdateValue};
 use crate::database::changeset_identity::validate_changeset_row_identities;
 use crate::database::{quote_ident, ChangesetIdentityError, DbError};
 use crate::sync::hlc::Timestamp;

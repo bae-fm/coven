@@ -117,7 +117,7 @@ fn apply_merge_subset_on(
     let applied_changeset = source
         .validate_subset(bytes.clone())
         .map_err(|error| DbError::Message(error.to_string()))?;
-    let actual_changes = crate::changeset::walk(&bytes).map_err(DbError::Message)?;
+    let actual_changes = crate::database::walk_changeset(&bytes).map_err(DbError::Message)?;
     if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
         advance_max_updated_at(
             changeset_max,
@@ -155,7 +155,7 @@ fn apply_merge_subset_on(
         .map_err(|error| DbError::Message(error.to_string()))?;
     }
     let winning_rows = store_transaction.current_winning_rows(source.schema(), &bytes)?;
-    let old_changes = crate::changeset::walk_old(&bytes).map_err(DbError::Message)?;
+    let old_changes = crate::database::walk_old_changeset(&bytes).map_err(DbError::Message)?;
     let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
         .map_err(|error| DbError::Message(error.to_string()))?;
     for intent in cleanup {
@@ -448,8 +448,10 @@ pub(crate) fn apply_prepared_merge_materialization_on(
         .changeset_strm(&mut removal_changeset)
         .map_err(DbError::from)?;
     drop(removal_session);
-    let removed = crate::changeset::walk_old(&removal_changeset).map_err(DbError::Message)?;
-    let removal_changes = crate::changeset::walk(&removal_changeset).map_err(DbError::Message)?;
+    let removed =
+        crate::database::walk_old_changeset(&removal_changeset).map_err(DbError::Message)?;
+    let removal_changes =
+        crate::database::walk_changeset(&removal_changeset).map_err(DbError::Message)?;
     let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &removal_changes)
         .map_err(|error| DbError::Message(error.to_string()))?;
     returned_changes.extend(removal_changes);

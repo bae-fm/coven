@@ -205,7 +205,7 @@ fn partition_blob_facts<'a>(
     changeset: &[u8],
     facts: &'a StoreWriteBlobFacts,
 ) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
-    let rows = crate::changeset::walk(changeset)
+    let rows = crate::database::walk_changeset(changeset)
         .map_err(|error| {
             StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
         })?

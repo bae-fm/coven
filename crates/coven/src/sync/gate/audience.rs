@@ -2287,7 +2287,8 @@ mod tests {
 
         let first = capture_routing_changes(&conn, &changeset, &gates, &key)
             .expect("capture the move's routing");
-        let mirror = crate::changeset::walk(&first.store_mirror).expect("walk the Store mirror");
+        let mirror =
+            crate::database::walk_changeset(&first.store_mirror).expect("walk the Store mirror");
         assert_eq!(
             mirror.len(),
             1,
@@ -2297,7 +2298,7 @@ mod tests {
         let again = capture_routing_changes(&conn, &changeset, &gates, &key)
             .expect("capture the same move's routing again");
         assert!(
-            crate::changeset::walk(&again.store_mirror)
+            crate::database::walk_changeset(&again.store_mirror)
                 .expect("walk the repeated Store mirror")
                 .is_empty(),
             "a second capture has nothing left to publish",
@@ -2382,7 +2383,7 @@ mod tests {
             &key,
         )
         .expect("filter first Circle package");
-        let rows = crate::changeset::walk(&filtered).expect("walk filtered changeset");
+        let rows = crate::database::walk_changeset(&filtered).expect("walk filtered changeset");
         assert_eq!(rows.len(), 2);
         assert!(rows
             .iter()
@@ -2758,7 +2759,7 @@ mod tests {
         )
         .expect("route stamp follows the audience transition, not row content");
         assert_eq!(
-            crate::changeset::walk(&filtered)
+            crate::database::walk_changeset(&filtered)
                 .expect("walk filtered Circle package")
                 .len(),
             2
@@ -2812,7 +2813,7 @@ mod tests {
         )
         .expect("authenticate the old package before omitting it");
 
-        assert!(crate::changeset::walk(&filtered)
+        assert!(crate::database::walk_changeset(&filtered)
             .expect("walk omitted package")
             .is_empty());
     }
@@ -2850,7 +2851,7 @@ mod tests {
         let filtered = filter_inbound_store_rows(&target, &changeset, &note_gates(&target), &key)
             .expect("filter stale Store edit");
 
-        assert!(crate::changeset::walk(&filtered)
+        assert!(crate::database::walk_changeset(&filtered)
             .expect("walk omitted Store edit")
             .is_empty());
     }

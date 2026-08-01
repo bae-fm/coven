@@ -36,7 +36,7 @@ use rusqlite::session::{ChangesetItem, ConflictAction, ConflictType};
 use rusqlite::Connection;
 use tracing::warn;
 
-use crate::changeset::value_ref_to_string;
+use crate::database::changeset::value_ref_to_string;
 use crate::database::{table_columns, DbError};
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;

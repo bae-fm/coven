@@ -860,7 +860,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .await;
 
-    let changes = crate::changeset::walk(&next).expect("walk next changeset");
+    let changes = crate::database::walk_changeset(&next).expect("walk next changeset");
     assert!(
         changes
             .iter()

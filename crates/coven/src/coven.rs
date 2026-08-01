@@ -718,7 +718,7 @@ mod tests {
             .write_changeset_for_test(&write_id)
             .await
             .expect("load gated changeset");
-        let rows = crate::changeset::walk(&changeset).expect("walk gated changeset");
+        let rows = crate::database::walk_changeset(&changeset).expect("walk gated changeset");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].op, crate::changeset::ChangeOp::Insert);
         assert_eq!(rows[0].pk(), Some("root-1"));

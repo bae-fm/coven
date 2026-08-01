@@ -158,7 +158,7 @@ impl StoreDatabase {
         changeset: &[u8],
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
-        let changes = crate::changeset::walk(changeset)
+        let changes = crate::database::walk_changeset(changeset)
             .map_err(|error| DbError::Message(format!("read Store write blobs: {error}")))?;
         let mut facts = BTreeMap::new();
         for change in changes {
@@ -450,7 +450,7 @@ impl StoreDatabase {
             let mut affected = Vec::new();
             for partition in &remote_partitions {
                 affected.extend(
-                    crate::changeset::walk(&partition.changeset)
+                    crate::database::walk_changeset(&partition.changeset)
                         .map_err(|error| {
                             DbError::Message(format!("read affected write rows: {error}"))
                         })?

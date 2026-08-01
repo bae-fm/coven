@@ -136,9 +136,9 @@ where
 /// Render a row column read against the live db as text, matching what the raw
 /// changeset path produces for the same value, so a gate resolved from a live
 /// row and one resolved from a changeset agree. The single rendering rule —
-/// including SQLite's REAL→text — lives in [`crate::changeset::value_ref_to_string`].
+/// including SQLite's REAL→text — lives in the database changeset decoder.
 fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
-    Ok(crate::changeset::value_ref_to_string(row.get_ref(idx)?))
+    Ok(crate::database::value_ref_to_string(row.get_ref(idx)?))
 }
 
 #[derive(Debug)]
@@ -317,8 +317,9 @@ impl std::error::Error for GateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changeset::{walk, ChangeOp};
+    use crate::changeset::ChangeOp;
     use crate::database::resolve_and_apply_changeset;
+    use crate::database::walk_changeset as walk;
     use rusqlite::session::Session as RqSession;
     use rusqlite::Connection;
 

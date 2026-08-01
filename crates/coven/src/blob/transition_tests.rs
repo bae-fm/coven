@@ -613,7 +613,9 @@ async fn assert_scoped_flip_journaled_atomically(
         .expect("read routed Store partitions");
     let all_changes = changesets
         .iter()
-        .map(|changeset| crate::changeset::walk(changeset).expect("walk routed Store partition"))
+        .map(|changeset| {
+            crate::database::walk_changeset(changeset).expect("walk routed Store partition")
+        })
         .collect::<Vec<_>>();
     let changes = all_changes
         .into_iter()

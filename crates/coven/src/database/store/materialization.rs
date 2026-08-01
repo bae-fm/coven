@@ -216,9 +216,9 @@ impl StoreDatabase {
                             ));
                         }
                         Self::replace_store_device_exclusion_freezes_from_replay_on(&tx)?;
-                        let old_projection = crate::changeset::walk_old(&projection_changeset)
+                        let old_projection = crate::database::walk_old_changeset(&projection_changeset)
                             .map_err(DbError::Message)?;
-                        let new_projection = crate::changeset::walk(&projection_changeset)
+                        let new_projection = crate::database::walk_changeset(&projection_changeset)
                             .map_err(DbError::Message)?;
                         for intent in crate::blob::local_cleanup::intents_from_changes(
                             &blob_decls,
