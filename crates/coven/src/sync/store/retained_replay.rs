@@ -163,7 +163,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
     ),
 ];
 
-fn projection_table_names(include_routing: bool) -> Vec<String> {
+pub(crate) fn projection_table_names(include_routing: bool) -> Vec<String> {
     REPLAY_TABLES
         .iter()
         .filter_map(|(table, disposition)| match disposition {
@@ -583,70 +583,6 @@ fn open_image(image: &[u8]) -> Result<Connection, DbError> {
         .map_err(|error| DbError::Message(format!("open retained replay database image: {error}")))
 }
 
-pub(crate) fn replace_live_projection(
-    target: &rusqlite::Transaction<'_>,
-    replay: &Connection,
-    synced_tables: &[crate::sync::session::SyncedTable],
-    include_routing: bool,
-) -> Result<Vec<u8>, DbError> {
-    let mut host_changes = rusqlite::session::Session::new(target).map_err(DbError::from)?;
-    for table in synced_tables {
-        host_changes
-            .attach(Some(table.name()))
-            .map_err(DbError::from)?;
-    }
-    let mut tables = projection_table_names(include_routing);
-    tables.extend(synced_tables.iter().map(|table| table.name().to_string()));
-    tables.sort();
-    tables.dedup();
-    target
-        .pragma_update(None, "defer_foreign_keys", "ON")
-        .map_err(DbError::from)?;
-    for table in tables.iter().rev() {
-        target
-            .execute_batch(&format!(
-                "DELETE FROM {}",
-                crate::sync::session::quote_ident(table)
-            ))
-            .map_err(DbError::from)?;
-    }
-    for table in &tables {
-        copy_table(replay, target, table)?;
-    }
-    let violations: bool = target
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
-    if violations {
-        let violation: (String, Option<i64>, String, i64) = target
-            .query_row(
-                "SELECT * FROM pragma_foreign_key_check LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(DbError::from)?;
-        return Err(DbError::Message(format!(
-            "retained replay projection violates foreign keys: {violation:?}"
-        )));
-    }
-    let mut changeset = Vec::new();
-    host_changes
-        .changeset_strm(&mut changeset)
-        .map_err(DbError::from)?;
-    Ok(changeset)
-}
-
-pub(crate) fn copy_table(
-    source: &Connection,
-    target: &Connection,
-    table: &str,
-) -> Result<(), DbError> {
-    copy_table_with_conflicts(source, target, table, false)
-}
-
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
 /// unique key already exists in `target` is left untouched instead of failing —
 /// used when installing a Circle image onto a Store image that already carries the
@@ -1027,43 +963,5 @@ mod tests {
             .expect("query excluded local state")
             .is_none());
         transaction.rollback().expect("rollback founder fixture");
-    }
-
-    #[test]
-    fn projection_replacement_returns_the_host_row_delta() {
-        let mut live = fixture();
-        let replay = fixture();
-        replay
-            .execute(
-                "UPDATE host_rows SET secret = 'replayed-value' WHERE id = 'host'",
-                [],
-            )
-            .expect("change replayed host row");
-        let transaction = live.transaction().expect("begin live replacement");
-        let changeset = replace_live_projection(
-            &transaction,
-            &replay,
-            &[crate::sync::session::SyncedTable::new(
-                "host_rows",
-                crate::sync::session::RowIdentity::SharedKey,
-            )],
-            true,
-        )
-        .expect("replace live projection");
-        let rows = crate::changeset::walk(&changeset).expect("walk replacement changeset");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].table, "host_rows");
-        assert_eq!(rows[0].pk(), Some("host"));
-        assert_eq!(
-            transaction
-                .query_row(
-                    "SELECT secret FROM host_rows WHERE id = 'host'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .expect("read replaced host row"),
-            "replayed-value"
-        );
-        transaction.rollback().expect("rollback live replacement");
     }
 }

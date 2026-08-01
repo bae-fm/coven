@@ -1124,16 +1124,17 @@ impl ExactObjectRef {
     }
 
     pub(crate) async fn verify_file(&self, path: &std::path::Path) -> Result<(), StorageError> {
-        super::local_file::verify_exact_file(self, path)
+        let (size, hash) = super::local_file::exact_file_facts(path)
             .await
-            .map_err(|error| match error {
-                super::local_file::ExactFileVerificationError::Filesystem(error) => {
-                    StorageError::LocalFilesystem(error)
-                }
-                super::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
-                    StorageError::InvalidContent(error)
-                }
-            })
+            .map_err(StorageError::LocalFilesystem)?;
+        if size != self.stored_size || hash != self.stored_hash {
+            return Err(StorageError::InvalidContent(format!(
+                "exact file {} does not match stored identity for {}",
+                path.display(),
+                self.slot.logical_key()
+            )));
+        }
+        Ok(())
     }
 }
 

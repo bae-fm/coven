@@ -23,6 +23,7 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
+#[cfg(test)]
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 
@@ -84,9 +85,6 @@ pub enum SyncLoopStatus {
 /// Manages the background sync loop and provides access to sync components.
 pub(crate) struct SyncLoopHandle {
     inner: Arc<SyncLoopHandleInner>,
-    clock: ClockRef,
-    config: Config,
-    store_dir: StoreDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     command_tx: tokio::sync::mpsc::Sender<SyncCommand>,
@@ -105,6 +103,8 @@ struct SyncLoopHandleInner {
     components: SyncComponents,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
     security: StoreSecurity,
+    clock: ClockRef,
+    config: Config,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, held so it releases only when the loop's
@@ -181,19 +181,16 @@ impl SyncLoopHandle {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let store_dir = config.store_dir.clone();
-
         Self {
             inner: Arc::new(SyncLoopHandleInner {
                 components,
                 blob_transitions,
                 security,
+                clock,
+                config,
                 observer,
                 _open_guard: open_guard,
             }),
-            clock,
-            config,
-            store_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
             command_tx,
@@ -246,8 +243,6 @@ impl SyncLoopHandle {
 
         let inner = Arc::clone(&self.inner);
         let status_tx = self.status_tx.clone();
-        let clock = self.clock.clone();
-        let store_dir = self.store_dir.clone();
         let running = Arc::clone(&self.running);
 
         let handle = std::thread::Builder::new()
@@ -292,7 +287,7 @@ impl SyncLoopHandle {
                                     info!("Sync command channel closed before first cycle");
                                     return;
                                 };
-                                execute_command(&inner, &store_dir, command).await;
+                                inner.execute_command(command).await;
                             }
                         }
                     }
@@ -313,7 +308,7 @@ impl SyncLoopHandle {
                             }
                             Ok(_) => {
                                 status_tx.send_replace(SyncLoopStatus::Publishing);
-                                let (decision, cycle_went_offline) = match run_single_cycle(&inner, clock.as_ref(), &store_dir).await {
+                                let (decision, cycle_went_offline) = match inner.run_single_cycle().await {
                                     Ok(result) => (loop_policy::after_success(result), false),
                                     Err(error) => {
                                         let offline = error.is_offline();
@@ -384,7 +379,7 @@ impl SyncLoopHandle {
                                     info!("Sync command channel closed, stopping sync loop");
                                     break;
                                 };
-                                execute_command(&inner, &store_dir, command).await;
+                                inner.execute_command(command).await;
                             }
                         }
                     }
@@ -465,11 +460,11 @@ impl SyncLoopHandle {
 
     #[cfg(test)]
     pub(crate) fn store_dir(&self) -> &StoreDir {
-        &self.store_dir
+        &self.inner.config.store_dir
     }
 
     pub(crate) fn config(&self) -> &Config {
-        &self.config
+        &self.inner.config
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -533,8 +528,8 @@ impl SyncLoopHandle {
         self.inner
             .components
             .drain_uploads(
-                self.clock.as_ref(),
-                &self.store_dir,
+                self.inner.clock.as_ref(),
+                &self.inner.config.store_dir,
                 self.inner.observer.as_deref(),
             )
             .await
@@ -717,104 +712,111 @@ impl SyncLoopHandle {
     }
 }
 
-async fn execute_command(inner: &SyncLoopHandleInner, store_dir: &StoreDir, command: SyncCommand) {
-    match command {
-        SyncCommand::CreateCircle { name, reply } => {
-            reply_circle_command(reply, inner.components.create_circle(&name).await);
-        }
-        SyncCommand::RenameCircle {
-            circle_id,
-            name,
-            reply,
-        } => {
-            reply_circle_command(
+impl SyncLoopHandleInner {
+    async fn execute_command(&self, command: SyncCommand) {
+        match command {
+            SyncCommand::CreateCircle { name, reply } => {
+                reply_circle_command(reply, self.components.create_circle(&name).await);
+            }
+            SyncCommand::RenameCircle {
+                circle_id,
+                name,
                 reply,
-                inner.components.rename_circle(circle_id, &name).await,
-            );
-        }
-        SyncCommand::AddCircleMember {
-            circle_id,
-            member_pubkey,
-            role,
-            reply,
-        } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(reply, self.components.rename_circle(circle_id, &name).await);
+            }
+            SyncCommand::AddCircleMember {
+                circle_id,
+                member_pubkey,
+                role,
                 reply,
-                inner
-                    .components
-                    .add_circle_member(store_dir, circle_id, member_pubkey, role)
-                    .await,
-            );
-        }
-        SyncCommand::RemoveCircleMember {
-            circle_id,
-            member_pubkey,
-            reply,
-        } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components
+                        .add_circle_member(&self.config.store_dir, circle_id, member_pubkey, role)
+                        .await,
+                );
+            }
+            SyncCommand::RemoveCircleMember {
+                circle_id,
+                member_pubkey,
                 reply,
-                inner
-                    .components
-                    .remove_circle_member(circle_id, member_pubkey)
-                    .await,
-            );
-        }
-        SyncCommand::ResolveCircleControl {
-            circle_id,
-            chosen,
-            reply,
-        } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components
+                        .remove_circle_member(circle_id, member_pubkey)
+                        .await,
+                );
+            }
+            SyncCommand::ResolveCircleControl {
+                circle_id,
+                chosen,
                 reply,
-                inner
-                    .components
-                    .resolve_circle_control(circle_id, chosen)
-                    .await,
-            );
-        }
-        SyncCommand::CancelCircleEpochClose { circle_id, reply } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components
+                        .resolve_circle_control(circle_id, chosen)
+                        .await,
+                );
+            }
+            SyncCommand::CancelCircleEpochClose { circle_id, reply } => {
+                reply_circle_command(
+                    reply,
+                    self.components.cancel_circle_epoch_close(circle_id).await,
+                );
+            }
+            SyncCommand::ExcludeCircleCloseDevice {
+                circle_id,
+                excluded_device_id,
                 reply,
-                inner.components.cancel_circle_epoch_close(circle_id).await,
-            );
-        }
-        SyncCommand::ExcludeCircleCloseDevice {
-            circle_id,
-            excluded_device_id,
-            reply,
-        } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components
+                        .exclude_circle_close_device(circle_id, excluded_device_id)
+                        .await,
+                );
+            }
+            SyncCommand::DeleteCircle { circle_id, reply } => {
+                reply_circle_command(reply, self.components.delete_circle(circle_id).await);
+            }
+            SyncCommand::RetryCircleOperation {
+                operation_id,
                 reply,
-                inner
-                    .components
-                    .exclude_circle_close_device(circle_id, excluded_device_id)
-                    .await,
-            );
-        }
-        SyncCommand::DeleteCircle { circle_id, reply } => {
-            reply_circle_command(reply, inner.components.delete_circle(circle_id).await);
-        }
-        SyncCommand::RetryCircleOperation {
-            operation_id,
-            reply,
-        } => {
-            reply_circle_command(
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components.retry_circle_operation(&operation_id).await,
+                );
+            }
+            SyncCommand::DiscardCircleOperation {
+                operation_id,
                 reply,
-                inner.components.retry_circle_operation(&operation_id).await,
-            );
+            } => {
+                reply_circle_command(
+                    reply,
+                    self.components
+                        .discard_circle_operation(&operation_id)
+                        .await,
+                );
+            }
         }
-        SyncCommand::DiscardCircleOperation {
-            operation_id,
-            reply,
-        } => {
-            reply_circle_command(
-                reply,
-                inner
-                    .components
-                    .discard_circle_operation(&operation_id)
-                    .await,
-            );
-        }
+    }
+
+    async fn run_single_cycle(
+        &self,
+    ) -> Result<super::cycle::SyncCycleResult, super::cycle::SyncCycleFailure> {
+        self.components
+            .run_cycle(
+                self.clock.as_ref(),
+                Some(&self.security),
+                &self.config.store_dir,
+                self.observer.as_deref(),
+            )
+            .await
     }
 }
 
@@ -855,23 +857,6 @@ impl Drop for RunningGuard {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
     }
-}
-
-/// Run a single sync cycle.
-async fn run_single_cycle(
-    inner: &SyncLoopHandleInner,
-    clock: &dyn crate::clock::Clock,
-    store_dir: &StoreDir,
-) -> Result<super::cycle::SyncCycleResult, super::cycle::SyncCycleFailure> {
-    inner
-        .components
-        .run_cycle(
-            clock,
-            Some(&inner.security),
-            store_dir,
-            inner.observer.as_deref(),
-        )
-        .await
 }
 
 #[cfg(test)]

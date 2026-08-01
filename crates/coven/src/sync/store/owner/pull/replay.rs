@@ -427,14 +427,6 @@ pub(crate) fn install_circle_bootstrap_image_on(
             ))
         })?;
     }
-    install_circle_bootstrap_blob_graph_on(conn, activation_commit, bootstrap)
-}
-
-fn install_circle_bootstrap_blob_graph_on(
-    conn: &rusqlite::Connection,
-    activation_commit: &StoreBatchCommitRef,
-    bootstrap: &crate::sync::store::circle_controls::VerifiedCircleImage,
-) -> Result<(), DbError> {
     install_circle_bootstrap_remote_objects_on(conn, activation_commit, bootstrap)?;
     for binding in &bootstrap.reference().blobs {
         let stored = binding.stored().ok_or_else(|| {

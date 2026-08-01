@@ -10,85 +10,74 @@ use super::journal::{
 };
 use super::OwnerPromotionError;
 
-async fn resume_request_publication(
-    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
-    journal: OwnerPromotionJournal,
-) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
-    let (previous, state) = journal.into_predecessor()?;
-    resume_request_publication_state(operation, previous, state).await
-}
-
-async fn resume_request_publication_state(
-    operation: &mut super::AuthorizedOwnerPromotion<'_, '_>,
-    mut previous: OwnerPromotionJournalPredecessor,
-    mut state: OwnerPromotionJournalState,
-) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
-    loop {
-        match state {
-            OwnerPromotionJournalState::Allocated => {
-                return Err(OwnerPromotionError::Protocol(
-                    "promotion request allocation has not been prepared".to_string(),
-                ));
-            }
-            OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
-                let head = candidate.head_ref();
-                let outcome = operation
-                    .writer
-                    .publish_prepared(candidate, None, None)
-                    .await?;
-                let next_state = match outcome {
-                    StoreOperationPublicationOutcome::Activated(commit) => {
-                        let activation = OwnerPromotionRequestActivation { commit, head };
-                        OwnerPromotionJournalState::AwaitingAcceptance {
-                            request,
-                            activation,
+/// Publish a request that promotes one exact active member device to Owner.
+impl super::AuthorizedOwnerPromotion<'_, '_> {
+    async fn resume_request_publication_state(
+        &mut self,
+        mut previous: OwnerPromotionJournalPredecessor,
+        mut state: OwnerPromotionJournalState,
+    ) -> Result<OwnerPromotionRequest, OwnerPromotionError> {
+        loop {
+            match state {
+                OwnerPromotionJournalState::Allocated => {
+                    return Err(OwnerPromotionError::Protocol(
+                        "promotion request allocation has not been prepared".to_string(),
+                    ));
+                }
+                OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
+                    let head = candidate.head_ref();
+                    let outcome = self.writer.publish_prepared(candidate, None, None).await?;
+                    let next_state = match outcome {
+                        StoreOperationPublicationOutcome::Activated(commit) => {
+                            let activation = OwnerPromotionRequestActivation { commit, head };
+                            OwnerPromotionJournalState::AwaitingAcceptance {
+                                request,
+                                activation,
+                            }
                         }
-                    }
-                    StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
-                        OwnerPromotionJournalState::RequestPrepared { request, candidate }
-                    }
-                    StoreOperationPublicationOutcome::NonactivatedCandidate {
-                        nonactivation,
-                        ..
-                    } => OwnerPromotionJournalState::Nonactivated {
-                        request,
-                        nonactivation: nonactivation.into_durable(),
-                    },
-                    StoreOperationPublicationOutcome::Nonactivated(_) => {
-                        return Err(OwnerPromotionError::Protocol(
-                            "promotion request lost without exact nonactivation evidence"
-                                .to_string(),
-                        ));
-                    }
-                    StoreOperationPublicationOutcome::Reprepared => {
-                        return Err(OwnerPromotionError::Protocol(
-                            "promotion request unexpectedly used acknowledgement reprepare"
-                                .to_string(),
-                        ));
-                    }
-                };
-                let next = OwnerPromotionJournal {
-                    promotion_id: previous.promotion_id,
-                    target: previous.target.clone(),
-                    state: next_state,
-                };
-                (previous, state) = operation.advance_journal(previous, next).await?;
-            }
-            OwnerPromotionJournalState::AwaitingAcceptance { request, .. }
-            | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
-            OwnerPromotionJournalState::AcceptanceReady { acceptance }
-            | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
-            | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
-            | OwnerPromotionJournalState::Finalized { acceptance, .. }
-            | OwnerPromotionJournalState::Stale { acceptance, .. } => {
-                return Ok(*acceptance.request);
+                        StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
+                            OwnerPromotionJournalState::RequestPrepared { request, candidate }
+                        }
+                        StoreOperationPublicationOutcome::NonactivatedCandidate {
+                            nonactivation,
+                            ..
+                        } => OwnerPromotionJournalState::Nonactivated {
+                            request,
+                            nonactivation: nonactivation.into_durable(),
+                        },
+                        StoreOperationPublicationOutcome::Nonactivated(_) => {
+                            return Err(OwnerPromotionError::Protocol(
+                                "promotion request lost without exact nonactivation evidence"
+                                    .to_string(),
+                            ));
+                        }
+                        StoreOperationPublicationOutcome::Reprepared => {
+                            return Err(OwnerPromotionError::Protocol(
+                                "promotion request unexpectedly used acknowledgement reprepare"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let next = OwnerPromotionJournal {
+                        promotion_id: previous.promotion_id,
+                        target: previous.target.clone(),
+                        state: next_state,
+                    };
+                    (previous, state) = self.advance_journal(previous, next).await?;
+                }
+                OwnerPromotionJournalState::AwaitingAcceptance { request, .. }
+                | OwnerPromotionJournalState::Nonactivated { request, .. } => return Ok(request),
+                OwnerPromotionJournalState::AcceptanceReady { acceptance }
+                | OwnerPromotionJournalState::MergeMembershipPrepared { acceptance, .. }
+                | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
+                | OwnerPromotionJournalState::Finalized { acceptance, .. }
+                | OwnerPromotionJournalState::Stale { acceptance, .. } => {
+                    return Ok(*acceptance.request);
+                }
             }
         }
     }
-}
 
-/// Publish a request that promotes one exact active member device to Owner.
-impl super::AuthorizedOwnerPromotion<'_, '_> {
     pub(crate) async fn begin(
         &mut self,
         member_registration: StoreDeviceRegistrationRef,
@@ -109,7 +98,10 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
             ) {
                 (None, Some(existing))
             } else {
-                return resume_request_publication(operation, existing).await;
+                let (previous, state) = existing.into_predecessor()?;
+                return operation
+                    .resume_request_publication_state(previous, state)
+                    .await;
             }
         } else {
             (None, None)
@@ -209,6 +201,8 @@ impl super::AuthorizedOwnerPromotion<'_, '_> {
         };
         let (previous, _) = allocation.into_predecessor()?;
         let (previous, state) = operation.advance_journal(previous, prepared).await?;
-        resume_request_publication_state(operation, previous, state).await
+        operation
+            .resume_request_publication_state(previous, state)
+            .await
     }
 }

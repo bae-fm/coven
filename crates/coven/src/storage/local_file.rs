@@ -842,31 +842,6 @@ impl OpenFile {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum ExactFileVerificationError {
-    #[error("inspect exact file: {0}")]
-    Filesystem(String),
-    #[error("{0}")]
-    IdentityMismatch(String),
-}
-
-pub(super) async fn verify_exact_file(
-    object: &crate::storage::ExactObjectRef,
-    path: &Path,
-) -> Result<(), ExactFileVerificationError> {
-    let (size, hash) = exact_file_facts(path)
-        .await
-        .map_err(ExactFileVerificationError::Filesystem)?;
-    if size != object.stored_size() || hash != object.stored_hash() {
-        return Err(ExactFileVerificationError::IdentityMismatch(format!(
-            "exact file {} does not match stored identity for {}",
-            path.display(),
-            object.slot().logical_key()
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 pub(super) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     let staged = AtomicStagedFile::create(dst).await?;

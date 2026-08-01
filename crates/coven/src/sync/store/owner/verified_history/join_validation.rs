@@ -23,53 +23,6 @@ pub(crate) struct VerifiedCommitJoinEvidence {
     pub(crate) cleanup_receipts: Vec<CommitJoinCleanupReceiptEvidence>,
 }
 
-pub(crate) fn validate_commit_join_cleanup_receipts(
-    activating_author: &StoreDeviceRegistration,
-    predecessor: Option<&MembershipChain>,
-    join_evidence: &VerifiedCommitJoinEvidence,
-    accepted: VerifiedMergePredecessorHistory<'_>,
-) -> Result<(), RegistrationLoadError> {
-    let predecessor = predecessor.ok_or_else(|| {
-        RegistrationLoadError::Invalid(
-            "device join cleanup activation has no exact predecessor authority".to_string(),
-        )
-    })?;
-    if !predecessor.is_owner_now(&activating_author.author_pubkey) {
-        return Err(RegistrationLoadError::Invalid(
-            "device join cleanup activation author is not an active Owner".to_string(),
-        ));
-    }
-    for loaded in &join_evidence.cleanup_receipts {
-        if !accepted
-            .contains_join_outcome(&loaded.receipt.cancellation)
-            .map_err(registration_attempt_error)?
-        {
-            return Err(RegistrationLoadError::Invalid(
-                "device join cleanup receipt outcome is absent from its verified predecessor history"
-                    .to_string(),
-            ));
-        }
-        let attempt = join_evidence.attempts.get(&loaded.attempt).ok_or_else(|| {
-            RegistrationLoadError::Invalid(
-                "device join cleanup receipt has no verified exact attempt".to_string(),
-            )
-        })?;
-        let expected_administrator = &attempt.provider_approval.request.offer.provider_admin;
-        if !predecessor_verifies_provider_administrator(
-            predecessor,
-            &loaded.receipt.provider_admin_grant,
-            &loaded.receipt.executor,
-            expected_administrator,
-        ) {
-            return Err(RegistrationLoadError::Invalid(
-                "device join cleanup executor is not the exact effective provider administrator"
-                    .to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_commit_join_attempts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,

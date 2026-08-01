@@ -126,8 +126,9 @@ pub(crate) use owner::{
 pub(crate) use owner::{RestoringStore, StoreRegistrationError};
 pub(crate) use protocol_root::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};
 pub(crate) use retained_replay::{
-    replace_live_projection, RetainedReplayAuthority, RetainedReplayBaseline,
-    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+    copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
+    GENERATION_ZERO,
 };
 
 #[cfg(test)]

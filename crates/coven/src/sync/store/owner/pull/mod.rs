@@ -24,7 +24,6 @@ use crate::protocol::store_commit::{
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
-use crate::store_dir::StoreDir;
 use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
 use crate::sync::session::SyncedTable;
@@ -34,6 +33,7 @@ use crate::sync::store::circle_controls::activation::{
 use crate::sync::store::retained_replay;
 use crate::sync::store::StoreError;
 use crate::sync::{gate, hlc};
+pub(super) use authorized::AuthorizedPull;
 
 mod device_lifecycle_state;
 mod discovery;
@@ -95,19 +95,6 @@ impl LoadedMergePredecessorMemberships {
 pub(crate) struct StorePullExecution {
     pub result: StorePullResult,
     pub membership: MembershipChain,
-}
-
-pub(super) async fn execute(
-    history: &mut AuthorizedStoreHistory<'_>,
-    store_dir: &StoreDir,
-    membership: &MembershipChain,
-    identity: Option<&UserKeypair>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-) -> Result<StorePullExecution, StorePullError> {
-    authorized::AuthorizedPull::load(history, store_dir, membership, identity, routing_encryption)
-        .await?
-        .execute()
-        .await
 }
 
 use super::verification::DeviceStateResolver;

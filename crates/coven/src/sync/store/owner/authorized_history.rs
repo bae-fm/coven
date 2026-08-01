@@ -278,7 +278,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         identity: Option<&UserKeypair>,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<pull::StorePullExecution, pull::StorePullError> {
-        pull::execute(self, store_dir, membership, identity, routing_encryption).await
+        pull::AuthorizedPull::load(self, store_dir, membership, identity, routing_encryption)
+            .await?
+            .execute()
+            .await
     }
 
     pub(super) async fn bind_pull_package_materializer(

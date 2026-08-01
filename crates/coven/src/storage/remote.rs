@@ -781,7 +781,11 @@ impl CloudCipher {
         aad_context: &[u8],
     ) -> Vec<u8> {
         match self {
-            CloudCipher::Encrypted(e) => seal_scoped_encrypted(scope, e, &plaintext, aad_context),
+            CloudCipher::Encrypted(master) => {
+                let (encryption, mut stored) = sealing_encryption_for_scope(scope, master);
+                stored.extend(encryption.encrypt(&plaintext, aad_context));
+                stored
+            }
             CloudCipher::Plaintext => plaintext,
         }
     }
@@ -1352,17 +1356,6 @@ fn opening_encryption_for_scope(
             master.derive_scoped_for_fingerprint(fingerprint, &scope_id)
         }
     }
-}
-
-fn seal_scoped_encrypted(
-    scope: crate::blob::BlobScope,
-    master: &EncryptionService,
-    plaintext: &[u8],
-    aad_context: &[u8],
-) -> Vec<u8> {
-    let (encryption, mut prefix) = sealing_encryption_for_scope(scope, master);
-    prefix.extend(encryption.encrypt(plaintext, aad_context));
-    prefix
 }
 
 fn open_scoped_encrypted(
@@ -2144,16 +2137,7 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        crate::storage::local_file::verify_exact_file(object, stored_file)
-            .await
-            .map_err(|error| match error {
-                crate::storage::local_file::ExactFileVerificationError::Filesystem(error) => {
-                    StorageError::LocalFilesystem(error)
-                }
-                crate::storage::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
-                    StorageError::InvalidContent(error)
-                }
-            })?;
+        object.verify_file(stored_file).await?;
         let body = BlobBody::from_file(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
@@ -2235,16 +2219,7 @@ impl SyncStorage for CloudSyncStorage {
                 }
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
             })?;
-        crate::storage::local_file::verify_exact_file(object, staged.path())
-            .await
-            .map_err(|error| match error {
-                crate::storage::local_file::ExactFileVerificationError::Filesystem(error) => {
-                    StorageError::LocalFilesystem(error)
-                }
-                crate::storage::local_file::ExactFileVerificationError::IdentityMismatch(error) => {
-                    StorageError::InvalidContent(error)
-                }
-            })?;
+        object.verify_file(staged.path()).await?;
         Ok(staged)
     }
 

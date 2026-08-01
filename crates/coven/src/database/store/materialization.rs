@@ -152,13 +152,61 @@ impl StoreDatabase {
                                 true,
                                 local_store_membership,
                             )?;
-                        let projection_changeset =
-                            crate::sync::replace_live_projection(
-                                &tx,
-                                &replay,
-                                &synced_tables,
-                                gates.has_scoped_graph(),
+                        let mut host_changes = rusqlite::session::Session::new(&tx)
+                            .map_err(DbError::from)?;
+                        for table in &synced_tables {
+                            host_changes
+                                .attach(Some(table.name()))
+                                .map_err(DbError::from)?;
+                        }
+                        let mut tables =
+                            crate::sync::projection_table_names(gates.has_scoped_graph());
+                        tables.extend(
+                            synced_tables
+                                .iter()
+                                .map(|table| table.name().to_string()),
+                        );
+                        tables.sort();
+                        tables.dedup();
+                        tx.pragma_update(None, "defer_foreign_keys", "ON")
+                            .map_err(DbError::from)?;
+                        for table in tables.iter().rev() {
+                            tx.execute_batch(&format!(
+                                "DELETE FROM {}",
+                                crate::sync::session::quote_ident(table)
+                            ))
+                            .map_err(DbError::from)?;
+                        }
+                        for table in &tables {
+                            crate::sync::copy_table_with_conflicts(
+                                &replay, &tx, table, false,
                             )?;
+                        }
+                        let violations: bool = tx
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .map_err(DbError::from)?;
+                        if violations {
+                            let violation: (String, Option<i64>, String, i64) = tx
+                                .query_row(
+                                    "SELECT * FROM pragma_foreign_key_check LIMIT 1",
+                                    [],
+                                    |row| {
+                                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                                    },
+                                )
+                                .map_err(DbError::from)?;
+                            return Err(DbError::Message(format!(
+                                "retained replay projection violates foreign keys: {violation:?}"
+                            )));
+                        }
+                        let mut projection_changeset = Vec::new();
+                        host_changes
+                            .changeset_strm(&mut projection_changeset)
+                            .map_err(DbError::from)?;
                         #[cfg(test)]
                         if materialization_failure.reach(
                             crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,

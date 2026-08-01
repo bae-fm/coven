@@ -6,7 +6,7 @@ use crate::protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHist
 use crate::store_dir::StoreDir;
 use std::collections::BTreeMap;
 
-pub(super) struct AuthorizedPull<'operation, 'storage> {
+pub(crate) struct AuthorizedPull<'operation, 'storage> {
     history: &'operation mut super::AuthorizedStoreHistory<'storage>,
     packages: super::super::pull_package_materializer::PullPackageMaterializer<'storage>,
     membership: &'operation MembershipChain,
@@ -15,7 +15,7 @@ pub(super) struct AuthorizedPull<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
-    pub(super) async fn load(
+    pub(crate) async fn load(
         history: &'operation mut super::AuthorizedStoreHistory<'storage>,
         store_dir: &'operation StoreDir,
         membership: &'operation MembershipChain,
@@ -37,7 +37,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         })
     }
 
-    pub(super) async fn execute(&mut self) -> Result<StorePullExecution, StorePullError> {
+    pub(crate) async fn execute(&mut self) -> Result<StorePullExecution, StorePullError> {
         let retained = self.history.prepare_pull_retained_history().await?;
         let membership = self.membership;
         let routing_encryption = self.routing_encryption;

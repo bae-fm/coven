@@ -378,9 +378,9 @@ impl AuthorizeRequest {
 
 /// Build the authorization URL + PKCE verifier for `config`, redirecting to
 /// `redirect_uri`. The caller opens the URL, captures the `code` and `state`
-/// from the redirect itself, then calls [`exchange_authorize_request`] with the
-/// same `redirect_uri` and returned request. [`authorize`] is this plus coven's
-/// localhost callback server for desktop.
+/// from the redirect itself, then calls [`OAuthClients::exchange_code`] with
+/// the same `redirect_uri` and returned request. [`authorize`] is this plus
+/// coven's localhost callback server for desktop.
 #[cfg(feature = "oauth-providers")]
 pub(crate) fn build_authorize_url(
     config: &OAuthConfig,
@@ -615,22 +615,6 @@ async fn exchange_code(
     post_token_request(client, config, params, clock).await
 }
 
-/// Verify the callback state from an [`AuthorizeRequest`] and exchange its code
-/// for tokens.
-#[cfg(feature = "oauth-providers")]
-pub(crate) async fn exchange_authorize_request(
-    client: &reqwest::Client,
-    config: &OAuthConfig,
-    code: &str,
-    callback_state: Option<&str>,
-    request: &AuthorizeRequest,
-    redirect_uri: &str,
-    clock: &dyn crate::clock::Clock,
-) -> Result<OAuthTokens, OAuthError> {
-    request.verify_callback_state(callback_state)?;
-    exchange_code(client, config, code, &request.verifier, redirect_uri, clock).await
-}
-
 /// Refresh an expired access token using a refresh token.
 #[cfg(feature = "oauth-providers")]
 pub(crate) async fn refresh(
@@ -690,12 +674,12 @@ impl OAuthClients {
         redirect_uri: &str,
         clock: &dyn crate::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
-        exchange_authorize_request(
+        request.verify_callback_state(callback_state)?;
+        exchange_code(
             &self.client,
             &self.config_for(provider)?,
             code,
-            callback_state,
-            request,
+            &request.verifier,
             redirect_uri,
             clock,
         )
@@ -1001,22 +985,25 @@ mod tests {
 
     #[cfg(feature = "oauth-providers")]
     #[tokio::test]
-    async fn exchange_authorize_request_rejects_wrong_state_before_token_request() {
-        let config = oauth_config("http://127.0.0.1:9/token".to_string());
-        let request = build_authorize_url(&config, "http://localhost/callback")
+    async fn exchange_code_rejects_wrong_state_before_token_request() {
+        let clients = OAuthClients::for_tests();
+        let request = clients
+            .build_authorize_request(
+                crate::config::CloudProvider::GoogleDrive,
+                "http://localhost/callback",
+            )
             .expect("build authorize request");
-        let client = reqwest::Client::new();
 
-        let result = exchange_authorize_request(
-            &client,
-            &config,
-            "auth-code",
-            Some("wrong-state"),
-            &request,
-            "http://localhost/callback",
-            &crate::clock::SystemClock,
-        )
-        .await;
+        let result = clients
+            .exchange_code(
+                crate::config::CloudProvider::GoogleDrive,
+                "auth-code",
+                Some("wrong-state"),
+                &request,
+                "http://localhost/callback",
+                &crate::clock::SystemClock,
+            )
+            .await;
 
         assert!(
             matches!(result, Err(OAuthError::Denied(ref msg)) if msg.contains("state mismatch")),
