@@ -31,11 +31,11 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
 use tracing::warn;
 
-use crate::changeset::{value_ref_to_string, UpdateValue};
-use crate::database::DbError;
-use crate::sync::conflict::{
+use super::conflict::{
     arbitrate_row_conflict, compare_lww_stamps, IncomingTimestampPolicy, LwwComparison, TableSchema,
 };
+use crate::changeset::{value_ref_to_string, UpdateValue};
+use crate::database::DbError;
 use crate::sync::hlc::Timestamp;
 #[cfg(test)]
 use crate::sync::session::SyncedTable;

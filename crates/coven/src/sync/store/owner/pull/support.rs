@@ -2,7 +2,7 @@
 use tracing::{debug, warn};
 
 use crate::changeset::RowChange;
-use crate::sync::conflict::TableSchema;
+use crate::database::TableSchema;
 use crate::sync::hlc::Timestamp;
 use crate::sync::store::blob::BlobDownloadFailureCause;
 

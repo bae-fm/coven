@@ -74,7 +74,7 @@ impl StoreDatabase {
                         &synced_tables,
                         routing_key.as_ref(),
                         local_store_membership,
-                        crate::sync::conflict::IncomingTimestampPolicy::Received {
+                        crate::database::IncomingTimestampPolicy::Received {
                             receiver_wall_ms,
                         },
                         None,

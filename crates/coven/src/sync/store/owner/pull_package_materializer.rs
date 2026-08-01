@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use crate::blob::CacheFill;
 use crate::database::StoreDatabase;
+use crate::database::TableSchema;
 use crate::database::ValidatedChangeset;
 use crate::protocol::audience_package::AudiencePackage;
 use crate::storage::BlobSpoolProtection;
 use crate::store_dir::StoreDir;
-use crate::sync::conflict::TableSchema;
 use crate::sync::store::blob::RemoteBlobSource;
 
 use super::pull::{

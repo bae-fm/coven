@@ -324,8 +324,7 @@ impl StoreDatabase {
         let activation = BlobActivation {
             coord: commit_ref.coord.clone(),
         };
-        let apply_schema =
-            crate::sync::conflict::TableSchema::for_apply(conn, synced_tables, gates)?;
+        let apply_schema = crate::database::TableSchema::for_apply(conn, synced_tables, gates)?;
         let store_transaction = MergeMaterializationTransaction::new(conn);
         let cloud_outbox = CloudOutboxRecords::new(conn);
         let mut consumed_uploads = 0;

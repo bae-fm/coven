@@ -503,8 +503,8 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changeset() {
     use std::sync::Arc;
 
+    use crate::database::TableSchema;
     use crate::database::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
-    use crate::sync::conflict::TableSchema;
 
     let source = open_test_db();
     exec(

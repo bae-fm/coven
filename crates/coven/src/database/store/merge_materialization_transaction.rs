@@ -1,4 +1,5 @@
 mod changeset_application;
+mod conflict;
 
 use rusqlite::OptionalExtension;
 
@@ -7,6 +8,7 @@ pub(crate) use changeset_application::{
     resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on,
 };
 pub(crate) use changeset_application::{ValidatedChangeset, WinningRow};
+pub(crate) use conflict::{IncomingTimestampPolicy, TableSchema};
 
 use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on, StoreDatabase,

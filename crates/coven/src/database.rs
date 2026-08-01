@@ -171,12 +171,13 @@ pub(crate) use store::{resolve_and_apply_changeset, resolve_and_apply_changeset_
 pub(crate) use store::{
     BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
     DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
-    MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, MergeMaterializationTransaction,
-    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
-    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection,
-    StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation, ValidatedChangeset,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
+    IncomingTimestampPolicy, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation,
+    MergeMaterializationTransaction, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
+    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, SnapshotPublicationPermit,
+    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
+    StoreWritePreparation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, WinningRow,
 };
 pub use store::{SqlContext, WriteBatch};
 pub(crate) use store_authority_records::{

@@ -462,7 +462,7 @@ impl StoreDatabase {
                     return Ok(BlockedWriteDiscard::RemoteResolutionRequired);
                 }
             }
-            let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
+            let schema = Arc::new(crate::database::TableSchema::from_db(
                 &tx,
                 &synced_tables,
             )?);

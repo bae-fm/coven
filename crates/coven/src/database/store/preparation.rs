@@ -21,11 +21,11 @@ use rusqlite::OptionalExtension;
 impl StoreDatabase {
     pub(crate) async fn table_schema_for_apply(
         &self,
-    ) -> Result<crate::sync::conflict::TableSchema, DbError> {
+    ) -> Result<crate::database::TableSchema, DbError> {
         let tables = self.synced_tables().to_vec();
         let gates = self.gates();
         self.connection
-            .call(move |conn| crate::sync::conflict::TableSchema::for_apply(conn, &tables, &gates))
+            .call(move |conn| crate::database::TableSchema::for_apply(conn, &tables, &gates))
             .await
     }
 
