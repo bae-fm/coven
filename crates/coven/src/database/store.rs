@@ -76,7 +76,13 @@ pub(crate) use materialization_models::{
     OwnedVerifiedMergeMaterialization, RetainedAudiencePackage, RetainedMergeMaterializationKey,
     RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
-pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
+#[cfg(test)]
+pub(crate) use merge_materialization_transaction::{
+    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on,
+};
+pub(crate) use merge_materialization_transaction::{
+    MergeMaterializationTransaction, ValidatedChangeset, WinningRow,
+};
 pub(crate) use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
 pub(crate) use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,

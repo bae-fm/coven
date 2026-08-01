@@ -166,6 +166,8 @@ pub(crate) use store::{
     record_verified_circle_activations_for_test, select_author_exclusion_activation_locator,
     store_package_is_retained_for_replay_for_test, AuthorExclusionLocatorTamper,
 };
+#[cfg(test)]
+pub(crate) use store::{resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on};
 pub(crate) use store::{
     BlockedWriteDiscard, CandidateCleanupObject, DurableStoreReclaimObject,
     DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
@@ -173,8 +175,8 @@ pub(crate) use store::{
     OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
     ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
     RetainedPackageApplication, SnapshotPublicationPermit, StoreDatabase, StoreDatabaseConnection,
-    StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation, ValidatedChangeset,
+    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
 };
 pub use store::{SqlContext, WriteBatch};
 pub(crate) use store_authority_records::{

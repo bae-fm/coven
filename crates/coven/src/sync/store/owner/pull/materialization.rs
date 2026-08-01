@@ -81,14 +81,14 @@ pub(crate) struct AppliedMergeMaterialization {
 }
 
 enum MergeSubsetOutcome {
-    Applied(Vec<crate::sync::apply::WinningRow>),
+    Applied(Vec<crate::database::WinningRow>),
     ConstraintConflict(Vec<String>),
 }
 
 impl MergeSubsetOutcome {
     fn extend_winning_rows(
         self,
-        winning_rows: &mut Vec<crate::sync::apply::WinningRow>,
+        winning_rows: &mut Vec<crate::database::WinningRow>,
     ) -> Result<(), Vec<String>> {
         match self {
             Self::Applied(rows) => {
@@ -132,8 +132,8 @@ fn apply_merge_subset_on(
             .filter(|change| !super::gate::is_routing_table(&change.table))
             .cloned(),
     );
-    let apply =
-        resolve_and_apply_changeset_with_policy_on(conn, applied_changeset, timestamp_policy)?;
+    let store_transaction = MergeMaterializationTransaction::new(conn);
+    let apply = store_transaction.apply_changeset(applied_changeset, timestamp_policy)?;
     if !apply.constraint_conflict_tables.is_empty() {
         return Ok(MergeSubsetOutcome::ConstraintConflict(
             apply.constraint_conflict_tables,
@@ -154,8 +154,7 @@ fn apply_merge_subset_on(
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
     }
-    let winning_rows =
-        crate::sync::apply::current_winning_rows_with_schema(conn, source.schema(), &bytes)?;
+    let winning_rows = store_transaction.current_winning_rows(source.schema(), &bytes)?;
     let old_changes = crate::changeset::walk_old(&bytes).map_err(DbError::Message)?;
     let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
         .map_err(|error| DbError::Message(error.to_string()))?;

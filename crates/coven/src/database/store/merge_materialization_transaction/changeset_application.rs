@@ -31,15 +31,19 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
 use tracing::warn;
 
-use super::conflict::{
-    arbitrate_row_conflict, compare_lww_stamps, IncomingTimestampPolicy, LwwComparison, TableSchema,
-};
-use super::hlc::Timestamp;
-#[cfg(test)]
-use super::session::SyncedTable;
-use super::session::{quote_ident, ChangesetIdentityError};
 use crate::changeset::{value_ref_to_string, UpdateValue};
 use crate::database::DbError;
+use crate::sync::conflict::{
+    arbitrate_row_conflict, compare_lww_stamps, IncomingTimestampPolicy, LwwComparison, TableSchema,
+};
+use crate::sync::hlc::Timestamp;
+#[cfg(test)]
+use crate::sync::session::SyncedTable;
+use crate::sync::session::{
+    quote_ident, validate_changeset_row_identities, ChangesetIdentityError,
+};
+
+use super::MergeMaterializationTransaction;
 
 /// Result of applying a changeset.
 pub(crate) struct ApplyResult {
@@ -81,7 +85,7 @@ pub(crate) struct ValidatedChangeset<B> {
 
 impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
     pub(crate) fn new(bytes: B, schema: Arc<TableSchema>) -> Result<Self, ChangesetIdentityError> {
-        super::session::validate_changeset_row_identities(bytes.as_ref(), schema.synced_tables())?;
+        validate_changeset_row_identities(bytes.as_ref(), schema.synced_tables())?;
         Ok(Self { bytes, schema })
     }
 
@@ -161,108 +165,138 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
 /// must roll back when the returned result reports an FK or non-FK constraint conflict.
 #[cfg(test)]
 pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
-    conn: &Connection,
+    transaction: &rusqlite::Transaction<'_>,
     changeset: ValidatedChangeset<B>,
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
-    resolve_and_apply_changeset_with_policy_on(
-        conn,
+    MergeMaterializationTransaction::new(transaction).apply_changeset(
         changeset,
         IncomingTimestampPolicy::Received { receiver_wall_ms },
     )
 }
 
-pub(crate) fn resolve_and_apply_changeset_with_policy_on<B: AsRef<[u8]>>(
-    conn: &Connection,
-    changeset: ValidatedChangeset<B>,
-    timestamp_policy: IncomingTimestampPolicy,
-) -> Result<ApplyResult, DbError> {
-    let ValidatedChangeset { bytes, schema } = changeset;
-    let bytes = bytes.as_ref();
-    #[cfg(test)]
-    let incoming_rows = incoming_rows(bytes, &schema)?;
-
-    let fk_flag = Arc::new(AtomicBool::new(false));
-    let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
-    let premerged_updates = premerge_losing_update_columns(conn, bytes, &schema, timestamp_policy)?;
-
-    let closure_flag = fk_flag.clone();
-    let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
-    let closure_schema = schema.clone();
-    conn.apply_strm(
-        &mut &bytes[..],
-        None::<fn(&str) -> bool>,
-        move |conflict_type, item| {
-            // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
-            // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
-            // crashes the process). Resolve it first, without touching the row.
-            if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
-                closure_flag.store(true, Ordering::Relaxed);
-                return ConflictAction::SQLITE_CHANGESET_OMIT;
-            }
-            // Every other conflict type exposes the operation, so the table name
-            // (needed to find the `_updated_at` column) is readable.
-            let (table, op_code) = match item.op() {
-                Ok(op) => (op.table_name().to_string(), op.code()),
-                Err(error) => {
-                    warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
-                    return ConflictAction::SQLITE_CHANGESET_ABORT;
-                }
-            };
-            if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
-                warn!(
-                    table = %table,
-                    "changeset hit a non-retryable SQLite constraint conflict; rejecting changeset"
-                );
-                match closure_constraint_conflict_tables.lock() {
-                    Ok(mut tables) => tables.push(table),
-                    Err(error) => {
-                        warn!(error = %error, "failed to record changeset constraint conflict; aborting apply");
-                        return ConflictAction::SQLITE_CHANGESET_ABORT;
-                    }
-                }
-                return ConflictAction::SQLITE_CHANGESET_OMIT;
-            }
-            if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
-                && op_code == Action::SQLITE_UPDATE
-            {
-                match is_premerged_update(&item, &table, &premerged_updates) {
-                    Ok(true) => return ConflictAction::SQLITE_CHANGESET_OMIT,
-                    Ok(false) => {}
-                    Err(error) => {
-                        warn!(table, error = %error, "failed to read premerged UPDATE primary key; aborting apply");
-                        return ConflictAction::SQLITE_CHANGESET_ABORT;
-                    }
-                }
-            }
-            arbitrate_row_conflict(
-                conflict_type,
-                item,
-                &table,
-                &closure_schema,
-                timestamp_policy,
-            )
-        },
-    )
-    .map_err(DbError::from)?;
-    let had_fk_violations = fk_flag.load(Ordering::Relaxed);
-    let constraint_conflict_tables = constraint_conflict_tables
-        .lock()
-        .map_err(|error| {
-            DbError::Message(format!(
-                "constraint conflict table collection poisoned: {error}"
-            ))
-        })?
-        .clone();
-    #[cfg(test)]
-    let winning_rows = resolve_winning_rows(conn, &schema, incoming_rows)?;
-
-    Ok(ApplyResult {
-        had_fk_violations,
-        constraint_conflict_tables,
+impl MergeMaterializationTransaction<'_, '_> {
+    pub(crate) fn apply_changeset<B: AsRef<[u8]>>(
+        &self,
+        changeset: ValidatedChangeset<B>,
+        timestamp_policy: IncomingTimestampPolicy,
+    ) -> Result<ApplyResult, DbError> {
+        let conn = self.transaction;
+        let ValidatedChangeset { bytes, schema } = changeset;
+        let bytes = bytes.as_ref();
         #[cfg(test)]
-        winning_rows,
-    })
+        let incoming_rows = incoming_rows(bytes, &schema)?;
+
+        let fk_flag = Arc::new(AtomicBool::new(false));
+        let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
+        let premerged_updates =
+            premerge_losing_update_columns(conn, bytes, &schema, timestamp_policy)?;
+
+        let closure_flag = fk_flag.clone();
+        let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
+        let closure_schema = schema.clone();
+        conn.apply_strm(
+            &mut &bytes[..],
+            None::<fn(&str) -> bool>,
+            move |conflict_type, item| {
+                // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
+                // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
+                // crashes the process). Resolve it first, without touching the row.
+                if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
+                    closure_flag.store(true, Ordering::Relaxed);
+                    return ConflictAction::SQLITE_CHANGESET_OMIT;
+                }
+                // Every other conflict type exposes the operation, so the table name
+                // (needed to find the `_updated_at` column) is readable.
+                let (table, op_code) = match item.op() {
+                    Ok(op) => (op.table_name().to_string(), op.code()),
+                    Err(error) => {
+                        warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
+                        return ConflictAction::SQLITE_CHANGESET_ABORT;
+                    }
+                };
+                if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
+                    warn!(
+                        table = %table,
+                        "changeset hit a non-retryable SQLite constraint conflict; rejecting changeset"
+                    );
+                    match closure_constraint_conflict_tables.lock() {
+                        Ok(mut tables) => tables.push(table),
+                        Err(error) => {
+                            warn!(error = %error, "failed to record changeset constraint conflict; aborting apply");
+                            return ConflictAction::SQLITE_CHANGESET_ABORT;
+                        }
+                    }
+                    return ConflictAction::SQLITE_CHANGESET_OMIT;
+                }
+                if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
+                    && op_code == Action::SQLITE_UPDATE
+                {
+                    match is_premerged_update(&item, &table, &premerged_updates) {
+                        Ok(true) => return ConflictAction::SQLITE_CHANGESET_OMIT,
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(table, error = %error, "failed to read premerged UPDATE primary key; aborting apply");
+                            return ConflictAction::SQLITE_CHANGESET_ABORT;
+                        }
+                    }
+                }
+                arbitrate_row_conflict(
+                    conflict_type,
+                    item,
+                    &table,
+                    &closure_schema,
+                    timestamp_policy,
+                )
+            },
+        )
+        .map_err(DbError::from)?;
+        let had_fk_violations = fk_flag.load(Ordering::Relaxed);
+        let constraint_conflict_tables = constraint_conflict_tables
+            .lock()
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "constraint conflict table collection poisoned: {error}"
+                ))
+            })?
+            .clone();
+        #[cfg(test)]
+        let winning_rows = resolve_winning_rows(conn, &schema, incoming_rows)?;
+
+        Ok(ApplyResult {
+            had_fk_violations,
+            constraint_conflict_tables,
+            #[cfg(test)]
+            winning_rows,
+        })
+    }
+
+    pub(crate) fn current_winning_rows<B: AsRef<[u8]>>(
+        &self,
+        schema: &TableSchema,
+        changeset: B,
+    ) -> Result<Vec<WinningRow>, DbError> {
+        resolve_winning_rows(
+            self.transaction,
+            schema,
+            incoming_rows(changeset.as_ref(), schema)?,
+        )
+    }
+
+    pub(crate) fn apply_changeset_strict<B: AsRef<[u8]>>(
+        &self,
+        changeset: ValidatedChangeset<B>,
+    ) -> Result<(), DbError> {
+        let bytes = changeset.bytes();
+        self.transaction
+            .apply_strm(
+                &mut &bytes[..],
+                None::<fn(&str) -> bool>,
+                |_conflict_type, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+            )
+            .map_err(DbError::from)?;
+        Ok(())
+    }
 }
 
 fn incoming_rows(bytes: &[u8], schema: &TableSchema) -> Result<Vec<IncomingRow>, DbError> {
@@ -359,28 +393,6 @@ fn resolve_winning_rows(
         }
     }
     Ok(winners)
-}
-
-pub(crate) fn current_winning_rows_with_schema(
-    conn: &Connection,
-    schema: &TableSchema,
-    changeset: &[u8],
-) -> Result<Vec<WinningRow>, DbError> {
-    resolve_winning_rows(conn, schema, incoming_rows(changeset, schema)?)
-}
-
-pub(crate) fn apply_changeset_strict_on<B: AsRef<[u8]>>(
-    conn: &Connection,
-    changeset: ValidatedChangeset<B>,
-) -> Result<(), DbError> {
-    let bytes = changeset.bytes();
-    conn.apply_strm(
-        &mut &bytes[..],
-        None::<fn(&str) -> bool>,
-        |_conflict_type, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
-    )
-    .map_err(DbError::from)?;
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

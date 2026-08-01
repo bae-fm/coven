@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::database::resolve_and_apply_changeset;
 use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::migration::Migration;
 use crate::protocol::store_commit::ObjectHash;
 use crate::store_dir::StoreDir;
-use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::session::{BlobDecl, SyncedTable};
 
 #[cfg(test)]

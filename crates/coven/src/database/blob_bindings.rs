@@ -24,7 +24,7 @@ impl Database {
         synced_tables: &[SyncedTable],
         package: &AudiencePackage,
         activation: &BlobActivation,
-        winning_rows: &[crate::sync::apply::WinningRow],
+        winning_rows: &[crate::database::WinningRow],
     ) -> Result<usize, DbError> {
         if package.commit_coord() != &activation.coord {
             return Err(DbError::Message(format!(

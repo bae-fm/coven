@@ -339,11 +339,8 @@ pub(crate) fn replay_retained_merge_projection_on(
                         overlay.write_id
                     ))
                 })?;
-            let applied = resolve_and_apply_changeset_with_policy_on(
-                &tx,
-                changeset,
-                IncomingTimestampPolicy::LocallyAuthored,
-            )?;
+            let applied = MergeMaterializationTransaction::new(&tx)
+                .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
             if applied.had_fk_violations || !applied.constraint_conflict_tables.is_empty() {
                 return Err(DbError::Message(format!(
                     "local replay write {} conflicts with accepted history",

@@ -36,7 +36,7 @@ async fn apply_result(
     db: &crate::database::Database,
     bytes: &[u8],
 ) -> Result<(), crate::database::DbError> {
-    use crate::sync::apply::resolve_and_apply_changeset;
+    use crate::database::resolve_and_apply_changeset;
 
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
@@ -237,7 +237,7 @@ async fn lww_later_update_wins() {
 
 #[tokio::test]
 async fn lww_earlier_update_loses() {
-    use crate::sync::apply::resolve_and_apply_changeset;
+    use crate::database::resolve_and_apply_changeset;
 
     // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
     let src = open_test_db();
@@ -503,7 +503,7 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changeset() {
     use std::sync::Arc;
 
-    use crate::sync::apply::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
+    use crate::database::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
     use crate::sync::conflict::TableSchema;
 
     let source = open_test_db();
@@ -572,7 +572,7 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
 /// Apply a changeset and report whether it had FK violations, through the same
 /// plain-`call` apply path as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
-    use crate::sync::apply::resolve_and_apply_changeset;
+    use crate::database::resolve_and_apply_changeset;
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();

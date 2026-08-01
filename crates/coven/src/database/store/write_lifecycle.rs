@@ -467,12 +467,13 @@ impl StoreDatabase {
                 &synced_tables,
             )?);
             for (_, inverse) in discarded.iter().rev() {
-                let inverse = crate::sync::apply::ValidatedChangeset::new(
+                let inverse = crate::database::ValidatedChangeset::new(
                     inverse,
                     schema.clone(),
                 )
                 .map_err(|error| DbError::Message(format!("invalid blocked-write inverse: {error}")))?;
-                crate::sync::apply::apply_changeset_strict_on(&tx, inverse)
+                MergeMaterializationTransaction::new(&tx)
+                    .apply_changeset_strict(inverse)
                     .map_err(|error| DbError::Message(format!("reverse blocked-write suffix: {error}")))?;
             }
             let discarded_ids: Vec<_> = discarded

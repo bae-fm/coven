@@ -10,7 +10,10 @@ use super::*;
 mod authorized;
 use crate::blob::decl::BlobDecls;
 use crate::changeset::RowChange;
-use crate::database::{BlobActivation, Database, DbError, VerifiedMergeMaterialization};
+use crate::database::{
+    BlobActivation, Database, DbError, MergeMaterializationTransaction, ValidatedChangeset,
+    VerifiedMergeMaterialization,
+};
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
@@ -24,7 +27,6 @@ use crate::protocol::store_commit::{
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
-use crate::sync::apply::{resolve_and_apply_changeset_with_policy_on, ValidatedChangeset};
 use crate::sync::conflict::{IncomingTimestampPolicy, TableSchema};
 use crate::sync::session::SyncedTable;
 use crate::sync::store::circle_controls::activation::{

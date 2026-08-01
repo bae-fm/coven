@@ -1,4 +1,3 @@
-pub(crate) mod apply;
 #[cfg(test)]
 mod blob_content_hash_tests;
 // Shared backoff math: the sync loop and blob engine's per-upload wait

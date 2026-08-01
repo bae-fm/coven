@@ -12,7 +12,7 @@
 //!
 //! This is row-level: the losing row is dropped whole. Column-level survival of
 //! concurrent edits to *different* columns of one row is handled upstream by the
-//! premerge in [`super::apply`], before the changeset reaches this arbiter — the
+//! premerge in [`crate::database::MergeMaterializationTransaction::apply_changeset`], before the changeset reaches this arbiter — the
 //! arbiter only picks a winner for the collisions the premerge did not fold in.
 //!
 //! A member is trusted to author valid changesets, so this is robustness, not a
@@ -24,7 +24,7 @@
 //! (the matching refusal to let it ratchet the clock lives in the pull's HLC
 //! advance — a rejected stamp never becomes an applied row there either).
 //!
-//! The decision runs inside the `apply_strm` conflict closure in [`super::apply`],
+//! The decision runs inside the transaction owner's changeset application,
 //! which is `Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static`.
 //! This module provides the per-table column map (moved owned into the closure)
 //! and the pure per-row decision.
@@ -167,9 +167,9 @@ pub(crate) fn compare_lww_stamps(
 /// - **NOTFOUND** (row deleted locally, incoming UPDATE): OMIT (delete wins).
 /// - **CONFLICT** (row exists, incoming INSERT): compare `_updated_at`. Newer wins.
 ///
-/// FOREIGN_KEY conflicts never reach here — [`super::apply`] resolves them before
+/// FOREIGN_KEY conflicts never reach here — the transaction owner resolves them before
 /// calling this, because that conflict type's iterator does not expose the row.
-/// CONSTRAINT conflicts are also handled in [`super::apply`] so the caller can
+/// CONSTRAINT conflicts are also handled by the transaction owner so the caller can
 /// surface the table and roll back the entire changeset.
 ///
 /// For DATA/CONFLICT, the incoming `_updated_at` is read from the side the op

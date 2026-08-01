@@ -326,14 +326,12 @@ impl StoreDatabase {
         };
         let apply_schema =
             crate::sync::conflict::TableSchema::for_apply(conn, synced_tables, gates)?;
+        let store_transaction = MergeMaterializationTransaction::new(conn);
         let cloud_outbox = CloudOutboxRecords::new(conn);
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
-            let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
-                conn,
-                &apply_schema,
-                package.package().changeset(),
-            )?;
+            let winning_rows = store_transaction
+                .current_winning_rows(&apply_schema, package.package().changeset())?;
             Database::install_winning_blob_bindings_on(
                 conn,
                 gates,

@@ -418,7 +418,7 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
     let tx = conn.transaction().expect("begin");
     Database::install_pulled_blob_activations_on(&tx, &package, &test_commit_ref())
         .expect("install pulled blob activation");
-    let winning_rows = [crate::sync::apply::WinningRow {
+    let winning_rows = [crate::database::WinningRow {
         table: "photos".to_string(),
         row_id: "winner".to_string(),
         row_stamp: Some("0000000001000-0000-a".to_string()),
@@ -504,7 +504,7 @@ fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
     let tx = conn.transaction().expect("begin");
     Database::install_pulled_blob_activations_on(&tx, &package, &test_commit_ref())
         .expect("install pulled blob activation");
-    let winning_rows = [crate::sync::apply::WinningRow {
+    let winning_rows = [crate::database::WinningRow {
         table: "photos".to_string(),
         row_id: "photo".to_string(),
         row_stamp: Some("0000000001000-0000-a".to_string()),

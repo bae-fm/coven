@@ -318,7 +318,7 @@ impl std::error::Error for GateError {}
 mod tests {
     use super::*;
     use crate::changeset::{walk, ChangeOp};
-    use crate::sync::apply::resolve_and_apply_changeset;
+    use crate::database::resolve_and_apply_changeset;
     use rusqlite::session::Session as RqSession;
     use rusqlite::Connection;
 
