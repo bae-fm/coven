@@ -2,10 +2,10 @@ use super::*;
 
 #[tokio::test]
 async fn accepted_package_transfers_to_shared_live_set_ownership() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
 
     assert!(
-        remote_object_exists(&fixture.db, &fixture.head_object).await,
+        fixture.remote_object_exists(&fixture.head_object).await,
         "the prepared Merge head must have durable candidate ownership before publication",
     );
 
@@ -29,7 +29,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
         serde_json::Value::String("locally_authored".to_string()),
     );
 
-    let remote = stored_remote_object(&fixture.db, &fixture.package_object).await;
+    let remote = fixture.stored_remote_object(&fixture.package_object).await;
     assert!(matches!(
         remote,
         crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
@@ -59,7 +59,9 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                         && ownership.activated.len() == 2
                 )
     ));
-    let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;
+    let commit = fixture
+        .stored_remote_object(&fixture.commit_ref.object)
+        .await;
     assert!(matches!(
         commit,
         crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -77,7 +79,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                         == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
             )
     ));
-    let head = stored_remote_object(&fixture.db, &fixture.head_object).await;
+    let head = fixture.stored_remote_object(&fixture.head_object).await;
     assert!(matches!(
         head,
         crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -100,7 +102,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
 #[tokio::test]
 async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_retryable() {
     for failed_call in 1..=3 {
-        let fixture = prepared_write_fixture().await;
+        let fixture = PreparedWriteFixture::prepare().await;
         fixture.home.fail_exact_create_before_call(failed_call);
         let first = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
         assert!(first.is_err(), "exact create call {failed_call} fails");
@@ -183,8 +185,8 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
 
 #[tokio::test]
 async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence() {
-    let fixture = prepared_write_fixture().await;
-    let winner = publish_competing_merge_head(&fixture).await;
+    let fixture = PreparedWriteFixture::prepare().await;
+    let winner = fixture.publish_competing_merge_head().await;
 
     assert_eq!(
         drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
@@ -204,7 +206,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         .await
         .expect("check durable losing candidate");
     assert!(retains_prepared);
-    let package = stored_remote_object(&fixture.db, &fixture.package_object).await;
+    let package = fixture.stored_remote_object(&fixture.package_object).await;
     assert!(matches!(
         package,
         crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record)
@@ -221,7 +223,9 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
                     )
             )
     ));
-    let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;
+    let commit = fixture
+        .stored_remote_object(&fixture.commit_ref.object)
+        .await;
     assert!(matches!(
         commit,
         crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record)
@@ -234,7 +238,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
                 } if winner_head == &winner
             )
     ));
-    let head = stored_remote_object(&fixture.db, &fixture.head_object).await;
+    let head = fixture.stored_remote_object(&fixture.head_object).await;
     assert!(matches!(
         head,
         crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -315,7 +319,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
 
 #[tokio::test]
 async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture
         .database
         .clone()
@@ -353,7 +357,7 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .expect("read local Merge position")
         .expect("abandonment advances the local stream");
     assert_ne!(authority, fixture.commit_ref);
-    let authority_remote = stored_remote_object(&fixture.db, &authority.object).await;
+    let authority_remote = fixture.stored_remote_object(&authority.object).await;
     assert!(matches!(
         authority_remote,
         crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -376,12 +380,12 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
             .unwrap(),
         crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
     ));
-    assert!(remote_object_exists(&fixture.db, &authority.object).await);
+    assert!(fixture.remote_object_exists(&authority.object).await);
 }
 
 #[tokio::test]
 async fn prepared_merge_abandonment_resumes_after_restart() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture
         .database
         .clone()
@@ -393,24 +397,16 @@ async fn prepared_merge_abandonment_resumes_after_restart() {
         )
         .await
         .expect("block prepared Merge candidate");
-    assert!(prepare_merge_candidate_abandonment(
-        &fixture.db,
-        &fixture.storage,
-        &fixture.keypair,
-        fixture.write_id.clone(),
-    )
-    .await
-    .expect("persist Merge abandonment"));
+    assert!(fixture
+        .prepare_merge_candidate_abandonment()
+        .await
+        .expect("persist Merge abandonment"));
 
     assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("resume Merge abandonment"),
+        fixture
+            .abandon_merge_candidate()
+            .await
+            .expect("resume Merge abandonment"),
         MergeCandidateAbandonment::Abandoned,
     );
 }
@@ -418,7 +414,7 @@ async fn prepared_merge_abandonment_resumes_after_restart() {
 #[tokio::test]
 async fn merge_abandonment_retries_commit_and_head_publication_failures() {
     for failed_call in 1..=2 {
-        let fixture = prepared_write_fixture().await;
+        let fixture = PreparedWriteFixture::prepare().await;
         fixture
             .database
             .clone()
@@ -430,36 +426,21 @@ async fn merge_abandonment_retries_commit_and_head_publication_failures() {
             )
             .await
             .expect("block prepared Merge candidate");
-        assert!(prepare_merge_candidate_abandonment(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("persist Merge abandonment"));
+        assert!(fixture
+            .prepare_merge_candidate_abandonment()
+            .await
+            .expect("persist Merge abandonment"));
         fixture.home.fail_exact_create_before_call(failed_call);
 
         assert!(
-            abandon_merge_candidate(
-                &fixture.db,
-                &fixture.storage,
-                &fixture.keypair,
-                fixture.write_id.clone(),
-            )
-            .await
-            .is_err(),
+            fixture.abandon_merge_candidate().await.is_err(),
             "exact create call {failed_call} fails",
         );
         assert_eq!(
-            abandon_merge_candidate(
-                &fixture.db,
-                &fixture.storage,
-                &fixture.keypair,
-                fixture.write_id.clone(),
-            )
-            .await
-            .expect("retry Merge abandonment publication"),
+            fixture
+                .abandon_merge_candidate()
+                .await
+                .expect("retry Merge abandonment publication"),
             MergeCandidateAbandonment::Abandoned,
         );
     }
@@ -467,7 +448,7 @@ async fn merge_abandonment_retries_commit_and_head_publication_failures() {
 
 #[tokio::test]
 async fn accepted_merge_abandonment_retries_losing_object_deletion() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     let batch = fixture
         .database
         .clone()
@@ -475,7 +456,8 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    publish_prepared_remote_objects(&fixture.store, &fixture.write_id)
+    fixture
+        .publish_prepared_remote_objects()
         .await
         .expect("publish original candidate objects");
     fixture
@@ -503,14 +485,7 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
     fixture.home.fail_exact_delete_on_call(1);
 
     assert!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .is_err(),
+        fixture.abandon_merge_candidate().await.is_err(),
         "losing object deletion fails",
     );
     assert!(fixture
@@ -520,21 +495,17 @@ async fn accepted_merge_abandonment_retries_losing_object_deletion() {
         .await
         .expect("cleanup remains pending"));
     assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("retry losing object deletion"),
+        fixture
+            .abandon_merge_candidate()
+            .await
+            .expect("retry losing object deletion"),
         MergeCandidateAbandonment::Abandoned,
     );
 }
 
 #[tokio::test]
 async fn original_candidate_activation_wins_abandonment_race() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     let batch = fixture
         .database
         .clone()
@@ -542,7 +513,8 @@ async fn original_candidate_activation_wins_abandonment_race() {
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    publish_prepared_remote_objects(&fixture.store, &fixture.write_id)
+    fixture
+        .publish_prepared_remote_objects()
         .await
         .expect("publish original candidate objects");
     fixture
@@ -568,14 +540,10 @@ async fn original_candidate_activation_wins_abandonment_race() {
         .expect("block locally unobserved Merge activation");
 
     assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("settle activation that won abandonment race"),
+        fixture
+            .abandon_merge_candidate()
+            .await
+            .expect("settle activation that won abandonment race"),
         MergeCandidateAbandonment::CandidateActivated,
     );
     assert!(matches!(
@@ -592,7 +560,7 @@ async fn original_candidate_activation_wins_abandonment_race() {
 
 #[tokio::test]
 async fn third_candidate_wins_after_abandonment_preparation() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture
         .database
         .clone()
@@ -604,14 +572,10 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         )
         .await
         .expect("block prepared Merge candidate");
-    assert!(prepare_merge_candidate_abandonment(
-        &fixture.db,
-        &fixture.storage,
-        &fixture.keypair,
-        fixture.write_id.clone(),
-    )
-    .await
-    .expect("persist Merge abandonment"));
+    assert!(fixture
+        .prepare_merge_candidate_abandonment()
+        .await
+        .expect("persist Merge abandonment"));
     let authority = fixture
         .database
         .clone()
@@ -621,17 +585,13 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         .expect("prepared abandonment exists");
     let authority_commit = authority.commit.object.clone();
     let authority_head = authority.head.object.clone();
-    let winner = publish_competing_merge_head(&fixture).await;
+    let winner = fixture.publish_competing_merge_head().await;
 
     assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("settle third-candidate winner"),
+        fixture
+            .abandon_merge_candidate()
+            .await
+            .expect("settle third-candidate winner"),
         MergeCandidateAbandonment::Abandoned,
     );
     assert!(!fixture
@@ -645,8 +605,8 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         .home
         .contains_exact_object(&fixture.commit_ref.object));
     assert!(fixture.home.contains_exact_object(&winner.object));
-    assert!(!remote_object_exists(&fixture.db, &authority_commit).await);
-    assert!(!remote_object_exists(&fixture.db, &authority_head).await);
+    assert!(!fixture.remote_object_exists(&authority_commit).await);
+    assert!(!fixture.remote_object_exists(&authority_head).await);
     assert_eq!(
         fixture
             .database
@@ -660,7 +620,7 @@ async fn third_candidate_wins_after_abandonment_preparation() {
 
 #[tokio::test]
 async fn alternate_head_for_abandonment_authority_is_accepted() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture
         .database
         .clone()
@@ -672,25 +632,17 @@ async fn alternate_head_for_abandonment_authority_is_accepted() {
         )
         .await
         .expect("block prepared Merge candidate");
-    assert!(prepare_merge_candidate_abandonment(
-        &fixture.db,
-        &fixture.storage,
-        &fixture.keypair,
-        fixture.write_id.clone(),
-    )
-    .await
-    .expect("persist Merge abandonment"));
-    let accepted_head = publish_alternate_head_for_prepared_commit(&fixture).await;
+    assert!(fixture
+        .prepare_merge_candidate_abandonment()
+        .await
+        .expect("persist Merge abandonment"));
+    let accepted_head = fixture.publish_alternate_head_for_prepared_commit().await;
 
     assert_eq!(
-        abandon_merge_candidate(
-            &fixture.db,
-            &fixture.storage,
-            &fixture.keypair,
-            fixture.write_id.clone(),
-        )
-        .await
-        .expect("accept alternate abandonment head"),
+        fixture
+            .abandon_merge_candidate()
+            .await
+            .expect("accept alternate abandonment head"),
         MergeCandidateAbandonment::Abandoned,
     );
     assert!(!fixture.home.contains_exact_object(&fixture.package_object));
@@ -702,8 +654,8 @@ async fn alternate_head_for_abandonment_authority_is_accepted() {
 
 #[tokio::test]
 async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
-    let fixture = prepared_write_fixture().await;
-    let accepted_head = publish_alternate_head_for_prepared_commit(&fixture).await;
+    let fixture = PreparedWriteFixture::prepare().await;
+    let accepted_head = fixture.publish_alternate_head_for_prepared_commit().await;
 
     assert_eq!(
         drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
@@ -716,7 +668,7 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
         crate::WriteStatus::Published(position)
             if position.commit() == &fixture.commit_ref
     ));
-    let head = stored_remote_object(&fixture.db, &accepted_head.object).await;
+    let head = fixture.stored_remote_object(&accepted_head.object).await;
     assert!(matches!(
         head,
         crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -731,7 +683,7 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
 
 #[tokio::test]
 async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture.home.corrupt_exact_readback_on_call(1);
 
     let result = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
@@ -760,7 +712,7 @@ async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
 
 #[tokio::test]
 async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idempotent() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture.home.fail_exact_create_after_call(3);
     assert_eq!(
         drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
@@ -803,7 +755,7 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
 
 #[tokio::test]
 async fn local_completion_failure_rolls_back_position_and_retries_after_visible_head() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     fixture
         .db
         .test_sql(|database| database.install_outbound_completion_failure_trigger())

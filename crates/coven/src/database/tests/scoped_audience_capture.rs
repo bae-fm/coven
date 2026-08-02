@@ -15,16 +15,11 @@ fn routing_id(conn: &rusqlite::Connection, table: &str, row_id: &str) -> String 
         .to_string()
 }
 
-fn seed_store_root(conn: &rusqlite::Connection) {
+fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {
     let database = crate::database::DatabaseTestSql::new(conn);
     database
         .install_test_store_root_authority("scoped-routing-root")
         .expect("install scoped-routing Store root authority");
-}
-
-fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {
-    seed_store_root(conn);
-    let database = crate::database::DatabaseTestSql::new(conn);
     let (circle_id, control) =
         crate::sync::test_helpers::install_test_active_circle(&database, label);
     (
@@ -680,8 +675,10 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
 
     let unknown_circle = crate::CircleId::from_bytes([3; 16]).to_string();
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    seed_store_root(&authority);
     let database = crate::database::DatabaseTestSql::new(&authority);
+    database
+        .install_test_store_root_authority("scoped-routing-root")
+        .expect("install scoped-routing Store root authority");
     let (inactive_circle, _) =
         crate::sync::test_helpers::install_test_inactive_circle(&database, "inactive-circle");
     drop(authority);

@@ -78,53 +78,6 @@ async fn prepare_merge_conflict_resolution_commit(
         .await
 }
 
-async fn prepare_merge_candidate_abandonment(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    identity_signer: &UserKeypair,
-    write_id: crate::WriteId,
-) -> Result<bool, StoreError> {
-    let store = crate::sync::store::Store::load(
-        StoreDatabase::new(db),
-        storage.clone(),
-        identity_signer.clone(),
-    )
-    .await?;
-    store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-        .prepare_merge_candidate_abandonment(write_id)
-        .await
-}
-
-async fn abandon_merge_candidate(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    identity_signer: &UserKeypair,
-    write_id: crate::WriteId,
-) -> Result<MergeCandidateAbandonment, StoreError> {
-    let store = crate::sync::store::Store::load(
-        StoreDatabase::new(db),
-        storage.clone(),
-        identity_signer.clone(),
-    )
-    .await?;
-    store.abandon_merge_candidate(write_id).await
-}
-
-async fn publish_prepared_remote_objects(
-    store: &Store,
-    write_id: &crate::WriteId,
-) -> Result<(), StoreError> {
-    store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-        .publish_prepared_remote_objects(write_id)
-        .await
-}
-
 #[path = "tests/common.rs"]
 mod common;
 use common::*;

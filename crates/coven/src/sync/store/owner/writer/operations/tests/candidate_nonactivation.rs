@@ -3,14 +3,14 @@ use crate::protocol::store_commit::StoreBatchCommitDeletionTarget;
 
 #[tokio::test]
 async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
-    let fixture = prepared_write_fixture().await;
+    let fixture = PreparedWriteFixture::prepare().await;
     let batch = crate::database::StoreDatabase::new(&fixture.db)
         .oldest_prepared_store_write()
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
     assert!(!fixture.home.contains_exact_object(&batch.commit.object));
-    publish_competing_merge_head(&fixture).await;
+    fixture.publish_competing_merge_head().await;
     let observation = match fixture
         .store
         .observe_excluded_candidate_head_for_test(

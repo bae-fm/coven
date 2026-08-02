@@ -861,14 +861,6 @@ impl OpenFile {
 }
 
 #[cfg(test)]
-pub(super) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
-    let staged = AtomicStagedFile::create(dst).await?;
-    let (staged, _, _) = staged.copy_from(src).await?;
-    staged.commit().await?;
-    Ok(())
-}
-
-#[cfg(test)]
 pub(super) async fn read(path: &Path) -> Result<Vec<u8>, String> {
     tokio::fs::read(path)
         .await
@@ -935,7 +927,11 @@ mod tests {
         AtomicStagedFile::write_for_test(&copy, b"old copy")
             .await
             .expect("seed copy");
-        copy_atomic(&source, &copy).await.expect("replace copy");
+        let staged = AtomicStagedFile::create(&copy)
+            .await
+            .expect("reserve replacement copy");
+        let (staged, _, _) = staged.copy_from(&source).await.expect("copy source");
+        staged.commit().await.expect("replace copy");
         assert_eq!(read(&copy).await.expect("read copy"), bytes);
 
         rename(&copy, &renamed).await.expect("rename copy");

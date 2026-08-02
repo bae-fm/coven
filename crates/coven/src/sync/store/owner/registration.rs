@@ -70,15 +70,6 @@ mod tests {
         (store, db)
     }
 
-    async fn restoring_store<'storage>(
-        store: &'storage crate::sync::test_helpers::TestDevice,
-    ) -> super::super::restore::RestoringStore<'storage> {
-        store
-            .restoring_for_test()
-            .await
-            .expect("authorize Owner recovery Store")
-    }
-
     async fn recovered_author() -> (
         TestStore,
         Database,
@@ -92,8 +83,10 @@ mod tests {
             .expect("load recovery Store");
         let authority = founder_recovery_authority(&store).await;
         let database = crate::database::StoreDatabase::new(&db);
-        let registration = restoring_store(&loaded)
+        let registration = loaded
+            .restoring_for_test()
             .await
+            .expect("authorize Owner recovery Store")
             .recover_owner_device(&authority)
             .await
             .expect("recover Owner device");
@@ -174,8 +167,10 @@ mod tests {
             .expect("load recovery Store");
         let authority = founder_recovery_authority(&store).await;
         let database = crate::database::StoreDatabase::new(&db);
-        let registration = restoring_store(&loaded)
+        let registration = loaded
+            .restoring_for_test()
             .await
+            .expect("authorize Owner recovery Store")
             .recover_owner_device(&authority)
             .await
             .expect("recover Owner device");
@@ -267,7 +262,10 @@ mod tests {
                 .expect("load recovery Store");
             let authority = founder_recovery_authority(&store).await;
             let database = crate::database::StoreDatabase::new(&db);
-            let mut restoring = restoring_store(&loaded).await;
+            let mut restoring = loaded
+                .restoring_for_test()
+                .await
+                .expect("authorize Owner recovery Store");
             store.home.fail_exact_create_before_call(failed_call);
             assert!(
                 restoring.recover_owner_device(&authority).await.is_err(),

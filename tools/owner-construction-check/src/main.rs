@@ -76,6 +76,16 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
+        "crates/coven/src/sync/store/owner/writer/operations/tests/merge_fixture.rs",
+        "PreparedWriteFixture",
+        "prepare",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/snapshots/tests.rs",
+        "CircleSnapshotFixture",
+        "initialize",
+    ),
+    (
         "crates/coven/src/sync/test_helpers.rs",
         "TestDevice",
         "create",

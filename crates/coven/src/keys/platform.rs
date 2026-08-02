@@ -922,16 +922,6 @@ mod tests {
         );
     }
 
-    /// A per-store keyring identity custody. Each test names its own
-    /// `store_id` so tests never race each other's keyring accounts.
-    fn test_identity_custody(store_id: &str) -> std::sync::Arc<dyn DeviceIdentityCustody> {
-        let store_keys = StoreKeys::bind(store_id.to_string());
-        crate::identity_custody::IdentityCustody::Keyring.resolve(
-            &store_keys,
-            &crate::store_dir::StoreDir::new("unused-store-dir"),
-        )
-    }
-
     /// A keypair written straight to the raw keyring under a store's signing-key
     /// account reads back through `require_identity` unchanged — the account
     /// math both sides use is the same, so the split doesn't strand an
@@ -954,7 +944,7 @@ mod tests {
             )
             .expect("write signing key to the raw keyring");
 
-        let custody = test_identity_custody(store_id);
+        let custody = StoreKeys::bind(store_id.to_string()).device_identity_custody();
         let read = require_identity(custody.as_ref()).expect("read the identity back");
         assert_eq!(
             read.public_key(),
@@ -969,7 +959,8 @@ mod tests {
     #[test]
     fn require_identity_maps_absence_to_no_device_identity() {
         test_keyring::install();
-        let custody = test_identity_custody("require-identity-absent-test");
+        let custody =
+            StoreKeys::bind("require-identity-absent-test".to_string()).device_identity_custody();
 
         match require_identity(custody.as_ref()) {
             Err(error) => assert!(matches!(error, KeyError::NoDeviceIdentity), "got {error:?}"),
@@ -984,7 +975,8 @@ mod tests {
     #[test]
     fn establishing_the_same_identity_again_is_idempotent() {
         test_keyring::install();
-        let custody = test_identity_custody("import-identity-idempotent-test");
+        let custody = StoreKeys::bind("import-identity-idempotent-test".to_string())
+            .device_identity_custody();
 
         let keypair = UserKeypair::generate();
         custody
@@ -1008,7 +1000,8 @@ mod tests {
     #[test]
     fn establishing_identity_refuses_to_overwrite_a_different_identity() {
         test_keyring::install();
-        let custody = test_identity_custody("import-identity-mismatch-test");
+        let custody =
+            StoreKeys::bind("import-identity-mismatch-test".to_string()).device_identity_custody();
 
         let established = UserKeypair::generate();
         custody
@@ -1050,7 +1043,8 @@ mod tests {
         test_keyring::install();
         let pending = mint_pending_identity().expect("mint pending identity");
         let request_pubkey = public_key_hex(&pending);
-        let custody = test_identity_custody("pending-identity-establish-test");
+        let custody = StoreKeys::bind("pending-identity-establish-test".to_string())
+            .device_identity_custody();
 
         custody
             .establish(&pending)
@@ -1116,8 +1110,10 @@ mod tests {
         let pending_b = mint_pending_identity().expect("mint pending identity b");
         assert_ne!(pending_a.public_key(), pending_b.public_key());
 
-        let custody_a = test_identity_custody("two-concurrent-joins-store-a");
-        let custody_b = test_identity_custody("two-concurrent-joins-store-b");
+        let custody_a =
+            StoreKeys::bind("two-concurrent-joins-store-a".to_string()).device_identity_custody();
+        let custody_b =
+            StoreKeys::bind("two-concurrent-joins-store-b".to_string()).device_identity_custody();
         custody_a
             .establish(&pending_a)
             .expect("establish a into store a");

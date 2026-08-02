@@ -408,54 +408,53 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
 /// reads the same slots and seal key the owner allocated.
 #[tokio::test]
 async fn the_offer_bundle_round_trips_through_its_encoded_form() {
-    tokio::spawn(run_the_offer_bundle_round_trips_through_its_encoded_form())
-        .await
-        .expect("offer bundle task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-bundle").await;
+        let bundle = fixture.begin().await;
 
-async fn run_the_offer_bundle_round_trips_through_its_encoded_form() {
-    let fixture = TransportFixture::build("device-join-transport-bundle").await;
-    let bundle = fixture.begin().await;
+        let decoded = DeviceJoinOfferBundle::from_bytes(&bundle.to_bytes())
+            .expect("a bundle the owner minted decodes");
+        assert_eq!(decoded.offer, bundle.offer);
+        assert_eq!(
+            decoded.transport.attempt_namespace,
+            bundle.transport.attempt_namespace
+        );
+        assert_eq!(decoded.transport.slots, bundle.transport.slots);
 
-    let decoded = DeviceJoinOfferBundle::from_bytes(&bundle.to_bytes())
-        .expect("a bundle the owner minted decodes");
-    assert_eq!(decoded.offer, bundle.offer);
-    assert_eq!(
-        decoded.transport.attempt_namespace,
-        bundle.transport.attempt_namespace
-    );
-    assert_eq!(decoded.transport.slots, bundle.transport.slots);
+        // The decoded seal key opens what the original sealed, which is the only
+        // property the joining device needs from it.
+        let joiner = fixture.client();
+        let request = joiner
+            .prepare_provider_access_request(bundle.offer.clone())
+            .await
+            .expect("prepare provider access request");
+        let joiner_storage = joiner
+            .transport_storage()
+            .await
+            .expect("joining device transport storage");
+        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
+            .expect("open transport")
+            .publish(&DeviceJoinAction::TransferProviderAccessRequest(
+                request.clone(),
+            ))
+            .await
+            .expect("publish the access request");
+        let read_back =
+            DeviceJoinTransport::open(&joiner_storage, &decoded, DeviceJoinRoles::joiner())
+                .expect("open the decoded transport")
+                .read(DeviceJoinTransportKind::ProviderAccessRequest)
+                .await
+                .expect("read through the decoded bundle");
+        assert_eq!(
+            read_back,
+            Some(DeviceJoinAction::TransferProviderAccessRequest(request)),
+        );
 
-    // The decoded seal key opens what the original sealed, which is the only
-    // property the joining device needs from it.
-    let joiner = fixture.client();
-    let request = joiner
-        .prepare_provider_access_request(bundle.offer.clone())
-        .await
-        .expect("prepare provider access request");
-    let joiner_storage = joiner
-        .transport_storage()
-        .await
-        .expect("joining device transport storage");
-    DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
-        .expect("open transport")
-        .publish(&DeviceJoinAction::TransferProviderAccessRequest(
-            request.clone(),
-        ))
-        .await
-        .expect("publish the access request");
-    let read_back = DeviceJoinTransport::open(&joiner_storage, &decoded, DeviceJoinRoles::joiner())
-        .expect("open the decoded transport")
-        .read(DeviceJoinTransportKind::ProviderAccessRequest)
-        .await
-        .expect("read through the decoded bundle");
-    assert_eq!(
-        read_back,
-        Some(DeviceJoinAction::TransferProviderAccessRequest(request)),
-    );
-
-    // Bytes that are not a bundle are refused rather than half-decoded.
-    assert!(DeviceJoinOfferBundle::from_bytes(b"{}").is_err());
+        // Bytes that are not a bundle are refused rather than half-decoded.
+        assert!(DeviceJoinOfferBundle::from_bytes(b"{}").is_err());
+    })
+    .await
+    .expect("offer bundle task");
 }
 
 /// The same admission when the joining device is on a different provider
@@ -1175,69 +1174,68 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
 /// have read what is there.
 #[tokio::test]
 async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
-    tokio::spawn(run_republishing_is_idempotent_and_a_different_artifact_is_refused())
-        .await
-        .expect("duplicate publish task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-duplicate").await;
+        let bundle = fixture.begin().await;
+        let joiner = fixture.client();
 
-async fn run_republishing_is_idempotent_and_a_different_artifact_is_refused() {
-    let fixture = TransportFixture::build("device-join-transport-duplicate").await;
-    let bundle = fixture.begin().await;
-    let joiner = fixture.client();
+        let request = joiner
+            .prepare_provider_access_request(bundle.offer.clone())
+            .await
+            .expect("prepare provider access request");
+        let joiner_storage = joiner
+            .transport_storage()
+            .await
+            .expect("joining device transport storage");
+        let transport =
+            DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
+                .expect("open transport");
 
-    let request = joiner
-        .prepare_provider_access_request(bundle.offer.clone())
-        .await
-        .expect("prepare provider access request");
-    let joiner_storage = joiner
-        .transport_storage()
-        .await
-        .expect("joining device transport storage");
-    let transport = DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
-        .expect("open transport");
-
-    let action = DeviceJoinAction::TransferProviderAccessRequest(request);
-    transport.publish(&action).await.expect("first publish");
-    let first_bytes = fixture
-        .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
-        .await
-        .expect("the access request is stored");
-
-    transport
-        .publish(&action)
-        .await
-        .expect("republishing the same artifact is the same transfer");
-    assert_eq!(
-        fixture
+        let action = DeviceJoinAction::TransferProviderAccessRequest(request);
+        transport.publish(&action).await.expect("first publish");
+        let first_bytes = fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
             .await
-            .expect("the access request is still stored"),
-        first_bytes,
-        "an idempotent republish leaves the first write's exact bytes",
-    );
+            .expect("the access request is stored");
 
-    // A request against a second attempt is a different artifact of the same
-    // kind, and the occupied slot refuses it.
-    let second = fixture.begin().await;
-    let other_request = fixture
-        .client()
-        .prepare_provider_access_request(second.offer.clone())
-        .await
-        .expect("prepare a different access request");
-    let conflict = transport
-        .publish(&DeviceJoinAction::TransferProviderAccessRequest(
-            other_request,
-        ))
-        .await;
-    assert!(
-        matches!(
-            conflict,
-            Err(DeviceJoinTransportError::ArtifactConflict {
-                kind: DeviceJoinTransportKind::ProviderAccessRequest
-            })
-        ),
-        "a different artifact at an occupied slot is refused, got {conflict:?}",
-    );
+        transport
+            .publish(&action)
+            .await
+            .expect("republishing the same artifact is the same transfer");
+        assert_eq!(
+            fixture
+                .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
+                .await
+                .expect("the access request is still stored"),
+            first_bytes,
+            "an idempotent republish leaves the first write's exact bytes",
+        );
+
+        // A request against a second attempt is a different artifact of the same
+        // kind, and the occupied slot refuses it.
+        let second = fixture.begin().await;
+        let other_request = fixture
+            .client()
+            .prepare_provider_access_request(second.offer.clone())
+            .await
+            .expect("prepare a different access request");
+        let conflict = transport
+            .publish(&DeviceJoinAction::TransferProviderAccessRequest(
+                other_request,
+            ))
+            .await;
+        assert!(
+            matches!(
+                conflict,
+                Err(DeviceJoinTransportError::ArtifactConflict {
+                    kind: DeviceJoinTransportKind::ProviderAccessRequest
+                })
+            ),
+            "a different artifact at an occupied slot is refused, got {conflict:?}",
+        );
+    })
+    .await
+    .expect("duplicate publish task");
 }
 
 /// Each artifact kind has one producing role, and a transport opened for other
@@ -1245,41 +1243,39 @@ async fn run_republishing_is_idempotent_and_a_different_artifact_is_refused() {
 /// the role that owns that step put there.
 #[tokio::test]
 async fn a_role_cannot_publish_another_roles_artifact() {
-    tokio::spawn(run_a_role_cannot_publish_another_roles_artifact())
-        .await
-        .expect("producer role task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-producer").await;
+        let bundle = fixture.begin().await;
+        let joiner = fixture.client();
 
-async fn run_a_role_cannot_publish_another_roles_artifact() {
-    let fixture = TransportFixture::build("device-join-transport-producer").await;
-    let bundle = fixture.begin().await;
-    let joiner = fixture.client();
-
-    let request = joiner
-        .prepare_provider_access_request(bundle.offer.clone())
-        .await
-        .expect("prepare provider access request");
-    let refused = fixture
-        .transport(&bundle)
-        .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
-        .await;
-    assert!(
-        matches!(
-            refused,
-            Err(DeviceJoinTransportError::WrongProducer {
-                kind: DeviceJoinTransportKind::ProviderAccessRequest,
-                role: crate::DeviceJoinRole::Joiner,
-            })
-        ),
-        "the admitting side must not write the joiner's artifact, got {refused:?}",
-    );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
+        let request = joiner
+            .prepare_provider_access_request(bundle.offer.clone())
             .await
-            .is_none(),
-        "a refused publish never reaches storage",
-    );
+            .expect("prepare provider access request");
+        let refused = fixture
+            .transport(&bundle)
+            .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(DeviceJoinTransportError::WrongProducer {
+                    kind: DeviceJoinTransportKind::ProviderAccessRequest,
+                    role: crate::DeviceJoinRole::Joiner,
+                })
+            ),
+            "the admitting side must not write the joiner's artifact, got {refused:?}",
+        );
+        assert!(
+            fixture
+                .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
+                .await
+                .is_none(),
+            "a refused publish never reaches storage",
+        );
+    })
+    .await
+    .expect("producer role task");
 }
 
 /// With no counterpart running, awaiting an artifact fails at its deadline and
@@ -1287,33 +1283,31 @@ async fn run_a_role_cannot_publish_another_roles_artifact() {
 /// app must be open".
 #[tokio::test]
 async fn awaiting_an_absent_counterpart_times_out_naming_its_role() {
-    tokio::spawn(run_awaiting_an_absent_counterpart_times_out_naming_its_role())
-        .await
-        .expect("timeout task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-timeout").await;
+        let bundle = fixture.begin().await;
+        let transport = fixture.transport(&bundle);
 
-async fn run_awaiting_an_absent_counterpart_times_out_naming_its_role() {
-    let fixture = TransportFixture::build("device-join-transport-timeout").await;
-    let bundle = fixture.begin().await;
-    let transport = fixture.transport(&bundle);
-
-    let expired = DeviceJoinTransportTiming {
-        poll: Duration::from_millis(1),
-        deadline: Duration::from_millis(20),
-    };
-    let timed_out = transport
-        .await_artifact::<crate::DeviceProviderAccessRequest>(expired)
-        .await;
-    assert!(
-        matches!(
-            timed_out,
-            Err(DeviceJoinTransportError::Timeout {
-                kind: DeviceJoinTransportKind::ProviderAccessRequest,
-                producer: crate::DeviceJoinRole::Joiner,
-            })
-        ),
-        "an absent joiner surfaces as a timeout naming it, got {timed_out:?}",
-    );
+        let expired = DeviceJoinTransportTiming {
+            poll: Duration::from_millis(1),
+            deadline: Duration::from_millis(20),
+        };
+        let timed_out = transport
+            .await_artifact::<crate::DeviceProviderAccessRequest>(expired)
+            .await;
+        assert!(
+            matches!(
+                timed_out,
+                Err(DeviceJoinTransportError::Timeout {
+                    kind: DeviceJoinTransportKind::ProviderAccessRequest,
+                    producer: crate::DeviceJoinRole::Joiner,
+                })
+            ),
+            "an absent joiner surfaces as a timeout naming it, got {timed_out:?}",
+        );
+    })
+    .await
+    .expect("timeout task");
 }
 
 /// Bytes swapped in the slot behind the transport's back do not advance the
@@ -1321,132 +1315,128 @@ async fn run_awaiting_an_absent_counterpart_times_out_naming_its_role() {
 /// than feeding anything to the protocol.
 #[tokio::test]
 async fn tampered_slot_bytes_refuse_to_open() {
-    tokio::spawn(run_tampered_slot_bytes_refuse_to_open())
-        .await
-        .expect("sabotage task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-sabotage").await;
+        let bundle = fixture.begin().await;
+        let joiner = fixture.client();
 
-async fn run_tampered_slot_bytes_refuse_to_open() {
-    let fixture = TransportFixture::build("device-join-transport-sabotage").await;
-    let bundle = fixture.begin().await;
-    let joiner = fixture.client();
-
-    let request = joiner
-        .prepare_provider_access_request(bundle.offer.clone())
-        .await
-        .expect("prepare provider access request");
-    let joiner_storage = joiner
-        .transport_storage()
-        .await
-        .expect("joining device transport storage");
-    DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
-        .expect("open transport")
-        .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
-        .await
-        .expect("publish the access request");
-
-    let target = slot(&bundle, DeviceJoinTransportKind::ProviderAccessRequest);
-    let mut sealed = fixture
-        .home
-        .read_at(target)
-        .await
-        .expect("the access request is stored");
-    let last = sealed.len() - 1;
-    sealed[last] ^= 0xff;
-    fixture
-        .home
-        .delete_at(target)
-        .await
-        .expect("clear the slot for the tampered bytes");
-    fixture
-        .home
-        .create_at(target, BlobBody::from_bytes(sealed), &no_progress())
-        .await
-        .expect("plant the tampered bytes");
-
-    let opened = fixture
-        .transport(&bundle)
-        .read(DeviceJoinTransportKind::ProviderAccessRequest)
-        .await;
-    assert!(
-        matches!(opened, Err(DeviceJoinTransportError::Unsealable(_))),
-        "tampered bytes must refuse to open, got {opened:?}",
-    );
-
-    let driven = fixture.drive_owner(&bundle).await;
-    assert!(
-        matches!(driven, Err(DeviceJoinTransportError::Unsealable(_))),
-        "a driver never advances past bytes it could not open, got {driven:?}",
-    );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
+        let request = joiner
+            .prepare_provider_access_request(bundle.offer.clone())
             .await
-            .is_none(),
-        "no approval was produced from unopenable bytes",
-    );
+            .expect("prepare provider access request");
+        let joiner_storage = joiner
+            .transport_storage()
+            .await
+            .expect("joining device transport storage");
+        DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
+            .expect("open transport")
+            .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
+            .await
+            .expect("publish the access request");
+
+        let target = slot(&bundle, DeviceJoinTransportKind::ProviderAccessRequest);
+        let mut sealed = fixture
+            .home
+            .read_at(target)
+            .await
+            .expect("the access request is stored");
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0xff;
+        fixture
+            .home
+            .delete_at(target)
+            .await
+            .expect("clear the slot for the tampered bytes");
+        fixture
+            .home
+            .create_at(target, BlobBody::from_bytes(sealed), &no_progress())
+            .await
+            .expect("plant the tampered bytes");
+
+        let opened = fixture
+            .transport(&bundle)
+            .read(DeviceJoinTransportKind::ProviderAccessRequest)
+            .await;
+        assert!(
+            matches!(opened, Err(DeviceJoinTransportError::Unsealable(_))),
+            "tampered bytes must refuse to open, got {opened:?}",
+        );
+
+        let driven = fixture.drive_owner(&bundle).await;
+        assert!(
+            matches!(driven, Err(DeviceJoinTransportError::Unsealable(_))),
+            "a driver never advances past bytes it could not open, got {driven:?}",
+        );
+        assert!(
+            fixture
+                .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
+                .await
+                .is_none(),
+            "no approval was produced from unopenable bytes",
+        );
+    })
+    .await
+    .expect("sabotage task");
 }
 
 /// Two attempts against one store never touch each other's slots: each is
 /// namespaced by its own attempt id, and each carries its own seal key.
 #[tokio::test]
 async fn concurrent_attempts_keep_separate_namespaces() {
-    tokio::spawn(run_concurrent_attempts_keep_separate_namespaces())
-        .await
-        .expect("concurrent attempts task");
-}
+    tokio::spawn(async {
+        let fixture = TransportFixture::build("device-join-transport-concurrent").await;
+        let first = fixture.begin().await;
+        let second = fixture.begin().await;
 
-async fn run_concurrent_attempts_keep_separate_namespaces() {
-    let fixture = TransportFixture::build("device-join-transport-concurrent").await;
-    let first = fixture.begin().await;
-    let second = fixture.begin().await;
-
-    assert_ne!(first.offer.attempt_id, second.offer.attempt_id);
-    assert_ne!(
-        first.transport.attempt_namespace,
-        second.transport.attempt_namespace
-    );
-    for kind in DeviceJoinTransportKind::ALL {
+        assert_ne!(first.offer.attempt_id, second.offer.attempt_id);
         assert_ne!(
-            slot(&first, kind).logical_key(),
-            slot(&second, kind).logical_key(),
-            "{kind:?} slots collide across attempts",
+            first.transport.attempt_namespace,
+            second.transport.attempt_namespace
         );
-    }
+        for kind in DeviceJoinTransportKind::ALL {
+            assert_ne!(
+                slot(&first, kind).logical_key(),
+                slot(&second, kind).logical_key(),
+                "{kind:?} slots collide across attempts",
+            );
+        }
 
-    let joiner = fixture.client();
-    let request = joiner
-        .prepare_provider_access_request(first.offer.clone())
-        .await
-        .expect("prepare provider access request");
-    let joiner_storage = joiner
-        .transport_storage()
-        .await
-        .expect("joining device transport storage");
-    DeviceJoinTransport::open(&joiner_storage, &first, DeviceJoinRoles::joiner())
-        .expect("open the first attempt's transport")
-        .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
-        .await
-        .expect("publish into the first attempt");
+        let joiner = fixture.client();
+        let request = joiner
+            .prepare_provider_access_request(first.offer.clone())
+            .await
+            .expect("prepare provider access request");
+        let joiner_storage = joiner
+            .transport_storage()
+            .await
+            .expect("joining device transport storage");
+        DeviceJoinTransport::open(&joiner_storage, &first, DeviceJoinRoles::joiner())
+            .expect("open the first attempt's transport")
+            .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
+            .await
+            .expect("publish into the first attempt");
 
-    assert!(
-        fixture
-            .slot_bytes(&first, DeviceJoinTransportKind::ProviderAccessRequest)
+        assert!(
+            fixture
+                .slot_bytes(&first, DeviceJoinTransportKind::ProviderAccessRequest)
+                .await
+                .is_some(),
+            "the first attempt holds its access request",
+        );
+        assert!(
+            fixture
+                .slot_bytes(&second, DeviceJoinTransportKind::ProviderAccessRequest)
+                .await
+                .is_none(),
+            "the second attempt's slot is untouched",
+        );
+        assert!(fixture
+            .transport(&second)
+            .read(DeviceJoinTransportKind::ProviderAccessRequest)
             .await
-            .is_some(),
-        "the first attempt holds its access request",
-    );
-    assert!(
-        fixture
-            .slot_bytes(&second, DeviceJoinTransportKind::ProviderAccessRequest)
-            .await
-            .is_none(),
-        "the second attempt's slot is untouched",
-    );
-    assert!(fixture
-        .transport(&second)
-        .read(DeviceJoinTransportKind::ProviderAccessRequest)
-        .await
-        .expect("read the second attempt's empty slot")
-        .is_none(),);
+            .expect("read the second attempt's empty slot")
+            .is_none(),);
+    })
+    .await
+    .expect("concurrent attempts task");
 }
