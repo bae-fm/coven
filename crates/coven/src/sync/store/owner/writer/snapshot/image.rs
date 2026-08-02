@@ -528,84 +528,75 @@ mod tests {
     }
 
     async fn seed_scoped_snapshot_rows(source: &Database) -> crate::protocol::circle::CircleId {
-        let tables = source.synced_tables().to_vec();
-        let gates = source.gates();
-        let blob_decls = source.blob_decls();
-        let write_id = source.new_write_id();
-        source
-            .test_sql(move |connection| {
-                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-                let (circle, _) = crate::sync::test_helpers::install_test_active_circle(
-                    &connection,
-                    "snapshot-route-circle",
-                );
-                connection.run_host_store_write(
-                    &tables,
-                    &gates,
-                    &blob_decls,
-                    Some(&routing),
-                    None,
-                    write_id,
-                    |transaction| {
-                        transaction.execute(
-                            "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
-                            (
-                                "01890a5d-ac96-774b-bcce-b302099c3f74",
-                                "Store document",
-                                "0000000001000-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
-                            (
-                                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                                "01890a5d-ac96-774b-bcce-b302099c3f74",
-                                "Store paragraph",
-                                "0000000001001-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)",
-                            (
-                                "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                                circle.to_string(),
-                                "Circle document",
-                                "0000000001002-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
-                            (
-                                "82df8bb7-52f0-44db-a8e7-3ec0e44cd609",
-                                "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                                "Circle paragraph",
-                                "0000000001003-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO documents VALUES (?1, 'local', ?2, ?3)",
-                            (
-                                "4a1b99f1-9d07-40d3-b6ac-b746e8d59983",
-                                "Local document",
-                                "0000000001004-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
-                            (
-                                "5fe26b58-ecf7-48b1-bb20-13469b5b9be9",
-                                "4a1b99f1-9d07-40d3-b6ac-b746e8d59983",
-                                "Local paragraph",
-                                "0000000001005-0000-owner",
-                            ),
-                        )?;
-                        Ok(circle)
-                    },
-                )
-            })
+        let database = StoreDatabase::new(source);
+        let circle = database
+            .install_test_active_circle("snapshot-route-circle".to_string())
             .await
-            .expect("commit scoped snapshot rows")
-            .value
+            .expect("install snapshot route Circle");
+        let write_circle = circle;
+        database
+            .run_host_store_write_for_test(
+                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                None,
+                move |transaction| {
+                    transaction.execute(
+                        "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
+                        (
+                            "01890a5d-ac96-774b-bcce-b302099c3f74",
+                            "Store document",
+                            "0000000001000-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
+                        (
+                            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                            "01890a5d-ac96-774b-bcce-b302099c3f74",
+                            "Store paragraph",
+                            "0000000001001-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)",
+                        (
+                            "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                            write_circle.to_string(),
+                            "Circle document",
+                            "0000000001002-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
+                        (
+                            "82df8bb7-52f0-44db-a8e7-3ec0e44cd609",
+                            "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                            "Circle paragraph",
+                            "0000000001003-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO documents VALUES (?1, 'local', ?2, ?3)",
+                        (
+                            "4a1b99f1-9d07-40d3-b6ac-b746e8d59983",
+                            "Local document",
+                            "0000000001004-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO paragraphs VALUES (?1, ?2, ?3, ?4)",
+                        (
+                            "5fe26b58-ecf7-48b1-bb20-13469b5b9be9",
+                            "4a1b99f1-9d07-40d3-b6ac-b746e8d59983",
+                            "Local paragraph",
+                            "0000000001005-0000-owner",
+                        ),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("commit scoped snapshot rows");
+        circle
     }
 
     fn circle_bootstrap_reference(
@@ -1153,55 +1144,45 @@ mod tests {
         )
         .await
         .expect("create Circle parent snapshot Store");
-        let gates = source.gates();
-        let blob_decls = source.blob_decls();
-        let write_id = source.new_write_id();
-        let write_tables = tables.clone();
-        let circle_id = source
-            .test_sql(move |connection| {
-                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-                let (circle_id, _) = crate::sync::test_helpers::install_test_active_circle(
-                    &connection,
-                    "snapshot-parent-circle",
-                );
-                connection.run_host_store_write(
-                    &write_tables,
-                    &gates,
-                    &blob_decls,
-                    Some(&routing),
-                    None,
-                    write_id,
-                    |transaction| {
-                        transaction.execute(
-                            "INSERT INTO folders VALUES (?1, 'kept', ?2)",
-                            (
-                                "93c8343e-6a43-4d66-9aba-f275825047ac",
-                                "0000000001000-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO folders VALUES (?1, 'omitted', ?2)",
-                            (
-                                "7d748d61-0a3b-4c79-9651-75be31988680",
-                                "0000000001001-0000-owner",
-                            ),
-                        )?;
-                        transaction.execute(
-                            "INSERT INTO documents VALUES (?1, ?2, ?3, 'Circle document', ?4)",
-                            (
-                                "17052cff-e9ce-469a-8987-bf4e02c2ce0d",
-                                circle_id.to_string(),
-                                "93c8343e-6a43-4d66-9aba-f275825047ac",
-                                "0000000001002-0000-owner",
-                            ),
-                        )?;
-                        Ok(circle_id)
-                    },
-                )
-            })
+        let database = StoreDatabase::new(&source);
+        let circle_id = database
+            .install_test_active_circle("snapshot-parent-circle".to_string())
             .await
-            .expect("commit Circle row with Store parent")
-            .value;
+            .expect("install snapshot parent Circle");
+        let write_circle_id = circle_id;
+        database
+            .run_host_store_write_for_test(
+                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                None,
+                move |transaction| {
+                    transaction.execute(
+                        "INSERT INTO folders VALUES (?1, 'kept', ?2)",
+                        (
+                            "93c8343e-6a43-4d66-9aba-f275825047ac",
+                            "0000000001000-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO folders VALUES (?1, 'omitted', ?2)",
+                        (
+                            "7d748d61-0a3b-4c79-9651-75be31988680",
+                            "0000000001001-0000-owner",
+                        ),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO documents VALUES (?1, ?2, ?3, 'Circle document', ?4)",
+                        (
+                            "17052cff-e9ce-469a-8987-bf4e02c2ce0d",
+                            write_circle_id.to_string(),
+                            "93c8343e-6a43-4d66-9aba-f275825047ac",
+                            "0000000001002-0000-owner",
+                        ),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("commit Circle row with Store parent");
 
         let image_dir = tempfile::tempdir().expect("Circle parent snapshot directory");
         let image_path = image_dir.path().to_path_buf();
@@ -1367,35 +1348,24 @@ mod tests {
             .membership_for_test()
             .await
             .expect("project scoped migration membership");
-        let gates = source.gates();
-        let blob_decls = source.blob_decls();
-        let write_id = source.new_write_id();
-        let write_tables = source_tables.clone();
-        source
-            .test_sql(move |connection| {
-                let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-                connection.run_host_store_write(
-                    &write_tables,
-                    &gates,
-                    &blob_decls,
-                    Some(&routing),
-                    None,
-                    write_id,
-                    |transaction| {
-                        transaction
-                            .execute(
-                                "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
-                                (
-                                    "6b432d70-7440-4ba8-b824-f17d6733f252",
-                                    "Migrated document",
-                                    "0000000002000-0000-owner",
-                                ),
-                            )
-                            .map(|_| ())
-                            .map_err(crate::database::DbError::from)
-                    },
-                )
-            })
+        StoreDatabase::new(&source)
+            .run_host_store_write_for_test(
+                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                None,
+                move |transaction| {
+                    transaction
+                        .execute(
+                            "INSERT INTO documents VALUES (?1, NULL, ?2, ?3)",
+                            (
+                                "6b432d70-7440-4ba8-b824-f17d6733f252",
+                                "Migrated document",
+                                "0000000002000-0000-owner",
+                            ),
+                        )
+                        .map(|_| ())
+                        .map_err(crate::database::DbError::from)
+                },
+            )
             .await
             .expect("commit pre-migration scoped row");
 

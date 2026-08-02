@@ -509,7 +509,7 @@ impl StoreDatabase {
                 // routes, and blob bindings in this activation transaction.
                 // Recording the verified activation above already removed its
                 // live access cache while retaining the control activation spine.
-                if StoreDatabase::circle_current_state_is_deleted_on(&tx, creation.circle_id)? {
+                if store_transaction.circle_current_state_is_deleted(creation.circle_id)? {
                     crate::database::prune_ineligible_scoped_rows(
                         &tx,
                         &gates,

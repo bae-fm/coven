@@ -520,33 +520,6 @@ impl StoreDatabase {
         }
         Ok(status)
     }
-
-    #[cfg(test)]
-    pub(crate) fn run_store_write_transaction_on<R, E>(
-        conn: &Connection,
-        synced_tables: &[SyncedTable],
-        gates: &Gates,
-        blob_decls: &BlobDecls,
-        routing_encryption: Option<&EncryptionService>,
-        blob_staging: Option<&crate::sync::HostWriteBlobStaging>,
-        write_id: WriteId,
-        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
-    ) -> Result<WriteReceipt<R>, E>
-    where
-        E: From<DbError>,
-    {
-        CapturedStoreWriteTransaction::begin(
-            conn,
-            synced_tables,
-            gates,
-            blob_decls,
-            routing_encryption,
-            blob_staging.map(AudienceBlobMoveMaterialization::Host),
-            write_id,
-        )
-        .map_err(E::from)?
-        .execute(f)
-    }
 }
 
 impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operation> {

@@ -82,9 +82,7 @@ pub(crate) use materialization_models::{
     RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
 };
 #[cfg(test)]
-pub(crate) use merge_materialization_transaction::{
-    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
-};
+pub(crate) use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
 pub(crate) use merge_materialization_transaction::{
     IncomingTimestampPolicy, MergeMaterializationTransaction, TableSchema, ValidatedChangeset,
     WinningRow,
@@ -679,18 +677,6 @@ impl StoreDatabase {
             })
             .await
     }
-}
-
-#[cfg(test)]
-pub(crate) fn record_verified_circle_activations_for_test(
-    connection: &rusqlite::Connection,
-    commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-    activations: &[crate::sync::VerifiedCircleReference],
-) -> Result<(), DbError> {
-    let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-    MergeMaterializationTransaction::new(&transaction)
-        .record_verified_circle_activations(commit, activations)?;
-    transaction.commit().map_err(DbError::from)
 }
 
 #[cfg(test)]

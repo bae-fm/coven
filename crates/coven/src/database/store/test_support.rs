@@ -23,11 +23,48 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn run_host_store_write_for_test<R>(
+        &self,
+        routing_encryption: Option<crate::encryption::EncryptionService>,
+        blob_staging: Option<crate::sync::HostWriteBlobStaging>,
+        operation: impl for<'transaction, 'connection> FnOnce(
+                crate::database::DatabaseTestTransaction<'transaction, 'connection>,
+            ) -> Result<R, DbError>
+            + Send
+            + 'static,
+    ) -> Result<crate::WriteReceipt<R>, DbError>
+    where
+        R: Send + 'static,
+    {
+        let synced_tables = self.synced_tables().to_vec();
+        let gates = self.gates();
+        let blob_decls = self.blob_decls();
+        let write_id = self.new_store_write_id();
+        self.connection
+            .call(move |connection| {
+                super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
+                    connection,
+                    &synced_tables,
+                    &gates,
+                    &blob_decls,
+                    routing_encryption.as_ref(),
+                    blob_staging.as_ref(),
+                    write_id,
+                )?
+                .execute(|transaction| {
+                    operation(crate::database::DatabaseTestTransaction::new(transaction))
+                })
+            })
+            .await
+    }
+
     pub(crate) async fn cleanup_intent_count_for_test(
         &self,
-        namespace: String,
-        blob_id: String,
+        namespace: &str,
+        blob_id: &str,
     ) -> Result<i64, DbError> {
+        let namespace = namespace.to_string();
+        let blob_id = blob_id.to_string();
         self.connection
             .call(move |connection| {
                 connection

@@ -215,10 +215,123 @@ impl StoreDatabase {
                 )));
             }
 
-            Self::persist_closed_write_objects_on(
+            let mut object_ids = std::collections::BTreeSet::new();
+            for remote in &stage.remote_objects {
+                remote.validate().map_err(|error| {
+                    DbError::Message(format!("prepared remote object: {error}"))
+                })?;
+                if !object_ids.insert(remote.object_id()) {
+                    return Err(DbError::Message(
+                        "prepared write contains a duplicate remote object".to_string(),
+                    ));
+                }
+            }
+            crate::database::validate_prepared_audience_blob_graph(
+                &object_ids,
+                &stage.audiences,
+            )?;
+            for remote in &stage.remote_objects {
+                crate::database::persist_prepared_remote_object_on(
+                    &tx,
+                    remote,
+                    &commit_ref,
+                    "candidate audience object",
+                )?;
+            }
+            let commit_remote = RemoteObjectRecord::candidate_commit(
+                commit_ref.clone(),
+                stage.commit.value.to_bytes(),
+                stage.commit.prepared.stored_bytes().to_vec(),
+            )
+            .map_err(|error| {
+                DbError::Message(format!("prepared candidate commit: {error}"))
+            })?;
+            persist_exact_remote_object_on(&tx, &commit_remote, "candidate commit")?;
+            let expected_partition_count = usize::from(partitions.store.is_some())
+                .checked_add(partitions.circles.len())
+                .ok_or_else(|| {
+                    DbError::Message("audience partition count overflow".to_string())
+                })?;
+            if stage.audiences.packages.len() != expected_partition_count {
+                return Err(DbError::Message(
+                    "prepared audience packages do not cover every write partition".to_string(),
+                ));
+            }
+            let mut indexed = std::collections::BTreeSet::new();
+            for package in &stage.audiences.packages {
+                let value = package.package();
+                if value.store_root_hash() != stage.root.store_root_hash
+                    || value.write_id() != &stage.write_id
+                    || value.commit_coord() != &commit_ref.coord
+                    || value.candidate_family() != stage.commit.value.candidate_family()
+                {
+                    return Err(DbError::Message(
+                        "prepared audience package differs from its exact Store commit"
+                            .to_string(),
+                    ));
+                }
+                match value.audience() {
+                    crate::protocol::audience_package::PackageAudience::Store => {
+                        let partition = partitions.store.as_ref().ok_or_else(|| {
+                            DbError::Message(
+                                "prepared Store package has no Store partition".to_string(),
+                            )
+                        })?;
+                        if value.changeset() != partition.changeset {
+                            return Err(DbError::Message(
+                                "prepared Store package changeset differs from its partition"
+                                    .to_string(),
+                            ));
+                        }
+                        stage
+                            .commit
+                            .value
+                            .verify_store_package(package.semantic_bytes())
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                    }
+                    crate::protocol::audience_package::PackageAudience::Circle {
+                        circle_id,
+                        ..
+                    } => {
+                        let partition = partitions
+                            .circles
+                            .iter()
+                            .find(|partition| {
+                                partition.audience
+                                    == crate::protocol::circle::Audience::Circle(*circle_id)
+                            })
+                            .ok_or_else(|| {
+                                DbError::Message(format!(
+                                    "prepared Circle package {circle_id} has no partition"
+                                ))
+                            })?;
+                        if value.changeset() != partition.changeset {
+                            return Err(DbError::Message(format!(
+                                "prepared Circle package {circle_id} changeset differs from its partition"
+                            )));
+                        }
+                        stage
+                            .commit
+                            .value
+                            .verify_circle_package(*circle_id, package.semantic_bytes())
+                            .map_err(|error| DbError::Message(error.to_string()))?;
+                    }
+                }
+                indexed.insert(package.remote_object_id());
+            }
+            indexed.extend(
+                stage
+                    .audiences
+                    .blobs
+                    .iter()
+                    .map(crate::database::PreparedAudienceBlob::remote_object_id),
+            );
+            debug_assert_eq!(indexed, object_ids);
+            Self::persist_prepared_audience_objects_on(
                 &tx,
-                &stage,
-                &partitions,
+                &stage.write_id,
+                &stage.audiences.packages,
+                &stage.audiences.blobs,
             )?;
             let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: stage.head.value.head_hash(),

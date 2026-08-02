@@ -1,7 +1,8 @@
 use super::super::*;
 use super::fixtures::*;
 
-async fn assert_store_creation_installs_generation_zero_replay_baseline() {
+#[tokio::test]
+async fn store_creation_installs_generation_zero_replay_baseline() {
     let db = crate::sync::test_helpers::open_test_db();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
@@ -27,11 +28,6 @@ async fn assert_store_creation_installs_generation_zero_replay_baseline() {
         }
     }
     baseline.validate_image().expect("validate replay image");
-}
-
-#[tokio::test]
-async fn store_creation_installs_generation_zero_replay_baseline() {
-    assert_store_creation_installs_generation_zero_replay_baseline().await;
 }
 
 #[test]

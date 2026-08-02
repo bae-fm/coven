@@ -848,13 +848,6 @@ mod tests {
         try_open(&dir).expect("open handle")
     }
 
-    async fn run_test_cycle(storage: &TestStore, handle: &CovenHandle) {
-        handle
-            .publish_test_store(storage)
-            .await
-            .expect("publish pending Store write");
-    }
-
     async fn merge_test_storage(
         handle: &CovenHandle,
         keypair: &crate::keys::UserKeypair,
@@ -868,7 +861,10 @@ mod tests {
     async fn publish_current_writes(handle: &CovenHandle) {
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(handle, &keypair).await;
-        run_test_cycle(&storage, handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
     }
 
     #[tokio::test]
@@ -892,7 +888,10 @@ mod tests {
         let reopened = open_files_handle_in(dir);
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&reopened, &keypair).await;
-        run_test_cycle(&storage, &reopened).await;
+        reopened
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
 
         let (_peer_tmp, peer) = open_files_handle();
         peer.pull_test_store(&storage).await;
@@ -940,7 +939,10 @@ mod tests {
         assert_eq!(*first_status.borrow(), crate::WriteStatus::Pending);
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&reopened, &keypair).await;
-        run_test_cycle(&storage, &reopened).await;
+        reopened
+            .publish_test_store(&storage)
+            .await
+            .expect("publish first pending Store write");
 
         first_status.changed().await.expect("published status");
         let first_sequence = match &*first_status.borrow() {
@@ -954,7 +956,10 @@ mod tests {
                 .expect("second status after first publication"),
             crate::WriteStatus::Pending,
         );
-        run_test_cycle(&storage, &reopened).await;
+        reopened
+            .publish_test_store(&storage)
+            .await
+            .expect("publish second pending Store write");
         let second_sequence = match reopened
             .write_status(&write_ids[1])
             .await
@@ -1012,7 +1017,10 @@ mod tests {
 
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&handle, &keypair).await;
-        run_test_cycle(&storage, &handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
         assert_eq!(
             handle
                 .write_status(&receipt.write_id)
@@ -1060,7 +1068,10 @@ mod tests {
 
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&handle, &keypair).await;
-        run_test_cycle(&storage, &handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
         assert!(matches!(
             handle
                 .write_status(&receipt.write_id)
@@ -1100,7 +1111,10 @@ mod tests {
             .expect("insert before first cycle");
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(&handle, &keypair).await;
-        run_test_cycle(&storage, &handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
 
         let (_peer_tmp, peer) = open_files_handle();
         peer.pull_test_store(&storage).await;
@@ -1119,7 +1133,10 @@ mod tests {
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
-        run_test_cycle(&storage, &reopened).await;
+        reopened
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
 
         peer.pull_test_store(&storage).await;
         assert!(
@@ -1161,7 +1178,10 @@ mod tests {
             crate::WriteStatus::Publishing,
         );
 
-        run_test_cycle(&storage, &handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
         assert!(
             matches!(
                 handle
@@ -1178,15 +1198,6 @@ mod tests {
         crate::storage::StagedBlobFile::write_for_test(path, bytes)
             .await
             .expect("write file");
-    }
-
-    async fn cleanup_intent_count(handle: &CovenHandle, namespace: &str, id: &str) -> i64 {
-        let namespace = namespace.to_string();
-        let id = id.to_string();
-        handle
-            .cleanup_intent_count_for_test(namespace, id)
-            .await
-            .expect("count cleanup intents")
     }
 
     #[tokio::test]
@@ -2374,7 +2385,10 @@ mod tests {
     ) {
         let keypair = crate::keys::UserKeypair::generate();
         let storage = merge_test_storage(handle, &keypair).await;
-        run_test_cycle(&storage, handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
 
         let first_sequence = match handle
             .write_status(first_write)
@@ -2393,7 +2407,10 @@ mod tests {
             "one Store publication consumes one pending host transaction",
         );
 
-        run_test_cycle(&storage, handle).await;
+        handle
+            .publish_test_store(&storage)
+            .await
+            .expect("publish pending Store write");
         let second_sequence = match handle
             .write_status(second_write)
             .await
@@ -2646,7 +2663,10 @@ mod tests {
             .expect("row delete commits despite cleanup failure");
 
         assert_eq!(
-            cleanup_intent_count(&handle, "media-files", "oldddddd").await,
+            handle
+                .cleanup_intent_count_for_test("media-files", "oldddddd")
+                .await
+                .expect("count cleanup intents"),
             2
         );
         assert!(dir
@@ -2671,7 +2691,10 @@ mod tests {
             .expect("later committed write drains pending cleanup");
 
         assert_eq!(
-            cleanup_intent_count(&handle, "media-files", "oldddddd").await,
+            handle
+                .cleanup_intent_count_for_test("media-files", "oldddddd")
+                .await
+                .expect("count cleanup intents"),
             0
         );
         assert!(!dir
@@ -2814,7 +2837,10 @@ mod tests {
             "the deleted locator's cache copy is removed"
         );
         assert_eq!(
-            cleanup_intent_count(&handle, "media-files", blob_id).await,
+            handle
+                .cleanup_intent_count_for_test("media-files", blob_id)
+                .await
+                .expect("count cleanup intents"),
             0,
         );
     }

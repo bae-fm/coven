@@ -1162,13 +1162,6 @@ impl StoreDatabase {
         Ok(state)
     }
 
-    pub(super) fn circle_current_state_is_deleted_on(
-        conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<bool, DbError> {
-        Ok(Self::circle_current_state_on(conn, circle_id)?.is_some_and(|state| state.is_deleted()))
-    }
-
     pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
         let mut statement = conn
             .prepare(

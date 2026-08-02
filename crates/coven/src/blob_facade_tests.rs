@@ -214,30 +214,20 @@ async fn registering_against_a_table_with_no_blob_is_refused() {
 /// Open the same store again over the same directory and key, the way a
 /// relaunched app does.
 ///
-/// A real relaunch has the previous process gone; here the dropped handle's
-/// sync loop releases the single-open guard as it finishes tearing down, so
-/// this waits for that release rather than racing it.
-async fn reopen(
+/// The caller stops sync and drops the previous handle before entering this
+/// construction boundary, matching a relaunched process with no prior owner.
+fn reopen(
     dir: crate::StoreDir,
     keyring: crate::MasterKeyring,
     owner: crate::keys::UserKeypair,
 ) -> crate::CovenHandle {
-    for _ in 0..200 {
-        match crate::Coven::builder(config(dir.clone()))
-            .synced_tables(note_tables())
-            .migrations(test_migrations())
-            .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
-            .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
-            .open()
-        {
-            Ok(handle) => return handle,
-            Err(crate::CovenError::AlreadyOpen { .. }) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await
-            }
-            Err(error) => panic!("reopen the store: {error:?}"),
-        }
-    }
-    panic!("the previous handle never released the store")
+    crate::Coven::builder(config(dir))
+        .synced_tables(note_tables())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(keyring))
+        .identity_custody(crate::IdentityCustody::InMemory(owner))
+        .open()
+        .expect("reopen the store after closing its previous owner")
 }
 
 /// A queued upload is visible the moment `make_remote` enqueues it — before any
@@ -344,8 +334,9 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
 
     // A relaunched app reads the same queue: it is a table in the store, not
     // anything the process was holding.
+    handle.disconnect_sync();
     drop(handle);
-    let reopened = reopen(dir, keyring, owner).await;
+    let reopened = reopen(dir, keyring, owner);
     let after_restart = reopened
         .queued_uploads()
         .await

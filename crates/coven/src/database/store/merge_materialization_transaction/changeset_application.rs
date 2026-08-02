@@ -148,29 +148,16 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
     let changeset = ValidatedChangeset::new(bytes, schema)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let result = resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms)?;
+    let result = MergeMaterializationTransaction::new(&tx).apply_changeset(
+        changeset,
+        IncomingTimestampPolicy::Received { receiver_wall_ms },
+    )?;
     if result.had_fk_violations || !result.constraint_conflict_tables.is_empty() {
         tx.rollback().map_err(DbError::from)?;
     } else {
         tx.commit().map_err(DbError::from)?;
     }
     Ok(result)
-}
-
-/// Apply one changeset on a connection whose transaction boundary belongs to the
-/// caller. Rows, exact row-bound blob locators, durable cleanup intents, and the
-/// receiver's position can therefore commit as one database operation. The caller
-/// must roll back when the returned result reports an FK or non-FK constraint conflict.
-#[cfg(test)]
-pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
-    transaction: &rusqlite::Transaction<'_>,
-    changeset: ValidatedChangeset<B>,
-    receiver_wall_ms: u64,
-) -> Result<ApplyResult, DbError> {
-    MergeMaterializationTransaction::new(transaction).apply_changeset(
-        changeset,
-        IncomingTimestampPolicy::Received { receiver_wall_ms },
-    )
 }
 
 impl MergeMaterializationTransaction<'_, '_> {

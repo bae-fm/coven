@@ -1,6 +1,46 @@
 use crate::database::{Database, DatabaseTestSql, DbError};
 
 impl Database {
+    pub(crate) async fn table_has_rows_for_test(
+        &self,
+        table: crate::database::DatabaseTestTable,
+    ) -> Result<bool, DbError> {
+        self.test_sql(move |database| database.table_has_rows(table))
+            .await
+    }
+
+    pub(crate) async fn store_partition_changesets_for_test(
+        &self,
+    ) -> Result<Vec<Vec<u8>>, DbError> {
+        self.test_sql(|database| database.store_partition_changesets())
+            .await
+    }
+
+    pub(crate) async fn has_store_partition_for_test(&self) -> Result<bool, DbError> {
+        self.test_sql(|database| database.has_store_partition())
+            .await
+    }
+
+    pub(crate) async fn make_remote_intent_exists_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<bool, DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        self.test_sql(move |database| database.make_remote_intent_exists(&root_table, &root_id))
+            .await
+    }
+
+    pub(crate) async fn published_blob_drop_intent_exists_for_test(
+        &self,
+        blob_id: &str,
+    ) -> Result<bool, DbError> {
+        let blob_id = blob_id.to_string();
+        self.test_sql(move |database| database.published_blob_drop_intent_exists(&blob_id))
+            .await
+    }
+
     pub(crate) async fn insert_published_blob_drop_intent_for_test(
         &self,
         sequence: u64,

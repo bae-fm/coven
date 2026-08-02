@@ -369,7 +369,7 @@ async fn publish_exact_remote_blob_binding(
         .expect("load exact blob upload authority");
     let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
         .expect("validate exact blob upload authority");
-    let outcome = crate::blob::upload::drain_uploads(
+    let outcome = crate::blob::upload::BlobUploadQueue::new(
         &database,
         &storage.storage,
         authority,
@@ -379,6 +379,7 @@ async fn publish_exact_remote_blob_binding(
         None,
         None,
     )
+    .drain()
     .await
     .expect("drain exact blob upload");
     assert_eq!(outcome.uploaded(), 1);

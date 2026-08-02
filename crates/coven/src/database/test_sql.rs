@@ -1663,11 +1663,13 @@ impl DatabaseTestSql<'_> {
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         activations: &[crate::sync::VerifiedCircleReference],
     ) -> Result<(), DbError> {
-        crate::database::record_verified_circle_activations_for_test(
-            self.connection,
-            commit,
-            activations,
-        )
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        crate::database::MergeMaterializationTransaction::new(&transaction)
+            .record_verified_circle_activations(commit, activations)?;
+        transaction.commit().map_err(DbError::from)
     }
 
     pub(crate) fn apply_changeset(
@@ -1702,11 +1704,13 @@ impl DatabaseTestSql<'_> {
         for changeset in changesets {
             let changeset = crate::database::ValidatedChangeset::new(changeset, schema.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            results.push(crate::database::resolve_and_apply_changeset_with_schema_on(
-                &transaction,
-                changeset,
-                receiver_wall_ms,
-            )?);
+            results.push(
+                crate::database::MergeMaterializationTransaction::new(&transaction)
+                    .apply_changeset(
+                        changeset,
+                        crate::database::IncomingTimestampPolicy::Received { receiver_wall_ms },
+                    )?,
+            );
         }
         let foreign_key_violations = transaction
             .query_row(
@@ -1800,32 +1804,6 @@ impl DatabaseTestSql<'_> {
             self.connection,
             synced_tables,
             routing_encryption,
-            write_id,
-            |transaction| operation(DatabaseTestTransaction::new(transaction)),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run_host_store_write<R, E>(
-        &self,
-        synced_tables: &[crate::sync::session::SyncedTable],
-        gates: &crate::database::Gates,
-        blob_decls: &crate::database::BlobDecls,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        blob_staging: Option<&crate::sync::HostWriteBlobStaging>,
-        write_id: crate::WriteId,
-        operation: impl FnOnce(DatabaseTestTransaction<'_, '_>) -> Result<R, E>,
-    ) -> Result<crate::WriteReceipt<R>, E>
-    where
-        E: From<DbError>,
-    {
-        crate::database::StoreDatabase::run_store_write_transaction_on(
-            self.connection,
-            synced_tables,
-            gates,
-            blob_decls,
-            routing_encryption,
-            blob_staging,
             write_id,
             |transaction| operation(DatabaseTestTransaction::new(transaction)),
         )

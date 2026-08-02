@@ -7,9 +7,7 @@ use rusqlite::OptionalExtension;
 use tracing::{debug, warn};
 
 #[cfg(test)]
-pub(crate) use changeset_application::{
-    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
-};
+pub(crate) use changeset_application::{resolve_and_apply_changeset, ApplyResult};
 pub(crate) use changeset_application::{ValidatedChangeset, WinningRow};
 pub(crate) use conflict::{IncomingTimestampPolicy, TableSchema};
 
@@ -200,6 +198,16 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 }
 
 impl MergeMaterializationTransaction<'_, '_> {
+    pub(super) fn circle_current_state_is_deleted(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+    ) -> Result<bool, DbError> {
+        Ok(
+            StoreDatabase::circle_current_state_on(self.transaction, circle_id)?
+                .is_some_and(|state| state.is_deleted()),
+        )
+    }
+
     /// Install only blob bindings whose exact row stamp won the enclosing
     /// changeset. App rows, locator facts, and the materialized commit position
     /// share this transaction and therefore commit or roll back together.
@@ -1382,7 +1390,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 rusqlite::params![&circle_id, current_state_payload],
             )
             .map_err(DbError::from)?;
-            if StoreDatabase::circle_current_state_is_deleted_on(conn, activation.circle_id)? {
+            if self.circle_current_state_is_deleted(activation.circle_id)? {
                 conn.execute(
                     "DELETE FROM circle_access_cache WHERE circle_id = ?1",
                     [&circle_id],
@@ -1675,10 +1683,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         // verified activation above already removed its live access cache while
         // retaining the authority spine.
         for activation in circle_activations.circles() {
-            if crate::database::StoreDatabase::circle_current_state_is_deleted_on(
-                conn,
-                activation.circle_id,
-            )? {
+            if self.circle_current_state_is_deleted(activation.circle_id)? {
                 inactive_circles.insert(activation.circle_id);
             }
         }

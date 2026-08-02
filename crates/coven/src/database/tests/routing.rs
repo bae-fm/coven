@@ -96,43 +96,29 @@ async fn capture_scoped_write_then_reopen(
         .expect("install active Circle current state");
     let circle_id = circle_id.to_string();
 
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let write_id = db.new_write_id();
     let routing = EncryptionService::from_key([7; 32]);
-    let capture_tables = tables.clone();
     let capture_circle_id = circle_id.clone();
-    db.call(move |conn| {
-        StoreDatabase::run_store_write_transaction_on(
-            conn,
-            &capture_tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
-            None,
-            write_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO accounts (id, audience, _updated_at)
+    StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "INSERT INTO accounts (id, audience, _updated_at)
                      VALUES ('store-account', NULL, '0000000001000-0000-restart')",
-                    [],
-                )?;
-                tx.execute(
-                    "INSERT INTO accounts (id, audience, _updated_at)
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO accounts (id, audience, _updated_at)
                      VALUES ('circle-account', ?1, '0000000001001-0000-restart')",
-                    [&capture_circle_id],
-                )?;
-                tx.execute(
-                    "INSERT INTO accounts (id, audience, _updated_at)
+                [&capture_circle_id],
+            )?;
+            tx.execute(
+                "INSERT INTO accounts (id, audience, _updated_at)
                      VALUES ('local-account', 'local', '0000000001002-0000-restart')",
-                    [],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("capture Store and Circle partitions");
+                [],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("capture Store and Circle partitions");
     let expected = db
         .call(|conn| {
             conn.prepare(
@@ -247,33 +233,15 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
 async fn assert_local_only_scoped_write(name: &str) {
     let (_temp, db, _) = capture_scoped_write_then_reopen(name).await;
     let store_database = StoreDatabase::new(&db);
-    let tables = vec![
-        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-    ];
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let write_id = db.new_write_id();
     let routing = EncryptionService::from_key([7; 32]);
-    let receipt = db
-        .call(move |conn| {
-            StoreDatabase::run_store_write_transaction_on(
-                conn,
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                None,
-                write_id,
-                |tx| {
-                    tx.execute(
-                        "INSERT INTO accounts (id, audience, _updated_at)
+    let receipt = store_database
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "INSERT INTO accounts (id, audience, _updated_at)
                          VALUES ('second-local-account', 'local', '0000000002000-0000-local')",
-                        [],
-                    )?;
-                    Ok::<_, DbError>(())
-                },
-            )
+                [],
+            )?;
+            Ok::<_, DbError>(())
         })
         .await
         .expect("capture local-only partition");
@@ -379,37 +347,23 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         .expect("install two Circles");
 
     let routing = EncryptionService::from_key([7; 32]);
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let write_id = db.new_write_id();
-    let stored_write_id = write_id.clone();
-    let write_tables = tables.clone();
     let (first_audience, second_audience) = (first.to_string(), second.to_string());
     let (write_first, write_second) = (first_audience.clone(), second_audience.clone());
-    db.call(move |conn| {
-        StoreDatabase::run_store_write_transaction_on(
-            conn,
-            &write_tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
-            None,
-            write_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO accounts VALUES ('first-account', ?1, '0000000001000-0000-circle')",
-                    [&write_first],
-                )?;
-                tx.execute(
-                    "INSERT INTO accounts VALUES ('second-account', ?1, '0000000001001-0000-circle')",
-                    [&write_second],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("capture Circle-only partitions");
+    let receipt = StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "INSERT INTO accounts VALUES ('first-account', ?1, '0000000001000-0000-circle')",
+                [&write_first],
+            )?;
+            tx.execute(
+                "INSERT INTO accounts VALUES ('second-account', ?1, '0000000001001-0000-circle')",
+                [&write_second],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("capture Circle-only partitions");
+    let stored_write_id = receipt.write_id;
 
     let partitions = db
         .call(move |conn| {
@@ -520,58 +474,31 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         .await
         .expect("install source and destination Circles");
     let routing = EncryptionService::from_key([7; 32]);
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let insert_tables = tables.clone();
-    let insert_id = db.new_write_id();
-    db.call(move |conn| {
-        StoreDatabase::run_store_write_transaction_on(
-            conn,
-            &insert_tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
-            None,
-            insert_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO accounts VALUES ('account', ?1, '0000000001000-0000-move')",
-                    [source.to_string()],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("insert source Circle row");
+    StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "INSERT INTO accounts VALUES ('account', ?1, '0000000001000-0000-move')",
+                [source.to_string()],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("insert source Circle row");
 
     let routing = EncryptionService::from_key([7; 32]);
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let move_id = db.new_write_id();
-    let stored_move_id = move_id.clone();
-    db.call(move |conn| {
-        StoreDatabase::run_store_write_transaction_on(
-            conn,
-            &tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
-            None,
-            move_id,
-            |tx| {
-                tx.execute(
-                    "UPDATE accounts
+    let receipt = StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "UPDATE accounts
                      SET audience = ?1, _updated_at = '0000000002000-0000-move'
                      WHERE id = 'account'",
-                    [destination.to_string()],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("move row between Circles");
+                [destination.to_string()],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("move row between Circles");
+    let stored_move_id = receipt.write_id;
 
     let partitions = db
         .call(move |conn| {
@@ -689,64 +616,36 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         .await
         .expect("install relationship Circles");
     let routing = EncryptionService::from_key([7; 32]);
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let insert_tables = tables.clone();
-    let insert_id = db.new_write_id();
-    db.call(move |conn| {
-        StoreDatabase::run_store_write_transaction_on(
-            conn,
-            &insert_tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
-            None,
-            insert_id,
-            |tx| {
-                tx.execute(
-                    "INSERT INTO notes VALUES ('note', ?1, '0000000001000-0000-move')",
-                    [source.to_string()],
-                )?;
-                tx.execute(
-                    "INSERT INTO categories VALUES ('category', ?1, '0000000001000-0000-move')",
-                    [source.to_string()],
-                )?;
-                tx.execute(
-                    "INSERT INTO comments
+    StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "INSERT INTO notes VALUES ('note', ?1, '0000000001000-0000-move')",
+                [source.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO categories VALUES ('category', ?1, '0000000001000-0000-move')",
+                [source.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO comments
                      VALUES ('comment', 'note', 'category', '0000000001000-0000-move')",
-                    [],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("insert valid scoped relationship");
+                [],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("insert valid scoped relationship");
 
     let routing = EncryptionService::from_key([7; 32]);
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let move_id = db.new_write_id();
-    let error = db
-        .call(move |conn| {
-            StoreDatabase::run_store_write_transaction_on(
-                conn,
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                None,
-                move_id,
-                |tx| {
-                    tx.execute(
-                        "UPDATE notes
+    let error = StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |tx| {
+            tx.execute(
+                "UPDATE notes
                          SET audience = ?1, _updated_at = '0000000002000-0000-move'
                          WHERE id = 'note'",
-                        [destination.to_string()],
-                    )?;
-                    Ok::<_, DbError>(())
-                },
-            )
+                [destination.to_string()],
+            )?;
+            Ok::<_, DbError>(())
         })
         .await
         .expect_err("move must reject the unchanged cross-Circle relationship");

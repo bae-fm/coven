@@ -535,8 +535,9 @@ async fn make_test_root_remote(
         .expect("load exact blob fixture write authority");
     let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
         .expect("validate exact blob fixture write authority");
-    let outcome = crate::blob::upload::drain_uploads(
-        &store_database(db),
+    let database = store_database(db);
+    let outcome = crate::blob::upload::BlobUploadQueue::new(
+        &database,
         &storage.storage,
         authority,
         store_dir,
@@ -545,6 +546,7 @@ async fn make_test_root_remote(
         None,
         None,
     )
+    .drain()
     .await
     .expect("upload exact blob fixture");
     assert!(outcome.uploaded() > 0);
@@ -3733,26 +3735,15 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
          INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
     );
-    let tables = source.synced_tables().to_vec();
-    let gates = source.gates();
-    let blob_decls = source.blob_decls();
-    let write_id = source.new_write_id();
-    source
-        .test_sql(move |conn| {
-            let routing = EncryptionService::from_key([42; 32]);
-            conn.run_host_store_write(
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                None,
-                write_id,
-                |tx| {
-                    tx.execute_batch(&sql)
-                        .map_err(crate::database::DbError::from)
-                },
-            )
-        })
+    crate::database::StoreDatabase::new(&source)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            None,
+            move |tx| {
+                tx.execute_batch(&sql)
+                    .map_err(crate::database::DbError::from)
+            },
+        )
         .await
         .expect("commit scoped host transaction");
     let (_source_temp, source_dir) = temp_store_dir();
@@ -3947,27 +3938,17 @@ fn scoped_fk_circle_db() -> crate::database::Database {
 }
 
 async fn author_scoped_write(store: &TestStore, db: &crate::database::Database, sql: String) {
-    let tables = db.synced_tables().to_vec();
-    let gates = db.gates();
-    let blob_decls = db.blob_decls();
-    let write_id = db.new_write_id();
-    db.test_sql(move |conn| {
-        let routing = EncryptionService::from_key([42; 32]);
-        conn.run_host_store_write(
-            &tables,
-            &gates,
-            &blob_decls,
-            Some(&routing),
+    crate::database::StoreDatabase::new(db)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
             None,
-            write_id,
-            |tx| {
+            move |tx| {
                 tx.execute_batch(&sql)
                     .map_err(crate::database::DbError::from)
             },
         )
-    })
-    .await
-    .expect("commit scoped host transaction");
+        .await
+        .expect("commit scoped host transaction");
     let (_temp, dir) = temp_store_dir();
     store
         .publish_pending(db, &dir)

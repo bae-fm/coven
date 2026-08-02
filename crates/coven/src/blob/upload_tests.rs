@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::upload::{drain_uploads, DrainOutcome};
+use super::upload::{BlobUploadQueue, DrainOutcome};
 use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::clock::{Clock, FixedClock};
 use crate::database::StoreDatabase;
@@ -394,7 +394,7 @@ async fn run_drain(
     let (registration_ref, registration) = fixture.database.local_blob_write_authority().await?;
     let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
         .map_err(|error| DbError::Message(error.to_string()))?;
-    drain_uploads(
+    BlobUploadQueue::new(
         &fixture.database,
         &fixture.storage,
         authority,
@@ -407,6 +407,7 @@ async fn run_drain(
         None,
         observer,
     )
+    .drain()
     .await
 }
 

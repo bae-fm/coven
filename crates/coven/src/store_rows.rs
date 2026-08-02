@@ -182,8 +182,8 @@ impl StoreRows {
     #[cfg(test)]
     pub(crate) async fn cleanup_intent_count_for_test(
         &self,
-        namespace: String,
-        blob_id: String,
+        namespace: &str,
+        blob_id: &str,
     ) -> Result<i64, crate::database::DbError> {
         self.database
             .cleanup_intent_count_for_test(namespace, blob_id)

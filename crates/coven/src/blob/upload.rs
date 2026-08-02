@@ -332,32 +332,6 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn drain_uploads(
-    database: &crate::database::StoreDatabase,
-    storage: &dyn crate::storage::SyncStorage,
-    authority: crate::storage::BlobWriteAuthority<'_>,
-    store_dir: &StoreDir,
-    clock: &dyn crate::clock::Clock,
-    hlc: &Hlc,
-    routing_encryption: Option<&EncryptionService>,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<DrainOutcome, DbError> {
-    BlobUploadQueue::new(
-        database,
-        storage,
-        authority,
-        store_dir,
-        clock,
-        hlc,
-        routing_encryption,
-        observer,
-    )
-    .drain()
-    .await
-}
-
 /// What one entry's upload attempt did, for [`BlobUploadQueue::drain`] to aggregate.
 enum EntryOutcome {
     /// The cloud write failed; the failure was recorded and the entry left queued.

@@ -306,27 +306,16 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
 }
 
 async fn scoped_host_exec(database: &Database, sql: String) {
-    let tables = database.synced_tables().to_vec();
-    let gates = database.gates();
-    let blob_decls = database.blob_decls();
-    let write_id = database.new_write_id();
-    database
-        .test_sql(move |connection| {
-            let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-            connection.run_host_store_write(
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                None,
-                write_id,
-                |transaction| {
-                    transaction
-                        .execute_batch(&sql)
-                        .map_err(crate::database::DbError::from)
-                },
-            )
-        })
+    StoreDatabase::new(database)
+        .run_host_store_write_for_test(
+            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| {
+                transaction
+                    .execute_batch(&sql)
+                    .map_err(crate::database::DbError::from)
+            },
+        )
         .await
         .expect("commit scoped host write");
 }
@@ -1830,33 +1819,21 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
 
     // A new host write destined to the deleted Circle is refused at capture.
-    let tables = fixture.owner_database.synced_tables().to_vec();
-    let gates = fixture.owner_database.gates();
-    let blob_decls = fixture.owner_database.blob_decls();
-    let write_id = fixture.owner_database.new_write_id();
     let circle_id = fixture.circle_id;
-    let error = fixture
-        .owner_database
-        .test_sql(move |connection| {
-            let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-            connection.run_host_store_write(
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                None,
-                write_id,
-                |transaction| {
-                    transaction
-                        .execute_batch(&format!(
-                            "INSERT INTO notes (id, audience, body, _updated_at)
+    let error = StoreDatabase::new(&fixture.owner_database)
+        .run_host_store_write_for_test(
+            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| {
+                transaction
+                    .execute_batch(&format!(
+                        "INSERT INTO notes (id, audience, body, _updated_at)
                              VALUES ('01890a5d-ac96-774b-bcce-b302099c3f99', '{circle_id}',
                                      'after deletion', '0000000003000-0000-owner');"
-                        ))
-                        .map_err(DbError::from)
-                },
-            )
-        })
+                    ))
+                    .map_err(DbError::from)
+            },
+        )
         .await
         .expect_err("a host write into a deleted Circle is refused");
     assert!(error.to_string().contains("deleted"), "{error}");

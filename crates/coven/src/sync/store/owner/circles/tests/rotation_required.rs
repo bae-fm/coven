@@ -2622,10 +2622,6 @@ async fn move_document_audience(
     audience: Option<CircleId>,
     stamp: &str,
 ) {
-    let write_id = fixture.db.new_write_id();
-    let tables = fixture.db.synced_tables().to_vec();
-    let gates = fixture.db.gates();
-    let blob_decls = fixture.db.blob_decls();
     let audience_value = audience.map(|circle_id| circle_id.to_string());
     let document_id = document_id.to_string();
     let stamp = stamp.to_string();
@@ -2636,28 +2632,20 @@ async fn move_document_audience(
         .components
         .store()
         .host_write_blob_staging(tokio::runtime::Handle::current(), fixture.store_dir.clone());
-    fixture
-        .db
-        .test_sql(move |connection| {
-            let routing = EncryptionService::from_key([42; 32]);
-            connection.run_host_store_write(
-                &tables,
-                &gates,
-                &blob_decls,
-                Some(&routing),
-                Some(&staging),
-                write_id,
-                |transaction| {
-                    transaction
-                        .execute(
-                            "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
-                            rusqlite::params![document_id, audience_value, stamp],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                },
-            )
-        })
+    StoreDatabase::new(&fixture.db)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            Some(staging),
+            move |transaction| {
+                transaction
+                    .execute(
+                        "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
+                        rusqlite::params![document_id, audience_value, stamp],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            },
+        )
         .await
         .expect("move the document to another audience");
 }

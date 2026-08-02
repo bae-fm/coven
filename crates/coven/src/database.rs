@@ -227,14 +227,11 @@ pub(crate) use store::{
     VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
 #[cfg(test)]
-pub(crate) use store::{
-    record_verified_circle_activations_for_test, select_author_exclusion_activation_locator,
-    store_package_is_retained_for_replay_for_test, AuthorExclusionLocatorTamper,
-};
+pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
 #[cfg(test)]
 pub(crate) use store::{
-    resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
-    MergeMaterializationTransaction,
+    select_author_exclusion_activation_locator, store_package_is_retained_for_replay_for_test,
+    AuthorExclusionLocatorTamper,
 };
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, SqlReadContext, WriteBatch};

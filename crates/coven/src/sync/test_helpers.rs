@@ -1886,6 +1886,27 @@ impl TestStore {
             .await
     }
 
+    pub(crate) async fn drain_uploads(
+        &self,
+        db: &Database,
+        store_dir: &crate::store_dir::StoreDir,
+        clock: &dyn crate::clock::Clock,
+        hlc: &crate::sync::hlc::Hlc,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+        let store = self
+            .bind_device(db, &self.signer)
+            .await
+            .map_err(crate::database::DbError::Message)?;
+        store
+            .authorize_writer()
+            .await
+            .map_err(|error| crate::database::DbError::Message(error.to_string()))?
+            .drain_uploads(store_dir, clock, hlc, routing_encryption, observer)
+            .await
+    }
+
     pub(crate) async fn activate_joined_device(
         &self,
         observer_db: &Database,
@@ -2038,6 +2059,31 @@ impl TestStore {
                 self.storage.store_id(),
                 store_name,
             )
+            .await
+    }
+
+    pub(crate) async fn invite_and_activate_peer(
+        &self,
+        observer_db: &Database,
+        peer_db: &Database,
+        peer: &UserKeypair,
+    ) -> Result<TestDevice, String> {
+        self.invite_member(
+            observer_db,
+            &self.signer,
+            &crate::sync::hlc::Hlc::new(
+                "peer-invitation".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
+            &pubkey_hex(peer),
+            None,
+            crate::protocol::membership::MemberRole::Member,
+            &crate::encryption::EncryptionService::from_key([42; 32]),
+            "Test Store",
+        )
+        .await
+        .map_err(|error| format!("invite peer identity: {error}"))?;
+        self.activate_joined_device(observer_db, peer_db, peer, "2026-07-16T00:00:00Z")
             .await
     }
 
