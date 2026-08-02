@@ -9,33 +9,49 @@ fn store_database(db: &crate::database::Database) -> crate::database::StoreDatab
     crate::database::StoreDatabase::new(db)
 }
 
-async fn publish_note(
-    db: &crate::database::Database,
-    device: &crate::sync::test_helpers::TestDevice,
-    store_dir: &crate::store_dir::StoreDir,
-    sequence: u64,
-) {
-    db.execute_test_host_write(&format!(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('history-{sequence}', 'history', NULL, 1, \
-                     '0000000001000-0000-history', '2026-07-21')"
-    ))
-    .await;
-    assert!(
-        device
-            .prepare_pending_store_write(store_dir)
-            .await
-            .expect("prepare Merge Store write"),
-        "host write produces a prepared Store commit",
-    );
-    assert_eq!(
-        device
-            .drain_store_writes()
-            .await
-            .expect("publish Merge Store write"),
-        1,
-        "one prepared Store commit is published",
-    );
+struct HistoryPublisher<'fixture> {
+    database: &'fixture crate::database::Database,
+    device: &'fixture crate::sync::test_helpers::TestDevice,
+    store_dir: &'fixture crate::store_dir::StoreDir,
+}
+
+impl<'fixture> HistoryPublisher<'fixture> {
+    fn new(
+        database: &'fixture crate::database::Database,
+        device: &'fixture crate::sync::test_helpers::TestDevice,
+        store_dir: &'fixture crate::store_dir::StoreDir,
+    ) -> Self {
+        Self {
+            database,
+            device,
+            store_dir,
+        }
+    }
+
+    async fn publish_note(&self, sequence: u64) {
+        self.database
+            .execute_test_host_write(&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('history-{sequence}', 'history', NULL, 1, \
+                         '0000000001000-0000-history', '2026-07-21')"
+            ))
+            .await;
+        assert!(
+            self.device
+                .prepare_pending_store_write(self.store_dir)
+                .await
+                .expect("prepare Merge Store write"),
+            "host write produces a prepared Store commit",
+        );
+        assert_eq!(
+            self.device
+                .drain_store_writes()
+                .await
+                .expect("publish Merge Store write"),
+            1,
+            "one prepared Store commit is published",
+        );
+    }
 }
 
 async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectSlot) {
@@ -53,9 +69,10 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .await
         .expect("bind materialized-history Store");
     let (_temp, store_dir) = temp_store_dir();
+    let publisher = HistoryPublisher::new(&db, &device, &store_dir);
 
     for sequence in 1..=history_length {
-        publish_note(&db, &device, &store_dir, sequence).await;
+        publisher.publish_note(sequence).await;
     }
 
     let retained = device
@@ -84,7 +101,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .clone();
 
     store.home.clear_exact_reads();
-    publish_note(&db, &device, &store_dir, history_length + 1).await;
+    publisher.publish_note(history_length + 1).await;
 
     let reread = store
         .home
@@ -124,8 +141,9 @@ impl PublishedHistory {
             .await
             .expect("load Merge membership");
         let (temp, store_dir) = temp_store_dir();
+        let publisher = HistoryPublisher::new(&db, &device, &store_dir);
         for sequence in 1..=history_length {
-            publish_note(&db, &device, &store_dir, sequence).await;
+            publisher.publish_note(sequence).await;
         }
         Self {
             db,
@@ -418,83 +436,85 @@ struct MemberRemovalHistory {
     summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
-async fn history_with_member_removal() -> MemberRemovalHistory {
-    let db = open_test_db();
-    let owner = UserKeypair::generate();
-    let member = UserKeypair::generate();
-    let member_pubkey = crate::sync::test_helpers::pubkey_hex(&member);
-    let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-    let store = TestStore::create(&db, "retained-removal-proof", owner.clone())
-        .await
-        .expect("create removal-proof Store");
-    store
-        .invite_member(
-            &db,
-            &owner,
-            &super::hlc::Hlc::new(
-                "retained-removal-proof".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &member_pubkey,
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &encryption,
-            "Retained removal proof",
-        )
-        .await
-        .expect("invite removable member");
-    let member_db = open_test_db();
-    store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-21T00:00:00Z")
-        .await
-        .expect("activate removable member device");
-    store
-        .promote_active_member_fixture(&db, &member_db, &owner, &member, &encryption)
-        .await
-        .expect("promote removable member to Owner");
-    let custody = crate::sync::test_helpers::TestCustody::default();
-    let security = crate::sync::test_helpers::test_store_security(
-        "retained-removal-proof",
-        std::sync::Arc::new(custody),
-    );
-    store
-        .remove_member(
-            &db,
-            &owner,
-            &super::hlc::Hlc::new(
-                "retained-removal-proof-remove".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &member_pubkey,
-            &encryption,
-            &security,
-        )
-        .await
-        .expect("remove retained member");
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("bind retained-removal Store");
-    let retained = device
-        .retained_merge_replay_inputs_for_test()
-        .await
-        .expect("load retained removal history");
-    let summary = retained
-        .last()
-        .expect("removal activation is retained")
-        .history_summary()
-        .clone();
-    MemberRemovalHistory {
-        db,
-        store,
-        device,
-        summary,
+impl MemberRemovalHistory {
+    async fn create() -> Self {
+        let db = open_test_db();
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let member_pubkey = crate::sync::test_helpers::pubkey_hex(&member);
+        let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let store = TestStore::create(&db, "retained-removal-proof", owner.clone())
+            .await
+            .expect("create removal-proof Store");
+        store
+            .invite_member(
+                &db,
+                &owner,
+                &super::hlc::Hlc::new(
+                    "retained-removal-proof".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &member_pubkey,
+                None,
+                crate::protocol::membership::MemberRole::Member,
+                &encryption,
+                "Retained removal proof",
+            )
+            .await
+            .expect("invite removable member");
+        let member_db = open_test_db();
+        store
+            .activate_joined_device(&db, &member_db, &member, "2026-07-21T00:00:00Z")
+            .await
+            .expect("activate removable member device");
+        store
+            .promote_active_member_fixture(&db, &member_db, &owner, &member, &encryption)
+            .await
+            .expect("promote removable member to Owner");
+        let custody = crate::sync::test_helpers::TestCustody::default();
+        let security = crate::sync::test_helpers::test_store_security(
+            "retained-removal-proof",
+            std::sync::Arc::new(custody),
+        );
+        store
+            .remove_member(
+                &db,
+                &owner,
+                &super::hlc::Hlc::new(
+                    "retained-removal-proof-remove".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &member_pubkey,
+                &encryption,
+                &security,
+            )
+            .await
+            .expect("remove retained member");
+        let device = store
+            .bind_device(&db, &store.signer)
+            .await
+            .expect("bind retained-removal Store");
+        let retained = device
+            .retained_merge_replay_inputs_for_test()
+            .await
+            .expect("load retained removal history");
+        let summary = retained
+            .last()
+            .expect("removal activation is retained")
+            .history_summary()
+            .clone();
+        Self {
+            db,
+            store,
+            device,
+            summary,
+        }
     }
 }
 
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_membership_removal() {
-    let fixture = Box::pin(history_with_member_removal()).await;
+    let fixture = Box::pin(MemberRemovalHistory::create()).await;
     let retained = fixture
         .device
         .retained_merge_replay_inputs_for_test()
@@ -520,7 +540,7 @@ async fn signed_head_rejects_an_omitted_membership_removal() {
 
 #[tokio::test]
 async fn membership_checkpoint_floor_includes_the_activating_control() {
-    let fixture = Box::pin(history_with_member_removal()).await;
+    let fixture = Box::pin(MemberRemovalHistory::create()).await;
     let control = fixture
         .summary
         .membership_proofs
@@ -541,7 +561,7 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
 
 #[tokio::test]
 async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() {
-    let mut fixture = Box::pin(history_with_member_removal()).await;
+    let mut fixture = Box::pin(MemberRemovalHistory::create()).await;
     let proof = fixture
         .summary
         .membership_proofs
@@ -577,7 +597,7 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
 
 #[tokio::test]
 async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
-    let fixture = Box::pin(history_with_member_removal()).await;
+    let fixture = Box::pin(MemberRemovalHistory::create()).await;
     let directory = tempfile::tempdir().expect("create snapshot image directory");
     let snapshot_dir = directory.path().to_path_buf();
     let database = store_database(&fixture.db);

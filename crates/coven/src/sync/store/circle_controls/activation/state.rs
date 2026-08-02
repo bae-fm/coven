@@ -1433,16 +1433,13 @@ mod derived_state_tests {
 
     /// An installed `Active` current state and its owner pubkey.
     async fn installed_active_state() -> (CircleCurrentState, String) {
-        let owner = crate::sync::test_helpers::test_circle_owner_keypair();
+        let owner = crate::database::test_circle_owner_keypair();
         let owner_pubkey = crate::keys::public_key_hex(&owner);
         let db = crate::sync::test_helpers::open_test_db();
         let state = db
             .test_sql(|database| {
                 database.apply_coven_routing_schema()?;
-                let (circle_id, _) = crate::sync::test_helpers::install_test_active_circle(
-                    &database,
-                    "derived-state",
-                );
+                let (circle_id, _) = database.install_test_active_circle("derived-state");
                 database.circle_current_state(circle_id)?.ok_or_else(|| {
                     crate::database::DbError::Message(
                         "installed active circle has no current state".to_string(),
@@ -1458,10 +1455,7 @@ mod derived_state_tests {
         let db = crate::sync::test_helpers::open_test_db();
         db.test_sql(|database| {
             database.apply_coven_routing_schema()?;
-            let (circle_id, _) = crate::sync::test_helpers::install_test_inactive_circle(
-                &database,
-                "derived-state-inactive",
-            );
+            let (circle_id, _) = database.install_test_inactive_circle("derived-state-inactive");
             database.circle_current_state(circle_id)?.ok_or_else(|| {
                 crate::database::DbError::Message(
                     "installed inactive circle has no current state".to_string(),

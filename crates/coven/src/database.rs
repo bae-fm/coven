@@ -146,7 +146,8 @@ pub(crate) use coven_schema::DatabaseTestTable;
 pub(crate) use test_sql::DatabaseTestSql;
 #[cfg(test)]
 pub(crate) use test_support::{
-    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
+    test_circle_owner_keypair, DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper,
+    ScopedRoutingStateForTest,
 };
 #[cfg(test)]
 pub(crate) use test_transaction::DatabaseTestTransaction;

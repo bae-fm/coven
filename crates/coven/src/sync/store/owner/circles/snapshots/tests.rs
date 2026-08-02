@@ -55,11 +55,7 @@ impl CircleSnapshotFixture {
         crate::protocol::circle::CircleControlCoord,
     ) {
         self.database
-            .test_sql(|database| {
-                Ok(crate::sync::test_helpers::install_test_active_circle(
-                    &database, "snap",
-                ))
-            })
+            .test_sql(|database| Ok(database.install_test_active_circle("snap")))
             .await
             .expect("install active Circle")
     }

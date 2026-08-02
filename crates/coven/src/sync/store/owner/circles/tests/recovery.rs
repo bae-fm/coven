@@ -12,96 +12,98 @@ struct RevokedOperation {
     author_grant_id: crate::protocol::membership::MembershipGrantId,
 }
 
-async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
-    let db = open_test_db();
-    let founder = UserKeypair::generate();
-    let store = create_test_store_in_its_own_task(&db, name, &founder).await;
-    let successor = UserKeypair::generate();
-    let successor_pubkey = keys::public_key_hex(&successor);
-    let encryption = EncryptionService::from_key([42; 32]);
-    store
-        .invite_member(
-            &db,
-            &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &successor_pubkey,
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Recovery test Store",
-        )
-        .await
-        .expect("invite successor member");
-    let successor_db = open_test_db();
-    store
-        .activate_joined_device(
-            &db,
-            &successor_db,
-            &successor,
-            "0000000001003-0000-successor",
-        )
-        .await
-        .expect("activate successor device");
-    let exact_membership = store
-        .bind_device(&successor_db, &successor)
-        .await
-        .expect("bind successor Store")
-        .membership_for_test()
-        .await
-        .expect("load the operation author's exact Store grant");
-    let [author_grant_id] = exact_membership
-        .active_grant_ids(&successor_pubkey)
-        .into_iter()
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("operation author has one active Store grant");
-    // The member device is the one that authors and publishes; drive everything
-    // through its database so its local membership view governs authority.
-    let journal = store
-        .bind_device(&successor_db, &successor)
-        .await
-        .expect("bind Circle preparation Store")
-        .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
-        .await
-        .expect("prepare operation while authorized");
-    let operation_id = journal.operation_id.clone();
-    StoreDatabase::new(&successor_db)
-        .insert_circle_operation(journal)
-        .await
-        .expect("persist operation");
+impl RevokedOperation {
+    async fn prepare(name: &str) -> Self {
+        let db = open_test_db();
+        let founder = UserKeypair::generate();
+        let store = create_test_store_in_its_own_task(&db, name, &founder).await;
+        let successor = UserKeypair::generate();
+        let successor_pubkey = keys::public_key_hex(&successor);
+        let encryption = EncryptionService::from_key([42; 32]);
+        store
+            .invite_member(
+                &db,
+                &founder,
+                &crate::sync::hlc::Hlc::new(
+                    "founder-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &successor_pubkey,
+                None,
+                MemberRole::Member,
+                &encryption,
+                "Recovery test Store",
+            )
+            .await
+            .expect("invite successor member");
+        let successor_db = open_test_db();
+        store
+            .activate_joined_device(
+                &db,
+                &successor_db,
+                &successor,
+                "0000000001003-0000-successor",
+            )
+            .await
+            .expect("activate successor device");
+        let exact_membership = store
+            .bind_device(&successor_db, &successor)
+            .await
+            .expect("bind successor Store")
+            .membership_for_test()
+            .await
+            .expect("load the operation author's exact Store grant");
+        let [author_grant_id] = exact_membership
+            .active_grant_ids(&successor_pubkey)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("operation author has one active Store grant");
+        // The member device is the one that authors and publishes; drive everything
+        // through its database so its local membership view governs authority.
+        let journal = store
+            .bind_device(&successor_db, &successor)
+            .await
+            .expect("bind Circle preparation Store")
+            .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
+            .await
+            .expect("prepare operation while authorized");
+        let operation_id = journal.operation_id.clone();
+        StoreDatabase::new(&successor_db)
+            .insert_circle_operation(journal)
+            .await
+            .expect("persist operation");
 
-    let custody = TestCustody::default();
-    custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "circle-recovery-test",
-        std::sync::Arc::new(custody),
-    );
-    store
-        .remove_member(
-            &db,
-            &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &successor_pubkey,
-            &encryption,
-            &security,
-        )
-        .await
-        .expect("remove successor grant");
+        let custody = TestCustody::default();
+        custody.set_initial_key([42; 32]);
+        let security = crate::sync::test_helpers::test_store_security(
+            "circle-recovery-test",
+            std::sync::Arc::new(custody),
+        );
+        store
+            .remove_member(
+                &db,
+                &founder,
+                &crate::sync::hlc::Hlc::new(
+                    "founder-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &successor_pubkey,
+                &encryption,
+                &security,
+            )
+            .await
+            .expect("remove successor grant");
 
-    RevokedOperation {
-        db: successor_db,
-        owner_db: db,
-        store,
-        founder,
-        successor,
-        operation_id,
-        author_grant_id,
+        Self {
+            db: successor_db,
+            owner_db: db,
+            store,
+            founder,
+            successor,
+            operation_id,
+            author_grant_id,
+        }
     }
 }
 
@@ -111,7 +113,7 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
 /// with the typed `NotBlocked`.
 #[tokio::test]
 async fn operation_inspection_surface_reports_the_typed_block() {
-    let revoked = prepare_and_revoke_operation("recovery-inspection-surface").await;
+    let revoked = RevokedOperation::prepare("recovery-inspection-surface").await;
     revoked
         .store
         .bind_device(&revoked.db, &revoked.successor)
@@ -175,7 +177,7 @@ async fn operation_inspection_surface_reports_the_typed_block() {
 
 #[tokio::test]
 async fn a_blocked_operation_reports_typed_authority_lost() {
-    let revoked = prepare_and_revoke_operation("recovery-typed-block").await;
+    let revoked = RevokedOperation::prepare("recovery-typed-block").await;
     revoked
         .store
         .bind_device(&revoked.db, &revoked.successor)
@@ -327,7 +329,7 @@ async fn discard_without_nonactivation_proof_is_refused() {
 /// discard verifies it, retires the candidate graph, and clears the journal.
 #[tokio::test]
 async fn discard_after_membership_revocation_witness_cleans_the_operation() {
-    let revoked = prepare_and_revoke_operation("recovery-discard-revocation").await;
+    let revoked = RevokedOperation::prepare("recovery-discard-revocation").await;
     revoked
         .store
         .bind_device(&revoked.db, &revoked.successor)
@@ -565,7 +567,7 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
 
     // A permanently-blocked operation re-blocks on retry; retrying twice leaves it
     // durably blocked with no corruption.
-    let revoked = prepare_and_revoke_operation("recovery-retry-reblock").await;
+    let revoked = RevokedOperation::prepare("recovery-retry-reblock").await;
     revoked
         .store
         .bind_device(&revoked.db, &revoked.successor)

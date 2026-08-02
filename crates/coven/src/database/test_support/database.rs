@@ -30,15 +30,141 @@ impl Database {
 
     pub(crate) async fn execute_test_host_write(&self, sql: &str) {
         let sql = sql.to_string();
-        let tables = self.synced_tables().to_vec();
-        let write_id = self.new_write_id();
-        self.test_sql(move |database| {
-            database.run_prepared_blob_transition_write(&tables, None, write_id, |transaction| {
+        crate::database::StoreDatabase::new(self)
+            .run_prepared_blob_transition_write_for_test(None, move |transaction| {
                 transaction.execute_batch(&sql).map_err(DbError::from)
             })
+            .await
+            .unwrap_or_else(|error| panic!("test host write failed: {error}"));
+    }
+
+    pub(crate) async fn seed_local_release_rows_for_test(
+        &self,
+        note_id: &str,
+        photo_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) {
+        let note_id = note_id.to_string();
+        let photo_id = photo_id.to_string();
+        let cloud_path = cloud_path.to_string();
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = crate::blob::content_hash(bytes);
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+                     VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
+                    rusqlite::params![note_id, 0_i64],
+                )
+                .map_err(DbError::from)?;
+            database
+                .execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
+                     VALUES (?1, ?2, 'image', ?3, ?4,
+                             '0000000001000-0000-A', '2026-01-01', ?5)",
+                    rusqlite::params![photo_id, note_id, size, hash, cloud_path],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
         })
         .await
-        .unwrap_or_else(|error| panic!("test host write failed: {error}"));
+        .expect("seed exact release rows");
+    }
+
+    pub(crate) async fn add_local_photo_for_test(
+        &self,
+        note_id: &str,
+        photo_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+        source: &std::path::Path,
+    ) {
+        let note_id = note_id.to_string();
+        let photo_id = photo_id.to_string();
+        let cloud_path = cloud_path.to_string();
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = crate::blob::content_hash(bytes);
+        self.execute_test_host_write(&format!(
+            "INSERT INTO note_photos
+             (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
+             VALUES ('{photo_id}', '{note_id}', 'image', {size}, '{hash}',
+                     '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+        ))
+        .await;
+        self.register_external_blob_for_test("note_photos", &photo_id, source)
+            .await;
+    }
+
+    pub(crate) async fn insert_local_upload_rows_for_test(
+        &self,
+        root_id: &str,
+        rows: &[(&str, &[u8])],
+    ) -> Result<(), DbError> {
+        let root_id = root_id.to_string();
+        let rows = rows
+            .iter()
+            .map(|(id, bytes)| {
+                (
+                    id.to_string(),
+                    i64::try_from(bytes.len()).expect("test blob size fits SQLite"),
+                    crate::blob::content_hash(bytes),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                     VALUES (?1, 'upload', 0, '0000000001000-0000-test', '2024-01-01')",
+                    [&root_id],
+                )
+                .map_err(DbError::from)?;
+            for (id, size, hash) in rows {
+                database
+                    .execute(
+                        "INSERT INTO note_photos
+                         (id, note_id, kind, size, hash, _updated_at, created_at)
+                         VALUES (?1, ?2, 'attach', ?3, ?4,
+                                 '0000000001000-0000-test', '2024-01-01')",
+                        rusqlite::params![id, root_id, size, hash],
+                    )
+                    .map_err(DbError::from)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn seed_stuck_blob_upload_for_test(
+        &self,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let hash = crate::blob::content_hash(b"x");
+        self.execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('pending-root', 'Pending', NULL, 0, \
+                     '0000000000001-0000-M', '2026-01-01'); \
+             INSERT INTO note_photos \
+                    (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('pending-blob', 'pending-root', 'cover', 1, '{hash}', \
+                     '0000000000001-0000-M', '2026-01-01')"
+        ))
+        .await;
+        let row = self.row_blob_ref("note_photos", "pending-blob").await?;
+        let created_at = created_at.to_string();
+        self.test_sql(move |database| {
+            database.enqueue_blob_upload(
+                "notes",
+                "pending-root",
+                &row,
+                std::path::Path::new("/nonexistent/pending-blob"),
+                false,
+                &created_at,
+            )
+        })
+        .await
     }
 
     pub(crate) async fn query_test_text(&self, sql: &str) -> String {
@@ -125,7 +251,17 @@ impl Database {
             .map(|result| result.had_fk_violations)
     }
 
-    pub(crate) async fn plant_blob_row_for_test(
+    pub(crate) async fn plant_blob_row_for_test(&self, blob_id: &str, remote: bool, bytes: &[u8]) {
+        self.plant_blob_row_with_facts_for_test(
+            blob_id,
+            remote,
+            bytes.len() as u64,
+            Some(&crate::blob::content_hash(bytes)),
+        )
+        .await;
+    }
+
+    pub(crate) async fn plant_blob_row_with_facts_for_test(
         &self,
         blob_id: &str,
         remote: bool,
@@ -315,6 +451,43 @@ impl Database {
             .await
     }
 
+    pub(crate) async fn retained_store_package_pin_for_test(
+        &self,
+        commit: &crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<
+        (
+            crate::protocol::remote_object::RetainedReplayOwner,
+            crate::protocol::store_commit::StorePackageRef,
+            crate::protocol::remote_object::RemoteObjectRecord,
+        ),
+        DbError,
+    > {
+        let stream_id = commit.coord.stream_id.to_string();
+        let sequence = commit.coord.sequence();
+        let (input_hash, canonical_input) = self
+            .test_sql(move |database| database.retained_merge_input(&stream_id, sequence))
+            .await?;
+        let retained: serde_json::Value = serde_json::from_slice(&canonical_input)
+            .map_err(|error| DbError::Message(format!("parse retained package input: {error}")))?;
+        let reference: crate::protocol::store_commit::StorePackageRef = serde_json::from_value(
+            retained["packages"][0]["store"]["reference"].clone(),
+        )
+        .map_err(|error| {
+            DbError::Message(format!("parse retained Store package reference: {error}"))
+        })?;
+        let remote = self
+            .remote_object_for_test(reference.object.clone())
+            .await?;
+        Ok((
+            crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                commit: commit.clone(),
+                input_hash,
+            },
+            reference,
+            remote,
+        ))
+    }
+
     pub(crate) async fn remote_objects_for_test(
         &self,
     ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, DbError> {
@@ -381,16 +554,14 @@ impl Database {
         cloud_path: Option<&str>,
         bytes: &[u8],
     ) -> Result<(), DbError> {
-        let tables = self.synced_tables().to_vec();
-        let write_id = self.new_write_id();
         let root_id = root_id.to_string();
         let row_id = row_id.to_string();
         let blob_id = blob_id.to_string();
         let cloud_path = cloud_path.map(str::to_string);
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
         let hash = crate::protocol::store_commit::ObjectHash::digest(bytes).to_string();
-        self.test_sql(move |database| {
-            database.run_internal_store_write(&tables, None, write_id, |transaction| {
+        crate::database::StoreDatabase::new(self)
+            .run_host_store_write_for_test(None, None, move |transaction| {
                 transaction
                     .execute(
                         "INSERT INTO notes
@@ -410,8 +581,8 @@ impl Database {
                     .map_err(DbError::from)?;
                 Ok(())
             })
-        })
-        .await
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn capture_circle_document_for_test(
@@ -420,15 +591,12 @@ impl Database {
         circle_id: crate::protocol::circle::CircleId,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let write_id = self.new_write_id();
-        let captured = write_id.clone();
-        let tables = self.synced_tables().to_vec();
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
         let audience_value = circle_id.to_string();
         let row_id = row_id.to_string();
         let stamp = stamp.to_string();
-        self.test_sql(move |connection| {
-            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+        let receipt = crate::database::StoreDatabase::new(self)
+            .run_host_store_write_for_test(Some(routing), None, move |transaction| {
                 transaction
                     .execute(
                         "INSERT INTO documents (id, audience, _updated_at)
@@ -438,9 +606,8 @@ impl Database {
                     .map(|_| ())
                     .map_err(DbError::from)
             })
-        })
-        .await?;
-        Ok(write_id)
+            .await?;
+        Ok(receipt.write_id)
     }
 
     pub(crate) async fn circle_document_present_for_test(
@@ -476,15 +643,12 @@ impl Database {
         audience: Option<crate::protocol::circle::CircleId>,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let write_id = self.new_write_id();
-        let captured = write_id.clone();
-        let tables = self.synced_tables().to_vec();
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
         let audience = audience.map(|circle_id| circle_id.to_string());
         let row_id = row_id.to_string();
         let stamp = stamp.to_string();
-        self.test_sql(move |database| {
-            database.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+        let receipt = crate::database::StoreDatabase::new(self)
+            .run_host_store_write_for_test(Some(routing), None, move |transaction| {
                 transaction
                     .execute(
                         "INSERT INTO documents (id, audience, _updated_at)
@@ -494,9 +658,8 @@ impl Database {
                     .map(|_| ())
                     .map_err(DbError::from)
             })
-        })
-        .await?;
-        Ok(write_id)
+            .await?;
+        Ok(receipt.write_id)
     }
 
     pub(crate) async fn capture_document_with_file_for_test(
@@ -507,9 +670,6 @@ impl Database {
         bytes: &[u8],
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let write_id = self.new_write_id();
-        let captured = write_id.clone();
-        let tables = self.synced_tables().to_vec();
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
         let document_id = document_id.to_string();
         let file_id = file_id.to_string();
@@ -517,8 +677,8 @@ impl Database {
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
         let hash = crate::blob::content_hash(bytes);
         let stamp = stamp.to_string();
-        self.test_sql(move |database| {
-            database.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+        let receipt = crate::database::StoreDatabase::new(self)
+            .run_host_store_write_for_test(Some(routing), None, move |transaction| {
                 transaction
                     .execute(
                         "INSERT INTO documents (id, audience, _updated_at)
@@ -536,9 +696,8 @@ impl Database {
                     .map(|_| ())
                     .map_err(DbError::from)
             })
-        })
-        .await?;
-        Ok(write_id)
+            .await?;
+        Ok(receipt.write_id)
     }
 
     pub(crate) async fn document_file_stamp_for_test(

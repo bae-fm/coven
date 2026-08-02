@@ -105,6 +105,36 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "TombstoneCollector",
         "load",
     ),
+    (
+        "crates/coven/src/blob/upload_tests.rs",
+        "UploadFixture",
+        "with_home",
+    ),
+    (
+        "crates/coven/src/sync/pull_tests.rs",
+        "ExactMembershipChain",
+        "load",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/recovery.rs",
+        "RevokedOperation",
+        "prepare",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/pull/tests.rs",
+        "EffectiveAccessFixture",
+        "create",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/writer/snapshot/image.rs",
+        "PublishedScopedSnapshot",
+        "publish",
+    ),
+    (
+        "crates/coven/src/sync/store_history_checkpoint_tests.rs",
+        "MemberRemovalHistory",
+        "create",
+    ),
     ("crates/coven/src/coven.rs", "RemoteOnlyStoreBlob", "create"),
     (
         "crates/coven/src/sync/test_helpers.rs",

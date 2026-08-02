@@ -1156,218 +1156,222 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
 /// without replacing the imported objects.
 #[tokio::test]
 async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
-    Box::pin(run_restore_first_cycle_extends_snapshot_stream()).await;
-}
+    Box::pin(async {
+        crate::keys::test_keyring::install();
 
-async fn run_restore_first_cycle_extends_snapshot_stream() {
-    crate::keys::test_keyring::install();
+        let store_id = "restore-anti-clobber-test";
+        let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+        let cloud =
+            crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
+        let cipher = CloudCipher::Plaintext;
+        let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
+        let tables = test_synced_tables();
+        let owner_keypair = UserKeypair::generate();
 
-    let store_id = "restore-anti-clobber-test";
-    let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
-    let cloud =
-        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
-    let cipher = CloudCipher::Plaintext;
-    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
-    let tables = test_synced_tables();
-    let owner_keypair = UserKeypair::generate();
+        let owner_storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+                cipher.clone(),
+                blob_paths,
+                store_id.to_string(),
+                owner_keypair.clone(),
+            )
+            .expect("build owner cloud storage"),
+        );
 
-    let owner_storage = Arc::new(
-        CloudSyncStorage::new(
-            Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        // Owner: a store with one shared note, captured straight into the published
+        // snapshot — the shape a device sees the first time it opens a shared store.
+        let db_owner = open_test_db();
+        let owner_device = TestDevice::create(
+            &db_owner,
+            owner_storage.clone(),
+            store_id,
+            owner_keypair.clone(),
+        )
+        .await
+        .expect("initialize owner Store");
+        let store_root = owner_device.store_root().clone();
+        let membership = owner_device
+            .membership()
+            .await
+            .expect("load owner membership");
+        db_owner
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
+            )
+            .await;
+        let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+        let snap_dir = snap_tmp.path().to_path_buf();
+        let store_database = crate::database::StoreDatabase::new(&db_owner);
+        let snapshot = store_database
+            .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
+            .await
+            .expect("owner snapshot");
+        let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+        owner_device
+            .publish_snapshot(snapshot, snapshot_coverage.clone())
+            .await
+            .expect("publish owner snapshot");
+        owner_device
+            .publish_acknowledgement(snapshot_coverage)
+            .await
+            .expect("publish owner snapshot acknowledgement");
+
+        let snapshot_before = owner_storage
+            .cloud_home()
+            .list("store-v1/snapshots/")
+            .await
+            .expect("list Store snapshot objects");
+
+        // Device B restores through the public restore-code service over its own
+        // CloudKit home onto the same records.
+        let app = Arc::new(tempfile::tempdir().expect("restore app dir"));
+        let joiner_keypair = owner_keypair.clone();
+        let continuation = owner_device
+            .export_activated_device_continuation()
+            .await
+            .expect("export exact activated continuation");
+        let expected_latest_snapshot = continuation.latest_snapshot.clone();
+        let restore_code = encode_restore_code(&RestoreCode {
+            v: crate::restoration::RESTORE_CODE_VERSION,
+            sid: store_id.to_string(),
+            ek: None,
+            name: "Restored Store".to_string(),
+            provider: CloudHomeJoinInfo::CloudKit,
+            store_root: store_root.clone(),
+            founder_pubkey: pubkey_hex(&owner_keypair),
+            membership_floor: MembershipFloor(membership.head_refs().to_vec()),
+            authority: RestoreAuthority::ActivatedContinuation(continuation),
+        });
+        let decoded = decode_restore_code(&restore_code).expect("decode continuation restore code");
+        let RestoreAuthority::ActivatedContinuation(decoded_continuation) = decoded.authority
+        else {
+            panic!("decoded restore authority changed variants");
+        };
+        assert_eq!(
+            decoded_continuation.latest_snapshot,
+            expected_latest_snapshot
+        );
+        let restore_app = app.clone();
+        let restore_tables = tables.clone();
+        let restore_cloudkit = cloudkit_ops.clone();
+        let config = tokio::spawn(async move {
+            let layout = StoreLayout::new(restore_app.path());
+            let cancel = tokio::sync::watch::channel(false).1;
+            restore_from_code(
+                &restore_code,
+                &restore_tables,
+                &test_migrations(),
+                None,
+                crate::custody::KeyCustody::Keyring,
+                crate::identity_custody::IdentityCustody::Keyring,
+                crate::oauth::OAuthClients::empty(),
+                None,
+                Some(restore_cloudkit),
+                &layout,
+                Arc::new(SystemClock),
+                Arc::new(SequentialIdProvider::new("device-b")),
+                |_status: &str| {},
+                &cancel,
+            )
+            .await
+        })
+        .await
+        .expect("restore task completes")
+        .expect("restore through code service");
+        let layout = StoreLayout::new(app.path());
+        let lib_b = config.store_dir.clone();
+        let store_keys = StoreKeys::bind(store_id.to_string());
+        let identity_custody =
+            crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
+
+        // The config is saved, and a saved config implies the identity was imported
+        // before it — the restored device's signing identity resolves in custody.
+        assert_eq!(
+            identity_custody
+                .unlock()
+                .expect("read restored identity")
+                .map(|kp| kp.public_key()),
+            Some(joiner_keypair.public_key()),
+            "a completed restore has its signing identity in custody",
+        );
+        let other_store_keys = StoreKeys::bind("restore-anti-clobber-other-store".to_string());
+        let other_identity_custody = crate::identity_custody::IdentityCustody::Keyring.resolve(
+            &other_store_keys,
+            &layout.store_dir("restore-anti-clobber-other-store"),
+        );
+        assert!(
+            other_identity_custody
+                .unlock()
+                .expect("read unrelated store identity")
+                .is_none(),
+            "restoring one store establishes no identity for another store",
+        );
+
+        let (db_b, _stamper) = Database::open(
+            &lib_b.db_path(),
+            tables.clone(),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            config.device_id.clone(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &test_migrations(),
+        )
+        .expect("open B db");
+
+        // B's first real sync cycle, with no local changes of its own.
+        let joiner_storage = CloudSyncStorage::new(
+            Arc::new(crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
-            owner_keypair.clone(),
+            joiner_keypair.clone(),
         )
-        .expect("build owner cloud storage"),
-    );
-
-    // Owner: a store with one shared note, captured straight into the published
-    // snapshot — the shape a device sees the first time it opens a shared store.
-    let db_owner = open_test_db();
-    let owner_device = TestDevice::create(
-        &db_owner,
-        owner_storage.clone(),
-        store_id,
-        owner_keypair.clone(),
-    )
-    .await
-    .expect("initialize owner Store");
-    let store_root = owner_device.store_root().clone();
-    let membership = owner_device
-        .membership()
-        .await
-        .expect("load owner membership");
-    db_owner
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-         VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
+        .expect("build joiner cloud storage");
+        let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
+            crate::database::StoreDatabase::new(&db_b),
+            lib_b.clone(),
         )
-        .await;
-    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
-    let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = crate::database::StoreDatabase::new(&db_owner);
-    let snapshot = store_database
-        .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
+        .prepare_sync(joiner_storage)
         .await
-        .expect("owner snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
-    owner_device
-        .publish_snapshot(snapshot, snapshot_coverage.clone())
-        .await
-        .expect("publish owner snapshot");
-    owner_device
-        .publish_acknowledgement(snapshot_coverage)
-        .await
-        .expect("publish owner snapshot acknowledgement");
-
-    let snapshot_before = owner_storage
-        .cloud_home()
-        .list("store-v1/snapshots/")
-        .await
-        .expect("list Store snapshot objects");
-
-    // Device B restores through the public restore-code service over its own
-    // CloudKit home onto the same records.
-    let app = Arc::new(tempfile::tempdir().expect("restore app dir"));
-    let joiner_keypair = owner_keypair.clone();
-    let continuation = owner_device
-        .export_activated_device_continuation()
-        .await
-        .expect("export exact activated continuation");
-    let expected_latest_snapshot = continuation.latest_snapshot.clone();
-    let restore_code = encode_restore_code(&RestoreCode {
-        v: crate::restoration::RESTORE_CODE_VERSION,
-        sid: store_id.to_string(),
-        ek: None,
-        name: "Restored Store".to_string(),
-        provider: CloudHomeJoinInfo::CloudKit,
-        store_root: store_root.clone(),
-        founder_pubkey: pubkey_hex(&owner_keypair),
-        membership_floor: MembershipFloor(membership.head_refs().to_vec()),
-        authority: RestoreAuthority::ActivatedContinuation(continuation),
-    });
-    let decoded = decode_restore_code(&restore_code).expect("decode continuation restore code");
-    let RestoreAuthority::ActivatedContinuation(decoded_continuation) = decoded.authority else {
-        panic!("decoded restore authority changed variants");
-    };
-    assert_eq!(
-        decoded_continuation.latest_snapshot,
-        expected_latest_snapshot
-    );
-    let restore_app = app.clone();
-    let restore_tables = tables.clone();
-    let restore_cloudkit = cloudkit_ops.clone();
-    let config = tokio::spawn(async move {
-        let layout = StoreLayout::new(restore_app.path());
-        let cancel = tokio::sync::watch::channel(false).1;
-        restore_from_code(
-            &restore_code,
-            &restore_tables,
-            &test_migrations(),
-            None,
-            crate::custody::KeyCustody::Keyring,
-            crate::identity_custody::IdentityCustody::Keyring,
-            crate::oauth::OAuthClients::empty(),
-            None,
-            Some(restore_cloudkit),
-            &layout,
-            Arc::new(SystemClock),
-            Arc::new(SequentialIdProvider::new("device-b")),
-            |_status: &str| {},
-            &cancel,
-        )
-        .await
+        .expect("prepare B sync cycle");
+        components
+            .run_cycle(&SystemClock, None, &lib_b, None)
+            .await
+            .expect("run B sync cycle");
+        let snapshot_after = components
+            .list_storage_objects_for_test("store-v1/snapshots/")
+            .await
+            .expect("list Store snapshot objects");
+        assert!(
+            snapshot_before
+                .iter()
+                .all(|object| snapshot_after.contains(object)),
+            "the restored cycle preserves every imported snapshot object",
+        );
+        let imported_snapshot = expected_latest_snapshot.expect("continued snapshot reference");
+        let (successor_generation, successor_bytes) = db_b
+            .test_sql(|database| database.latest_published_store_snapshot())
+            .await
+            .expect("read continued snapshot stream");
+        let successor: crate::protocol::store_commit::SnapshotMeta =
+            serde_json::from_slice(&successor_bytes).expect("parse continued snapshot metadata");
+        assert_eq!(
+            u64::try_from(successor_generation).expect("non-negative snapshot generation"),
+            imported_snapshot
+                .generation
+                .checked_add(1)
+                .expect("snapshot generation successor"),
+            "the due snapshot advances exactly one immutable generation",
+        );
+        assert_eq!(
+            successor.predecessor,
+            Some(imported_snapshot),
+            "the due snapshot extends the imported exact generation",
+        );
     })
-    .await
-    .expect("restore task completes")
-    .expect("restore through code service");
-    let layout = StoreLayout::new(app.path());
-    let lib_b = config.store_dir.clone();
-    let store_keys = StoreKeys::bind(store_id.to_string());
-    let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
-
-    // The config is saved, and a saved config implies the identity was imported
-    // before it — the restored device's signing identity resolves in custody.
-    assert_eq!(
-        identity_custody
-            .unlock()
-            .expect("read restored identity")
-            .map(|kp| kp.public_key()),
-        Some(joiner_keypair.public_key()),
-        "a completed restore has its signing identity in custody",
-    );
-    let other_store_keys = StoreKeys::bind("restore-anti-clobber-other-store".to_string());
-    let other_identity_custody = crate::identity_custody::IdentityCustody::Keyring.resolve(
-        &other_store_keys,
-        &layout.store_dir("restore-anti-clobber-other-store"),
-    );
-    assert!(
-        other_identity_custody
-            .unlock()
-            .expect("read unrelated store identity")
-            .is_none(),
-        "restoring one store establishes no identity for another store",
-    );
-
-    let (db_b, _stamper) = Database::open(
-        &lib_b.db_path(),
-        tables.clone(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        config.device_id.clone(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open B db");
-
-    // B's first real sync cycle, with no local changes of its own.
-    let joiner_storage = CloudSyncStorage::new(
-        Arc::new(crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        joiner_keypair.clone(),
-    )
-    .expect("build joiner cloud storage");
-    let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(&db_b),
-        lib_b.clone(),
-    )
-    .run_cycle(joiner_storage)
-    .await
-    .expect("B sync cycle");
-    let snapshot_after = components
-        .list_storage_objects_for_test("store-v1/snapshots/")
-        .await
-        .expect("list Store snapshot objects");
-    assert!(
-        snapshot_before
-            .iter()
-            .all(|object| snapshot_after.contains(object)),
-        "the restored cycle preserves every imported snapshot object",
-    );
-    let imported_snapshot = expected_latest_snapshot.expect("continued snapshot reference");
-    let (successor_generation, successor_bytes) = db_b
-        .test_sql(|database| database.latest_published_store_snapshot())
-        .await
-        .expect("read continued snapshot stream");
-    let successor: crate::protocol::store_commit::SnapshotMeta =
-        serde_json::from_slice(&successor_bytes).expect("parse continued snapshot metadata");
-    assert_eq!(
-        u64::try_from(successor_generation).expect("non-negative snapshot generation"),
-        imported_snapshot
-            .generation
-            .checked_add(1)
-            .expect("snapshot generation successor"),
-        "the due snapshot advances exactly one immutable generation",
-    );
-    assert_eq!(
-        successor.predecessor,
-        Some(imported_snapshot),
-        "the due snapshot extends the imported exact generation",
-    );
+    .await;
 }
 
 /// Mirrors join_tests.rs's `a_fresh_joiner_refuses_a_rolled_back_membership_head`:
@@ -1482,276 +1486,290 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
 /// Restore bootstrap downloads every eager blob referenced by snapshot rows.
 #[tokio::test]
 async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
-    Box::pin(run_restore_bootstrap_backfills_blob_files_for_snapshot_rows()).await;
-}
+    Box::pin(async {
+        crate::keys::test_keyring::install();
 
-async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
-    crate::keys::test_keyring::install();
+        let store_id = "restore-blob-backfill-test";
+        let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+        let cloud = Arc::new(
+            crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+        );
+        let master_key =
+            crate::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
+        let serialized_keyring = master_key.to_serialized();
+        let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key));
+        let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
+        let tables = test_synced_tables_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        ));
+        let owner_keypair = UserKeypair::generate();
 
-    let store_id = "restore-blob-backfill-test";
-    let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
-    let cloud = Arc::new(
-        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
-    );
-    let master_key = crate::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
-    let serialized_keyring = master_key.to_serialized();
-    let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key));
-    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
-    let tables = test_synced_tables_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheEager,
-    ));
-    let owner_keypair = UserKeypair::generate();
+        let owner_storage = Arc::new(
+            CloudSyncStorage::new(
+                cloud.clone(),
+                cipher.clone(),
+                blob_paths,
+                store_id.to_string(),
+                owner_keypair.clone(),
+            )
+            .expect("build owner cloud storage"),
+        );
 
-    let owner_storage = Arc::new(
-        CloudSyncStorage::new(
+        // Owner: a shared note with a cover photo, both captured into the snapshot.
+        let db_owner = open_test_db_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        ));
+        let owner_device = Box::pin(TestDevice::create(
+            &db_owner,
+            owner_storage,
+            store_id,
+            owner_keypair.clone(),
+        ))
+        .await
+        .expect("initialize owner Store");
+        let store_root = owner_device.store_root().clone();
+        db_owner
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+            )
+            .await;
+        db_owner
+            .execute_test_host_write(&format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
+                crate::blob::content_hash(b"cover-bytes"),
+            ))
+            .await;
+        let (owner_tmp, owner_dir) = temp_store_dir();
+        crate::store_dir::StoreDir::store_local_blob(
+            &owner_dir,
+            "photos",
+            "photo1",
+            b"cover-bytes",
+        )
+        .await
+        .expect("stage owner blob");
+        let cycle_storage = CloudSyncStorage::new(
             cloud.clone(),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
             owner_keypair.clone(),
         )
-        .expect("build owner cloud storage"),
-    );
-
-    // Owner: a shared note with a cover photo, both captured into the snapshot.
-    let db_owner = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheEager,
-    ));
-    let owner_device = Box::pin(TestDevice::create(
-        &db_owner,
-        owner_storage,
-        store_id,
-        owner_keypair.clone(),
-    ))
-    .await
-    .expect("initialize owner Store");
-    let store_root = owner_device.store_root().clone();
-    db_owner
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-         VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+        .expect("build owner cycle storage");
+        let components = Box::pin(
+            crate::sync::test_owner_graph::TestOwnerGraph::new(
+                crate::database::StoreDatabase::new(&db_owner),
+                owner_dir.clone(),
+            )
+            .prepare_sync(cycle_storage),
         )
-        .await;
-    db_owner
-        .execute_test_host_write(&format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
-             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
-            crate::blob::content_hash(b"cover-bytes"),
+        .await
+        .expect("prepare owner row and blob publication");
+        Box::pin(components.run_cycle(&SystemClock, None, &owner_dir, None))
+            .await
+            .expect("publish owner row and blob");
+        let membership = owner_device
+            .membership()
+            .await
+            .expect("load owner membership");
+        let restore_app = tempfile::tempdir().expect("restore app dir");
+        let layout = StoreLayout::new(restore_app.path());
+        let lib_b = layout.store_dir(store_id);
+        let owner_blob = db_owner
+            .row_blob_ref("note_photos", "photo1")
+            .await
+            .expect("capture exact snapshot blob");
+        let expected_blob = lib_b
+            .cache_blob_path(
+                "photos",
+                owner_blob
+                    .stored()
+                    .expect("published snapshot blob has exact storage")
+                    .locator()
+                    .locator_hash(),
+            )
+            .expect("cache blob path");
+
+        let joiner_keypair = owner_keypair.clone();
+        let continuation = owner_device
+            .export_activated_device_continuation()
+            .await
+            .expect("export exact activated continuation");
+        let materialized_commits_without_device_state = db_owner
+            .test_sql(|database| database.materialized_commits_without_device_state_count())
+            .await
+            .expect("verify source device-state snapshots");
+        assert_eq!(materialized_commits_without_device_state, 0);
+        let published_snapshot_bytes = db_owner
+            .test_sql(|database| database.latest_published_store_snapshot_bytes())
+            .await
+            .expect("read published snapshot metadata");
+        let published_snapshot: crate::protocol::store_commit::SnapshotMeta =
+            serde_json::from_slice(&published_snapshot_bytes)
+                .expect("parse published snapshot metadata");
+        let snapshot_coverage = published_snapshot.coverage.into_refs();
+        let snapshot_frontier =
+            crate::protocol::store_commit::CommitFrontier::from_refs(snapshot_coverage.clone())
+                .expect("snapshot coverage has valid stream ids");
+        let latest_position = continuation
+            .latest_position
+            .as_ref()
+            .expect("continuation has a latest Store position");
+        let source_registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
+            &continuation.registration_bytes,
+            &store_root,
+            continuation.registration.device_id,
+        )
+        .expect("parse continuation Store registration");
+        let mut expected_device_snapshots = snapshot_coverage
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let ancestry = owner_device
+            .load_commit_ancestry_until(latest_position.clone(), &snapshot_frontier)
+            .await
+            .expect("load continuation ancestry");
+        for (reference, commit) in ancestry {
+            expected_device_snapshots.insert(reference);
+            assert_eq!(commit.author(), &source_registration);
+        }
+        let device_signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
+            hex::decode(&continuation.device_signing_secret)
+                .expect("decode continuation device signing key")
+                .try_into()
+                .expect("continuation device signing key length");
+        let device_signer = UserKeypair::from_signing_key_bytes(&device_signing_key)
+            .expect("restore continuation device signer");
+        let authority = RestoreAuthority::ActivatedContinuation(continuation.clone());
+
+        let config = Box::pin(crate::restoration::restore_from_cloud(
+            store_id,
+            store_root,
+            Some(&serialized_keyring),
+            "Restored Store",
+            &tables,
+            &test_migrations(),
+            crate::custody::KeyCustody::Keyring,
+            crate::identity_custody::IdentityCustody::Keyring,
+            crate::restoration::RestoreSource {
+                join_info: CloudHomeJoinInfo::CloudKit,
+                custom_s3_exact_slots: None,
+                oauth_clients: crate::oauth::OAuthClients::empty(),
+                oauth_tokens: None,
+                cloudkit_ops: Some(cloudkit_ops),
+            },
+            &MembershipFloor(membership.head_refs().to_vec()),
+            &joiner_keypair,
+            &authority,
+            Some(&device_signer),
+            &layout,
+            Arc::new(SystemClock),
+            Arc::new(SequentialIdProvider::new("unused-continuation-device")),
+            |_status| {},
+            &tokio::sync::watch::channel(false).1,
         ))
-        .await;
-    let (owner_tmp, owner_dir) = temp_store_dir();
-    crate::store_dir::StoreDir::store_local_blob(&owner_dir, "photos", "photo1", b"cover-bytes")
         .await
-        .expect("stage owner blob");
-    let cycle_storage = CloudSyncStorage::new(
-        cloud.clone(),
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        owner_keypair.clone(),
-    )
-    .expect("build owner cycle storage");
-    Box::pin(
-        crate::sync::test_owner_graph::TestOwnerGraph::new(
-            crate::database::StoreDatabase::new(&db_owner),
-            owner_dir.clone(),
+        .expect("restore bootstrap backfills the blob");
+
+        assert!(
+            expected_blob.exists(),
+            "the cover blob file must be backfilled to {} after restore",
+            expected_blob.display(),
+        );
+        assert_eq!(
+            std::fs::read(&expected_blob).expect("read backfilled blob"),
+            b"cover-bytes",
+            "the backfilled file must hold the blob's plaintext bytes",
+        );
+
+        drop(owner_tmp);
+        let (restored, _stamper) = Database::open(
+            &lib_b.db_path(),
+            tables,
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            config.device_id,
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &test_migrations(),
         )
-        .run_cycle(cycle_storage),
-    )
-    .await
-    .expect("publish owner row and blob");
-    let membership = owner_device
-        .membership()
-        .await
-        .expect("load owner membership");
-    let restore_app = tempfile::tempdir().expect("restore app dir");
-    let layout = StoreLayout::new(restore_app.path());
-    let lib_b = layout.store_dir(store_id);
-    let owner_blob = db_owner
-        .row_blob_ref("note_photos", "photo1")
-        .await
-        .expect("capture exact snapshot blob");
-    let expected_blob = lib_b
-        .cache_blob_path(
-            "photos",
-            owner_blob
-                .stored()
-                .expect("published snapshot blob has exact storage")
-                .locator()
-                .locator_hash(),
-        )
-        .expect("cache blob path");
-
-    let joiner_keypair = owner_keypair.clone();
-    let continuation = owner_device
-        .export_activated_device_continuation()
-        .await
-        .expect("export exact activated continuation");
-    let materialized_commits_without_device_state = db_owner
-        .test_sql(|database| database.materialized_commits_without_device_state_count())
-        .await
-        .expect("verify source device-state snapshots");
-    assert_eq!(materialized_commits_without_device_state, 0);
-    let published_snapshot_bytes = db_owner
-        .test_sql(|database| database.latest_published_store_snapshot_bytes())
-        .await
-        .expect("read published snapshot metadata");
-    let published_snapshot: crate::protocol::store_commit::SnapshotMeta =
-        serde_json::from_slice(&published_snapshot_bytes)
-            .expect("parse published snapshot metadata");
-    let snapshot_coverage = published_snapshot.coverage.into_refs();
-    let snapshot_frontier =
-        crate::protocol::store_commit::CommitFrontier::from_refs(snapshot_coverage.clone())
-            .expect("snapshot coverage has valid stream ids");
-    let latest_position = continuation
-        .latest_position
-        .as_ref()
-        .expect("continuation has a latest Store position");
-    let source_registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
-        &continuation.registration_bytes,
-        &store_root,
-        continuation.registration.device_id,
-    )
-    .expect("parse continuation Store registration");
-    let mut expected_device_snapshots = snapshot_coverage
-        .values()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let ancestry = owner_device
-        .load_commit_ancestry_until(latest_position.clone(), &snapshot_frontier)
-        .await
-        .expect("load continuation ancestry");
-    for (reference, commit) in ancestry {
-        expected_device_snapshots.insert(reference);
-        assert_eq!(commit.author(), &source_registration);
-    }
-    let device_signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
-        hex::decode(&continuation.device_signing_secret)
-            .expect("decode continuation device signing key")
-            .try_into()
-            .expect("continuation device signing key length");
-    let device_signer = UserKeypair::from_signing_key_bytes(&device_signing_key)
-        .expect("restore continuation device signer");
-    let authority = RestoreAuthority::ActivatedContinuation(continuation.clone());
-
-    let config = Box::pin(crate::restoration::restore_from_cloud(
-        store_id,
-        store_root,
-        Some(&serialized_keyring),
-        "Restored Store",
-        &tables,
-        &test_migrations(),
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
-        crate::restoration::RestoreSource {
-            join_info: CloudHomeJoinInfo::CloudKit,
-            custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
-            oauth_tokens: None,
-            cloudkit_ops: Some(cloudkit_ops),
-        },
-        &MembershipFloor(membership.head_refs().to_vec()),
-        &joiner_keypair,
-        &authority,
-        Some(&device_signer),
-        &layout,
-        Arc::new(SystemClock),
-        Arc::new(SequentialIdProvider::new("unused-continuation-device")),
-        |_status| {},
-        &tokio::sync::watch::channel(false).1,
-    ))
-    .await
-    .expect("restore bootstrap backfills the blob");
-
-    assert!(
-        expected_blob.exists(),
-        "the cover blob file must be backfilled to {} after restore",
-        expected_blob.display(),
-    );
-    assert_eq!(
-        std::fs::read(&expected_blob).expect("read backfilled blob"),
-        b"cover-bytes",
-        "the backfilled file must hold the blob's plaintext bytes",
-    );
-
-    drop(owner_tmp);
-    let (restored, _stamper) = Database::open(
-        &lib_b.db_path(),
-        tables,
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        config.device_id,
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open restored database");
-    let (restored_notes, restored_photos, restored_parent_links, foreign_key_violations) = restored
-        .test_sql(|conn| {
-            Ok((
-                conn.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM note_photos WHERE id = 'photo1'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM note_photos AS photo
+        .expect("open restored database");
+        let (restored_notes, restored_photos, restored_parent_links, foreign_key_violations) =
+            restored
+                .test_sql(|conn| {
+                    Ok((
+                        conn.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM note_photos WHERE id = 'photo1'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM note_photos AS photo
                      JOIN notes AS note ON note.id = photo.note_id
                      WHERE photo.id = 'photo1' AND note.id = 'n1'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?,
-                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-            ))
-        })
-        .await
-        .expect("inspect restored snapshot rows");
-    assert_eq!(
-        (
-            restored_notes,
-            restored_photos,
-            restored_parent_links,
-            foreign_key_violations,
-        ),
-        (1, 1, 1, 0)
-    );
-    let restored_device_snapshots = restored
-        .test_sql(|database| database.store_device_state_snapshot_refs())
-        .await
-        .expect("load restored device-state snapshots")
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(restored_device_snapshots, expected_device_snapshots);
-    restored
-        .execute_test_host_write(
-            "UPDATE note_photos
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                    ))
+                })
+                .await
+                .expect("inspect restored snapshot rows");
+        assert_eq!(
+            (
+                restored_notes,
+                restored_photos,
+                restored_parent_links,
+                foreign_key_violations,
+            ),
+            (1, 1, 1, 0)
+        );
+        let restored_device_snapshots = restored
+            .test_sql(|database| database.store_device_state_snapshot_refs())
+            .await
+            .expect("load restored device-state snapshots")
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(restored_device_snapshots, expected_device_snapshots);
+        restored
+            .execute_test_host_write(
+                "UPDATE note_photos
          SET _updated_at = '0000000002000-0000-restored'
          WHERE id = 'photo1'",
+            )
+            .await;
+        let restored_storage = CloudSyncStorage::new(
+            cloud,
+            cipher,
+            blob_paths,
+            store_id.to_string(),
+            joiner_keypair,
         )
-        .await;
-    let restored_storage = CloudSyncStorage::new(
-        cloud,
-        cipher,
-        blob_paths,
-        store_id.to_string(),
-        joiner_keypair,
-    )
-    .expect("build restored cloud storage");
-    Box::pin(
-        crate::sync::test_owner_graph::TestOwnerGraph::new(
-            crate::database::StoreDatabase::new(&restored),
-            lib_b.clone(),
+        .expect("build restored cloud storage");
+        let components = Box::pin(
+            crate::sync::test_owner_graph::TestOwnerGraph::new(
+                crate::database::StoreDatabase::new(&restored),
+                lib_b.clone(),
+            )
+            .prepare_sync(restored_storage),
         )
-        .run_cycle(restored_storage),
-    )
-    .await
-    .expect("publish restored row by reusing its exact remote blob");
+        .await
+        .expect("prepare restored row publication");
+        Box::pin(components.run_cycle(&SystemClock, None, &lib_b, None))
+            .await
+            .expect("publish restored row by reusing its exact remote blob");
+    })
+    .await;
 }

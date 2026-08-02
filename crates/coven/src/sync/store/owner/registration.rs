@@ -8,8 +8,8 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 #[cfg(test)]
 use crate::protocol::store_commit::{
-    owner_recovery_semantic_prefix, OwnerRecoveryPosition, StoreCommitCoord,
-    StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+    owner_recovery_semantic_prefix, StoreCommitCoord, StoreDeviceRegistration,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
 #[cfg(test)]
 use crate::storage::ProtocolObjectDomain;
@@ -37,30 +37,6 @@ mod tests {
     use crate::storage::SyncStorage;
     use crate::sync::test_helpers::{open_test_db, TestStore};
 
-    async fn founder_recovery_authority(
-        store: &TestStore,
-    ) -> crate::restoration::OwnerRecoveryAuthority {
-        let device = store.founder_device().await.expect("load founder Store");
-        let protocol_root = device.protocol_root_for_test();
-        let owner_grant = protocol_root.descriptor.founder_grant.clone();
-        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
-            &store.root,
-            &crate::keys::public_key_hex(&store.signer),
-            &owner_grant,
-            &protocol_root.descriptor.founder_recovery,
-        )
-        .expect("derive founder recovery activation");
-        crate::restoration::OwnerRecoveryAuthority {
-            owner_identity_secret: hex::encode(store.signer.to_keypair_bytes()),
-            owner_grant: owner_grant.clone(),
-            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
-                owner_grant,
-                position: OwnerRecoveryPosition::BeforeFirst { activation },
-            },
-            published_at: "2026-07-17T00:00:00Z".to_string(),
-        }
-    }
-
     async fn initialized() -> (TestStore, Database) {
         let signer = UserKeypair::generate();
         let db = open_test_db();
@@ -81,7 +57,7 @@ mod tests {
             .bind_device(&db, &store.signer)
             .await
             .expect("load recovery Store");
-        let authority = founder_recovery_authority(&store).await;
+        let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
             .restoring_for_test()
@@ -152,7 +128,7 @@ mod tests {
             .bind_device(&db, &store.signer)
             .await
             .expect("load recovery Store");
-        let authority = founder_recovery_authority(&store).await;
+        let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
             .restoring_for_test()
@@ -245,7 +221,7 @@ mod tests {
                 .bind_device(&db, &store.signer)
                 .await
                 .expect("load recovery Store");
-            let authority = founder_recovery_authority(&store).await;
+            let authority = store.founder_recovery_authority().await;
             let database = crate::database::StoreDatabase::new(&db);
             let mut restoring = loaded
                 .restoring_for_test()

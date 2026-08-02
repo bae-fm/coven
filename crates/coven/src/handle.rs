@@ -1270,7 +1270,7 @@ mod tests {
     use crate::storage::{BlobPathScheme, CloudCipher};
     use crate::store_sync::{ConfigProvider, SyncError};
     use crate::sync::test_helpers::{
-        open_test_db_with_blob, plant_blob_row, read_test_db, temp_store_dir, TestStore,
+        open_test_db_with_blob, read_test_db, temp_store_dir, TestStore,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1501,7 +1501,8 @@ mod tests {
             crate::storage::BlobChunking::DEFAULT,
         );
 
-        plant_blob_row(&db, "anyblob0", false, b"typed setup error").await;
+        db.plant_blob_row_for_test("anyblob0", false, b"typed setup error")
+            .await;
         let blob = db
             .row_blob_ref("note_photos", "anyblob0")
             .await
@@ -1828,138 +1829,132 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_test_home_drives_drain_and_read_through_the_handle())
+                test_keyring::install();
+
+                let (_tmp, store_dir) = temp_store_dir();
+                // `note_photos` carries a blob in the `images` namespace so the read path can
+                // resolve a planted row up to its gated `notes` root (the gate that decides
+                // Local vs Remote).
+                let db = host_blob_test_db("images");
+
+                // Pre-create the exact Store in the same home the handle will connect to,
+                // with the same signing identity and cipher.
+                let mut config = Config::with_defaults(
+                    "lib-test".to_string(),
+                    "test-device".to_string(),
+                    store_dir.clone(),
+                    "Test Store".to_string(),
+                );
+                config.cloud_home.storage = HomeStorage::Opaque;
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+                let upload_pause = Arc::new(PausedUploadDrain::new());
+                let signer = crate::keys::UserKeypair::generate();
+                let store = TestStore::create(&db, "lib-test", signer.clone())
                     .await
-                    .expect("test-home handle task");
+                    .expect("create exact test Store");
+                let store_keys = test_store_keys("lib-test");
+                let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+                    .resolve(&store_keys, &store_dir);
+
+                let stamper = db.stamper();
+                let handle = CovenHandle::new(
+                    db.clone(),
+                    // `read_db`: this test never calls `sql_read`, and the test db is
+                    // `:memory:` (no shareable read-only companion), so the writer clone
+                    // stands in.
+                    db.clone(),
+                    stamper,
+                    store_dir.clone(),
+                    config_provider,
+                    store_keys,
+                    test_key_custody(),
+                    identity_custody,
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    None,
+                    Some(upload_pause.clone()),
+                    StoreOpenGuard::acquire_for_test(&store_dir),
+                    crate::storage::BlobChunking::DEFAULT,
+                );
+
+                // Inject the mock home; the host hands over only the home + cipher.
+                let home = store.home.clone();
+                handle
+                    .connect_sync_with_test_home(
+                        home.clone(),
+                        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+                    )
+                    .await
+                    .expect("connect over the injected test home");
+
+                // The loop prepares the exact blob upload from the pending Store write,
+                // then the observer pauses before it can drain the queue itself.
+                let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
+                handle
+                    .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+                    .await;
+                handle
+                    .make_remote("notes", "note-cover-1", false)
+                    .await
+                    .expect("queue the exact row/blob transition");
+                tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
+                    .await
+                    .expect("the loop reaches the paused upload drain");
+                let local = handle
+                    .row_blob_ref("note_photos", "cover-1")
+                    .await
+                    .expect("capture Local row while upload is paused");
+                assert!(
+                    matches!(local.authority(), crate::blob::RowBlobAuthority::Local),
+                    "the row stays Local until the exact upload completes",
+                );
+                assert!(local.stored().is_none());
+
+                upload_pause.resume();
+                let outcome = handle
+                    .drain_uploads()
+                    .await
+                    .expect("drain the prepared exact blob through the public handle");
+                assert_eq!(outcome.uploaded(), 1);
+                assert!(outcome.yielded_for_publish());
+                assert!(outcome.failures().failures().is_empty());
+
+                let blob = handle
+                    .row_blob_ref("note_photos", "cover-1")
+                    .await
+                    .expect("capture Remote row after exact upload");
+                let object = blob
+                    .stored()
+                    .expect("published blob has exact storage")
+                    .object();
+                let exact = home
+                    .clone()
+                    .exact_slot_storage()
+                    .expect("test home supports exact object slots");
+                let at_rest = exact
+                    .read_at(object.slot())
+                    .await
+                    .expect("the exact blob object exists");
+                assert!(
+                    !at_rest.is_empty(),
+                    "the exact blob object contains its sealed payload",
+                );
+
+                // The published `RowBlobRef` carries the exact remote object and authority;
+                // the read resolves it through the same connected home.
+                let read = handle
+                    .read_blob(&blob)
+                    .await
+                    .expect("read through the handle");
+                assert_eq!(
+                    read, plaintext,
+                    "read_blob fetched the blob's plaintext from the injected test home",
+                );
             })
             .await;
-    }
-
-    async fn run_test_home_drives_drain_and_read_through_the_handle() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        // `note_photos` carries a blob in the `images` namespace so the read path can
-        // resolve a planted row up to its gated `notes` root (the gate that decides
-        // Local vs Remote).
-        let db = host_blob_test_db("images");
-
-        // Pre-create the exact Store in the same home the handle will connect to,
-        // with the same signing identity and cipher.
-        let mut config = Config::with_defaults(
-            "lib-test".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Opaque;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let upload_pause = Arc::new(PausedUploadDrain::new());
-        let signer = crate::keys::UserKeypair::generate();
-        let store = TestStore::create(&db, "lib-test", signer.clone())
-            .await
-            .expect("create exact test Store");
-        let store_keys = test_store_keys("lib-test");
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
-            .resolve(&store_keys, &store_dir);
-
-        let stamper = db.stamper();
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: this test never calls `sql_read`, and the test db is
-            // `:memory:` (no shareable read-only companion), so the writer clone
-            // stands in.
-            db.clone(),
-            stamper,
-            store_dir.clone(),
-            config_provider,
-            store_keys,
-            test_key_custody(),
-            identity_custody,
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            Some(upload_pause.clone()),
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        // Inject the mock home; the host hands over only the home + cipher.
-        let home = store.home.clone();
-        handle
-            .connect_sync_with_test_home(
-                home.clone(),
-                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            )
-            .await
-            .expect("connect over the injected test home");
-
-        // The loop prepares the exact blob upload from the pending Store write,
-        // then the observer pauses before it can drain the queue itself.
-        let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
-        handle
-            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
-            .await;
-        handle
-            .make_remote("notes", "note-cover-1", false)
-            .await
-            .expect("queue the exact row/blob transition");
-        tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
-            .await
-            .expect("the loop reaches the paused upload drain");
-        let local = handle
-            .row_blob_ref("note_photos", "cover-1")
-            .await
-            .expect("capture Local row while upload is paused");
-        assert!(
-            matches!(local.authority(), crate::blob::RowBlobAuthority::Local),
-            "the row stays Local until the exact upload completes",
-        );
-        assert!(local.stored().is_none());
-
-        upload_pause.resume();
-        let outcome = handle
-            .drain_uploads()
-            .await
-            .expect("drain the prepared exact blob through the public handle");
-        assert_eq!(outcome.uploaded(), 1);
-        assert!(outcome.yielded_for_publish());
-        assert!(outcome.failures().failures().is_empty());
-
-        let blob = handle
-            .row_blob_ref("note_photos", "cover-1")
-            .await
-            .expect("capture Remote row after exact upload");
-        let object = blob
-            .stored()
-            .expect("published blob has exact storage")
-            .object();
-        let exact = home
-            .clone()
-            .exact_slot_storage()
-            .expect("test home supports exact object slots");
-        let at_rest = exact
-            .read_at(object.slot())
-            .await
-            .expect("the exact blob object exists");
-        assert!(
-            !at_rest.is_empty(),
-            "the exact blob object contains its sealed payload",
-        );
-
-        // The published `RowBlobRef` carries the exact remote object and authority;
-        // the read resolves it through the same connected home.
-        let read = handle
-            .read_blob(&blob)
-            .await
-            .expect("read through the handle");
-        assert_eq!(
-            read, plaintext,
-            "read_blob fetched the blob's plaintext from the injected test home",
-        );
     }
 
     /// `connect_sync_with_test_home_caller_driven` installs the same connection
@@ -1978,140 +1973,134 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_caller_driven_connect_leaves_the_only_drain())
+                test_keyring::install();
+
+                let (_tmp, store_dir) = temp_store_dir();
+                let db = host_blob_test_db("images");
+
+                let mut config = Config::with_defaults(
+                    "lib-caller-driven".to_string(),
+                    "test-device".to_string(),
+                    store_dir.clone(),
+                    "Test Store".to_string(),
+                );
+                config.cloud_home.storage = HomeStorage::Opaque;
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+                let signer = crate::keys::UserKeypair::generate();
+                let store = TestStore::create(&db, "lib-caller-driven", signer.clone())
                     .await
-                    .expect("caller-driven connect task");
+                    .expect("create exact test Store");
+                let store_keys = test_store_keys("lib-caller-driven");
+                let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+                    .resolve(&store_keys, &store_dir);
+
+                let handle = CovenHandle::new(
+                    db.clone(),
+                    // `read_db`: this test never calls `sql_read`, and the test db is
+                    // `:memory:` (no shareable read-only companion), so the writer clone
+                    // stands in.
+                    db.clone(),
+                    db.stamper(),
+                    store_dir.clone(),
+                    config_provider,
+                    store_keys,
+                    test_key_custody(),
+                    identity_custody,
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    None,
+                    // No paused-drain observer: holding a running loop off the queue is
+                    // the dance this connect exists to remove.
+                    None,
+                    StoreOpenGuard::acquire_for_test(&store_dir),
+                    crate::storage::BlobChunking::DEFAULT,
+                );
+
+                let home = store.home.clone();
+                handle
+                    .connect_sync_with_test_home_caller_driven(
+                        home.clone(),
+                        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+                    )
+                    .await
+                    .expect("connect over the injected test home without a loop");
+                let sync = handle
+                    .sync
+                    .cloud_sync_for_test()
+                    .expect("the cloud connection is installed");
+                assert!(
+                    !sync.is_running(),
+                    "the connect started no loop thread, so none can drain the queue",
+                );
+                assert!(!handle.is_syncing());
+
+                let plaintext = b"caller-driven-cover-art".to_vec();
+                handle
+                    .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+                    .await;
+                handle
+                    .make_remote("notes", "note-cover-1", false)
+                    .await
+                    .expect("queue the exact row/blob transition");
+
+                // The queue still holds the upload. No cycle exists to have taken it, so
+                // this is a fact about the connection rather than a race this test won.
+                assert_eq!(
+                    handle
+                        .queued_uploads()
+                        .await
+                        .expect("read the durable upload queue")
+                        .len(),
+                    1,
+                );
+                let local = handle
+                    .row_blob_ref("note_photos", "cover-1")
+                    .await
+                    .expect("capture Local row before the drain");
+                assert!(matches!(
+                    local.authority(),
+                    crate::blob::RowBlobAuthority::Local
+                ));
+
+                let outcome = handle
+                    .drain_uploads()
+                    .await
+                    .expect("drain the queue through the public handle");
+                assert!(
+                    matches!(
+                        outcome,
+                        DrainOutcome::Drained {
+                            uploaded: 1,
+                            yielded_for_publish: true,
+                            ..
+                        }
+                    ),
+                    "the caller's drain uploaded the blob and reported it: {outcome:?}",
+                );
+
+                // The blob's bytes are in the injected home, read back through the row's
+                // own published locator.
+                let blob = handle
+                    .row_blob_ref("note_photos", "cover-1")
+                    .await
+                    .expect("capture Remote row after the drain");
+                assert_eq!(
+                    handle
+                        .read_blob(&blob)
+                        .await
+                        .expect("read through the handle"),
+                    plaintext,
+                );
+
+                assert!(
+                    !handle.is_syncing(),
+                    "no loop thread appeared over the connection's life",
+                );
             })
             .await;
-    }
-
-    async fn run_caller_driven_connect_leaves_the_only_drain() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = host_blob_test_db("images");
-
-        let mut config = Config::with_defaults(
-            "lib-caller-driven".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Opaque;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let signer = crate::keys::UserKeypair::generate();
-        let store = TestStore::create(&db, "lib-caller-driven", signer.clone())
-            .await
-            .expect("create exact test Store");
-        let store_keys = test_store_keys("lib-caller-driven");
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
-            .resolve(&store_keys, &store_dir);
-
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: this test never calls `sql_read`, and the test db is
-            // `:memory:` (no shareable read-only companion), so the writer clone
-            // stands in.
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            store_keys,
-            test_key_custody(),
-            identity_custody,
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            // No paused-drain observer: holding a running loop off the queue is
-            // the dance this connect exists to remove.
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        let home = store.home.clone();
-        handle
-            .connect_sync_with_test_home_caller_driven(
-                home.clone(),
-                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            )
-            .await
-            .expect("connect over the injected test home without a loop");
-        let sync = handle
-            .sync
-            .cloud_sync_for_test()
-            .expect("the cloud connection is installed");
-        assert!(
-            !sync.is_running(),
-            "the connect started no loop thread, so none can drain the queue",
-        );
-        assert!(!handle.is_syncing());
-
-        let plaintext = b"caller-driven-cover-art".to_vec();
-        handle
-            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
-            .await;
-        handle
-            .make_remote("notes", "note-cover-1", false)
-            .await
-            .expect("queue the exact row/blob transition");
-
-        // The queue still holds the upload. No cycle exists to have taken it, so
-        // this is a fact about the connection rather than a race this test won.
-        assert_eq!(
-            handle
-                .queued_uploads()
-                .await
-                .expect("read the durable upload queue")
-                .len(),
-            1,
-        );
-        let local = handle
-            .row_blob_ref("note_photos", "cover-1")
-            .await
-            .expect("capture Local row before the drain");
-        assert!(matches!(
-            local.authority(),
-            crate::blob::RowBlobAuthority::Local
-        ));
-
-        let outcome = handle
-            .drain_uploads()
-            .await
-            .expect("drain the queue through the public handle");
-        assert!(
-            matches!(
-                outcome,
-                DrainOutcome::Drained {
-                    uploaded: 1,
-                    yielded_for_publish: true,
-                    ..
-                }
-            ),
-            "the caller's drain uploaded the blob and reported it: {outcome:?}",
-        );
-
-        // The blob's bytes are in the injected home, read back through the row's
-        // own published locator.
-        let blob = handle
-            .row_blob_ref("note_photos", "cover-1")
-            .await
-            .expect("capture Remote row after the drain");
-        assert_eq!(
-            handle
-                .read_blob(&blob)
-                .await
-                .expect("read through the handle"),
-            plaintext,
-        );
-
-        assert!(
-            !handle.is_syncing(),
-            "no loop thread appeared over the connection's life",
-        );
     }
 
     /// The chunk size a host sets through
@@ -2125,142 +2114,135 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_connected_seal_honors_the_handles_configured_chunking(),
+                test_keyring::install();
+
+                // Distinctive on both axes: neither number is `BlobChunking::DEFAULT`'s
+                // (64 KiB chunk, 1 MiB window), so a dropped configuration is visible
+                // rather than coinciding with the default.
+                const CHUNK: u32 = 4096;
+                let chunking = crate::storage::BlobChunking::new(
+                    std::num::NonZeroU32::new(CHUNK).expect("nonzero chunk"),
+                    std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
+                );
+
+                let (_tmp, store_dir) = temp_store_dir();
+                let db = host_blob_test_db("images");
+
+                let mut config = Config::with_defaults(
+                    "lib-chunking".to_string(),
+                    "test-device".to_string(),
+                    store_dir.clone(),
+                    "Test Store".to_string(),
+                );
+                config.cloud_home.storage = HomeStorage::Opaque;
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+                let signer = crate::keys::UserKeypair::generate();
+                let store = TestStore::create(&db, "lib-chunking", signer.clone())
+                    .await
+                    .expect("create exact test Store");
+                let store_keys = test_store_keys("lib-chunking");
+                let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+                    .resolve(&store_keys, &store_dir);
+                // Holds the loop off the upload queue so this test's explicit
+                // `drain_uploads` is the call that seals the object.
+                let upload_pause = Arc::new(PausedUploadDrain::new());
+
+                let handle = CovenHandle::new(
+                    db.clone(),
+                    // `read_db`: this test never calls `sql_read`, and the test db is
+                    // `:memory:` (no shareable read-only companion), so the writer clone
+                    // stands in.
+                    db.clone(),
+                    db.stamper(),
+                    store_dir.clone(),
+                    config_provider,
+                    store_keys,
+                    test_key_custody(),
+                    identity_custody,
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    None,
+                    Some(upload_pause.clone()),
+                    StoreOpenGuard::acquire_for_test(&store_dir),
+                    chunking,
+                );
+
+                let home = store.home.clone();
+                handle
+                    .connect_sync_with_test_home(
+                        home.clone(),
+                        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+                    )
+                    .await
+                    .expect("connect over the injected test home");
+
+                // Several chunks' worth of plaintext, so the configured size frames the
+                // object rather than fitting inside one chunk either way.
+                let plaintext: Vec<u8> = (0..3 * CHUNK as usize + 17)
+                    .map(|value| (value % 251) as u8)
+                    .collect();
+                handle
+                    .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+                    .await;
+                handle
+                    .make_remote("notes", "note-cover-1", false)
+                    .await
+                    .expect("queue the exact row/blob transition");
+                tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
+                    .await
+                    .expect("the loop reaches the paused upload drain");
+
+                upload_pause.resume();
+                let outcome = handle
+                    .drain_uploads()
+                    .await
+                    .expect("drain the prepared exact blob through the public handle");
+                assert_eq!(outcome.uploaded(), 1);
+                assert!(outcome.failures().failures().is_empty());
+
+                let blob = handle
+                    .row_blob_ref("note_photos", "cover-1")
+                    .await
+                    .expect("capture Remote row after exact upload");
+                let object = blob
+                    .stored()
+                    .expect("published blob has exact storage")
+                    .object();
+                let exact = home
+                    .clone()
+                    .exact_slot_storage()
+                    .expect("test home supports exact object slots");
+                let at_rest = exact
+                    .read_at(object.slot())
+                    .await
+                    .expect("the exact blob object exists");
+
+                // `[key tag][header][chunks]` — the header the sealer wrote is what every
+                // later reader frames the object by.
+                let header = crate::encryption::SealedBlobHeader::parse(
+                    &at_rest[crate::storage::KEY_TAG_LEN..],
                 )
-                .await
-                .expect("configured-chunking handle task");
+                .expect("stored blob carries a sealed header");
+                assert_eq!(
+                    header.chunk_size().get(),
+                    CHUNK,
+                    "the sealed blob is framed at the chunking the handle was built with",
+                );
+                assert_eq!(header.plaintext_len(), plaintext.len() as u64);
+
+                let read = handle
+                    .read_blob(&blob)
+                    .await
+                    .expect("read through the handle");
+                assert_eq!(
+                    read, plaintext,
+                    "the blob sealed at the configured chunk size reads back whole",
+                );
             })
             .await;
-    }
-
-    async fn run_connected_seal_honors_the_handles_configured_chunking() {
-        test_keyring::install();
-
-        // Distinctive on both axes: neither number is `BlobChunking::DEFAULT`'s
-        // (64 KiB chunk, 1 MiB window), so a dropped configuration is visible
-        // rather than coinciding with the default.
-        const CHUNK: u32 = 4096;
-        let chunking = crate::storage::BlobChunking::new(
-            std::num::NonZeroU32::new(CHUNK).expect("nonzero chunk"),
-            std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
-        );
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = host_blob_test_db("images");
-
-        let mut config = Config::with_defaults(
-            "lib-chunking".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Opaque;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let signer = crate::keys::UserKeypair::generate();
-        let store = TestStore::create(&db, "lib-chunking", signer.clone())
-            .await
-            .expect("create exact test Store");
-        let store_keys = test_store_keys("lib-chunking");
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
-            .resolve(&store_keys, &store_dir);
-        // Holds the loop off the upload queue so this test's explicit
-        // `drain_uploads` is the call that seals the object.
-        let upload_pause = Arc::new(PausedUploadDrain::new());
-
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: this test never calls `sql_read`, and the test db is
-            // `:memory:` (no shareable read-only companion), so the writer clone
-            // stands in.
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            store_keys,
-            test_key_custody(),
-            identity_custody,
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            Some(upload_pause.clone()),
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            chunking,
-        );
-
-        let home = store.home.clone();
-        handle
-            .connect_sync_with_test_home(
-                home.clone(),
-                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            )
-            .await
-            .expect("connect over the injected test home");
-
-        // Several chunks' worth of plaintext, so the configured size frames the
-        // object rather than fitting inside one chunk either way.
-        let plaintext: Vec<u8> = (0..3 * CHUNK as usize + 17)
-            .map(|value| (value % 251) as u8)
-            .collect();
-        handle
-            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
-            .await;
-        handle
-            .make_remote("notes", "note-cover-1", false)
-            .await
-            .expect("queue the exact row/blob transition");
-        tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
-            .await
-            .expect("the loop reaches the paused upload drain");
-
-        upload_pause.resume();
-        let outcome = handle
-            .drain_uploads()
-            .await
-            .expect("drain the prepared exact blob through the public handle");
-        assert_eq!(outcome.uploaded(), 1);
-        assert!(outcome.failures().failures().is_empty());
-
-        let blob = handle
-            .row_blob_ref("note_photos", "cover-1")
-            .await
-            .expect("capture Remote row after exact upload");
-        let object = blob
-            .stored()
-            .expect("published blob has exact storage")
-            .object();
-        let exact = home
-            .clone()
-            .exact_slot_storage()
-            .expect("test home supports exact object slots");
-        let at_rest = exact
-            .read_at(object.slot())
-            .await
-            .expect("the exact blob object exists");
-
-        // `[key tag][header][chunks]` — the header the sealer wrote is what every
-        // later reader frames the object by.
-        let header =
-            crate::encryption::SealedBlobHeader::parse(&at_rest[crate::storage::KEY_TAG_LEN..])
-                .expect("stored blob carries a sealed header");
-        assert_eq!(
-            header.chunk_size().get(),
-            CHUNK,
-            "the sealed blob is framed at the chunking the handle was built with",
-        );
-        assert_eq!(header.plaintext_len(), plaintext.len() as u64);
-
-        let read = handle
-            .read_blob(&blob)
-            .await
-            .expect("read through the handle");
-        assert_eq!(
-            read, plaintext,
-            "the blob sealed at the configured chunk size reads back whole",
-        );
     }
 
     #[tokio::test]
@@ -2324,100 +2306,92 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_read_only_handle_resolves_an_encrypted_cipher_through_custody(),
-                )
-                .await
-                .expect("encrypted read-only handle task");
+                test_keyring::install();
+
+                let store_id = "ro-encrypted-custody-test";
+                let (_tmp, store_dir) = temp_store_dir();
+                let db = host_blob_test_db("images");
+
+                let mut config = Config::with_defaults(
+                    store_id.to_string(),
+                    "test-device".to_string(),
+                    store_dir.clone(),
+                    "Test Store".to_string(),
+                );
+                config.cloud_home.provider = Some(CloudProvider::CloudKit);
+                config.cloud_home.storage = HomeStorage::Opaque;
+
+                let key_service = test_store_keys(store_id);
+                let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
+                custody
+                    .persist(&crate::encryption::MasterKeyring::generate())
+                    .expect("establish a master key");
+
+                // Exact opaque blob locators bind their uploader registration, so establish
+                // the writer's signing identity before connecting storage.
+                let identity_custody = crate::identity_custody::IdentityCustody::Keyring
+                    .resolve(&key_service, &store_dir);
+                identity_custody
+                    .persist(&crate::keys::UserKeypair::generate())
+                    .expect("establish this store's signing identity");
+
+                let ops = Arc::new(TestCloudKitOps::new());
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+                let writer = CovenHandle::new(
+                    db.clone(),
+                    db.clone(),
+                    db.stamper(),
+                    store_dir.clone(),
+                    config_provider,
+                    key_service.clone(),
+                    custody.clone(),
+                    identity_custody.clone(),
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    Some(ops.clone()),
+                    None,
+                    StoreOpenGuard::acquire_for_test(&store_dir),
+                    crate::storage::BlobChunking::DEFAULT,
+                );
+                writer
+                    .connect_sync_with_cloudkit(ops.clone())
+                    .await
+                    .expect("connect encrypted CloudKit writer");
+                let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
+                let blob = writer
+                    .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
+                    .await;
+
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+                let reader = crate::read_handle::CovenReadHandle::new(
+                    db,
+                    store_dir,
+                    config_provider,
+                    key_service,
+                    custody,
+                    identity_custody,
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    Some(ops),
+                    crate::storage::BlobChunking::DEFAULT,
+                );
+
+                let read = reader
+                    .read_blob(&blob)
+                    .await
+                    .expect("the read-only handle resolves the same cipher through custody");
+                assert_eq!(
+                    read, plaintext,
+                    "the blob decrypts back to its original plaintext",
+                );
             })
             .await;
-    }
-
-    async fn run_read_only_handle_resolves_an_encrypted_cipher_through_custody() {
-        test_keyring::install();
-
-        let store_id = "ro-encrypted-custody-test";
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = host_blob_test_db("images");
-
-        let mut config = Config::with_defaults(
-            store_id.to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.provider = Some(CloudProvider::CloudKit);
-        config.cloud_home.storage = HomeStorage::Opaque;
-
-        let key_service = test_store_keys(store_id);
-        let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
-        custody
-            .persist(&crate::encryption::MasterKeyring::generate())
-            .expect("establish a master key");
-
-        // Exact opaque blob locators bind their uploader registration, so establish
-        // the writer's signing identity before connecting storage.
-        let identity_custody =
-            crate::identity_custody::IdentityCustody::Keyring.resolve(&key_service, &store_dir);
-        identity_custody
-            .persist(&crate::keys::UserKeypair::generate())
-            .expect("establish this store's signing identity");
-
-        let ops = Arc::new(TestCloudKitOps::new());
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let writer = CovenHandle::new(
-            db.clone(),
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            key_service.clone(),
-            custody.clone(),
-            identity_custody.clone(),
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            Some(ops.clone()),
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-        writer
-            .connect_sync_with_cloudkit(ops.clone())
-            .await
-            .expect("connect encrypted CloudKit writer");
-        let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
-        let blob = writer
-            .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
-            .await;
-
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let reader = crate::read_handle::CovenReadHandle::new(
-            db,
-            store_dir,
-            config_provider,
-            key_service,
-            custody,
-            identity_custody,
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            Some(ops),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        let read = reader
-            .read_blob(&blob)
-            .await
-            .expect("the read-only handle resolves the same cipher through custody");
-        assert_eq!(
-            read, plaintext,
-            "the blob decrypts back to its original plaintext",
-        );
     }
 
     #[tokio::test]
@@ -2479,118 +2453,110 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(Box::pin(
-                    run_initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back(),
-                ))
+                test_keyring::install();
+
+                let (_tmp, store_dir) = temp_store_dir();
+                let db = host_blob_test_db("images");
+                let store_id = "lib-init-master-key-seals-traffic";
+
+                // Opaque storage: the master key established below seals every object at
+                // rest. A configured provider is unnecessary — the injected test home is
+                // the enablement.
+                let mut config = Config::with_defaults(
+                    store_id.to_string(),
+                    "test-device".to_string(),
+                    store_dir.clone(),
+                    "Test Store".to_string(),
+                );
+                config.cloud_home.storage = HomeStorage::Opaque;
+                let config_provider: ConfigProvider = {
+                    let config = config.clone();
+                    Arc::new(move || config.clone())
+                };
+
+                let store_keys = test_store_keys(store_id);
+                let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+                let identity_custody = crate::identity_custody::IdentityCustody::Keyring
+                    .resolve(&store_keys, &store_dir);
+                let handle = CovenHandle::new(
+                    db.clone(),
+                    db.clone(),
+                    db.stamper(),
+                    store_dir.clone(),
+                    config_provider,
+                    store_keys,
+                    custody,
+                    identity_custody,
+                    crate::oauth::OAuthClients::empty(),
+                    Arc::new(SystemClock),
+                    None,
+                    None,
+                    StoreOpenGuard::acquire_for_test(&store_dir),
+                    crate::storage::BlobChunking::DEFAULT,
+                );
+
+                handle
+                    .initialize_master_key()
+                    .expect("establish the master key before connecting");
+                handle
+                    .initialize_identity()
+                    .expect("establish this store's identity before connecting");
+
+                // Connect over the injected home through the custody path: StoreSync
+                // resolves the cipher from the just-established key, never an injected
+                // one. An opaque home with no key would fail here with
+                // `MasterKeyNotEstablished`.
+                let home = Arc::new(InMemoryCloudHome::new());
+                let connect_handle = handle.clone();
+                let connect_home = home.clone();
+                tokio::task::spawn_local(async move {
+                    connect_handle
+                        .connect_sync_with_test_home_custody(connect_home)
+                        .await
+                })
                 .await
-                .expect("master-key cloud traffic test task");
+                .expect("join custody-resolved connection")
+                .expect("connect over the injected opaque home, resolving the cipher from custody");
+
+                // Publish a host-provided row and exact blob under the opaque home. The
+                // resulting row reference carries its uploader authority and stored slot.
+                let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
+                let blob = handle
+                    .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
+                    .await;
+                let cloud_key = blob
+                    .stored()
+                    .expect("published blob has exact storage")
+                    .object()
+                    .slot()
+                    .logical_key();
+
+                // At rest the object is ciphertext: the stored bytes are not the
+                // plaintext, and no object in the home holds the plaintext verbatim.
+                let at_rest = home.get(cloud_key).expect("the blob landed in the home");
+                assert_ne!(
+                    at_rest, plaintext,
+                    "the master key sealed the upload — the bytes at rest are not the plaintext",
+                );
+                assert!(
+                    home.keys()
+                        .iter()
+                        .all(|k| home.get(k).as_deref() != Some(plaintext.as_slice())),
+                    "no object in the home holds the plaintext",
+                );
+
+                // Read back through the row's activated exact locator and the same
+                // custody-resolved cipher.
+                let read = handle
+                    .read_blob(&blob)
+                    .await
+                    .expect("read through the handle");
+                assert_eq!(
+                    read, plaintext,
+                    "read_blob decrypts the sealed blob back to its original plaintext",
+                );
             })
             .await;
-    }
-
-    async fn run_initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = host_blob_test_db("images");
-        let store_id = "lib-init-master-key-seals-traffic";
-
-        // Opaque storage: the master key established below seals every object at
-        // rest. A configured provider is unnecessary — the injected test home is
-        // the enablement.
-        let mut config = Config::with_defaults(
-            store_id.to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Opaque;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-
-        let store_keys = test_store_keys(store_id);
-        let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
-        let identity_custody =
-            crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
-        let handle = CovenHandle::new(
-            db.clone(),
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            store_keys,
-            custody,
-            identity_custody,
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        handle
-            .initialize_master_key()
-            .expect("establish the master key before connecting");
-        handle
-            .initialize_identity()
-            .expect("establish this store's identity before connecting");
-
-        // Connect over the injected home through the custody path: StoreSync
-        // resolves the cipher from the just-established key, never an injected
-        // one. An opaque home with no key would fail here with
-        // `MasterKeyNotEstablished`.
-        let home = Arc::new(InMemoryCloudHome::new());
-        let connect_handle = handle.clone();
-        let connect_home = home.clone();
-        tokio::task::spawn_local(async move {
-            connect_handle
-                .connect_sync_with_test_home_custody(connect_home)
-                .await
-        })
-        .await
-        .expect("join custody-resolved connection")
-        .expect("connect over the injected opaque home, resolving the cipher from custody");
-
-        // Publish a host-provided row and exact blob under the opaque home. The
-        // resulting row reference carries its uploader authority and stored slot.
-        let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
-        let blob = handle
-            .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
-            .await;
-        let cloud_key = blob
-            .stored()
-            .expect("published blob has exact storage")
-            .object()
-            .slot()
-            .logical_key();
-
-        // At rest the object is ciphertext: the stored bytes are not the
-        // plaintext, and no object in the home holds the plaintext verbatim.
-        let at_rest = home.get(cloud_key).expect("the blob landed in the home");
-        assert_ne!(
-            at_rest, plaintext,
-            "the master key sealed the upload — the bytes at rest are not the plaintext",
-        );
-        assert!(
-            home.keys()
-                .iter()
-                .all(|k| home.get(k).as_deref() != Some(plaintext.as_slice())),
-            "no object in the home holds the plaintext",
-        );
-
-        // Read back through the row's activated exact locator and the same
-        // custody-resolved cipher.
-        let read = handle
-            .read_blob(&blob)
-            .await
-            .expect("read through the handle");
-        assert_eq!(
-            read, plaintext,
-            "read_blob decrypts the sealed blob back to its original plaintext",
-        );
     }
 
     #[tokio::test]

@@ -79,121 +79,19 @@ async fn resign_merge_journal_with_objects(
         .operation()
         .creation
         .control_ref(objects, Some(old_reference.head_object().clone()));
-    resign_merge_journal_with_reference(db, store, signer, journal, reference, |_| {}).await;
-}
-
-async fn resign_merge_journal_with_reference(
-    db: &Database,
-    store: &TestStore,
-    signer: &UserKeypair,
-    journal: &mut CircleOperationJournal,
-    reference: crate::protocol::store_commit::CircleControlRef,
-    mutate_commit: impl FnOnce(&mut StoreBatchCommit),
-) {
-    let old_commit = journal.commit().expect("parse prepared Circle commit");
-    let author = crate::database::StoreDatabase::new(db)
-        .activated_store_device_registration(old_commit.author_registration.clone())
-        .await
-        .expect("load Circle commit author");
-    let device_signer = author
-        .device_signer(signer)
-        .expect("derive Circle device signer");
-    let coord = journal.operation().commit_ref.coord.clone();
-    let stream_activations = old_commit.stream_activations().to_vec();
-    let mut commit = signed_circle_commit(
-        old_commit.store_root_hash,
-        old_commit.write_id.clone(),
-        coord.clone(),
-        old_commit.author_registration.clone(),
-        &author,
-        old_commit.order.clone(),
-        old_commit.membership_state.clone(),
-        old_commit.device_state.clone(),
-        old_commit
-            .operations_membership_authority()
-            .expect("prepared Circle commit carries validated operations"),
-        reference,
-        stream_activations,
-        &device_signer,
-    )
-    .expect("re-sign Circle commit with substituted exact graph");
-    mutate_commit(&mut commit);
-    commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
-    let StoreCommitCoord { stream_id, .. } = coord.clone();
     let device = store
         .bind_device(db, signer)
         .await
         .expect("bind substituted Circle object Store");
-    let commit_prepared = device
-        .prepare_circle_object(
-            &ProtocolObjectContext::signed_plaintext(
-                commit.store_root_hash,
-                ProtocolObjectDomain::StoreCommit,
-            ),
-            &commit_semantic_prefix(
-                commit.candidate_family(),
-                &stream_id.to_string(),
-                commit.seq(),
-                commit.commit_hash(),
-            ),
-            ".json",
-            commit.to_bytes(),
-        )
+    let mut writer = device
+        .authorize_writer()
         .await
-        .expect("prepare substituted Circle commit");
-    let commit_ref =
-        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
-            .expect("bind substituted Circle commit");
-    let policy = &journal.operation().policy;
-    let old_head = &policy.head;
-    let history_summary = &policy.history_summary;
-    let history_summary = history_summary.clone();
-    let head = StoreDeviceHead::signed(
-        commit.store_root_hash,
-        commit.author_registration.clone(),
-        commit_ref.clone(),
-        history_summary.digest(),
-        old_head.successor.clone(),
-        &device_signer,
-    )
-    .expect("sign substituted Circle Store head");
-    let head_slot = journal
-        .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("Circle operation carries a Store head")
-        .reference()
-        .slot()
-        .clone();
-    let head_prepared = device
-        .prepare_circle_object_at(
-            &ProtocolObjectContext::signed_plaintext(
-                commit.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            ),
-            head_slot,
-            &head_slot_prefix(
-                &commit.author_registration.device_id.to_string(),
-                commit.seq(),
-            ),
-            head.to_bytes(),
-        )
+        .expect("authorize substituted Circle object Store");
+    writer
+        .circles()
+        .resign_merge_journal_with_reference_for_test(journal, reference, |_| {})
         .await
-        .expect("prepare substituted Circle Store head");
-    let operation = journal.operation_mut();
-    operation.commit_bytes = commit.to_bytes();
-    operation.commit_ref = commit_ref;
-    operation
-        .prepared_objects
-        .insert("store-commit".to_string(), commit_prepared);
-    operation
-        .prepared_objects
-        .insert("store-head".to_string(), head_prepared);
-    operation.policy = CircleOperationPolicy {
-        head,
-        history_summary,
-    };
-    operation.uploaded.clear();
+        .expect("re-sign Circle commit with substituted exact graph");
 }
 
 fn promote_store_member_access_without_adding_to_circle_roster(

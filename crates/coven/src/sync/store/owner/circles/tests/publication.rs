@@ -639,20 +639,14 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         blob_bytes.len(),
         crate::blob::content_hash(blob_bytes),
     );
-    let tables = db.synced_tables().to_vec();
-    let write_id = db.new_write_id();
-    let captured_write_id = write_id.clone();
     let routing = EncryptionService::from_key([42; 32]);
-    db.test_sql(move |connection| {
-        connection.run_internal_store_write(
-            &tables,
-            Some(&routing),
-            captured_write_id,
-            |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
-        )
-    })
-    .await
-    .expect("capture scoped Circle blob row");
+    let write_id = crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |transaction| {
+            transaction.execute_batch(&insert).map_err(DbError::from)
+        })
+        .await
+        .expect("capture scoped Circle blob row")
+        .write_id;
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "files", blob_id, blob_bytes)
         .await
         .expect("stage Circle blob");
@@ -785,24 +779,19 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         late_bytes.len(),
         crate::blob::content_hash(late_bytes),
     );
-    let concurrent_tables = concurrent_db.synced_tables().to_vec();
-    let late_write_id = concurrent_db.new_write_id();
-    let captured_late_write_id = late_write_id.clone();
-    concurrent_db
-        .test_sql(move |connection| {
-            connection.run_internal_store_write(
-                &concurrent_tables,
-                Some(&EncryptionService::from_key([42; 32])),
-                captured_late_write_id,
-                |transaction| {
-                    transaction
-                        .execute_batch(&late_insert)
-                        .map_err(DbError::from)
-                },
-            )
-        })
+    let late_write_id = crate::database::StoreDatabase::new(&concurrent_db)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| {
+                transaction
+                    .execute_batch(&late_insert)
+                    .map_err(DbError::from)
+            },
+        )
         .await
-        .expect("capture late concurrent Circle row");
+        .expect("capture late concurrent Circle row")
+        .write_id;
     crate::store_dir::StoreDir::store_local_blob(
         &concurrent_store_dir,
         "files",
@@ -1322,33 +1311,25 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let prior_control = prior.control.coord.clone();
     let prior_epoch = prior.control.value.epoch_id();
     let prior_fingerprint = prior.control.value.key_fingerprint();
-    let tables = db.synced_tables().to_vec();
-    let write_id = db.new_write_id();
-    let captured_write_id = write_id.clone();
     let routing = EncryptionService::from_key([42; 32]);
-    db.test_sql(move |connection| {
-        connection.run_internal_store_write(
-            &tables,
-            Some(&routing),
-            captured_write_id,
-            |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO documents (id, audience, _updated_at)
+    let write_id = crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(Some(routing), None, move |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO documents (id, audience, _updated_at)
                          VALUES (?1, ?2, ?3)",
-                        rusqlite::params![
-                            "00000000-0000-4000-8000-000000000001",
-                            circle_id.to_string(),
-                            "0000000002500-0000-owner",
-                        ],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            },
-        )
-    })
-    .await
-    .expect("capture pre-close Circle row");
+                    rusqlite::params![
+                        "00000000-0000-4000-8000-000000000001",
+                        circle_id.to_string(),
+                        "0000000002500-0000-owner",
+                    ],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("capture pre-close Circle row")
+        .write_id;
     components
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
@@ -2430,35 +2411,29 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     // then pulls the close. While the epoch is closing, publication is frozen: the
     // write does not reach the Store.
     let member_row = "00000000-0000-4000-8000-0000000000c1";
-    let member_tables = fixture.member_db.synced_tables().to_vec();
-    let member_write_id = fixture.member_db.new_write_id();
-    let captured_member_write_id = member_write_id.clone();
     let member_circle_id = fixture.circle_id;
-    fixture
-        .member_db
-        .test_sql(move |connection| {
-            connection.run_internal_store_write(
-                &member_tables,
-                Some(&EncryptionService::from_key([42; 32])),
-                captured_member_write_id,
-                |transaction| {
-                    transaction
-                        .execute(
-                            "INSERT INTO documents (id, audience, _updated_at)
+    let member_write_id = crate::database::StoreDatabase::new(&fixture.member_db)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
                              VALUES (?1, ?2, ?3)",
-                            rusqlite::params![
-                                member_row,
-                                member_circle_id.to_string(),
-                                "0000000003000-0000-member",
-                            ],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                },
-            )
-        })
+                        rusqlite::params![
+                            member_row,
+                            member_circle_id.to_string(),
+                            "0000000003000-0000-member",
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            },
+        )
         .await
-        .expect("member captures an old-epoch Circle row");
+        .expect("member captures an old-epoch Circle row")
+        .write_id;
     fixture.member_pull().await;
     assert!(
         fixture.member_push().await.is_err(),
@@ -2878,15 +2853,20 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         objects,
         Some(old_commit.circle_controls()[0].head_object().clone()),
     );
-    resign_merge_journal_with_reference(
-        &fixture.db,
-        &fixture.store,
-        &fixture.signer,
-        &mut journal,
-        forged_reference,
-        |_| {},
-    )
-    .await;
+    let device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind forged Circle commit Store");
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize forged Circle commit Store");
+    writer
+        .circles()
+        .resign_merge_journal_with_reference_for_test(&mut journal, forged_reference, |_| {})
+        .await
+        .expect("re-sign forged Circle commit");
 
     let forged_commit = journal.commit().expect("parse forged reopen commit");
     let error = fixture
@@ -2905,68 +2885,27 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     );
 }
 
-/// Prepare the Circle's reopen, begin its finalization, and persist it durably —
-/// the `Finalizing` state a crash leaves before any object is published.
-async fn begin_cancellation_finalization(fixture: &ClosingFounderCircle) {
-    let owner_pubkey = keys::public_key_hex(&fixture.signer);
-    let (current, activation_commit_ref) = StoreDatabase::new(&fixture.db)
-        .circle_closing_context(fixture.circle_id, &owner_pubkey)
-        .await
-        .expect("load closing Circle context");
-    let loaded_store = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("load Circle preparation Store");
-    let activation_commit = loaded_store
-        .load_commit_for_test(&activation_commit_ref)
-        .await
-        .expect("load closing activation commit");
-    let mut authority = loaded_store
-        .authorize_writer()
-        .await
-        .expect("authorize Circle writer");
-    let previous_control = activation_commit
-        .value()
-        .circle_controls()
-        .iter()
-        .find(|reference| {
-            reference.circle_id() == fixture.circle_id
-                && reference.control() == &current.control.coord
-        })
-        .expect("closing control is present in its activating commit")
-        .clone();
-    let prepared = authority
-        .circles()
-        .preparer()
-        .prepare_request(
-            super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
-                super::super::commands::CircleCancelEpochCloseRequest {
-                    operation_id: fixture.operation_id.clone(),
-                    circle_id: fixture.circle_id,
-                    member_pubkey: fixture.member_pubkey.clone(),
-                    current,
-                    previous_control,
-                },
-            )),
-        )
-        .await
-        .expect("prepare Circle reopen");
-    let mut journal = StoreDatabase::new(&fixture.db)
-        .circle_operation(&fixture.operation_id)
-        .await
-        .expect("read waiting Circle operation")
-        .expect("waiting Circle operation is durable");
-    journal
-        .begin_finalization(prepared.operation().clone())
-        .expect("begin cancellation finalization");
-    StoreDatabase::new(&fixture.db)
-        .begin_circle_operation_finalization(journal)
-        .await
-        .expect("persist cancellation finalization");
-}
-
 impl ClosingFounderCircle {
+    /// Persist the exact `Finalizing` state a crash leaves before cancellation
+    /// publication begins.
+    async fn begin_cancellation_finalization(&self) {
+        let device = self
+            .store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("load Circle cancellation Store");
+        let mut writer = device
+            .authorize_writer()
+            .await
+            .expect("authorize Circle cancellation writer");
+        let operation_id = writer
+            .circles()
+            .begin_circle_epoch_close_cancellation_for_test(self.circle_id)
+            .await
+            .expect("persist Circle cancellation finalization");
+        assert_eq!(operation_id, self.operation_id);
+    }
+
     async fn member_pull(&self) {
         self.store
             .bind_device(&self.member_db, &self.member)
@@ -3088,7 +3027,7 @@ async fn interrupted_cancellation_flow() {
     // the durable operation resumes and completes exactly once. Its distinct write
     // identity keeps it from being re-derived as a finalization.
     let before_publication = setup_closing_founder_circle("circle-cancel-restart-before").await;
-    begin_cancellation_finalization(&before_publication).await;
+    before_publication.begin_cancellation_finalization().await;
     assert_eq!(
         StoreDatabase::new(&before_publication.db)
             .circle_operation(&before_publication.operation_id)
@@ -3124,7 +3063,7 @@ async fn interrupted_cancellation_flow() {
     // head, access envelopes, then the commit and the head); failing before the
     // final head create leaves the commit published and activation not recorded.
     let after_publication = setup_closing_founder_circle("circle-cancel-restart-after").await;
-    begin_cancellation_finalization(&after_publication).await;
+    after_publication.begin_cancellation_finalization().await;
     let journal = StoreDatabase::new(&after_publication.db)
         .circle_operation(&after_publication.operation_id)
         .await
@@ -3315,6 +3254,7 @@ struct SilentParticipantCircle {
     circle_id: CircleId,
     removed_pubkey: String,
     silent: UserKeypair,
+    silent_device_id: crate::protocol::store_commit::StoreDeviceId,
     silent_db: Database,
     silent_storage: Arc<crate::storage::CloudSyncStorage>,
     prior_epoch: crate::protocol::circle::CircleEpochId,
@@ -3330,6 +3270,7 @@ struct SilentParticipantClose {
     circle_id: CircleId,
     removed_pubkey: String,
     silent: UserKeypair,
+    silent_device_id: crate::protocol::store_commit::StoreDeviceId,
     silent_db: Database,
     operation_id: CircleOperationId,
     prior_epoch: crate::protocol::circle::CircleEpochId,
@@ -3434,6 +3375,16 @@ impl SilentParticipantClose {
             .await
             .expect("silent participant publishes its close response");
     }
+
+    async fn finalized_close_outcome(&self) -> crate::protocol::circle::CircleEpochCloseOutcome {
+        self.store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("bind finalized Circle Store")
+            .finalized_circle_close_outcome_for_test(self.circle_id)
+            .await
+            .expect("load finalized Circle close outcome")
+    }
 }
 
 /// A founder Circle closing on a member removal whose remaining roster includes a
@@ -3451,6 +3402,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         circle_id,
         removed_pubkey,
         silent,
+        silent_device_id,
         silent_db,
         silent_storage: _,
         prior_epoch,
@@ -3480,6 +3432,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         circle_id,
         removed_pubkey,
         silent,
+        silent_device_id,
         silent_db,
         operation_id,
         prior_epoch,
@@ -3540,6 +3493,10 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         .activate_joined_device(&db, &silent_db, &silent, "2026-07-24T01:00:00Z")
         .await
         .expect("activate silent participant device");
+    let silent_device_id = silent_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read silent participant device id");
 
     let (_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
@@ -3617,96 +3574,11 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         circle_id,
         removed_pubkey,
         silent,
+        silent_device_id,
         silent_db,
         silent_storage,
         prior_epoch,
     }
-}
-
-/// The device id of the sole close participant that is not the Owner's own device.
-async fn silent_participant_device_id(
-    fixture: &SilentParticipantClose,
-) -> crate::protocol::store_commit::StoreDeviceId {
-    close_participant_to_exclude(&fixture.db).await
-}
-
-async fn close_participant_to_exclude(
-    db: &Database,
-) -> crate::protocol::store_commit::StoreDeviceId {
-    let owner_device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device id")
-        .expect("local Store device is active");
-    let controls = StoreDatabase::new(db)
-        .closing_circle_controls()
-        .await
-        .expect("read closing Circle controls");
-    let control = controls.into_iter().next().expect("one closing Circle");
-    let crate::protocol::circle::CircleControlState::EpochClose(close) = control.value.state()
-    else {
-        panic!("closing Circle must hold an epoch close");
-    };
-    close
-        .participants
-        .iter()
-        .map(|participant| participant.registration.device_id)
-        .find(|device_id| device_id.to_string() != owner_device_id)
-        .expect("close has a non-owner participant to exclude")
-}
-
-async fn finalized_close_outcome(
-    fixture: &SilentParticipantClose,
-) -> crate::protocol::circle::CircleEpochCloseOutcome {
-    let (successor, _) = StoreDatabase::new(&fixture.db)
-        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
-        .await
-        .expect("load finalized successor Circle authoring state");
-    let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
-        successor.control.value.state()
-    else {
-        panic!("finalized Circle control must be active");
-    };
-    let crate::protocol::circle::CircleEpochOrigin::Closed { close_id, .. } = &active.common.origin
-    else {
-        panic!("finalized successor must name its close outcome");
-    };
-    let context = ProtocolObjectContext::store_encrypted(
-        fixture.store.root.store_root_hash,
-        ProtocolObjectDomain::CircleEpochCloseOutcome,
-    );
-    let prefix = crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
-        fixture.circle_id,
-        *close_id,
-    );
-    let activation = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind successor Circle Store")
-        .verified_circle_activation_for_test(fixture.circle_id, successor.control.coord.clone())
-        .await
-        .expect("read successor activation")
-        .expect("successor activation retained");
-    let outcome_ref = activation
-        .reference
-        .objects()
-        .close_outcome
-        .as_ref()
-        .expect("successor names its outcome");
-    let (bytes, _) = fixture
-        .store
-        .storage
-        .read_protocol_slot(&context, outcome_ref.object.slot(), &prefix)
-        .await
-        .expect("read outcome slot");
-    let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
-        crate::protocol::circle::CircleEpochCloseSlotValue::parse(&bytes)
-            .expect("parse outcome slot value")
-    else {
-        panic!("finalized slot holds an outcome");
-    };
-    outcome
 }
 
 #[tokio::test]
@@ -3746,7 +3618,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
     );
 
     // The Owner excludes the silent participant, completing the response set.
-    let silent_device_id = silent_participant_device_id(&fixture).await;
+    let silent_device_id = fixture.silent_device_id;
     fixture
         .components
         .exclude_circle_close_device(fixture.circle_id, silent_device_id)
@@ -3775,7 +3647,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
 
     // The outcome carries the Owner's response and the silent participant's
     // exclusion; the cutoff joins only the responder's frontier.
-    let outcome = finalized_close_outcome(&fixture).await;
+    let outcome = fixture.finalized_close_outcome().await;
     let exclusions = outcome
         .responses
         .iter()
@@ -3817,7 +3689,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
 #[tokio::test]
 async fn close_status_reports_a_response_and_an_exclusion() {
     let fixture = setup_closing_with_silent_participant("circle-close-status").await;
-    let silent_device_id = silent_participant_device_id(&fixture).await;
+    let silent_device_id = fixture.silent_device_id;
 
     // The Owner responds; the silent participant does not. Its slot is empty.
     fixture
@@ -3957,7 +3829,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         .publish_circle_epoch_close_response()
         .await
         .expect("publish Owner close response");
-    let silent_device_id = close_participant_to_exclude(&fixture.db).await;
+    let silent_device_id = fixture.silent_device_id;
     fixture
         .components
         .exclude_circle_close_device(fixture.circle_id, silent_device_id)
@@ -4081,7 +3953,7 @@ async fn drive_close_and_exclude_silent(
         .publish_circle_epoch_close_response()
         .await
         .expect("publish Owner close response");
-    let silent_device_id = close_participant_to_exclude(&fixture.db).await;
+    let silent_device_id = fixture.silent_device_id;
     fixture
         .components
         .exclude_circle_close_device(fixture.circle_id, silent_device_id)
@@ -4571,7 +4443,7 @@ async fn slot_race_response_first_adopts_the_response() {
 
     // The Owner then tries to exclude that participant; create-once holds the
     // response, so the exclusion command adopts it as a no-op.
-    let silent_device_id = silent_participant_device_id(&fixture).await;
+    let silent_device_id = fixture.silent_device_id;
     fixture
         .components
         .exclude_circle_close_device(fixture.circle_id, silent_device_id)
@@ -4589,7 +4461,7 @@ async fn slot_race_response_first_adopts_the_response() {
         .is_none());
 
     // The outcome counts the participant's response — no exclusion.
-    let outcome = finalized_close_outcome(&fixture).await;
+    let outcome = fixture.finalized_close_outcome().await;
     assert!(
         outcome.responses.iter().all(|settlement| matches!(
             settlement,
@@ -4622,7 +4494,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
-    let silent_device_id = silent_participant_device_id(&fixture).await;
+    let silent_device_id = fixture.silent_device_id;
     fixture
         .components
         .exclude_circle_close_device(fixture.circle_id, silent_device_id)
@@ -4645,7 +4517,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
 
     // The outcome excludes the participant; its late frontier is not part of the
     // cutoff.
-    let outcome = finalized_close_outcome(&fixture).await;
+    let outcome = fixture.finalized_close_outcome().await;
     let excluded = outcome
         .responses
         .iter()
@@ -4678,7 +4550,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
-    let silent_device_id = silent_participant_device_id(&fixture).await;
+    let silent_device_id = fixture.silent_device_id;
 
     // A crash while writing the exclusion to the slot: the create fails.
     fixture.store.home.fail_exact_create_before_call(1);
@@ -4714,7 +4586,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .await
         .expect("read completed close operation")
         .is_none());
-    let outcome = finalized_close_outcome(&fixture).await;
+    let outcome = fixture.finalized_close_outcome().await;
     assert_eq!(
         outcome
             .responses
@@ -4789,7 +4661,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("finalize the honest close");
-    let honest = finalized_close_outcome(&fixture).await;
+    let honest = fixture.finalized_close_outcome().await;
     assert!(
         honest.verify_for(&close_control, &intent, &settlements),
         "the honest outcome verifies against the actual slot responses"

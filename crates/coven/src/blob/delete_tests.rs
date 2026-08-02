@@ -14,20 +14,19 @@ use async_trait::async_trait;
 use crate::blob::delete::{
     BlobTombstoneJson, TombstoneCollection, TombstoneDrain, BLOB_TOMBSTONE_GRACE,
 };
-use crate::blob::{BlobScope, CacheFill, Provenance};
+use crate::blob::{CacheFill, Provenance};
 use crate::clock::FixedClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MemberRole;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
-use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, PendingRotation};
 use crate::store_dir::StoreDir;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
-    exact_tombstone_key, open_test_db, open_test_db_with_blob, plaintext_cipher, plant_blob_row,
-    pubkey_hex, TestStore,
+    exact_tombstone_key, open_test_db, open_test_db_with_blob, plaintext_cipher, pubkey_hex,
+    TestStore,
 };
 
 const T0: &str = "2024-06-01T00:00:00Z";
@@ -154,117 +153,13 @@ impl<'a> TombstoneCollector<'a> {
     }
 }
 
-/// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
-fn create_exact_blob<'a>(
-    storage: &'a TestStore,
-    namespace: &'a str,
-    id: &'a str,
-    bytes: &'a [u8],
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::blob::locator::StoredBlobRef> + 'a>>
-{
-    Box::pin(async move {
-        let (uploader, registration, _) = storage
-            .founder_device_authority()
-            .await
-            .expect("load exact founder device authority");
-        let authority = crate::storage::BlobWriteAuthority::new(&uploader, &registration)
-            .expect("validate exact blob write authority");
-        create_exact_blob_with_authority(&storage.storage, &authority, namespace, id, bytes).await
-    })
-}
-
-fn create_exact_blob_as<'a>(
-    storage: &'a TestStore,
-    db: &'a Database,
-    identity: &'a UserKeypair,
-    namespace: &'a str,
-    id: &'a str,
-    bytes: &'a [u8],
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::blob::locator::StoredBlobRef> + 'a>>
-{
-    Box::pin(async move {
-        let (uploader, registration) = StoreDatabase::new(db)
-            .local_blob_write_authority()
-            .await
-            .expect("load activated exact blob write authority");
-        let device_signer = registration
-            .device_signer(identity)
-            .expect("derive exact device signer");
-        let authority = crate::storage::BlobWriteAuthority::new(&uploader, &registration)
-            .expect("validate exact blob write authority");
-        assert_eq!(
-            authority.registration.device_signing_pubkey,
-            hex::encode(device_signer.public_key())
-        );
-        let member_storage = crate::storage::CloudSyncStorage::new(
-            storage.home.clone(),
-            CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            "test-store",
-            identity.clone(),
-        )
-        .expect("construct exact member blob storage");
-        create_exact_blob_with_authority(&member_storage, &authority, namespace, id, bytes).await
-    })
-}
-
-async fn create_exact_blob_with_authority(
-    storage: &dyn SyncStorage,
-    authority: &crate::storage::BlobWriteAuthority<'_>,
-    namespace: &str,
-    id: &str,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let protection = crate::encryption::EncryptionService::from_key([42; 32]);
-    let locator = crate::blob::locator::BlobLocator::opaque(
-        namespace,
-        id,
-        authority.reference.clone(),
-        crate::blob::locator::RemoteAudience::Store,
-        BlobScope::Master,
-        protection.seal_key_fingerprint(),
-        bytes.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(bytes),
-    )
-    .expect("build exact blob locator");
-    let temp = tempfile::tempdir().expect("create exact blob spool directory");
-    let plaintext = temp.path().join("plaintext");
-    let spool = temp.path().join("stored");
-    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
-        .await
-        .expect("write exact blob plaintext");
-    let slot = storage
-        .allocate_blob_slot(&locator, authority)
-        .await
-        .expect("allocate exact blob slot");
-    storage
-        .seal_blob_to_spool(
-            &locator,
-            authority,
-            crate::storage::BlobSpoolProtection::Opaque(protection),
-            &plaintext,
-            &spool,
-        )
-        .await
-        .expect("seal exact blob");
-    let stored = storage
-        .prepare_blob_object(&locator, authority, slot, &spool)
-        .await
-        .expect("prepare exact blob object");
-    storage
-        .create_blob_object_from_file(&stored, authority, &spool, &no_progress())
-        .await
-        .expect("create exact blob object");
-    stored
-}
-
 async fn enqueue_local_upload(
     db: &Database,
     blob_id: &str,
     bytes: &[u8],
     source_dir: &std::path::Path,
 ) {
-    plant_blob_row(db, blob_id, false, bytes).await;
+    db.plant_blob_row_for_test(blob_id, false, bytes).await;
     let row = db
         .row_blob_ref("note_photos", blob_id)
         .await
@@ -279,67 +174,6 @@ async fn enqueue_local_upload(
     })
     .await
     .expect("enqueue exact Local row upload");
-}
-
-async fn publish_exact_remote_blob_binding(
-    db: &Database,
-    storage: &TestStore,
-    store_dir: &StoreDir,
-    root_id: &str,
-    row_id: &str,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let local = db
-        .row_blob_ref("note_photos", row_id)
-        .await
-        .expect("load exact Local row blob reference");
-    let source = store_dir
-        .local_blob_path(&local.blob().namespace, &local.blob().id)
-        .expect("resolve host blob source");
-    crate::storage::StagedBlobFile::write_for_test(&source, bytes)
-        .await
-        .expect("write host blob source");
-    let hlc = crate::sync::hlc::Hlc::new(
-        "delete-tests".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
-    let database = StoreDatabase::new(db);
-    crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone())
-        .local_transitions()
-        .make_remote("notes", root_id, false)
-        .await
-        .expect("start exact make_remote");
-    let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    let (registration_ref, registration) = database
-        .local_blob_write_authority()
-        .await
-        .expect("load exact blob upload authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-        .expect("validate exact blob upload authority");
-    let outcome = crate::blob::upload::BlobUploadQueue::new(
-        &database,
-        &storage.storage,
-        authority,
-        store_dir,
-        &clock,
-        &hlc,
-        None,
-        None,
-    )
-    .drain()
-    .await
-    .expect("drain exact blob upload");
-    assert_eq!(outcome.uploaded(), 1);
-    assert!(storage
-        .publish_pending(db, store_dir)
-        .await
-        .expect("publish exact remote blob binding"));
-    db.row_blob_ref("note_photos", row_id)
-        .await
-        .expect("load exact Remote row blob reference")
-        .stored()
-        .cloned()
-        .expect("Remote row owns an exact stored blob reference")
 }
 
 /// Exact test storage holding a real two-member chain: `founder` (Owner) added
@@ -572,7 +406,9 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
-    let stored = create_exact_blob(&storage, "delete-tests", "queued-delete", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "queued-delete", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let deletes_before = cloud.deletes_seen();
 
@@ -598,7 +434,10 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     // The blob is still present — the drain records the deletion, it doesn't
     // perform it.
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is kept for the grace, not deleted on drain",
     );
     assert_eq!(
@@ -634,7 +473,9 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
     let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
-    let stored = create_exact_blob(&storage, "delete-tests", "garbage-slot", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "garbage-slot", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     cloud
         .write(
@@ -682,7 +523,9 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
     let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
-    let stored = create_exact_blob(&storage, "delete-tests", "existing", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "existing", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let original = BlobTombstoneJson::signed(
         "lib",
@@ -735,7 +578,8 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    plant_blob_row(&db, "upload-row", false, b"upload body").await;
+    db.plant_blob_row_for_test("upload-row", false, b"upload body")
+        .await;
     let row = db
         .row_blob_ref("note_photos", "upload-row")
         .await
@@ -760,7 +604,9 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     .await
     .expect("enqueue exact upload");
     let storage = TestStore::new().await;
-    let stored = create_exact_blob(&storage, "delete-tests", "shape-delete", b"delete").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "shape-delete", b"delete")
+        .await;
     db.enqueue_blob_delete_for_test(&stored, T0)
         .await
         .expect("enqueue exact blob deletion");
@@ -793,7 +639,9 @@ async fn delete_validation_failure_backs_off_then_retries() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db);
     let storage = TestStore::new().await;
-    let stored = create_exact_blob(&storage, "delete-tests", "validation-retry", b"body").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "validation-retry", b"body")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let inner = storage.home.as_ref();
     let cloud = FailCloudOpOnKey::new(inner, FailingCloudOp::Read, &tombstone_key, 1);
@@ -900,7 +748,9 @@ async fn delete_write_failure_backs_off_then_retries() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db);
     let storage = TestStore::new().await;
-    let stored = create_exact_blob(&storage, "delete-tests", "write-retry", b"body").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "write-retry", b"body")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let inner = storage.home.as_ref();
     let cloud = FailCloudOpOnKey::new(inner, FailingCloudOp::PutObject, &tombstone_key, 1);
@@ -1002,20 +852,12 @@ async fn corrupt_delete_backoff_timestamp_case() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db);
     let storage = Box::pin(TestStore::new()).await;
-    let corrupt = Box::pin(create_exact_blob(
-        &storage,
-        "delete-tests",
-        "corrupt-retry",
-        b"corrupt",
-    ))
-    .await;
-    let healthy = Box::pin(create_exact_blob(
-        &storage,
-        "delete-tests",
-        "healthy-retry",
-        b"healthy",
-    ))
-    .await;
+    let corrupt =
+        Box::pin(storage.create_exact_opaque_blob("delete-tests", "corrupt-retry", b"corrupt"))
+            .await;
+    let healthy =
+        Box::pin(storage.create_exact_opaque_blob("delete-tests", "healthy-retry", b"healthy"))
+            .await;
     let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
@@ -1085,7 +927,9 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
     let cipher = plaintext_cipher();
 
     // The exact blob exists; a member tombstoned it at a known instant.
-    let stored = create_exact_blob(&storage, "delete-tests", "grace", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "grace", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
@@ -1104,7 +948,10 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
         .expect("gc inside grace");
     assert_eq!(n, 0, "nothing reclaimed inside the grace");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives a GC inside the grace",
     );
     assert!(
@@ -1120,7 +967,10 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
         .expect("gc past grace");
     assert_eq!(n, 1, "one blob reclaimed past the grace");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is deleted past the grace",
     );
     assert!(
@@ -1142,15 +992,9 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     db.insert_local_blob_row_for_test("n1", "bloblive", "bloblive", None, b"live contents")
         .await
         .expect("insert journaled Local blob row");
-    let stored = publish_exact_remote_blob_binding(
-        &db,
-        &storage,
-        &store_dir,
-        "n1",
-        "bloblive",
-        b"live contents",
-    )
-    .await;
+    let stored = storage
+        .publish_exact_remote_blob_binding(&store_dir, "n1", "bloblive", b"live contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
@@ -1169,7 +1013,10 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
 
     assert_eq!(n, 0, "a live blob reference prevents reclaim");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the referenced blob remains in cloud",
     );
     assert!(
@@ -1192,7 +1039,9 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
     );
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
-    let replaced = create_exact_blob(&storage, "photos", "p1cover", b"old cover").await;
+    let replaced = storage
+        .create_exact_opaque_blob("photos", "p1cover", b"old cover")
+        .await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     db.insert_local_blob_row_for_test(
         "n1",
@@ -1203,9 +1052,9 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
     )
     .await
     .expect("insert journaled Local blob row");
-    let live =
-        publish_exact_remote_blob_binding(&db, &storage, &store_dir, "n1", "ph1", b"live cover")
-            .await;
+    let live = storage
+        .publish_exact_remote_blob_binding(&store_dir, "n1", "ph1", b"live cover")
+        .await;
     // The replacement tombstoned the blob it replaced. A tombstone also stands for the
     // live blob's key — a stale one the GC must cancel, not act on.
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -1227,11 +1076,17 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
 
     assert_eq!(reclaimed, 1, "exactly the replaced blob is reclaimed");
     assert!(
-        storage.storage.verify_blob_object(&replaced).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&replaced)
+            .await
+            .expect("verify exact blob object"),
         "the replaced blob's object is collected — no live row names its key",
     );
     assert!(
-        storage.storage.verify_blob_object(&live).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&live)
+            .await
+            .expect("verify exact blob object"),
         "the blob the row now holds is protected by the live-row check",
     );
     assert!(
@@ -1263,15 +1118,9 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     db.insert_local_blob_row_for_test("n1", "bloblive", "bloblive", None, b"live contents")
         .await
         .expect("insert journaled Local blob row");
-    let stored = publish_exact_remote_blob_binding(
-        &db,
-        &storage,
-        &store_dir,
-        "n1",
-        "bloblive",
-        b"live contents",
-    )
-    .await;
+    let stored = storage
+        .publish_exact_remote_blob_binding(&store_dir, "n1", "bloblive", b"live contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
 
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -1292,7 +1141,10 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         .expect("gc within grace");
     assert_eq!(n, 0, "nothing reclaimed inside the grace");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives inside the grace",
     );
     assert!(
@@ -1315,7 +1167,10 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         "the blob is reclaimed once grace passes and the row is gone"
     );
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is deleted past the grace",
     );
     assert!(
@@ -1340,15 +1195,9 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
     db.insert_local_blob_row_for_test("n1", "orphan", "orphan", None, b"orphan contents")
         .await
         .expect("insert journaled Local blob row");
-    let stored = publish_exact_remote_blob_binding(
-        &db,
-        &storage,
-        &store_dir,
-        "n1",
-        "orphan",
-        b"orphan contents",
-    )
-    .await;
+    let stored = storage
+        .publish_exact_remote_blob_binding(&store_dir, "n1", "orphan", b"orphan contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
 
     // Remove the bound row's parent with foreign keys disabled. The exact child
@@ -1376,7 +1225,10 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
 
     assert!(error.contains("locality is unresolved"), "{error}");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is untouched when locality is unresolved",
     );
     assert!(
@@ -1403,7 +1255,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    storage
+    let member_device = storage
         .activate_joined_device(&db, &member_db, &member, "2024-06-01T00:00:00Z")
         .await
         .expect("activate exact member uploader");
@@ -1413,9 +1265,12 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     // One blob under the member's own prefix, one under the founder's. No live rows
     // reference either (the DB is empty), so both are ripe for reclaim — only the
     // prefix gate decides which the member may delete.
-    let mine =
-        create_exact_blob_as(&storage, &member_db, &member, "photos", "mineblob", b"mine").await;
-    let foreign = create_exact_blob(&storage, "photos", "foreignblob", b"foreign").await;
+    let mine = member_device
+        .create_exact_opaque_blob("photos", "mineblob", b"mine")
+        .await;
+    let foreign = storage
+        .create_exact_opaque_blob("photos", "foreignblob", b"foreign")
+        .await;
     assert_eq!(
         StoreDatabase::new(&member_db)
             .activated_store_device_registration(mine.locator().uploader().clone())
@@ -1449,11 +1304,17 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
 
     assert_eq!(n, 1, "the member reclaims exactly its own-prefix blob");
     assert!(
-        storage.storage.verify_blob_object(&mine).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&mine)
+            .await
+            .expect("verify exact blob object"),
         "the member's own-prefix blob is reclaimed",
     );
     assert!(
-        storage.storage.verify_blob_object(&foreign).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&foreign)
+            .await
+            .expect("verify exact blob object"),
         "a blob under another member's prefix is left for its owner or an owner sweep",
     );
     assert!(
@@ -1484,22 +1345,16 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    storage
+    let member_device = storage
         .activate_joined_device(&db, &member_db, &member, "2024-06-01T00:00:00Z")
         .await
         .expect("activate exact member uploader");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     storage.pull_into(&db, &store_dir).await;
 
-    let foreign = create_exact_blob_as(
-        &storage,
-        &member_db,
-        &member,
-        "photos",
-        "absentblob",
-        b"contents",
-    )
-    .await;
+    let foreign = member_device
+        .create_exact_opaque_blob("photos", "absentblob", b"contents")
+        .await;
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", foreign.clone(), deleted_at.to_string(), &member);
@@ -1526,7 +1381,10 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         "the owner reclaims the absent member's condemned blob"
     );
     assert!(
-        storage.storage.verify_blob_object(&foreign).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&foreign)
+            .await
+            .expect("verify exact blob object"),
         "an owner sweep deletes a blob under another member's prefix",
     );
 }
@@ -1547,7 +1405,9 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
 
     // Authorization passes, so GC reaches the pre-delete re-check where the
     // simulated concurrent removal lands.
-    let stored = create_exact_blob(&storage, "delete-tests", "cancel-mid-gc", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "cancel-mid-gc", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
@@ -1572,7 +1432,10 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
         .expect("gc");
     assert_eq!(n, 0, "a tombstone removed mid-GC reclaims nothing");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the exact blob survives after its tombstone disappears",
     );
 }
@@ -1586,7 +1449,9 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
-    let stored = create_exact_blob(&storage, "delete-tests", "plain-delete", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "plain-delete", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
@@ -1605,7 +1470,10 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
 
     assert_eq!(n, 1, "the blob is erased past the grace");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is gone after a plain-delete reclaim",
     );
     assert!(
@@ -1624,7 +1492,9 @@ async fn a_configured_one_hour_grace_is_honored() {
     let cipher = plaintext_cipher();
     let grace = chrono::Duration::hours(1);
 
-    let stored = create_exact_blob(&storage, "delete-tests", "configured-grace", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "configured-grace", b"contents")
+        .await;
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
@@ -1642,7 +1512,10 @@ async fn a_configured_one_hour_grace_is_honored() {
         .expect("gc within the configured hour");
     assert_eq!(n, 0, "nothing reclaimed inside the configured hour");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives inside the configured hour (well before the 7-day default)",
     );
 
@@ -1655,7 +1528,10 @@ async fn a_configured_one_hour_grace_is_honored() {
         .expect("gc past the configured hour");
     assert_eq!(n, 1, "the blob is erased once the configured hour passes");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob is gone past the configured grace",
     );
 }
@@ -1672,7 +1548,9 @@ async fn tombstone_by_a_non_member_is_ignored() {
     let cipher = plaintext_cipher();
     let outsider = UserKeypair::generate(); // not in the chain
 
-    let stored = create_exact_blob(&storage, "delete-tests", "non-member", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "non-member", b"contents")
+        .await;
     // Validly signed by the outsider (the signature itself verifies), but the
     // outsider is not a member — long past the grace, so only authorization stands
     // between this and a deletion.
@@ -1700,7 +1578,10 @@ async fn tombstone_by_a_non_member_is_ignored() {
         .expect("gc");
     assert_eq!(n, 0, "a non-member tombstone reclaims nothing");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives a non-member's forged deletion",
     );
 }
@@ -1735,7 +1616,9 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // The victim blob, and a tombstone the attacker signs as their forged founder,
     // backdated well past the grace so only authorization stands between it and the
     // deletion.
-    let stored = create_exact_blob(&storage, "delete-tests", "refounded", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "refounded", b"contents")
+        .await;
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone = BlobTombstoneJson::signed(
         "test-lib",
@@ -1766,7 +1649,10 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
          any tombstone is judged",
     );
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the victim blob survives a wiped-and-refounded-chain takeover",
     );
 }
@@ -1790,10 +1676,12 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
         .await
         .expect("load exact founder graph")
         .expect("created Store has a founder graph");
-    let stored = create_exact_blob(&storage, "delete-tests", "wiped", b"contents").await;
-    let crate::database::DurableFounderMembership { head, .. } = founder_graph.membership;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "wiped", b"contents")
+        .await;
+    let crate::database::DurableFounderMembership { head_ref, .. } = founder_graph.membership;
     storage
-        .delete_protocol_object(&head.object)
+        .delete_membership_head_for_test(&head_ref)
         .await
         .expect("wipe exact founder membership head");
 
@@ -1823,7 +1711,10 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
          before any tombstone is judged",
     );
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives a tombstone over a wiped membership chain",
     );
 }
@@ -1838,8 +1729,12 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
-    let stored = create_exact_blob(&storage, "delete-tests", "bad-signature", b"contents").await;
-    let other = create_exact_blob(&storage, "delete-tests", "signed-other", b"other").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "bad-signature", b"contents")
+        .await;
+    let other = storage
+        .create_exact_opaque_blob("delete-tests", "signed-other", b"other")
+        .await;
     // A member signs a tombstone for another exact object, then its stored
     // reference is replaced. The signature no longer covers the object in its slot.
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -1863,7 +1758,10 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
         .expect("gc");
     assert_eq!(n, 0, "a tombstone with a bad signature reclaims nothing");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives a tombstone whose signature doesn't verify",
     );
 }
@@ -1880,7 +1778,9 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
-    let stored = create_exact_blob(&storage, "delete-tests", "foreign-store", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "foreign-store", b"contents")
+        .await;
     // Signed for "other-lib" by a real member of THIS store; the GC runs as
     // "test-lib", so the signature (taken over other-lib's id) fails here.
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -1903,7 +1803,10 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
         .expect("gc");
     assert_eq!(n, 0, "a foreign-store tombstone reclaims nothing");
     assert!(
-        storage.storage.verify_blob_object(&stored).await.is_ok(),
+        storage
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact blob object"),
         "the blob survives a tombstone bound to a different store",
     );
 }
@@ -1917,7 +1820,9 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
 #[tokio::test]
 async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
     let storage = TestStore::new().await;
-    let deleted = create_exact_blob(&storage, "photos", "same-id", b"old").await;
+    let deleted = storage
+        .create_exact_opaque_blob("photos", "same-id", b"old")
+        .await;
 
     // Delete then upload: both exact intents remain.
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -2000,7 +1905,9 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
     let cipher = plaintext_cipher();
     let tmp = tempfile::tempdir().unwrap();
 
-    let old = create_exact_blob(&storage, "photos", "blob-key", b"old contents").await;
+    let old = storage
+        .create_exact_opaque_blob("photos", "blob-key", b"old contents")
+        .await;
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", old.clone(), deleted_at.to_string(), &member);
@@ -2016,22 +1923,23 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
     .await
     .expect("insert journaled Local blob row");
     let store_dir = StoreDir::new(tmp.path());
-    let replacement = publish_exact_remote_blob_binding(
-        &db,
-        &storage,
-        &store_dir,
-        "note-blob-key",
-        "blob-key",
-        b"fresh contents",
-    )
-    .await;
+    let replacement = storage
+        .publish_exact_remote_blob_binding(
+            &store_dir,
+            "note-blob-key",
+            "blob-key",
+            b"fresh contents",
+        )
+        .await;
     assert_ne!(old.object(), replacement.object());
-    assert!(storage.storage.verify_blob_object(&old).await.is_ok());
     assert!(storage
-        .storage
-        .verify_blob_object(&replacement)
+        .contains_stored_blob_object(&old)
         .await
-        .is_ok());
+        .expect("verify exact blob object"));
+    assert!(storage
+        .contains_stored_blob_object(&replacement)
+        .await
+        .expect("verify exact blob object"));
     assert!(storage.home.read(&exact_tombstone_key(&old)).await.is_ok());
 
     let collector =
@@ -2044,12 +1952,14 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
         .await
         .expect("gc");
     assert_eq!(gc, 1, "the old exact object is reclaimed");
-    assert!(storage.storage.verify_blob_object(&old).await.is_err());
-    storage
-        .storage
-        .verify_blob_object(&replacement)
+    assert!(!storage
+        .contains_stored_blob_object(&old)
         .await
-        .expect("the replacement exact object survives the old tombstone");
+        .expect("verify exact blob object"));
+    assert!(storage
+        .contains_stored_blob_object(&replacement)
+        .await
+        .expect("verify replacement exact blob object"));
 }
 
 // ----- the tombstone write is idempotent: a re-drain holds the grace deadline -----
@@ -2069,7 +1979,9 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     let cloud = storage.home.as_ref();
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
-    let stored = create_exact_blob(&storage, "delete-tests", "redrain", b"contents").await;
+    let stored = storage
+        .create_exact_opaque_blob("delete-tests", "redrain", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&stored);
 
     // First drain at T0: writes the tombstone, removes the row.
@@ -2145,8 +2057,12 @@ async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
     let db = open_test_db();
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
-    let old = create_exact_blob(&storage, "photos", "blob", b"same bytes").await;
-    let replacement = create_exact_blob(&storage, "photos", "blob", b"same bytes").await;
+    let old = storage
+        .create_exact_opaque_blob("photos", "blob", b"same bytes")
+        .await;
+    let replacement = storage
+        .create_exact_opaque_blob("photos", "blob", b"same bytes")
+        .await;
     assert_ne!(
         old.object(),
         replacement.object(),
@@ -2167,11 +2083,14 @@ async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
         .await
         .expect("reclaim the exact replaced object");
     assert_eq!(reclaimed, 1);
-    assert!(storage.verify_blob_object(&old).await.is_err());
-    storage
-        .verify_blob_object(&replacement)
+    assert!(!storage
+        .contains_stored_blob_object(&old)
         .await
-        .expect("replacement exact object survives the old tombstone");
+        .expect("verify exact blob object"));
+    assert!(storage
+        .contains_stored_blob_object(&replacement)
+        .await
+        .expect("verify replacement exact blob object"));
 }
 
 /// A failed exact-object delete leaves the signed tombstone in place. A later GC
@@ -2182,7 +2101,9 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
     let db = open_test_db();
     let (storage, _founder, member) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
-    let stored = create_exact_blob(&storage, "photos", "retry", b"retry bytes").await;
+    let stored = storage
+        .create_exact_opaque_blob("photos", "retry", b"retry bytes")
+        .await;
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
@@ -2199,10 +2120,10 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         .await
         .expect_err("exact delete failure fails GC");
     assert!(error.contains("Failed to delete blob"), "{error}");
-    storage
-        .verify_blob_object(&stored)
+    assert!(storage
+        .contains_stored_blob_object(&stored)
         .await
-        .expect("failed exact delete leaves the blob present");
+        .expect("verify failed exact delete blob"));
     assert!(storage
         .home
         .read(&exact_tombstone_key(&stored))
@@ -2214,7 +2135,10 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         .await
         .expect("retry GC");
     assert_eq!(second, 1);
-    assert!(storage.verify_blob_object(&stored).await.is_err());
+    assert!(!storage
+        .contains_stored_blob_object(&stored)
+        .await
+        .expect("verify exact blob object"));
     assert!(storage
         .home
         .read(&exact_tombstone_key(&stored))
@@ -2237,7 +2161,9 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     ));
     let (storage, _founder, member) = Box::pin(storage_with_chain(&db)).await;
     let cipher = plaintext_cipher();
-    let old = create_exact_blob(&storage, "photos", "blob-key", b"contents").await;
+    let old = storage
+        .create_exact_opaque_blob("photos", "blob-key", b"contents")
+        .await;
     let tombstone_key = exact_tombstone_key(&old);
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
@@ -2263,7 +2189,10 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         .expect_err("tombstone delete failure fails GC");
     assert!(error.contains("Failed to delete tombstone"), "{error}");
     assert!(
-        storage.storage.verify_blob_object(&old).await.is_err(),
+        !storage
+            .contains_stored_blob_object(&old)
+            .await
+            .expect("verify exact blob object"),
         "the blob is deleted",
     );
     assert!(
@@ -2283,15 +2212,14 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     .await
     .expect("insert journaled Local blob row");
     let store_dir = StoreDir::new(tmp.path());
-    let replacement = publish_exact_remote_blob_binding(
-        &db,
-        &storage,
-        &store_dir,
-        "note-blob-key",
-        "blob-key",
-        b"re-uploaded contents",
-    )
-    .await;
+    let replacement = storage
+        .publish_exact_remote_blob_binding(
+            &store_dir,
+            "note-blob-key",
+            "blob-key",
+            b"re-uploaded contents",
+        )
+        .await;
     assert_ne!(old.object(), replacement.object());
     assert!(
         storage.home.read(&tombstone_key).await.is_ok(),
@@ -2315,10 +2243,9 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     );
     assert!(
         storage
-            .storage
-            .verify_blob_object(&replacement)
+            .contains_stored_blob_object(&replacement)
             .await
-            .is_ok(),
+            .expect("verify exact blob object"),
         "the re-uploaded blob survives the leftover-tombstone window",
     );
 }

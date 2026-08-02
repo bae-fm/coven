@@ -1199,6 +1199,36 @@ impl StoreBlobCache {
     }
 
     #[cfg(test)]
+    pub(crate) async fn populate_bytes_with_mtime_for_test(
+        &self,
+        namespace: &str,
+        id: &str,
+        bytes: &[u8],
+        mtime_secs: u64,
+    ) -> Result<(), BlobCacheError> {
+        let locator_hash = crate::protocol::store_commit::ObjectHash::digest(id.as_bytes());
+        self.populate_bytes_for_test(namespace, locator_hash, bytes)
+            .await?;
+        let path = self.store_dir.cache_blob_path(namespace, locator_hash)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|error| {
+                BlobCacheError::Io(format!(
+                    "open cached blob {} to set modification time: {error}",
+                    path.display()
+                ))
+            })?;
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs))
+            .map_err(|error| {
+                BlobCacheError::Io(format!(
+                    "set cached blob modification time {}: {error}",
+                    path.display()
+                ))
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) async fn clear_for_test(&self) -> Result<(), BlobCacheError> {
         let cache_dir = self.store_dir.cache_dir();
         match tokio::fs::remove_dir_all(&cache_dir).await {

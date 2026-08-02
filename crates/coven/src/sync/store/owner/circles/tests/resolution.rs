@@ -1,8 +1,5 @@
 use std::collections::BTreeSet;
 
-use super::super::commands::{
-    CircleOperationRequest, CircleResolveControlRequest, CircleResolveLosingBranch,
-};
 use super::*;
 use crate::protocol::circle::{CircleControlCoord, CircleInfo, CircleRole};
 use crate::sync::store::Store;
@@ -379,74 +376,10 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     );
 }
 
-/// Build a `ResolveControl` request for the chosen branch that names an
-/// explicit conflicting set — used to drive preparation with a set that no
-/// longer matches the retained branches.
-async fn resolve_request(
-    fixture: &ConflictFixture,
-    chosen: &CircleControlCoord,
-    conflicting_branches: Vec<CircleControlCoord>,
-) -> CircleOperationRequest {
-    let chosen_activation = fixture
-        .store
-        .bind_device(&fixture.db1, &fixture.founder)
-        .await
-        .expect("bind chosen branch Store")
-        .verified_circle_activation_for_test(fixture.circle_id, chosen.clone())
-        .await
-        .expect("read chosen branch activation")
-        .expect("chosen branch is retained");
-    let mut losing_branches = Vec::new();
-    for branch in fixture.conflict_branches_device1().await {
-        if branch == *chosen {
-            continue;
-        }
-        let activation = fixture
-            .store
-            .bind_device(&fixture.db1, &fixture.founder)
-            .await
-            .expect("bind losing branch Store")
-            .verified_circle_activation_for_test(fixture.circle_id, branch)
-            .await
-            .expect("read losing branch activation")
-            .expect("losing branch is retained");
-        let selected_metadata = activation
-            .local_access
-            .as_ref()
-            .and_then(|access| access.active.as_ref())
-            .expect("losing branch active")
-            .metadata
-            .clone();
-        losing_branches.push(CircleResolveLosingBranch {
-            reference: activation.reference.clone(),
-            selected_metadata,
-        });
-    }
-    let access = chosen_activation
-        .local_access
-        .as_ref()
-        .expect("chosen branch access");
-    let active = access.active.as_ref().expect("chosen branch active");
-    CircleOperationRequest::ResolveControl(Box::new(CircleResolveControlRequest {
-        circle_id: fixture.circle_id,
-        chosen: CircleAuthoringState {
-            candidate_family: access.leaf.value.candidate_family,
-            control: chosen_activation.control.clone(),
-            access: access.leaf.value.clone(),
-            roster: active.roster.clone(),
-            metadata: active.metadata.clone(),
-        },
-        previous_control: chosen_activation.reference.clone(),
-        losing_branches,
-        conflicting_branches,
-    }))
-}
-
 #[tokio::test]
 async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict() {
     let fixture = conflict_fixture("resolve-stale").await;
     let (chosen, _losing) = fixture.fork().await;
-    let stale_request = resolve_request(&fixture, &chosen, vec![chosen.clone()]).await;
     let store = fixture
         .store
         .bind_device(&fixture.db1, &fixture.founder)
@@ -456,13 +389,17 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
         .authorize_writer()
         .await
         .expect("authorize Circle writer");
+    let mut circles = authority.circles();
+    let stale_request = circles
+        .resolution_request_for_test(fixture.circle_id, &chosen, vec![chosen.clone()])
+        .await
+        .expect("build stale resolution request");
 
     // A resolution whose captured conflicting set omits a currently retained
     // branch no longer equals the retained set inside the journal transaction,
     // so preparation fails loud rather than silently dropping the omitted
     // branch. Here the captured set names only the chosen branch.
-    let stale = authority
-        .circles()
+    let stale = circles
         .preparer()
         .prepare_request(stale_request)
         .await
@@ -904,7 +841,6 @@ async fn journal_resolution(
     fixture: &ConflictFixture,
     chosen: &CircleControlCoord,
 ) -> CircleOperationJournal {
-    let request = resolve_request(fixture, chosen, fixture.conflict_branches_device1().await).await;
     let store = fixture
         .store
         .bind_device(&fixture.db1, &fixture.founder)
@@ -914,8 +850,16 @@ async fn journal_resolution(
         .authorize_writer()
         .await
         .expect("authorize Circle writer");
-    let journal = authority
-        .circles()
+    let mut circles = authority.circles();
+    let request = circles
+        .resolution_request_for_test(
+            fixture.circle_id,
+            chosen,
+            fixture.conflict_branches_device1().await,
+        )
+        .await
+        .expect("build resolution request");
+    let journal = circles
         .preparer()
         .prepare_request(request)
         .await

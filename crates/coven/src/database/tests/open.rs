@@ -2,10 +2,8 @@ use crate::database::connection_io::attach_session;
 use crate::database::connection_io::capture_changeset;
 
 use super::super::*;
-use crate::blob::BLOB_TOMBSTONE_GRACE;
-use crate::database::StoreDatabase;
-
 use super::fixtures::*;
+use crate::blob::BLOB_TOMBSTONE_GRACE;
 
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
@@ -655,26 +653,17 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     .await
     .expect("seed existing write records");
 
-    let write_id = db.new_write_id();
-    let result = db
-        .call(move |conn| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &tables,
-                None,
-                write_id,
-                |tx| {
-                    tx.execute(
-                        "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
-                        ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
-                        [],
-                    )?;
-                    Ok::<_, DbError>(())
-                },
-            )
+    let result = crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(None, None, move |tx| {
+            tx.execute(
+                "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
+                ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+            )?;
+            tx.execute(
+                "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
+                [],
+            )?;
+            Ok::<_, DbError>(())
         })
         .await;
     let error = result.expect_err("invalid UUID must reject the host transaction");
@@ -727,58 +716,33 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     .await
     .expect("seed row");
 
-    let update_tables = tables.clone();
     let renamed = "01890a5d-ac96-774b-bcce-b302099c3f74";
-    let update_write_id = db.new_write_id();
-    db.call(move |conn| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            conn,
-            &update_tables,
-            None,
-            update_write_id,
-            |tx| {
+    crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "UPDATE things SET id = ?1, _updated_at = '0000000002000-0000-writer' WHERE id = ?2",
                 [renamed, original],
             )?;
             Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("valid primary-key change succeeds");
+        })
+        .await
+        .expect("valid primary-key change succeeds");
 
-    let replace_tables = tables.clone();
     let replaced = "8b1a9953-c461-4e20-8c66-826115d53552";
-    let replace_write_id = db.new_write_id();
-    db.call(move |conn| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            conn,
-            &replace_tables,
-            None,
-            replace_write_id,
-            |tx| {
-                tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
-                tx.execute(
-                    "INSERT INTO things VALUES (?1, 'replaced', '0000000003000-0000-writer')",
-                    [replaced],
-                )?;
-                Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("explicit delete and insert succeeds");
+    crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(None, None, move |tx| {
+            tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
+            tx.execute(
+                "INSERT INTO things VALUES (?1, 'replaced', '0000000003000-0000-writer')",
+                [replaced],
+            )?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("explicit delete and insert succeeds");
 
-    let ordinary_tables = tables.clone();
-    let ordinary_write_id = db.new_write_id();
-    db.call(move |conn| {
-        StoreDatabase::run_internal_store_write_transaction_on(
-            conn,
-            &ordinary_tables,
-            None,
-            ordinary_write_id,
-            |tx| {
+    crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "UPDATE things SET body = 'ordinary', _updated_at = '0000000004000-0000-writer' WHERE id = ?1",
                 [replaced],
@@ -789,11 +753,9 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
                 [replaced],
             )?;
             Ok::<_, DbError>(())
-            },
-        )
-    })
-    .await
-    .expect("ordinary update and same-id upsert succeed");
+        })
+        .await
+        .expect("ordinary update and same-id upsert succeed");
 
     let pending_before = db
         .call(|conn| {
@@ -809,23 +771,13 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         .expect("read existing write records");
     assert_eq!(pending_before.len(), 3);
 
-    let invalid_tables = tables;
-    let invalid_write_id = db.new_write_id();
-    let invalid = db
-        .call(move |conn| {
-            StoreDatabase::run_internal_store_write_transaction_on(
-                conn,
-                &invalid_tables,
-                None,
-                invalid_write_id,
-                |tx| {
+    let invalid = crate::database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(None, None, move |tx| {
                     tx.execute(
                         "UPDATE things SET id = 'not-a-uuid', _updated_at = '0000000006000-0000-writer' WHERE id = ?1",
                         [replaced],
                     )?;
                     Ok::<_, DbError>(())
-                },
-            )
         })
         .await;
     let error = invalid.expect_err("invalid new UUID rejects the primary-key change");

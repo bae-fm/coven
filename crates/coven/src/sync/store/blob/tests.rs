@@ -17,7 +17,7 @@ use crate::sync::session::BlobDecl;
 use crate::sync::session::SyncedTable;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, photo_decl, plant_blob_row, read_test_db,
+    open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
     read_test_db_with_download_limit, remote_root_db, temp_store_dir, test_migrations, TestStore,
 };
 
@@ -27,7 +27,6 @@ const SCHEMA_VERSION: u32 = 1;
 
 trait BlobTestStoreDirOps {
     async fn cache_total_bytes(&self, namespace: &str) -> u64;
-    fn set_cache_mtime(&self, namespace: &str, id: &str, secs: u64);
 }
 
 impl BlobTestStoreDirOps for crate::store_dir::StoreDir {
@@ -38,16 +37,6 @@ impl BlobTestStoreDirOps for crate::store_dir::StoreDir {
             .iter()
             .map(|file| file.size())
             .sum()
-    }
-
-    fn set_cache_mtime(&self, namespace: &str, id: &str, secs: u64) {
-        let path = self
-            .cache_blob_path(
-                namespace,
-                crate::sync::test_helpers::test_cache_locator_hash(id),
-            )
-            .expect("cache path");
-        set_path_mtime(&path, secs);
     }
 }
 
@@ -126,173 +115,107 @@ async fn create_store(db: &Database) -> TestStore {
         .expect("create exact test Store for the test database")
 }
 
-async fn create_exact_blob_object(
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    id: &str,
-    namespace: &str,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let content_hash = ObjectHash::digest(bytes);
-    let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
-    let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
-    crate::storage::StagedBlobFile::write_for_test(&plaintext_path, bytes)
-        .await
-        .expect("write exact blob plaintext");
-    let protection = crate::encryption::EncryptionService::from_key([42; 32]);
-    let (uploader, registration, _) = storage
-        .founder_device_authority()
-        .await
-        .expect("load exact founder device authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&uploader, &registration)
-        .expect("validate exact blob write authority");
-    let locator = crate::blob::locator::BlobLocator::opaque(
-        namespace,
-        id,
-        uploader.clone(),
-        crate::blob::locator::RemoteAudience::Store,
-        BlobScope::Master,
-        protection.seal_key_fingerprint(),
-        bytes.len() as u64,
-        content_hash,
-    )
-    .expect("build exact blob locator");
-    let slot = storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate exact blob slot");
-    storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            crate::storage::BlobSpoolProtection::Opaque(protection),
-            &plaintext_path,
-            &spool_path,
-        )
-        .await
-        .expect("seal exact blob");
-    let stored = storage
-        .prepare_blob_object(&locator, &authority, slot, &spool_path)
-        .await
-        .expect("prepare exact blob");
-    storage
-        .create_blob_object_from_file(
-            &stored,
-            &authority,
-            &spool_path,
-            &crate::storage::cloud::no_progress(),
-        )
-        .await
-        .expect("create exact blob");
-    stored
+struct ExactRemoteBlobFixture<'a> {
+    database: &'a Database,
+    store: &'a TestStore,
 }
 
-/// Upload one blob to a **browsable** home: stored in the clear at a readable
-/// path, with no key tag, no header, and no per-chunk tags. The counterpart of
-/// [`create_exact_blob_object`], whose home seals.
-async fn create_browsable_blob_object(
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    id: &str,
-    namespace: &str,
-    cloud_path: &str,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let content_hash = ObjectHash::digest(bytes);
-    let plaintext_path = spool_dir.join(format!("{id}-{content_hash}.plaintext"));
-    let spool_path = spool_dir.join(format!("{id}-{content_hash}.stored"));
-    crate::storage::StagedBlobFile::write_for_test(&plaintext_path, bytes)
-        .await
-        .expect("write browsable blob plaintext");
-    let (uploader, registration, _) = storage
-        .founder_device_authority()
-        .await
-        .expect("load browsable founder device authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&uploader, &registration)
-        .expect("validate browsable blob write authority");
-    let locator = crate::blob::locator::BlobLocator::browsable(
-        namespace,
-        id,
-        uploader.clone(),
-        cloud_path,
-        bytes.len() as u64,
-        content_hash,
-    )
-    .expect("build browsable blob locator");
-    let slot = storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate browsable blob slot");
-    storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            crate::storage::BlobSpoolProtection::Browsable,
-            &plaintext_path,
-            &spool_path,
-        )
-        .await
-        .expect("stage browsable blob");
-    let stored = storage
-        .prepare_blob_object(&locator, &authority, slot, &spool_path)
-        .await
-        .expect("prepare browsable blob");
-    storage
-        .create_blob_object_from_file(
-            &stored,
-            &authority,
-            &spool_path,
-            &crate::storage::cloud::no_progress(),
-        )
-        .await
-        .expect("create browsable blob");
-    stored
-}
+impl<'a> ExactRemoteBlobFixture<'a> {
+    fn new(database: &'a Database, store: &'a TestStore) -> Self {
+        Self { database, store }
+    }
 
-async fn install_exact_remote_blob(
-    db: &Database,
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    id: &str,
-    namespace: &str,
-    bytes: &[u8],
-) -> crate::blob::RowBlobRef {
-    install_exact_remote_blob_for_row(db, storage, spool_dir, "note_photos", id, namespace, bytes)
-        .await
-}
+    async fn install(&self, id: &str, namespace: &str, bytes: &[u8]) -> crate::blob::RowBlobRef {
+        self.install_for_row("note_photos", id, namespace, bytes)
+            .await
+    }
 
-async fn install_exact_remote_blob_for_row(
-    db: &Database,
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    table: &str,
-    id: &str,
-    namespace: &str,
-    bytes: &[u8],
-) -> crate::blob::RowBlobRef {
-    install_exact_remote_blob_binding_for_row(db, storage, spool_dir, table, id, namespace, bytes)
-        .await;
-    db.row_blob_ref(table, id)
-        .await
-        .expect("load exact row blob reference")
+    async fn install_for_row(
+        &self,
+        table: &str,
+        id: &str,
+        namespace: &str,
+        bytes: &[u8],
+    ) -> crate::blob::RowBlobRef {
+        self.bind_for_row(table, id, namespace, bytes).await;
+        self.database
+            .row_blob_ref(table, id)
+            .await
+            .expect("load exact row blob reference")
+    }
+
+    async fn bind_for_row(&self, table: &str, id: &str, namespace: &str, bytes: &[u8]) {
+        let source_db = open_test_db();
+        let changeset = source_db
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+              VALUES ('cache-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            ])
+            .await;
+        let device = self
+            .store
+            .founder_device()
+            .await
+            .expect("retain exact test producer");
+        let sequence = device
+            .latest_local_store_position()
+            .await
+            .expect("load exact test producer position")
+            .map_or(1, |reference| reference.coord.sequence() + 1);
+        let owner = self
+            .store
+            .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
+            .await
+            .expect("publish exact blob owner commit");
+        self.bind_for_row_with_owner(table, id, namespace, bytes, owner)
+            .await;
+    }
+
+    async fn bind_for_row_with_owner(
+        &self,
+        table: &str,
+        id: &str,
+        namespace: &str,
+        bytes: &[u8],
+        owner: crate::protocol::store_commit::StoreBatchCommitRef,
+    ) {
+        let stored = self
+            .store
+            .create_exact_opaque_blob(namespace, id, bytes)
+            .await;
+        self.database
+            .bind_stored_blob_to_row_for_test(&stored, table, id, owner)
+            .await
+            .expect("install exact remote blob binding");
+    }
+
+    async fn install_many(&self, count: usize) -> (Vec<crate::blob::RowBlobRef>, Vec<Vec<u8>>) {
+        let mut blobs = Vec::new();
+        let mut all_bytes = Vec::new();
+        for i in 0..count {
+            let blob = blob_ref(&format!("pinc{i:04}"), "audio", CacheFill::CacheLazy);
+            let bytes: Vec<u8> = (0..1000u32).map(|x| ((x + i as u32) % 251) as u8).collect();
+            self.database
+                .plant_blob_row_for_test(&blob.id, true, &bytes)
+                .await;
+            blobs.push(self.install(&blob.id, &blob.namespace, &bytes).await);
+            all_bytes.push(bytes);
+        }
+        (blobs, all_bytes)
+    }
 }
 
 #[tokio::test]
 async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() {
     let db = remote_root_db(photo_decl());
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
+    let (_tmp, store_dir) = temp_store_dir();
     let bytes = b"exact materialized plaintext";
-    plant_blob_row(&db, "materialized-row", true, bytes).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        "materialized-row",
-        "photos",
-        bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test("materialized-row", true, bytes)
+        .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install("materialized-row", "photos", bytes)
+        .await;
     let locator_hash = reference
         .stored()
         .expect("remote row has an exact locator")
@@ -328,18 +251,13 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
 async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
     let db = remote_root_db(photo_decl());
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
+    let (_tmp, store_dir) = temp_store_dir();
     let bytes = b"exact pinned plaintext";
-    plant_blob_row(&db, "pinned-corruption", true, bytes).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        "pinned-corruption",
-        "photos",
-        bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test("pinned-corruption", true, bytes)
+        .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install("pinned-corruption", "photos", bytes)
+        .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
         .pin_blobs(
@@ -372,17 +290,12 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
 async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
     let db = remote_root_db(photo_decl());
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
-    plant_blob_row(&db, "stale-materialized-row", true, b"stale source").await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        "stale-materialized-row",
-        "photos",
-        b"stale source",
-    )
-    .await;
+    let (_tmp, store_dir) = temp_store_dir();
+    db.plant_blob_row_for_test("stale-materialized-row", true, b"stale source")
+        .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install("stale-materialized-row", "photos", b"stale source")
+        .await;
     let destination = store_dir
         .cache_blob_path(
             "photos",
@@ -419,7 +332,9 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     let (tmp, store_dir) = temp_store_dir();
     let external_db = read_test_db("audio");
     let external_bytes = b"external exact bytes";
-    plant_blob_row(&external_db, "external-corrupt", false, external_bytes).await;
+    external_db
+        .plant_blob_row_for_test("external-corrupt", false, external_bytes)
+        .await;
     let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
     external_db
         .register_external_blob_for_test("note_photos", "external-corrupt", &external_path)
@@ -442,7 +357,9 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
 
     let host_db = open_test_db_with_blob(photo_decl());
     let host_bytes = b"host local exact bytes";
-    plant_blob_row(&host_db, "host-corrupt", false, host_bytes).await;
+    host_db
+        .plant_blob_row_for_test("host-corrupt", false, host_bytes)
+        .await;
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "host-corrupt", host_bytes)
         .await
         .expect("store host-local source");
@@ -471,12 +388,13 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let db = remote_root_db(photo_decl());
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
+    let (_tmp, store_dir) = temp_store_dir();
     let id = "same-logical-id";
     let first_bytes = b"first exact version";
-    plant_blob_row(&db, id, true, first_bytes).await;
-    let first =
-        install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", first_bytes).await;
+    db.plant_blob_row_for_test(id, true, first_bytes).await;
+    let first = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(id, "photos", first_bytes)
+        .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
         .materialize_blob(Some(storage.storage.clone()), &first)
         .await
@@ -499,8 +417,9 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     })
     .await
     .expect("replace logical row with a second exact version");
-    let second =
-        install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", second_bytes).await;
+    let second = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(id, "photos", second_bytes)
+        .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
         .materialize_blob(Some(storage.storage.clone()), &second)
         .await
@@ -539,86 +458,6 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     assert!(!second_cache.exists());
 }
 
-async fn install_exact_remote_blob_binding_for_row(
-    db: &Database,
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    table: &str,
-    id: &str,
-    namespace: &str,
-    bytes: &[u8],
-) {
-    let source_db = open_test_db();
-    let changeset = source_db
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-          VALUES ('cache-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ])
-        .await;
-    let device = storage
-        .founder_device()
-        .await
-        .expect("retain exact test producer");
-    let sequence = device
-        .latest_local_store_position()
-        .await
-        .expect("load exact test producer position")
-        .map_or(1, |reference| reference.coord.sequence() + 1);
-    let owner = storage
-        .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
-        .await
-        .expect("publish exact blob owner commit");
-    install_exact_remote_blob_binding_for_row_with_owner(
-        db, storage, spool_dir, table, id, namespace, bytes, owner,
-    )
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn install_exact_remote_blob_binding_for_row_with_owner(
-    db: &Database,
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    table: &str,
-    id: &str,
-    namespace: &str,
-    bytes: &[u8],
-    owner: crate::protocol::store_commit::StoreBatchCommitRef,
-) {
-    let stored = create_exact_blob_object(storage, spool_dir, id, namespace, bytes).await;
-    db.bind_stored_blob_to_row_for_test(&stored, table, id, owner)
-        .await
-        .expect("install exact remote blob binding");
-}
-
-/// Publish the owner commit a blob binding hangs off. The installers above do
-/// this inline for opaque blobs; a browsable blob needs the same commit before
-/// it can bind.
-async fn browsable_owner_commit(
-    storage: &TestStore,
-) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    let source_db = open_test_db();
-    let changeset = source_db
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-          VALUES ('browsable-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ])
-        .await;
-    let device = storage
-        .founder_device()
-        .await
-        .expect("retain browsable test producer");
-    let sequence = device
-        .latest_local_store_position()
-        .await
-        .expect("load the browsable test producer position")
-        .map_or(1, |reference| reference.coord.sequence() + 1);
-    storage
-        .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
-        .await
-        .expect("publish the browsable blob owner commit")
-}
-
 /// A second read is a local hit: the first read populates the exact locator cache from the
 /// cloud, and after the cloud copy is deleted the second read still returns the
 /// bytes — served from disk, no fetch.
@@ -626,14 +465,14 @@ async fn browsable_owner_commit(
 async fn second_read_is_a_local_hit() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"THE-BLOB-BYTES".to_vec();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     // First read misses, fetches from the cloud, and populates the evictable cache.
     let first =
@@ -668,11 +507,13 @@ async fn second_read_is_a_local_hit() {
 async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
+    let (_tmp, store_dir) = temp_store_dir();
     let id = "budget01";
     let bytes = b"REMOTE-BLOB-WITH-INVALID-BUDGET";
-    plant_blob_row(&db, id, true, bytes).await;
-    let reference = install_exact_remote_blob(&db, &storage, tmp.path(), id, "audio", bytes).await;
+    db.plant_blob_row_for_test(id, true, bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(id, "audio", bytes)
+        .await;
     StoreDatabase::new(&db)
         .set_invalid_cache_budget_for_test("audio", "invalid")
         .await
@@ -699,14 +540,14 @@ async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
 async fn corrupt_cached_remote_blob_fails_without_replacement() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-torn", "audio", CacheFill::CacheLazy);
     let bytes = b"complete remote blob bytes".to_vec();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
         .read_blob(Some(storage.storage.clone()), &reference)
@@ -739,20 +580,14 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
 async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-shrt", "audio", CacheFill::CacheLazy);
     let declared = b"the full declared blob bytes".to_vec();
-    plant_blob_row(&db, &blob.id, true, &declared).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        &declared,
-    )
-    .await;
+    db.plant_blob_row_for_test(&blob.id, true, &declared).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &declared)
+        .await;
     storage.home.replace_exact_object(
         reference
             .stored()
@@ -805,14 +640,14 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     );
 
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("blob-reuse", "audio", CacheFill::CacheLazy);
     let bytes = ramp(4096);
 
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
     let gate_models_before_reads = crate::database::gate_from_tables_call_count();
     let blob_models_before_reads = crate::database::from_tables_call_count();
 
@@ -920,14 +755,14 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     let db = read_test_db("audio");
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("ond-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"ON-DEMAND-AUDIO".to_vec();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     // Read it on demand → it lands in the evictable cache.
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -993,16 +828,11 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     // demote.
     let eager = blob_ref("mir-aaaa", "audio", CacheFill::CacheEager);
     let eager_bytes = b"NEVER-PINNED";
-    plant_blob_row(&db, &eager.id, true, eager_bytes).await;
-    let eager_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &eager.id,
-        &eager.namespace,
-        eager_bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test(&eager.id, true, eager_bytes)
+        .await;
+    let eager_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&eager.id, &eager.namespace, eager_bytes)
+        .await;
     StoreBlobCache::new(store_database.clone(), ld.clone())
         .unpin(std::slice::from_ref(&eager_reference))
         .await
@@ -1017,14 +847,14 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
 async fn pin_downloads_remote_blob_straight_to_pinned_file() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("pin0aaaa", "audio", CacheFill::CacheLazy);
     let bytes: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
         .pin_blobs(
@@ -1052,36 +882,17 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
 /// each) and put their bytes in the mock cloud, returning the refs and the bytes so a
 /// pin test can drive the download loop and verify what landed. None are cached, so a
 /// pin fetches each through `read_blob_to_file`.
-async fn setup_remote_blobs(
-    db: &Database,
-    storage: &TestStore,
-    spool_dir: &std::path::Path,
-    n: usize,
-) -> (Vec<crate::blob::RowBlobRef>, Vec<Vec<u8>>) {
-    let mut blobs = Vec::new();
-    let mut all_bytes = Vec::new();
-    for i in 0..n {
-        let blob = blob_ref(&format!("pinc{i:04}"), "audio", CacheFill::CacheLazy);
-        let bytes: Vec<u8> = (0..1000u32).map(|x| ((x + i as u32) % 251) as u8).collect();
-        plant_blob_row(db, &blob.id, true, &bytes).await;
-        blobs.push(
-            install_exact_remote_blob(db, storage, spool_dir, &blob.id, &blob.namespace, &bytes)
-                .await,
-        );
-        all_bytes.push(bytes);
-    }
-    (blobs, all_bytes)
-}
-
 /// At limit 1 the pin loop runs one at a time: every blob is fetched (one at a time) and
 /// lands in `pinned/` with its bytes.
 #[tokio::test]
 async fn pin_at_limit_one_pins_every_blob() {
     let db = read_test_db_with_download_limit("audio", 1);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
-    let (blobs, bytes) = setup_remote_blobs(&db, &storage, tmp.path(), 4).await;
+    let (blobs, bytes) = ExactRemoteBlobFixture::new(&db, &storage)
+        .install_many(4)
+        .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
         .pin_blobs(Some(storage.storage.clone()), &blobs)
         .await
@@ -1110,10 +921,12 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
     let db = read_test_db_with_download_limit("audio", 2);
     let storage = create_store(&db).await;
     storage.home.arm_exact_stream_read_concurrency_probe(2);
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Four blobs over a barrier of two: waves of two must gather to proceed.
-    let (blobs, bytes) = setup_remote_blobs(&db, &storage, tmp.path(), 4).await;
+    let (blobs, bytes) = ExactRemoteBlobFixture::new(&db, &storage)
+        .install_many(4)
+        .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
         .pin_blobs(Some(storage.storage.clone()), &blobs)
         .await
@@ -1139,22 +952,19 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
 async fn pin_mid_batch_failure_surfaces_the_error() {
     let db = read_test_db_with_download_limit("audio", 2);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
-    let (mut blobs, _bytes) = setup_remote_blobs(&db, &storage, tmp.path(), 3).await;
+    let (mut blobs, _bytes) = ExactRemoteBlobFixture::new(&db, &storage)
+        .install_many(3)
+        .await;
     // A blob whose row resolves Remote but whose bytes were never uploaded: no
     // uploader is recorded and no cloud object exists, so its fetch fails.
     let missing = blob_ref("miss0aaa", "audio", CacheFill::CacheLazy);
-    plant_blob_row(&db, &missing.id, true, b"never-uploaded").await;
-    let missing_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &missing.id,
-        &missing.namespace,
-        b"never-uploaded",
-    )
-    .await;
+    db.plant_blob_row_for_test(&missing.id, true, b"never-uploaded")
+        .await;
+    let missing_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&missing.id, &missing.namespace, b"never-uploaded")
+        .await;
     storage
         .delete_blob_object(
             missing_reference
@@ -1251,14 +1061,14 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     let db = read_test_db("audio");
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"CACHED-BYTES".to_vec();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
     storage
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
@@ -1331,14 +1141,14 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    plant_blob_row(&db, &blob.id, true, &full).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &full)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &full).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &full)
+        .await;
 
     // Populate the cache with the whole file, then remove the cloud copy so a
     // ranged read that tried to fetch would fail.
@@ -1405,14 +1215,14 @@ fn a_blob_stream_is_send_and_sync() {
 async fn ranges_off_an_uncached_stream_never_download_the_object() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-once", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    plant_blob_row(&db, &blob.id, true, &full).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &full)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &full).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &full)
+        .await;
 
     // The blob is in neither cache folder, so the stream reads the cloud object.
     assert!(!pinned_path(&ld, &reference).exists());
@@ -1492,22 +1302,35 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
         TestStore::create_browsable(&db, "browsable-store", crate::keys::UserKeypair::generate())
             .await
             .expect("create a browsable test Store");
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let full = ramp(5000);
     db.insert_browsable_blob_row_for_test("browsable-track", CLOUD_PATH, &full)
         .await
         .expect("plant the browsable blob row");
-    let owner = browsable_owner_commit(&storage).await;
-    let stored = create_browsable_blob_object(
-        &storage,
-        tmp.path(),
-        "browsable-track",
-        "audio",
-        CLOUD_PATH,
-        &full,
-    )
-    .await;
+    let source_db = open_test_db();
+    let changeset = source_db
+        .capture_test_changeset(&[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+          VALUES ('browsable-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+        ])
+        .await;
+    let device = storage
+        .founder_device()
+        .await
+        .expect("retain browsable test producer");
+    let sequence = device
+        .latest_local_store_position()
+        .await
+        .expect("load the browsable test producer position")
+        .map_or(1, |reference| reference.coord.sequence() + 1);
+    let owner = storage
+        .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish the browsable blob owner commit");
+    let stored = storage
+        .create_exact_browsable_blob("audio", "browsable-track", CLOUD_PATH, &full)
+        .await;
     db.bind_stored_blob_to_row_for_test(&stored, "note_photos", "browsable-track", owner)
         .await
         .expect("install exact browsable blob binding");
@@ -1567,14 +1390,14 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
 async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-bbbb", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    plant_blob_row(&db, &blob.id, true, &full).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &full)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &full).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &full)
+        .await;
 
     assert!(!pinned_path(&ld, &reference).exists());
     assert!(!cache_path(&ld, &reference).exists());
@@ -1627,14 +1450,14 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
 async fn full_read_blob_still_populates_the_cache() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-cccc", "audio", CacheFill::CacheLazy);
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     let first =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -1669,23 +1492,17 @@ async fn full_read_blob_still_populates_the_cache() {
 async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let full = ramp(1000);
 
     // Non-cached blob: the stream opens over a cloud miss, then bounds the range
     // against the plaintext size it proved.
     let remote = blob_ref("blob-dddd", "audio", CacheFill::CacheLazy);
-    plant_blob_row(&db, &remote.id, true, &full).await;
-    let remote_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &remote.id,
-        &remote.namespace,
-        &full,
-    )
-    .await;
+    db.plant_blob_row_for_test(&remote.id, true, &full).await;
+    let remote_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&remote.id, &remote.namespace, &full)
+        .await;
     assert!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
             .read_blob_range(Some(storage.storage.clone()), &remote_reference, 900, 200)
@@ -1705,16 +1522,10 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     // Cached blob: same contract on the local-file path. Populate the cache, drop
     // the cloud copy so only the local path can serve.
     let cached = blob_ref("blob-eeee", "audio", CacheFill::CacheLazy);
-    plant_blob_row(&db, &cached.id, true, &full).await;
-    let cached_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &cached.id,
-        &cached.namespace,
-        &full,
-    )
-    .await;
+    db.plant_blob_row_for_test(&cached.id, true, &full).await;
+    let cached_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&cached.id, &cached.namespace, &full)
+        .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
         .read_blob(Some(storage.storage.clone()), &cached_reference)
         .await
@@ -1759,7 +1570,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     let blob = blob_ref("extr-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: the gate dispatches to the external file.
     let full = ramp(5000);
-    plant_blob_row(&db, &blob.id, false, &full).await;
+    db.plant_blob_row_for_test(&blob.id, false, &full).await;
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
     db.register_external_blob_for_test("note_photos", &blob.id, &path)
@@ -1828,7 +1639,9 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
 
     // Local + user-provided: the user's own external file, unlinked after open.
     let external_db = read_test_db("audio");
-    plant_blob_row(&external_db, "strm-ext1", false, &full).await;
+    external_db
+        .plant_blob_row_for_test("strm-ext1", false, &full)
+        .await;
     let external_path = write_external_file(tmp.path(), "strm-ext1.flac", &full);
     external_db
         .register_external_blob_for_test("note_photos", "strm-ext1", &external_path)
@@ -1859,7 +1672,9 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // same-length different bytes — the temp-then-rename shape every coven publish
     // and every download uses, which a per-range re-open by name would follow.
     let host_db = open_test_db_with_blob(photo_decl());
-    plant_blob_row(&host_db, "strm-hst1", false, &full).await;
+    host_db
+        .plant_blob_row_for_test("strm-hst1", false, &full)
+        .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst1", &full)
         .await
         .expect("store the host-provided local source");
@@ -1899,16 +1714,12 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // *names*; a stream holds the file, so a sweep cannot break a live read.
     let remote_db = read_test_db("audio");
     let storage = create_store(&remote_db).await;
-    plant_blob_row(&remote_db, "strm-rem1", true, &full).await;
-    let remote = install_exact_remote_blob(
-        &remote_db,
-        &storage,
-        tmp.path(),
-        "strm-rem1",
-        "audio",
-        &full,
-    )
-    .await;
+    remote_db
+        .plant_blob_row_for_test("strm-rem1", true, &full)
+        .await;
+    let remote = ExactRemoteBlobFixture::new(&remote_db, &storage)
+        .install("strm-rem1", "audio", &full)
+        .await;
     let remote_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
         StoreDatabase::new(&remote_db),
         ld.clone(),
@@ -1951,7 +1762,7 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     let (offset, len) = (1234u64, 1000u64);
 
     let db = read_test_db("audio");
-    plant_blob_row(&db, "strm-ext2", false, &full).await;
+    db.plant_blob_row_for_test("strm-ext2", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext2.flac", &full);
     db.register_external_blob_for_test("note_photos", "strm-ext2", &path)
         .await;
@@ -2010,7 +1821,9 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     let corrupt = vec![b'!'; full.len()];
 
     let external_db = read_test_db("audio");
-    plant_blob_row(&external_db, "strm-ext3", false, &full).await;
+    external_db
+        .plant_blob_row_for_test("strm-ext3", false, &full)
+        .await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
     external_db
         .register_external_blob_for_test("note_photos", "strm-ext3", &external_path)
@@ -2043,7 +1856,9 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     ));
 
     let host_db = open_test_db_with_blob(photo_decl());
-    plant_blob_row(&host_db, "strm-hst3", false, &full).await;
+    host_db
+        .plant_blob_row_for_test("strm-hst3", false, &full)
+        .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst3", &full)
         .await
         .expect("store the host-provided local source");
@@ -2084,7 +1899,7 @@ async fn a_relengthened_external_file_is_refused_at_open() {
     let full = ramp(5000);
 
     let db = read_test_db("audio");
-    plant_blob_row(&db, "strm-ext4", false, &full).await;
+    db.plant_blob_row_for_test("strm-ext4", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
     db.register_external_blob_for_test("note_photos", "strm-ext4", &path)
         .await;
@@ -2119,16 +1934,11 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     // Missing file: a ref pointing at a path that does not exist.
     let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
     let missing_hash = crate::blob::content_hash(&vec![0; 1234]);
-    db.plant_blob_row_for_test(&missing.id, false, 1234, Some(&missing_hash))
+    db.plant_blob_row_with_facts_for_test(&missing.id, false, 1234, Some(&missing_hash))
         .await;
-    create_exact_blob_object(
-        &storage,
-        tmp.path(),
-        &missing.id,
-        &missing.namespace,
-        &cloud_bytes,
-    )
-    .await;
+    storage
+        .create_exact_opaque_blob(&missing.namespace, &missing.id, &cloud_bytes)
+        .await;
     let missing_path = tmp.path().join("external").join("gone.flac");
     db.register_external_blob_for_test("note_photos", &missing.id, &missing_path)
         .await;
@@ -2148,18 +1958,18 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 
     // Present file, wrong length: register a size one byte off the real file.
     let mism = blob_ref("exts-aaaa", "audio", CacheFill::CacheLazy);
-    create_exact_blob_object(
-        &storage,
-        tmp.path(),
-        &mism.id,
-        &mism.namespace,
-        &cloud_bytes,
-    )
-    .await;
+    storage
+        .create_exact_opaque_blob(&mism.namespace, &mism.id, &cloud_bytes)
+        .await;
     let actual = ramp(2000);
     let mism_hash = crate::blob::content_hash(&actual);
-    db.plant_blob_row_for_test(&mism.id, false, actual.len() as u64 + 1, Some(&mism_hash))
-        .await;
+    db.plant_blob_row_with_facts_for_test(
+        &mism.id,
+        false,
+        actual.len() as u64 + 1,
+        Some(&mism_hash),
+    )
+    .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
     db.register_external_blob_for_test("note_photos", &mism.id, &mism_path)
         .await;
@@ -2192,7 +2002,8 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     let blob = blob_ref("extc-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: serves the user's external file.
     let ext_bytes = ramp(1500);
-    plant_blob_row(&db, &blob.id, false, &ext_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, false, &ext_bytes)
+        .await;
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
     db.register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
@@ -2214,16 +2025,9 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     // The cloud object's length must match the row's declared size (1500) — the
     // whole-blob read verifies it before serving.
     let cloud_bytes = ramp(1500);
-    install_exact_remote_blob_binding_for_row(
-        &db,
-        &storage,
-        tmp.path(),
-        "note_photos",
-        &blob.id,
-        &blob.namespace,
-        &cloud_bytes,
-    )
-    .await;
+    ExactRemoteBlobFixture::new(&db, &storage)
+        .bind_for_row("note_photos", &blob.id, &blob.namespace, &cloud_bytes)
+        .await;
     // Install the exact destination before the host write, then atomically clear
     // the Local source and flip the gate. No observer can see a Remote row without
     // its exact locator.
@@ -2270,7 +2074,8 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     // Local + user-provided.
     let blob = blob_ref("extp-aaaa", "audio", CacheFill::CacheLazy);
     let ext_bytes = ramp(2048);
-    plant_blob_row(&db, &blob.id, false, &ext_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, false, &ext_bytes)
+        .await;
 
     // Decoys at the other on-device stores — both must be ignored.
     StoreBlobCache::new(store_database.clone(), ld.clone())
@@ -2339,17 +2144,13 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
     // Local + host-provided: its bytes live in the local store, never the cloud.
     let blob = host_blob_ref("res0aaaa", "photos", CacheFill::CacheEager);
     let store_bytes = ramp(2048);
-    plant_blob_row(&db, &blob.id, false, &store_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, false, &store_bytes)
+        .await;
 
     // Decoys at every other store — all must be ignored.
-    create_exact_blob_object(
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        b"FROM-CLOUD",
-    )
-    .await;
+    storage
+        .create_exact_opaque_blob(&blob.namespace, &blob.id, b"FROM-CLOUD")
+        .await;
     StoreBlobCache::new(store_database.clone(), ld.clone())
         .populate_bytes_for_test(
             &blob.namespace,
@@ -2403,11 +2204,12 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("rem0cccc", "audio", CacheFill::CacheLazy);
     let cloud_bytes = ramp(2048);
-    plant_blob_row(&db, &blob.id, true, &cloud_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, true, &cloud_bytes)
+        .await;
 
     // A stale local-store file (a Remote + user-provided read must NOT serve it) and
     // the real cloud copy with distinct bytes.
@@ -2419,15 +2221,9 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
     )
     .await
     .expect("write a stale local-store file");
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        &cloud_bytes,
-    )
-    .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &cloud_bytes)
+        .await;
 
     let whole =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -2460,20 +2256,15 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
     let remote_bytes = b"REMOTE-CLOUD-BYTES";
 
-    plant_blob_row(&db, &blob.id, true, remote_bytes).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        remote_bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test(&blob.id, true, remote_bytes)
+        .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, remote_bytes)
+        .await;
     storage
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
@@ -2516,20 +2307,15 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
         CacheFill::CacheEager,
     ));
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = host_blob_ref("rrrr0001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"REMOTE-ROOT-CLOUD";
-    plant_blob_row(&db, &blob.id, false, cloud_bytes).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        cloud_bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test(&blob.id, false, cloud_bytes)
+        .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, cloud_bytes)
+        .await;
 
     let got =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -2612,21 +2398,16 @@ async fn plain_blob_table_uses_the_store_audience() {
         CacheFill::CacheEager,
     ));
     let storage = create_store(&db).await;
-    let (tmp, store_dir) = temp_store_dir();
+    let (_tmp, store_dir) = temp_store_dir();
     let blob = host_blob_ref("plain001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"PLAIN-CLOUD";
-    plant_blob_row(&db, &blob.id, true, cloud_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, true, cloud_bytes)
+        .await;
 
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        cloud_bytes,
-    )
-    .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, cloud_bytes)
+        .await;
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
             StoreDatabase::new(&db),
@@ -2646,22 +2427,17 @@ async fn plain_blob_table_uses_the_store_audience() {
 async fn local_user_provided_blob_without_an_external_ref_errors() {
     let db = read_test_db("audio");
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extn-aaaa", "audio", CacheFill::CacheLazy);
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
     // ref is registered. A cloud copy exists as a decoy a store-probing read would serve.
     let declared_hash = crate::blob::content_hash(b"CLOUD-DECOY");
-    db.plant_blob_row_for_test(&blob.id, false, 11, Some(&declared_hash))
+    db.plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
-    create_exact_blob_object(
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        b"CLOUD-DECOY",
-    )
-    .await;
+    storage
+        .create_exact_opaque_blob(&blob.namespace, &blob.id, b"CLOUD-DECOY")
+        .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
@@ -2701,23 +2477,18 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
         CacheFill::CacheEager,
     ));
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
     let declared_hash = crate::blob::content_hash(b"CLOUD-DECOY");
-    db.plant_blob_row_for_test(&blob.id, false, 11, Some(&declared_hash))
+    db.plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
 
     // A cloud copy under the same id: a read that probed every store would serve these
     // bytes. No external ref, no local-store file, no cache file.
-    create_exact_blob_object(
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        b"CLOUD-DECOY",
-    )
-    .await;
+    storage
+        .create_exact_opaque_blob(&blob.namespace, &blob.id, b"CLOUD-DECOY")
+        .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
@@ -2764,19 +2535,14 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let stale_ext = ramp(1500);
     let path = write_external_file(tmp.path(), "stale.flac", &stale_ext);
     let cloud_bytes = ramp(2048);
-    plant_blob_row(&db, &blob.id, false, &cloud_bytes).await;
+    db.plant_blob_row_for_test(&blob.id, false, &cloud_bytes)
+        .await;
     db.register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     db.set_blob_remote_for_test(&blob.id, true).await;
-    let reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &blob.id,
-        &blob.namespace,
-        &cloud_bytes,
-    )
-    .await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &cloud_bytes)
+        .await;
 
     let whole =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -2815,7 +2581,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
         BlobDecl::new("ns_remote", Provenance::HostProvided, CacheFill::CacheEager),
     );
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // One id carried by a row in each table, under different gates: note_photos
     // (ns_local) below a Local note, note_covers (ns_remote) below a Remote note.
@@ -2851,16 +2617,9 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     crate::store_dir::StoreDir::store_local_blob(&ld, "ns_local", id, b"LOCAL-STORE-BYTES")
         .await
         .expect("store the Local blob's local copy");
-    let remote_reference = install_exact_remote_blob_for_row(
-        &db,
-        &storage,
-        tmp.path(),
-        "note_covers",
-        id,
-        "ns_remote",
-        b"REMOTE-CLOUD-BYTES",
-    )
-    .await;
+    let remote_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install_for_row("note_covers", id, "ns_remote", b"REMOTE-CLOUD-BYTES")
+        .await;
     let local_reference = db
         .row_blob_ref("note_photos", id)
         .await
@@ -2898,29 +2657,6 @@ fn set_path_mtime(path: &std::path::Path, secs: u64) {
         .expect("set cache file mtime");
 }
 
-/// Stage `bytes` into a synthetic locator-keyed cache path with a fixed modification time, with
-/// NO budget set so the stage itself never evicts. Builds the over-budget cache a
-/// later eviction test then trims.
-async fn stage_with_mtime(
-    db: &StoreDatabase,
-    ld: &crate::store_dir::StoreDir,
-    namespace: &str,
-    id: &str,
-    bytes: &[u8],
-    mtime_secs: u64,
-) {
-    let blob = blob_ref(id, namespace, CacheFill::CacheLazy);
-    StoreBlobCache::new(db.clone(), ld.clone())
-        .populate_bytes_for_test(
-            &blob.namespace,
-            crate::sync::test_helpers::test_cache_locator_hash(&blob.id),
-            bytes,
-        )
-        .await
-        .expect("stage blob into cache");
-    ld.set_cache_mtime(namespace, id, mtime_secs);
-}
-
 /// Over budget, eviction deletes the OLDEST files (by mtime) in that namespace first
 /// and stops once the total is back under the namespace's budget: the oldest go, the
 /// newest stay, and the summed `cache/<namespace>/` size ends `<=` the budget. Driven
@@ -2931,45 +2667,26 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // Four 100-byte files, oldest → newest by mtime. No budget yet, so staging does
     // not evict; the cache holds all 400 bytes.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "old1aaaa",
-        &[1u8; 100],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "old2bbbb",
-        &[2u8; 100],
-        2000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "new3cccc",
-        &[3u8; 100],
-        3000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "new4dddd",
-        &[4u8; 100],
-        4000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "old1aaaa", &[1u8; 100], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "old2bbbb", &[2u8; 100], 2000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "new3cccc", &[3u8; 100], 3000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "new4dddd", &[4u8; 100], 4000)
+        .await
+        .expect("stage blob into cache");
     assert_eq!(
         ld.cache_total_bytes("release_files").await,
         400,
@@ -2983,7 +2700,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         .set_cache_budget("release_files", 250)
         .await
         .expect("set budget");
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", None)
         .await
         .expect("evict to budget");
@@ -3038,61 +2755,37 @@ async fn release_files_eviction_leaves_covers_intact() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // A cover in the small `covers` namespace, plus four audio files in the big
     // `release_files` namespace. No budgets yet.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "covers",
-        "cov00aaa",
-        &[9u8; 500],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "aud01aaa",
-        &[1u8; 100],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "aud02bbb",
-        &[2u8; 100],
-        2000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "aud03ccc",
-        &[3u8; 100],
-        3000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "aud04ddd",
-        &[4u8; 100],
-        4000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("covers", "cov00aaa", &[9u8; 500], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "aud01aaa", &[1u8; 100], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "aud02bbb", &[2u8; 100], 2000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "aud03ccc", &[3u8; 100], 3000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "aud04ddd", &[4u8; 100], 4000)
+        .await
+        .expect("stage blob into cache");
 
     // Only `release_files` is budgeted and swept. `covers` is never touched.
     store_database
         .set_cache_budget("release_files", 250)
         .await
         .expect("set release_files budget");
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", None)
         .await
         .expect("evict release_files to budget");
@@ -3144,7 +2837,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     let db = read_test_db("covers");
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Two 200-byte covers in the cloud, both `CacheEager`. The `covers` budget holds
     // one at a time (250 bytes).
@@ -3152,26 +2845,16 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     let cov2 = blob_ref("cov02bbb", "covers", CacheFill::CacheEager);
     let cov1_bytes = [1u8; 200];
     let cov2_bytes = [2u8; 200];
-    plant_blob_row(&db, &cov1.id, true, &cov1_bytes).await;
-    plant_blob_row(&db, &cov2.id, true, &cov2_bytes).await;
-    let cov1_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &cov1.id,
-        &cov1.namespace,
-        &cov1_bytes,
-    )
-    .await;
-    let cov2_reference = install_exact_remote_blob(
-        &db,
-        &storage,
-        tmp.path(),
-        &cov2.id,
-        &cov2.namespace,
-        &cov2_bytes,
-    )
-    .await;
+    db.plant_blob_row_for_test(&cov1.id, true, &cov1_bytes)
+        .await;
+    db.plant_blob_row_for_test(&cov2.id, true, &cov2_bytes)
+        .await;
+    let cov1_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&cov1.id, &cov1.namespace, &cov1_bytes)
+        .await;
+    let cov2_reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&cov2.id, &cov2.namespace, &cov2_bytes)
+        .await;
     store_database
         .set_cache_budget("covers", 250)
         .await
@@ -3266,7 +2949,8 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 
     let db2 = open_test_db_with_user_and_host_blobs(photo_decl(), lazy_decl);
     let store_database2 = StoreDatabase::new(&db2);
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database2.clone(), ld.clone());
     let (_updated, result) = storage.pull_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
     let eager = db2
@@ -3299,22 +2983,20 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     })
     .await
     .expect("plant lazy blob row");
-    install_exact_remote_blob_binding_for_row_with_owner(
-        &db2,
-        &storage,
-        tmp.path(),
-        "note_covers",
-        &lazy.id,
-        &lazy.namespace,
-        &lazy_bytes,
-        blob_owner,
-    )
-    .await;
+    ExactRemoteBlobFixture::new(&db2, &storage)
+        .bind_for_row_with_owner(
+            "note_covers",
+            &lazy.id,
+            &lazy.namespace,
+            &lazy_bytes,
+            blob_owner,
+        )
+        .await;
     let lazy_reference = db2
         .row_blob_ref("note_covers", &lazy.id)
         .await
         .expect("load exact lazy row blob reference");
-    StoreBlobCache::new(store_database2.clone(), ld.clone())
+    cache
         .populate_bytes_for_test(&lazy.namespace, locator_hash(&lazy_reference), &[7u8; 500])
         .await
         .expect("write the lazy blob into the cache");
@@ -3330,24 +3012,14 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     // Flood BOTH namespaces' evictable caches, set a tiny budget on EACH, and sweep
     // each. The pinned files live in pinned/ — the per-namespace sweep never touches
     // them, whichever namespace's budget runs.
-    stage_with_mtime(
-        &store_database2,
-        &ld,
-        "photos",
-        "junkp1cc",
-        &[1u8; 1000],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database2,
-        &ld,
-        "audio",
-        "junka1cc",
-        &[2u8; 1000],
-        2000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("photos", "junkp1cc", &[1u8; 1000], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("audio", "junka1cc", &[2u8; 1000], 2000)
+        .await
+        .expect("stage blob into cache");
     store_database2
         .set_cache_budget("photos", 10)
         .await
@@ -3356,11 +3028,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .set_cache_budget("audio", 10)
         .await
         .expect("set tiny audio budget");
-    StoreBlobCache::new(store_database2.clone(), ld.clone())
+    cache
         .enforce_budget("photos", None)
         .await
         .expect("evict photos to budget");
-    StoreBlobCache::new(store_database2.clone(), ld.clone())
+    cache
         .enforce_budget("audio", None)
         .await
         .expect("evict audio to budget");
@@ -3417,38 +3089,24 @@ async fn unset_namespace_budget_never_evicts() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "keep1aaa",
-        &[1u8; 5000],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "keep2bbb",
-        &[2u8; 5000],
-        2000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "keep3ccc",
-        &[3u8; 5000],
-        3000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "keep1aaa", &[1u8; 5000], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "keep2bbb", &[2u8; 5000], 2000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "keep3ccc", &[3u8; 5000], 3000)
+        .await
+        .expect("stage blob into cache");
     assert_eq!(ld.cache_total_bytes("release_files").await, 15000);
 
     // No budget set for this namespace — an explicit sweep is a no-op.
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", None)
         .await
         .expect("evict is a no-op with no budget");
@@ -3479,18 +3137,14 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     let db = read_test_db("release_files");
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // An older cached file (100 bytes, old mtime), no budget yet.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "older1aa",
-        &[1u8; 100],
-        1000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "older1aa", &[1u8; 100], 1000)
+        .await
+        .expect("stage blob into cache");
 
     // Budget of 150 bytes: holds either file alone, not both. Now a read fetches a
     // second 100-byte blob; populating it pushes the total to 200 (> 150), so the
@@ -3502,10 +3156,10 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .expect("set budget");
     let blob = blob_ref("newer2bb", "release_files", CacheFill::CacheLazy);
     let bytes = vec![2u8; 100];
-    plant_blob_row(&db, &blob.id, true, &bytes).await;
-    let reference =
-        install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
-            .await;
+    db.plant_blob_row_for_test(&blob.id, true, &bytes).await;
+    let reference = ExactRemoteBlobFixture::new(&db, &storage)
+        .install(&blob.id, &blob.namespace, &bytes)
+        .await;
 
     let got =
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -3541,7 +3195,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     let db = read_test_db("release_files");
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db).await;
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Budget of 250 bytes; each blob is 100 bytes, so at most two fit.
     store_database
@@ -3554,10 +3208,10 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     for i in 0..6u8 {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
         let bytes = vec![i; 100];
-        plant_blob_row(&db, &id, true, &bytes).await;
-        let reference =
-            install_exact_remote_blob(&db, &storage, tmp.path(), &id, "release_files", &bytes)
-                .await;
+        db.plant_blob_row_for_test(&id, true, &bytes).await;
+        let reference = ExactRemoteBlobFixture::new(&db, &storage)
+            .install(&id, "release_files", &bytes)
+            .await;
         let exact_cache_path = cache_path(&ld, &reference);
         if i == 0 {
             first_path = Some(exact_cache_path.clone());
@@ -3610,27 +3264,18 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // Two 100-byte files. The protected one is OLDER (mtime 1000); the other is
     // NEWER (mtime 2000). A naive oldest-first sweep would evict the protected one.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "prot0aaa",
-        &[1u8; 100],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "othr0bbb",
-        &[2u8; 100],
-        2000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "prot0aaa", &[1u8; 100], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "othr0bbb", &[2u8; 100], 2000)
+        .await
+        .expect("stage blob into cache");
 
     // Budget of 100 bytes: exactly one file fits, so one must be evicted.
     store_database
@@ -3643,7 +3288,7 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
             crate::sync::test_helpers::test_cache_locator_hash("prot0aaa"),
         )
         .unwrap();
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", Some(&protected))
         .await
         .expect("evict to budget, protecting the older file");
@@ -3682,27 +3327,18 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // A 100-byte protected file plus a 100-byte evictable one. The protected file
     // alone (100 bytes) is larger than the 50-byte budget.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "biginuse",
-        &[1u8; 100],
-        1000,
-    )
-    .await;
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "othr0bbb",
-        &[2u8; 100],
-        2000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "biginuse", &[1u8; 100], 1000)
+        .await
+        .expect("stage blob into cache");
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "othr0bbb", &[2u8; 100], 2000)
+        .await
+        .expect("stage blob into cache");
 
     store_database
         .set_cache_budget("release_files", 50)
@@ -3714,7 +3350,7 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
             crate::sync::test_helpers::test_cache_locator_hash("biginuse"),
         )
         .unwrap();
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", Some(&protected))
         .await
         .expect("eviction returns Ok even when the in-use file alone exceeds budget");
@@ -3756,17 +3392,13 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
+    let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
     // A committed 100-byte cache file (newer by mtime), already at the budget.
-    stage_with_mtime(
-        &store_database,
-        &ld,
-        "release_files",
-        "keep0aaa",
-        &[1u8; 100],
-        2000,
-    )
-    .await;
+    cache
+        .populate_bytes_with_mtime_for_test("release_files", "keep0aaa", &[1u8; 100], 2000)
+        .await
+        .expect("stage blob into cache");
 
     // A concurrent populate's in-flight temp: a `.tmp.<uuid>` sibling in the shard dir
     // where its committed blob will land, aged OLDER than the committed file so a sweep
@@ -3798,7 +3430,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         .set_cache_budget("release_files", 100)
         .await
         .expect("set budget");
-    StoreBlobCache::new(store_database.clone(), ld.clone())
+    cache
         .enforce_budget("release_files", None)
         .await
         .expect("evict to budget");

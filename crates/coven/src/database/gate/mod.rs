@@ -335,6 +335,7 @@ mod tests {
 
     trait ConnectionTestSql {
         fn execute_test_sql(&self, sql: &str);
+        fn apply_test_changeset(&self, bytes: &[u8], tables: &[SyncedTable]);
         fn query_test_text(&self, sql: &str) -> String;
         fn test_row_exists(&self, sql: &str) -> bool;
     }
@@ -343,6 +344,16 @@ mod tests {
         fn execute_test_sql(&self, sql: &str) {
             self.execute_batch(sql)
                 .unwrap_or_else(|error| panic!("exec failed for {sql}: {error}"));
+        }
+
+        fn apply_test_changeset(&self, bytes: &[u8], tables: &[SyncedTable]) {
+            resolve_and_apply_changeset(
+                self,
+                bytes,
+                tables,
+                crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
+            )
+            .expect("apply test changeset");
         }
 
         fn query_test_text(&self, sql: &str) -> String {
@@ -834,13 +845,7 @@ mod tests {
         // Apply cycle 2's output to a fresh peer: complete consistent subtree.
         let peer = conn();
         create_synced_schema(&peer);
-        resolve_and_apply_changeset(
-            &peer,
-            &out2,
-            &tables,
-            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
-        )
-        .expect("apply to peer");
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer has the note"
@@ -1080,17 +1085,6 @@ mod tests {
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE) STRICT",
         );
-    }
-
-    /// Apply a changeset with the production conflict-resolving apply path, scoped to the album set.
-    fn apply_album(c: &Connection, bytes: &[u8]) {
-        resolve_and_apply_changeset(
-            c,
-            bytes,
-            &album_tables(),
-            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
-        )
-        .expect("apply album changeset");
     }
 
     /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
@@ -1523,7 +1517,7 @@ mod tests {
 
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "peer has artist"
@@ -1610,7 +1604,7 @@ mod tests {
         );
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out1);
+        peer.apply_test_changeset(&out1, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL1'"),
             "peer has the shared album AL1"
@@ -1634,7 +1628,7 @@ mod tests {
             "the newly-referenced album AL2 must be re-emitted"
         );
 
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL2'"),
             "peer now has AL2"
@@ -1694,7 +1688,7 @@ mod tests {
 
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"),
             "peer has join row"
@@ -1724,7 +1718,7 @@ mod tests {
 
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out1);
+        peer.apply_test_changeset(&out1, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "peer has the album after cycle 1"
@@ -1754,7 +1748,7 @@ mod tests {
         );
 
         // Applying the duplicate album INSERT must not error; peer consistent.
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "album still present"
@@ -1860,13 +1854,7 @@ mod tests {
         );
         let peer = conn();
         create_synced_schema(&peer);
-        resolve_and_apply_changeset(
-            &peer,
-            &out1,
-            &tables,
-            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
-        )
-        .expect("apply share");
+        peer.apply_test_changeset(&out1, &tables);
         assert!(peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"));
         assert!(peer.test_row_exists("SELECT 1 FROM note_tags WHERE id = 't1'"));
         assert!(peer.test_row_exists("SELECT 1 FROM note_photos WHERE id = 'p1'"));
@@ -1877,13 +1865,7 @@ mod tests {
             &tables,
             &["UPDATE notes SET shared = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
         );
-        resolve_and_apply_changeset(
-            &peer,
-            &out2,
-            &tables,
-            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
-        )
-        .expect("apply retract");
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             !peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer drops the retracted root"
@@ -1920,7 +1902,7 @@ mod tests {
         );
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out1);
+        peer.apply_test_changeset(&out1, &tables);
 
         // Retract only R1.
         let out2 = capture_and_gate(
@@ -1955,7 +1937,7 @@ mod tests {
             "the join row is spared"
         );
 
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             !peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "R1 gone on peer"
@@ -2006,7 +1988,7 @@ mod tests {
         );
         let peer = conn();
         create_album_schema(&peer);
-        apply_album(&peer, &out1);
+        peer.apply_test_changeset(&out1, &tables);
 
         // Retract the last managed release: the now-childless album AND artist are
         // deleted too.
@@ -2029,7 +2011,7 @@ mod tests {
             );
         }
 
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(!peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"));
         assert!(!peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"));
         assert!(
@@ -2103,7 +2085,7 @@ mod tests {
             &tables,
             &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
         );
-        apply_album(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "shared to peer"
@@ -2115,7 +2097,7 @@ mod tests {
             &tables,
             &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'"],
         );
-        apply_album(&peer, &out3);
+        peer.apply_test_changeset(&out3, &tables);
         assert!(
             !peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "retracted from peer"
@@ -2144,7 +2126,7 @@ mod tests {
                 "{table}.{pk} re-emitted as an INSERT on re-share"
             );
         }
-        apply_album(&peer, &out4);
+        peer.apply_test_changeset(&out4, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "re-shared to peer"
@@ -2193,7 +2175,7 @@ mod tests {
             &tables,
             &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-devA' WHERE id = 'R1'"],
         );
-        apply_album(&b, &share);
+        b.apply_test_changeset(&share, &tables);
         assert!(
             b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "B has the release"
@@ -2213,7 +2195,7 @@ mod tests {
             &tables,
             &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-devA' WHERE id = 'R1'"],
         );
-        apply_album(&b, &retract);
+        b.apply_test_changeset(&retract, &tables);
         assert!(
             !b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "B drops the release"
@@ -2283,16 +2265,6 @@ mod tests {
         );
     }
 
-    fn apply_album_asset(c: &Connection, bytes: &[u8]) {
-        resolve_and_apply_changeset(
-            c,
-            bytes,
-            &album_asset_tables(),
-            crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
-        )
-        .expect("apply album-asset changeset");
-    }
-
     /// A `managed` release keeps its artist alive, and the artist image rides the
     /// kept artist's gate to peers — same for the cover under the release.
     #[test]
@@ -2334,7 +2306,7 @@ mod tests {
         // The image and cover rows land on a fresh peer.
         let peer = conn();
         create_album_asset_schema(&peer);
-        apply_album_asset(&peer, &out);
+        peer.apply_test_changeset(&out, &tables);
         assert!(peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"));
         assert!(peer.test_row_exists("SELECT 1 FROM covers WHERE id = 'CV'"));
     }
@@ -2411,7 +2383,7 @@ mod tests {
             has_row(&c2, "covers", "CV"),
             "the cover re-emits with its now-remote release"
         );
-        apply_album_asset(&peer, &out2);
+        peer.apply_test_changeset(&out2, &tables);
         assert!(
             peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"),
             "peer has the image"
@@ -2440,7 +2412,7 @@ mod tests {
             has_op(&c3, "covers", "CV", ChangeOp::Delete),
             "the cover retracts with its release"
         );
-        apply_album_asset(&peer, &out3);
+        peer.apply_test_changeset(&out3, &tables);
         assert!(
             !peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"),
             "peer drops the image"

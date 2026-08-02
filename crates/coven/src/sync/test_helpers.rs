@@ -20,397 +20,6 @@ pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {
     ObjectHash::digest(label.as_bytes())
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn install_test_active_circle(
-    database: &crate::database::DatabaseTestSql<'_>,
-    label: &str,
-) -> (
-    crate::protocol::circle::CircleId,
-    crate::protocol::circle::CircleControlCoord,
-) {
-    install_test_circle_current_state(database, label, true)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
-    let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
-        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
-        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
-    ))
-    .expect("fixed Circle signing key is hexadecimal")
-    .try_into()
-    .expect("fixed Circle signing key is 64 bytes");
-    UserKeypair::from_signing_key_bytes(&keypair_bytes).expect("fixed Circle signing key is valid")
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn install_test_inactive_circle(
-    database: &crate::database::DatabaseTestSql<'_>,
-    label: &str,
-) -> (
-    crate::protocol::circle::CircleId,
-    crate::protocol::circle::CircleControlCoord,
-) {
-    install_test_circle_current_state(database, label, false)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-fn install_test_circle_current_state(
-    database: &crate::database::DatabaseTestSql<'_>,
-    label: &str,
-    active: bool,
-) -> (
-    crate::protocol::circle::CircleId,
-    crate::protocol::circle::CircleControlCoord,
-) {
-    use std::collections::BTreeMap;
-
-    use crate::protocol::circle::{
-        CircleMetadataHead, CircleRole, CircleRosterDraftPolicy, CircleRosterHead,
-        CircleRosterPolicyObjects, CircleTransitionDraft, CircleTransitionPolicyObjects,
-        PreparedCircleTransition, StoreMembershipStateRef,
-    };
-    use crate::protocol::membership::{
-        MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
-        MembershipStatus,
-    };
-    use crate::protocol::store_commit::{
-        CandidateFamilyId, CircleActivationObjects, CircleMetadataObjectRef, DeviceStreamAnchor,
-        GrantStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
-        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef, StreamActivation,
-        SuccessorLink,
-    };
-    use crate::storage::cloud::ObjectSlot;
-    use crate::storage::ExactObjectRef;
-    use crate::sync::store::{
-        CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
-    };
-
-    fn exact_object(label: &str, bytes: &[u8]) -> ExactObjectRef {
-        ExactObjectRef::new(
-            ObjectSlot::logical(format!("store-v1/test/{label}.json"))
-                .expect("valid test object slot"),
-            bytes.len() as u64,
-            ObjectHash::digest(bytes),
-        )
-    }
-
-    let owner = test_circle_owner_keypair();
-    let owner_pubkey = crate::keys::public_key_hex(&owner);
-    let store_root_hash = ObjectHash::digest(format!("{label} Store root").as_bytes());
-    let root_bytes = format!("{label} root").into_bytes();
-    let root = StoreRootRef {
-        store_root_id: ObjectHash::digest(format!("{label} identity").as_bytes()),
-        store_root_hash,
-        object: exact_object(&format!("{label}/root"), &root_bytes),
-    };
-    let registration_origin = StoreDeviceRegistrationOrigin::Founder {
-        creation_id: StoreCreationId::from_random_bytes(
-            *ObjectHash::digest(label.as_bytes()).as_bytes(),
-        ),
-    };
-    let store_commits = DeviceStreamAnchor::StoreAnnouncements {
-        first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/announcements/1.json"))
-            .expect("valid test Store announcement slot"),
-    };
-    let registration = StoreDeviceRegistration::signed(
-        root.clone(),
-        registration_origin,
-        crate::storage::ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
-                access_key_id_hash: ObjectHash::digest(
-                    format!("{label} registration access key").as_bytes(),
-                ),
-            },
-        },
-        store_commits,
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: ObjectSlot::logical(format!(
-                "store-v1/test/{label}/acknowledgements/1.json"
-            ))
-            .expect("valid test Store acknowledgement slot"),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/snapshots/1.json"))
-                .expect("valid test Store snapshot slot"),
-        },
-        &owner,
-    )
-    .expect("sign test Store device registration");
-    let registration_bytes = registration.to_bytes();
-    let author_registration = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        exact_object(&format!("{label}/registration"), &registration_bytes),
-    );
-    let device_signer = registration
-        .device_signer(&owner)
-        .expect("derive test Store device signer");
-    let membership_anchor = GrantStreamAnchor::StoreMembership {
-        first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
-            .expect("valid test membership slot"),
-    };
-    let founder = crate::protocol::membership::founder_entry(
-        label,
-        &owner,
-        crate::protocol::causal_grants::MembershipGrantId::from_test_label(label),
-        "founder",
-        membership_anchor,
-        crate::protocol::provider::FounderProviderAdminGrant::from_test_label(label),
-    );
-    let founder_coord = founder.coord();
-    let chain =
-        MembershipChain::from_entries(vec![founder.clone()]).expect("found test membership");
-    let MembershipStatus::Resolved(resolved) = chain.status() else {
-        panic!("founder membership must resolve")
-    };
-    let head = MembershipHeadRef {
-        coord: founder_coord.clone(),
-        head_hash: ObjectHash::digest(format!("{label} membership head").as_bytes()),
-        object: exact_object(&format!("{label}/membership-head"), b"test membership head"),
-    };
-    let membership = StoreMembershipStateRef::from_parts(
-        vec![head],
-        Vec::new(),
-        Vec::new(),
-        resolved.state_hash,
-    )
-    .expect("valid test membership reference");
-    let membership_authority = MembershipGrantCreationAuthority::Entry(founder_coord);
-    let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(
-        format!("{label} candidate family").as_bytes(),
-    ));
-    let ids = crate::id_provider::SequentialIdProvider::new(label);
-    let draft = CircleTransitionDraft::founder(
-        store_root_hash,
-        candidate_family,
-        &registration.device_id.to_string(),
-        label,
-        "0000000001000-0000-test",
-        membership,
-        membership_authority,
-        vec![(owner_pubkey.clone(), MemberRole::Owner)],
-        &ids,
-        &owner,
-    )
-    .expect("construct test Circle");
-    let control_object = exact_object(&format!("{label}/control"), &draft.control.bytes);
-    let metadata_bytes = serde_json::to_vec(&draft.metadata).expect("serialize test metadata");
-    let metadata_object = exact_object(&format!("{label}/metadata"), &metadata_bytes);
-    let mut roster_entries = BTreeMap::new();
-    let mut roster_heads = Vec::new();
-    let metadata_entries = BTreeMap::from([(
-        draft.metadata.coord(),
-        CircleMetadataObjectRef {
-            key_fingerprint: draft.metadata.key_fingerprint,
-            object: metadata_object.clone(),
-        },
-    )]);
-    let mut metadata_heads = Vec::new();
-    let (policy_objects, head_object) = {
-        let CircleRosterDraftPolicy::Founder {
-            entry: roster_entry,
-        } = &draft.policy.roster
-        else {
-            panic!("founder Circle contains a founder roster entry");
-        };
-        let roster_entry = roster_entry.clone();
-        let roster_bytes =
-            serde_json::to_vec(&roster_entry).expect("serialize test Circle roster entry");
-        let roster_object = exact_object(&format!("{label}/roster-entry"), &roster_bytes);
-        roster_entries.insert(roster_entry.coord(), roster_object.clone());
-
-        let roster_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-roster-head/1.json"))
-                .expect("valid test Circle roster-head slot");
-        let roster_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            roster_entry.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleRoster {
-                circle_id: draft.circle_id,
-                first_slot: roster_head_slot.clone(),
-            },
-        );
-        let roster_head = CircleRosterHead::signed(
-            &roster_entry,
-            roster_object,
-            SuccessorLink {
-                activation: roster_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-roster-head/2.json"
-                ))
-                .expect("valid next test Circle roster-head slot"),
-            },
-            &device_signer,
-        );
-        let roster_head_bytes =
-            serde_json::to_vec(&roster_head).expect("serialize test Circle roster head");
-        let roster_head_object = ExactObjectRef::new(
-            roster_head_slot,
-            roster_head_bytes.len() as u64,
-            ObjectHash::digest(&roster_head_bytes),
-        );
-        roster_heads.push(
-            crate::protocol::circle::CircleRosterHeadRef::from_stored_head(
-                &roster_head,
-                roster_head_object,
-            ),
-        );
-
-        let metadata_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-metadata-head/1.json"))
-                .expect("valid test Circle metadata-head slot");
-        let metadata_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            draft.metadata.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleMetadata {
-                circle_id: draft.circle_id,
-                first_slot: metadata_head_slot.clone(),
-            },
-        );
-        let metadata_head = CircleMetadataHead::signed(
-            &draft.metadata,
-            metadata_object,
-            SuccessorLink {
-                activation: metadata_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-metadata-head/2.json"
-                ))
-                .expect("valid next test Circle metadata-head slot"),
-            },
-            &device_signer,
-        );
-        let metadata_head_bytes =
-            serde_json::to_vec(&metadata_head).expect("serialize test Circle metadata head");
-        let metadata_head_object = ExactObjectRef::new(
-            metadata_head_slot,
-            metadata_head_bytes.len() as u64,
-            ObjectHash::digest(&metadata_head_bytes),
-        );
-        metadata_heads.push(
-            crate::protocol::circle::CircleMetadataHeadRef::from_stored_head(
-                &metadata_head,
-                metadata_head_object,
-            ),
-        );
-
-        let control_head_slot =
-            ObjectSlot::logical(format!("store-v1/test/{label}/circle-control-head/1.json"))
-                .expect("valid test Circle control-head slot");
-        let control_activation = StreamActivation::grant_authorized(
-            store_root_hash,
-            author_registration.clone(),
-            draft.metadata.author_owner_grant.clone(),
-            GrantStreamAnchor::CircleControl {
-                circle_id: draft.circle_id,
-                first_slot: control_head_slot.clone(),
-            },
-        );
-        let control_head = crate::protocol::circle::CircleControlHead::signed(
-            &draft.control.value,
-            control_object.clone(),
-            SuccessorLink {
-                activation: control_activation.activation_id(),
-                predecessor: None,
-                next_slot: ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/circle-control-head/2.json"
-                ))
-                .expect("valid next test Circle control-head slot"),
-            },
-            &device_signer,
-        );
-        let control_head_bytes =
-            serde_json::to_vec(&control_head).expect("serialize test Circle control head");
-        let control_head_object = ExactObjectRef::new(
-            control_head_slot,
-            control_head_bytes.len() as u64,
-            ObjectHash::digest(&control_head_bytes),
-        );
-        (
-            CircleTransitionPolicyObjects {
-                roster: Some(CircleRosterPolicyObjects {
-                    entry: roster_entry,
-                    head: roster_head,
-                }),
-                metadata_head: Some(metadata_head),
-                control_head,
-            },
-            Some(control_head_object),
-        )
-    };
-    let creation = PreparedCircleTransition {
-        circle_id: draft.circle_id,
-        epoch_id: draft.epoch_id,
-        keyring: draft.keyring,
-        roster: draft.roster,
-        policy_objects,
-        metadata: draft.metadata,
-        close_intent: draft.close_intent,
-        close_outcome: None,
-        close_cancellation: None,
-        access: draft.access,
-        control: draft.control,
-    };
-    let objects = CircleActivationObjects {
-        control: control_object,
-        close_intent: None,
-        close_outcome: None,
-        close_cancellation: None,
-        roster_entries,
-        roster_heads,
-        roster_resolutions: BTreeMap::new(),
-        metadata_entries,
-        metadata_heads,
-        access: Vec::new(),
-    };
-    let reference = creation.control_ref(objects, head_object);
-    let control = creation.control.clone();
-    let own_access = creation
-        .access
-        .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
-        .expect("test Circle owner access");
-    let activation = VerifiedCircleReference {
-        reference,
-        circle_id: creation.circle_id,
-        control: control.clone(),
-        local_access: active.then(|| VerifiedCircleAccess {
-            envelope: own_access.envelope.clone(),
-            leaf: own_access.leaf.clone(),
-            active: Some(VerifiedCircleActive {
-                roster: creation.resolved_roster(),
-                metadata: creation.metadata.clone(),
-            }),
-        }),
-    };
-    let current = CircleCurrentState::from_verified(candidate_family, &activation)
-        .expect("derive test Circle current state");
-    let control_coord =
-        serde_json::to_string(&control.coord).expect("serialize test Circle control coordinate");
-    database
-        .install_circle_current_state(
-            creation.circle_id,
-            &control_coord,
-            &format!("{label}-device"),
-            ObjectHash::digest(format!("{label} commit").as_bytes()),
-            &control.bytes,
-            active.then_some(owner_pubkey.as_str()),
-            &serde_json::to_vec(&current).expect("serialize test Circle current state"),
-        )
-        .expect("install test Circle state");
-    assert_eq!(
-        creation
-            .resolved_roster()
-            .members()
-            .get(&crate::keys::public_key_hex(&owner)),
-        Some(&CircleRole::Owner)
-    );
-    (creation.circle_id, control.coord)
-}
-
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
 /// to fail. The switch models a device whose keyring is momentarily
 /// unwritable, so a test can drive a key adoption into its failure path and then
@@ -552,7 +161,7 @@ pub(crate) fn open_test_db_with_blob(decl: BlobDecl) -> Database {
 /// match the blobs the test reads (the read path resolves the carrying table from the
 /// blob's namespace); its provenance/fill don't matter to that resolution (the read
 /// reads the row → root → gate, and takes provenance off the `BlobRef`), so this fixes
-/// them. Pair with [`plant_blob_row`].
+/// them. Pair with [`Database::plant_blob_row_for_test`].
 pub(crate) fn read_test_db(namespace: &str) -> Database {
     open_test_db_with_blob(BlobDecl::new(
         namespace,
@@ -584,23 +193,6 @@ pub(crate) fn read_test_db_with_download_limit(namespace: &str, downloads: usize
     )
     .expect("open test database");
     db
-}
-
-/// Plant the backing row `read_blob` resolves a blob's locality
-/// from: a gated `notes` root with `shared = remote` and a `note_photos` child whose
-/// id is `blob_id`, carrying `bytes`'s length and content hash so a download of those
-/// exact bytes verifies. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);
-/// `remote = false` ⇒ **Local** (and the read then dispatches on the `BlobRef`'s
-/// provenance — external file vs local store). Requires a db whose `note_photos`
-/// carries a blob (e.g. [`read_test_db`] / [`open_test_db_with_blob`]).
-pub(crate) async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool, bytes: &[u8]) {
-    db.plant_blob_row_for_test(
-        blob_id,
-        remote,
-        bytes.len() as u64,
-        Some(&crate::blob::content_hash(bytes)),
-    )
-    .await;
 }
 
 /// Open a test [`Database`] with both `note_photos` (per `photo_decl`) and
@@ -776,148 +368,6 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
     }
 }
 
-#[cfg(test)]
-pub(crate) fn install_cross_principal_device_fixture<'a>(
-    store: &'a TestStore,
-    observer_db: &'a Database,
-    local_db: &'a Database,
-    identity: &'a UserKeypair,
-    peer_account_id: &'a str,
-    published_at: &'a str,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
-    Box::pin(async move {
-        let local_database = crate::database::StoreDatabase::new(local_db);
-        let observer = store.bind_device(observer_db, &store.signer).await?;
-        let provider_binding = crate::storage::SyncStorage::provider_binding(&*store.storage)
-            .await
-            .map_err(|error| error.to_string())?;
-        let crate::storage::StoreProviderBinding::Dropbox { namespace_id } =
-            &provider_binding.store
-        else {
-            return Err("cross-principal test Store is not Dropbox".to_string());
-        };
-        let namespace_id = namespace_id.clone();
-        let peer_binding = crate::storage::ResolvedProviderBinding {
-            store: provider_binding.store.clone(),
-            device: crate::storage::ProviderDeviceBinding {
-                principal: crate::storage::ProviderPrincipalId::Dropbox {
-                    account_id: peer_account_id.to_string(),
-                },
-            },
-        };
-        let peer_home = std::sync::Arc::new(
-            store
-                .home
-                .as_ref()
-                .clone()
-                .with_provider_binding(peer_binding),
-        );
-        let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
-            crate::storage::CloudSyncStorage::new(
-                peer_home.clone(),
-                crate::storage::CloudCipher::Encrypted(
-                    crate::encryption::EncryptionService::from_key([42; 32]),
-                ),
-                crate::storage::BlobPathScheme::Hashed,
-                "cross-principal-test-store",
-                identity.clone(),
-            )
-            .map_err(|error| error.to_string())?,
-        );
-        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
-            pending_dir.path().join("pending-device-join.sqlite"),
-        )
-        .map_err(|error| error.to_string())?;
-        let offer = observer
-            .store
-            .begin_device_join(&pubkey_hex(identity))
-            .await
-            .map_err(|error| error.to_string())?;
-        let (join_root, join_history) =
-            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                .open_pinned(peer_storage.as_ref(), &offer.store_root)
-                .await
-                .map_err(|error| error.to_string())?;
-        let observation = crate::sync::store::PendingDeviceJoinObservation::new(
-            &pending,
-            &peer_storage,
-            join_root,
-            join_history,
-            offer.attempt_id,
-        );
-        let mut pending_join =
-            crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
-                .await
-                .map_err(|error| error.to_string())?;
-        let access_request = pending_join
-            .prepare_provider_access_request()
-            .await
-            .map_err(|error| error.to_string())?;
-        let access_administrator = TestDropboxAccessAdministrator { namespace_id };
-        let approval = observer
-            .store
-            .authorize_device_provider_access(access_request, Some(&access_administrator))
-            .await
-            .map_err(|error| error.to_string())?;
-        if !matches!(
-            approval.admission,
-            crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
-        ) {
-            return Err("distinct provider principals produced same-principal admission".into());
-        }
-        let registration_request = pending_join
-            .prepare_registration_request(approval)
-            .await
-            .map_err(|error| error.to_string())?;
-        let provisional = observer
-            .store
-            .accept_device_registration_request(registration_request)
-            .await
-            .map_err(|error| error.to_string())?;
-        let provider_ready = observer
-            .store
-            .publish_device_provider_challenge(provisional)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut joining = pending_join
-            .begin_joining_store(local_database)
-            .await
-            .map_err(|error| error.to_string())?;
-        let readiness = joining
-            .bootstrap(provider_ready, published_at)
-            .await
-            .map_err(|error| error.to_string())?;
-        if !matches!(
-            readiness.provider,
-            crate::sync::store::DeviceProviderReadiness::CrossPrincipal(_)
-        ) {
-            return Err("distinct provider principals produced same-principal readiness".into());
-        }
-        let completion = observer
-            .store
-            .complete_device_provider_admission(readiness)
-            .await
-            .map_err(|error| error.to_string())?;
-        if !matches!(
-            completion.admission,
-            crate::sync::store::DeviceProviderAdmission::CrossPrincipal(_)
-        ) {
-            return Err("distinct provider principals produced same-principal completion".into());
-        }
-        let activation = observer
-            .store
-            .finalize_device_join(completion)
-            .await
-            .map_err(|error| error.to_string())?;
-        joining
-            .complete(activation)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    })
-}
-
 pub(crate) struct TestStore {
     pub home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     pub storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
@@ -1050,6 +500,145 @@ impl TestDevice {
         self.store.store_root()
     }
 
+    pub(crate) async fn create_exact_opaque_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        bytes: &[u8],
+    ) -> crate::blob::locator::StoredBlobRef {
+        let (registration_ref, registration) = self
+            .db
+            .local_blob_write_authority()
+            .await
+            .expect("load exact blob write authority");
+        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+            .expect("validate exact blob write authority");
+        let protection = crate::encryption::EncryptionService::from_key([42; 32]);
+        let locator = crate::blob::locator::BlobLocator::opaque(
+            namespace,
+            id,
+            authority.reference.clone(),
+            crate::blob::locator::RemoteAudience::Store,
+            crate::blob::BlobScope::Master,
+            protection.seal_key_fingerprint(),
+            bytes.len() as u64,
+            crate::protocol::store_commit::ObjectHash::digest(bytes),
+        )
+        .expect("build exact blob locator");
+        let temp = tempfile::tempdir().expect("create exact blob spool directory");
+        let plaintext = temp.path().join("plaintext");
+        let spool = temp.path().join("stored");
+        crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
+            .await
+            .expect("write exact blob plaintext");
+        let slot = self
+            .storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .expect("allocate exact blob slot");
+        self.storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::storage::BlobSpoolProtection::Opaque(protection),
+                &plaintext,
+                &spool,
+            )
+            .await
+            .expect("seal exact blob");
+        let stored = self
+            .storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .expect("prepare exact blob object");
+        self.storage
+            .create_blob_object_from_file(
+                &stored,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("create exact blob object");
+        stored
+    }
+
+    pub(crate) async fn create_exact_browsable_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) -> crate::blob::locator::StoredBlobRef {
+        let (registration_ref, registration) = self
+            .db
+            .local_blob_write_authority()
+            .await
+            .expect("load browsable blob write authority");
+        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+            .expect("validate browsable blob write authority");
+        let locator = crate::blob::locator::BlobLocator::browsable(
+            namespace,
+            id,
+            authority.reference.clone(),
+            cloud_path,
+            bytes.len() as u64,
+            crate::protocol::store_commit::ObjectHash::digest(bytes),
+        )
+        .expect("build browsable blob locator");
+        let temp = tempfile::tempdir().expect("create browsable blob spool directory");
+        let plaintext = temp.path().join("plaintext");
+        let spool = temp.path().join("stored");
+        crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
+            .await
+            .expect("write browsable blob plaintext");
+        let slot = self
+            .storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .expect("allocate browsable blob slot");
+        self.storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::storage::BlobSpoolProtection::Browsable,
+                &plaintext,
+                &spool,
+            )
+            .await
+            .expect("stage browsable blob");
+        let stored = self
+            .storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .expect("prepare browsable blob object");
+        self.storage
+            .create_blob_object_from_file(
+                &stored,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("create browsable blob object");
+        stored
+    }
+
+    pub(crate) async fn run_cycle(
+        &self,
+        store_dir: &StoreDir,
+        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+    ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure> {
+        let components =
+            crate::sync::test_owner_graph::TestOwnerGraph::new(self.db.clone(), store_dir.clone())
+                .prepare_sync(self.storage.clone())
+                .await
+                .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
+        components
+            .run_cycle(&crate::clock::SystemClock, None, store_dir, observer)
+            .await
+    }
+
     pub(crate) async fn create_circle(
         &self,
         metadata_stamp: &str,
@@ -1155,6 +744,48 @@ impl TestDevice {
             .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?
             .prepare_pending_store_write(store_dir)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_blocked_transfer_candidate(
+        &self,
+        label: &str,
+    ) -> (tempfile::TempDir, StoreDir, crate::WriteId) {
+        let statement = format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('{label}', 'pending', NULL, 1, \
+                     '0000000002000-0000-{label}', '2026-07-18')"
+        );
+        self.db
+            .run_host_store_write_for_test(None, None, move |transaction| {
+                transaction
+                    .execute_batch(&statement)
+                    .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("capture transfer candidate host write");
+        let (temporary, store_dir) = temp_store_dir();
+        assert!(self
+            .prepare_pending_store_write(&store_dir)
+            .await
+            .expect("prepare transfer candidate"));
+        let candidate = self
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load transfer candidate")
+            .expect("transfer candidate exists");
+        let write_id = candidate.commit.value.write_id.clone();
+        self.db
+            .set_write_status(
+                &write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "exercise restored author-exclusion evidence".to_string(),
+                }),
+            )
+            .await
+            .expect("block transfer candidate");
+        (temporary, store_dir, write_id)
     }
 
     #[cfg(test)]
@@ -1278,6 +909,14 @@ impl TestDevice {
             .expect("read released owner exclusion freeze")
             .is_empty());
         exclusion
+    }
+
+    pub(crate) async fn finalize_peer_exclusion(
+        &self,
+        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> crate::protocol::store_commit::StoreDeviceExclusionRef {
+        let proposal = self.prepare_peer_exclusion(target).await;
+        self.activate_peer_exclusion(&proposal).await
     }
 
     pub(crate) async fn prepare_circle_object(
@@ -1705,6 +1344,290 @@ struct TestStoreProducers {
 }
 
 impl TestStore {
+    pub(crate) async fn founder_recovery_authority(
+        &self,
+    ) -> crate::restoration::OwnerRecoveryAuthority {
+        let device = self.founder_device().await.expect("load founder Store");
+        let protocol_root = device.protocol_root_for_test();
+        let owner_grant = protocol_root.descriptor.founder_grant.clone();
+        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+            &self.root,
+            &crate::keys::public_key_hex(&self.signer),
+            &owner_grant,
+            &protocol_root.descriptor.founder_recovery,
+        )
+        .expect("derive founder recovery activation");
+        crate::restoration::OwnerRecoveryAuthority {
+            owner_identity_secret: hex::encode(self.signer.to_keypair_bytes()),
+            owner_grant: owner_grant.clone(),
+            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+                owner_grant,
+                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                    activation,
+                },
+            },
+            published_at: "2026-07-17T00:00:00Z".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_cross_principal_device<'a>(
+        &'a self,
+        local_database: crate::database::StoreDatabase,
+        identity: &'a UserKeypair,
+        peer_account_id: &'a str,
+        published_at: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
+        Box::pin(async move {
+            let observer = self.founder.clone();
+            let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
+                .await
+                .map_err(|error| error.to_string())?;
+            let crate::storage::StoreProviderBinding::Dropbox { namespace_id } =
+                &provider_binding.store
+            else {
+                return Err("cross-principal test Store is not Dropbox".to_string());
+            };
+            let namespace_id = namespace_id.clone();
+            let peer_binding = crate::storage::ResolvedProviderBinding {
+                store: provider_binding.store.clone(),
+                device: crate::storage::ProviderDeviceBinding {
+                    principal: crate::storage::ProviderPrincipalId::Dropbox {
+                        account_id: peer_account_id.to_string(),
+                    },
+                },
+            };
+            let peer_home = std::sync::Arc::new(
+                self.home
+                    .as_ref()
+                    .clone()
+                    .with_provider_binding(peer_binding),
+            );
+            let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
+                crate::storage::CloudSyncStorage::new(
+                    peer_home.clone(),
+                    crate::storage::CloudCipher::Encrypted(
+                        crate::encryption::EncryptionService::from_key([42; 32]),
+                    ),
+                    crate::storage::BlobPathScheme::Hashed,
+                    "cross-principal-test-store",
+                    identity.clone(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+            let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+                pending_dir.path().join("pending-device-join.sqlite"),
+            )
+            .map_err(|error| error.to_string())?;
+            let offer = observer
+                .store
+                .begin_device_join(&pubkey_hex(identity))
+                .await
+                .map_err(|error| error.to_string())?;
+            let (join_root, join_history) =
+                crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                    .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let observation = crate::sync::store::PendingDeviceJoinObservation::new(
+                &pending,
+                &peer_storage,
+                join_root,
+                join_history,
+                offer.attempt_id,
+            );
+            let mut pending_join =
+                crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let access_request = pending_join
+                .prepare_provider_access_request()
+                .await
+                .map_err(|error| error.to_string())?;
+            let access_administrator = TestDropboxAccessAdministrator { namespace_id };
+            let approval = observer
+                .store
+                .authorize_device_provider_access(access_request, Some(&access_administrator))
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                approval.admission,
+                crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal admission".into(),
+                );
+            }
+            let registration_request = pending_join
+                .prepare_registration_request(approval)
+                .await
+                .map_err(|error| error.to_string())?;
+            let provisional = observer
+                .store
+                .accept_device_registration_request(registration_request)
+                .await
+                .map_err(|error| error.to_string())?;
+            let provider_ready = observer
+                .store
+                .publish_device_provider_challenge(provisional)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut joining = pending_join
+                .begin_joining_store(local_database)
+                .await
+                .map_err(|error| error.to_string())?;
+            let readiness = joining
+                .bootstrap(provider_ready, published_at)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                readiness.provider,
+                crate::sync::store::DeviceProviderReadiness::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal readiness".into(),
+                );
+            }
+            let completion = observer
+                .store
+                .complete_device_provider_admission(readiness)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                completion.admission,
+                crate::sync::store::DeviceProviderAdmission::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal completion".into(),
+                );
+            }
+            let activation = observer
+                .store
+                .finalize_device_join(completion)
+                .await
+                .map_err(|error| error.to_string())?;
+            joining
+                .complete(activation)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    pub(crate) async fn run_founder_cycle(
+        &self,
+        store_dir: &StoreDir,
+        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+    ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure> {
+        self.founder.run_cycle(store_dir, observer).await
+    }
+
+    pub(crate) async fn publish_fixture_position(
+        &self,
+        store_dir: &StoreDir,
+        note_id: &str,
+    ) -> u64 {
+        self.founder
+            .db
+            .insert_fixture_position_for_test(note_id)
+            .await
+            .expect("insert fixture Store position");
+        assert!(self
+            .publish_pending_store_database(&self.founder.db, store_dir)
+            .await
+            .expect("publish fixture Store position"));
+        self.founder
+            .latest_local_store_position()
+            .await
+            .expect("read fixture Store position")
+            .expect("fixture Store write has an exact position")
+            .coord
+            .sequence()
+    }
+
+    pub(crate) async fn create_exact_opaque_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        bytes: &[u8],
+    ) -> crate::blob::locator::StoredBlobRef {
+        self.founder
+            .create_exact_opaque_blob(namespace, id, bytes)
+            .await
+    }
+
+    pub(crate) async fn create_exact_browsable_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) -> crate::blob::locator::StoredBlobRef {
+        self.founder
+            .create_exact_browsable_blob(namespace, id, cloud_path, bytes)
+            .await
+    }
+
+    pub(crate) async fn publish_exact_remote_blob_binding(
+        &self,
+        store_dir: &StoreDir,
+        root_id: &str,
+        row_id: &str,
+        bytes: &[u8],
+    ) -> crate::blob::locator::StoredBlobRef {
+        let local = self
+            .founder
+            .db
+            .row_blob_ref("note_photos", row_id)
+            .await
+            .expect("load exact Local row blob reference");
+        let source = store_dir
+            .local_blob_path(&local.blob().namespace, &local.blob().id)
+            .expect("resolve host blob source");
+        crate::storage::StagedBlobFile::write_for_test(&source, bytes)
+            .await
+            .expect("write host blob source");
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            self.founder.db.clone(),
+            store_dir.clone(),
+        )
+        .make_remote("notes", root_id, false)
+        .await
+        .expect("start exact make_remote");
+        let clock = crate::clock::FixedClock(
+            chrono::DateTime::parse_from_rfc3339("2024-06-01T01:00:00Z")
+                .expect("valid exact blob publication time")
+                .with_timezone(&chrono::Utc),
+        );
+        let hlc = crate::sync::hlc::Hlc::new(
+            "delete-tests".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
+        let outcome = self
+            .founder
+            .store
+            .authorize_writer()
+            .await
+            .expect("authorize exact blob publication")
+            .drain_uploads(store_dir, &clock, &hlc, None, None)
+            .await
+            .expect("drain exact blob upload");
+        assert_eq!(outcome.uploaded(), 1);
+        assert!(self
+            .publish_pending_store_database(&self.founder.db, store_dir)
+            .await
+            .expect("publish exact remote blob binding"));
+        self.founder
+            .db
+            .row_blob_ref("note_photos", row_id)
+            .await
+            .expect("load exact Remote row blob reference")
+            .stored()
+            .cloned()
+            .expect("Remote row owns an exact stored blob reference")
+    }
+
     pub(crate) async fn pull_into_result(
         &self,
         db: &Database,
@@ -2031,6 +1954,24 @@ impl TestStore {
         Ok(prepared.reference().clone())
     }
 
+    pub(crate) async fn publish_prepared_protocol_object(
+        &self,
+        prepared: &crate::storage::PreparedExactObject,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.storage.create_protocol_object(prepared).await
+    }
+
+    pub(crate) async fn read_exact_protocol_object(
+        &self,
+        context: &crate::storage::ProtocolObjectContext,
+        object: &crate::storage::ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+        self.storage
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
     pub(crate) async fn contains_blob_object(&self, reference: &crate::blob::RowBlobRef) -> bool {
         match reference.stored() {
             Some(stored) => self
@@ -2050,6 +1991,17 @@ impl TestStore {
             Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) async fn contains_blob_tombstone(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<bool, crate::storage::cloud::CloudHomeError> {
+        let key = crate::blob::delete::tombstone_key_for_test(
+            stored,
+            &self.storage.cipher_state().snapshot(),
+        );
+        crate::storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
     }
 
     pub(crate) async fn contains_circle_snapshot_image(
@@ -2478,6 +2430,13 @@ impl TestStore {
             .expect("write replacement head");
     }
 
+    pub(crate) async fn delete_membership_head_for_test(
+        &self,
+        reference: &crate::protocol::membership::MembershipHeadRef,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.storage.delete_protocol_object(&reference.object).await
+    }
+
     pub(crate) async fn pending_device_join_observation(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
@@ -2557,29 +2516,6 @@ impl TestStore {
                 created_at,
                 store_routing,
             )
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn drive_circle_snapshot_publications(
-        &self,
-        db: &Database,
-        temp_dir: std::path::PathBuf,
-        schema_version: u32,
-        created_at: &str,
-        store_routing: Option<&crate::encryption::EncryptionService>,
-    ) -> Result<(), crate::sync::store::SnapshotError> {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::SnapshotError::PublicationState)?
-            .authorize_writer()
-            .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
-            .circles()
-            .snapshots()
-            .push_circle_snapshots(temp_dir, schema_version, created_at, store_routing)
             .await
     }
 
@@ -3072,6 +3008,54 @@ impl TestStore {
             .ok_or_else(|| "published test changeset has no Store position".to_string())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn publish_founder_changeset(
+        &self,
+        store_dir: &StoreDir,
+        changeset: Vec<u8>,
+        previous_sequence: u64,
+    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+        let before = self
+            .founder
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?;
+        let actual_previous_sequence = before
+            .as_ref()
+            .map_or(0, |position| position.coord.sequence());
+        if actual_previous_sequence != previous_sequence {
+            return Err(format!(
+                "founder Store position is {actual_previous_sequence}, expected {previous_sequence}"
+            ));
+        }
+        self.founder
+            .db
+            .enqueue_store_changeset_for_test(changeset)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut writer = self
+            .founder
+            .authorize_writer()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !writer
+            .prepare_pending_store_write(store_dir)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("test changeset did not prepare a Store commit".to_string());
+        }
+        writer
+            .drain_store_writes()
+            .await
+            .map_err(|error| error.to_string())?;
+        writer
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "published test changeset has no Store position".to_string())
+    }
+
     async fn ensure_producer(&self, name: &str) -> Result<TestDevice, String> {
         {
             let producers = self.producers.lock().await;
@@ -3222,10 +3206,7 @@ pub(crate) fn remote_root_db(decl: BlobDecl) -> Database {
 /// The cloud key a tombstone for `stored` is written under.
 #[cfg(test)]
 pub(crate) fn exact_tombstone_key(stored: &crate::blob::locator::StoredBlobRef) -> String {
-    format!(
-        "blob_tombstones/{}",
-        crate::protocol::remote_object::remote_object_id(stored.object())
-    )
+    crate::blob::delete::tombstone_key_for_test(stored, &crate::storage::CloudCipher::Plaintext)
 }
 
 /// Which protocol read an interceptor hook is running ahead of.

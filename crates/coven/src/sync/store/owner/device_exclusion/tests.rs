@@ -120,12 +120,64 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         .coord
         .sequence();
     drop(writer);
-    Box::pin(race_cancellation_with_ack(
-        reopened,
-        reopened_store,
-        reference,
-        base_sequence,
-    ))
+    Box::pin(async move {
+        let (candidate_staged, resume_candidate) = reopened.arm_test_pause(
+            crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
+        );
+        let cancel_device = reopened_store.clone();
+        let cancel_reference = reference.clone();
+        let cancellation_task = tokio::spawn(async move {
+            cancel_device
+                .cancel_device_exclusion(&cancel_reference)
+                .await
+        });
+        candidate_staged.notified().await;
+
+        let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+            store_database(&reopened)
+                .materialized_frontier()
+                .await
+                .expect("read competing acknowledgement frontier"),
+        )
+        .expect("shape competing acknowledgement frontier");
+        reopened_store
+            .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
+            .await
+            .expect("stage competing acknowledgement");
+        assert_eq!(
+            reopened_store
+                .drain_acknowledgements()
+                .await
+                .expect("publish competing acknowledgement"),
+            1
+        );
+        resume_candidate.notify_one();
+        let cancellation = cancellation_task
+            .await
+            .expect("join cancellation publication")
+            .expect("cancel exclusion proposal");
+        assert!(matches!(
+            &cancellation,
+            StoreDeviceExclusionResult::OutcomeActivated {
+                outcome: StoreDeviceExclusionOutcomeRef::Cancelled(_),
+                commit,
+            } if commit.coord.sequence() == base_sequence + 2
+        ));
+        assert!(store_database(&reopened)
+            .store_device_exclusion_freezes()
+            .await
+            .expect("read released exclusion freezes")
+            .is_empty());
+        let operations = reopened_store
+            .device_exclusion_operations_for_test()
+            .await
+            .expect("list exclusion operations");
+        assert_eq!(operations.len(), 2);
+        assert!(operations.iter().all(|operation| matches!(
+            operation.status,
+            StoreDeviceExclusionOperationStatus::Completed(_)
+        )));
+    })
     .await;
 }
 
@@ -187,13 +239,17 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .await
         .expect("open snapshot exclusion Store");
     let peer_db = open_test_db();
-    Box::pin(store.activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z"))
-        .await
-        .expect("activate snapshot exclusion peer");
-    let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
-        prepare_transfer_candidate(&peer_db, &store, &signer, "snapshot-excluded-candidate"),
-    )
-    .await;
+    let peer_device = Box::pin(store.activate_joined_device(
+        &owner_db,
+        &peer_db,
+        &signer,
+        "2026-07-18T00:00:00Z",
+    ))
+    .await
+    .expect("activate snapshot exclusion peer");
+    let (_candidate_temp, _candidate_store_dir, candidate_write_id) =
+        Box::pin(peer_device.prepare_blocked_transfer_candidate("snapshot-excluded-candidate"))
+            .await;
     let owner_device_id = owner_device.device_id.clone();
     let target = store_database(&owner_db)
         .activated_store_device_registration_records()
@@ -203,7 +259,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         .map(|(reference, _)| reference)
         .find(|reference| reference.device_id.to_string() != owner_device_id)
         .expect("snapshot exclusion peer registration");
-    let exclusion = finalize_peer_exclusion(&owner_device, &target).await;
+    let exclusion = owner_device.finalize_peer_exclusion(&target).await;
     let restore = owner_device
         .restore_membership()
         .await
@@ -367,10 +423,9 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
         .await
         .expect("activate bootstrap exclusion peer");
-    let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
-        prepare_transfer_candidate(&peer_db, &store, &signer, "bootstrap-excluded-candidate"),
-    )
-    .await;
+    let (_candidate_temp, _candidate_store_dir, candidate_write_id) =
+        Box::pin(peer_device.prepare_blocked_transfer_candidate("bootstrap-excluded-candidate"))
+            .await;
     let owner_device_id = owner_device.device_id.clone();
     let target = store_database(&owner_db)
         .activated_store_device_registration_records()
@@ -509,20 +564,12 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         .expect("replayed exclusion candidate cleanup completes"));
 }
 
-async fn finalize_peer_exclusion(
-    owner_device: &TestDevice,
-    target: &StoreDeviceRegistrationRef,
-) -> StoreDeviceExclusionRef {
-    let proposal = owner_device.prepare_peer_exclusion(target).await;
-    owner_device.activate_peer_exclusion(&proposal).await
-}
-
 async fn finalize_peer_exclusion_detached(
     owner_device: TestDevice,
     target: &StoreDeviceRegistrationRef,
 ) -> StoreDeviceExclusionRef {
     let target = target.clone();
-    tokio::spawn(async move { Box::pin(finalize_peer_exclusion(&owner_device, &target)).await })
+    tokio::spawn(async move { Box::pin(owner_device.finalize_peer_exclusion(&target)).await })
         .await
         .expect("join peer exclusion finalization")
 }
@@ -761,6 +808,59 @@ enum ExpectedHeldCandidate<'a> {
     ConcurrentExactOrNone(&'a StoreBatchCommitRef),
 }
 
+struct ExcludedPeer<'a> {
+    database: &'a Database,
+    store: &'a TestStore,
+    store_dir: &'a StoreDir,
+}
+
+impl<'a> ExcludedPeer<'a> {
+    fn new(database: &'a Database, store: &'a TestStore, store_dir: &'a StoreDir) -> Self {
+        Self {
+            database,
+            store,
+            store_dir,
+        }
+    }
+
+    async fn pull_exclusion(&self, expected_held: ExpectedHeldCandidate<'_>) {
+        let pull = self
+            .store
+            .pull_into_result(self.database, self.store_dir)
+            .await
+            .expect("pull peer exclusion")
+            .1;
+        let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
+            matches!(
+                pull.held_positions.as_slice(),
+                [crate::sync::store::owner::pull::HeldStorePosition {
+                    coordinate:
+                        crate::sync::store::owner::pull::HeldStoreCoordinate::Commit {
+                            commit,
+                            ..
+                        },
+                    reason:
+                        crate::sync::store::owner::pull::HeldStorePositionReason::InactiveDevice {
+                            ..
+                        },
+                }] if commit == candidate
+            )
+        };
+        match expected_held {
+            ExpectedHeldCandidate::None => assert!(
+                pull.held_positions.is_empty(),
+                "held: {:?}",
+                pull.held_positions
+            ),
+            ExpectedHeldCandidate::ConcurrentExactOrNone(candidate) => assert!(
+                pull.held_positions.is_empty() || is_exact_candidate_hold(candidate),
+                "expected no hold or exact concurrent candidate {candidate:?}, held: {:?}",
+                pull.held_positions,
+            ),
+        }
+    }
+}
+
 fn indexed_shared_blob(
     label: &str,
     candidate: &StoreBatchCommitRef,
@@ -826,122 +926,10 @@ async fn run_excluded_author_candidate_cleanup(
     .await;
 }
 
-async fn materialize_surviving_owner_commit(
-    owner_db: &Database,
-    peer_db: &Database,
-    store: &TestStore,
-    signer: &UserKeypair,
-    store_dir: &StoreDir,
-) {
-    owner_db
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('surviving-owner-note', 'surviving', NULL, 1, \
-                     '0000000001500-0000-owner', '2026-07-18')",
-        )
-        .await;
-    let owner_device = store
-        .bind_device(owner_db, signer)
-        .await
-        .expect("bind surviving owner Store");
-    assert!(owner_device
-        .prepare_pending_store_write(store_dir)
-        .await
-        .expect("prepare surviving owner commit"));
-    owner_device
-        .drain_store_writes()
-        .await
-        .expect("publish surviving owner commit");
-    store
-        .pull_into_result(peer_db, store_dir)
-        .await
-        .expect("materialize surviving owner commit on excluded peer");
-}
-
 #[derive(Clone, Copy)]
 enum TerminalMergeTransactionFailure {
     Injected(crate::database::MergeMaterializationFailurePoint),
     DeleteDeviceStateDuringRetraction,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn assert_terminal_merge_transaction_rollback(
-    peer_db: &Database,
-    store: &TestStore,
-    store_dir: &StoreDir,
-    write_id: &crate::WriteId,
-    original: &crate::PublishedPosition,
-    activation_commit: &StoreBatchCommitRef,
-    failure: TerminalMergeTransactionFailure,
-) {
-    match failure {
-        TerminalMergeTransactionFailure::Injected(point) => {
-            peer_db.fail_next_merge_materialization_at(point);
-        }
-        TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
-            peer_db
-                .test_sql(|database| database.install_retracted_device_state_failure_trigger())
-                .await
-                .expect("install early device-state deletion trigger");
-        }
-    }
-    let error = store
-        .pull_into_result(peer_db, store_dir)
-        .await
-        .expect_err("injected terminal Merge transaction failure");
-    let expected = match failure {
-        TerminalMergeTransactionFailure::Injected(_) => "injected failure",
-        TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
-            "retracted Merge device state disappeared"
-        }
-    };
-    assert!(
-        error.to_string().contains(expected),
-        "unexpected terminal transaction error: {error:?}"
-    );
-    let StoreCommitCoord {
-        stream_id,
-        sequence,
-    } = &activation_commit.coord;
-    assert!(store_database(peer_db)
-        .exact_materialized_ref(&stream_id.to_string(), *sequence)
-        .await
-        .expect("reload rolled-back activation coordinate")
-        .is_none());
-    store_database(peer_db)
-        .retained_merge_materialization(store.root.clone(), original.commit().clone())
-        .await
-        .expect("rolled-back retraction retains the original materialization");
-    assert!(matches!(
-        crate::database::StoreDatabase::new(peer_db)
-            .write_status(write_id)
-            .await
-            .expect("reload rolled-back write status"),
-        crate::WriteStatus::Published(position) if position.as_ref() == original
-    ));
-    assert_eq!(
-        peer_db
-            .test_sql(|connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM notes WHERE id IN (
-                                 'excluded-peer-note',
-                                 'excluded-peer-local-note',
-                                 'surviving-owner-note'
-                             )",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(crate::database::DbError::from)
-            })
-            .await
-            .expect("count rows after transaction rollback"),
-        3,
-    );
-    assert!(!crate::database::StoreDatabase::new(peer_db)
-        .merge_candidate_cleanup_pending(write_id)
-        .await
-        .expect("rolled-back transaction created no cleanup"));
 }
 
 async fn run_excluded_author_candidate_cleanup_case(
@@ -975,13 +963,31 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("activate excluded peer");
     let (_store_temp, store_dir) = temp_store_dir();
     if materialize_before_exclusion {
-        Box::pin(materialize_surviving_owner_commit(
-            &owner_db,
-            &peer_db,
-            store.as_ref(),
-            &signer,
-            &store_dir,
-        ))
+        Box::pin(async {
+            owner_db
+                .execute_test_host_write(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                     VALUES ('surviving-owner-note', 'surviving', NULL, 1, \
+                             '0000000001500-0000-owner', '2026-07-18')",
+                )
+                .await;
+            let owner_device = store
+                .bind_device(&owner_db, &signer)
+                .await
+                .expect("bind surviving owner Store");
+            assert!(owner_device
+                .prepare_pending_store_write(&store_dir)
+                .await
+                .expect("prepare surviving owner commit"));
+            owner_device
+                .drain_store_writes()
+                .await
+                .expect("publish surviving owner commit");
+            store
+                .pull_into_result(&peer_db, &store_dir)
+                .await
+                .expect("materialize surviving owner commit on excluded peer");
+        })
         .await;
     }
     peer_db
@@ -1123,15 +1129,78 @@ async fn run_excluded_author_candidate_cleanup_case(
             .activation_commit()
             .clone();
         if let Some(failure) = transaction_failure {
-            Box::pin(assert_terminal_merge_transaction_rollback(
-                &peer_db,
-                store.as_ref(),
-                &store_dir,
-                &write_id,
-                &original,
-                &activation_commit,
-                failure,
-            ))
+            Box::pin(async {
+                match failure {
+                    TerminalMergeTransactionFailure::Injected(point) => {
+                        peer_db.fail_next_merge_materialization_at(point);
+                    }
+                    TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
+                        peer_db
+                            .test_sql(|database| {
+                                database.install_retracted_device_state_failure_trigger()
+                            })
+                            .await
+                            .expect("install early device-state deletion trigger");
+                    }
+                }
+                let error = store
+                    .pull_into_result(&peer_db, &store_dir)
+                    .await
+                    .expect_err("injected terminal Merge transaction failure");
+                let expected = match failure {
+                    TerminalMergeTransactionFailure::Injected(_) => "injected failure",
+                    TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
+                        "retracted Merge device state disappeared"
+                    }
+                };
+                assert!(
+                    error.to_string().contains(expected),
+                    "unexpected terminal transaction error: {error:?}"
+                );
+                let StoreCommitCoord {
+                    stream_id,
+                    sequence,
+                } = &activation_commit.coord;
+                assert!(store_database(&peer_db)
+                    .exact_materialized_ref(&stream_id.to_string(), *sequence)
+                    .await
+                    .expect("reload rolled-back activation coordinate")
+                    .is_none());
+                store_database(&peer_db)
+                    .retained_merge_materialization(store.root.clone(), original.commit().clone())
+                    .await
+                    .expect("rolled-back retraction retains the original materialization");
+                assert!(matches!(
+                    crate::database::StoreDatabase::new(&peer_db)
+                        .write_status(&write_id)
+                        .await
+                        .expect("reload rolled-back write status"),
+                    crate::WriteStatus::Published(position) if position.as_ref() == &original
+                ));
+                assert_eq!(
+                    peer_db
+                        .test_sql(|connection| {
+                            connection
+                                .query_row(
+                                    "SELECT COUNT(*) FROM notes WHERE id IN (
+                                         'excluded-peer-note',
+                                         'excluded-peer-local-note',
+                                         'surviving-owner-note'
+                                     )",
+                                    [],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                                .map_err(crate::database::DbError::from)
+                        })
+                        .await
+                        .expect("count rows after transaction rollback"),
+                    3,
+                );
+                assert!(!crate::database::StoreDatabase::new(&peer_db)
+                    .merge_candidate_cleanup_pending(&write_id)
+                    .await
+                    .expect("rolled-back transaction created no cleanup"));
+            })
             .await;
             if matches!(
                 failure,
@@ -1197,13 +1266,9 @@ async fn run_excluded_author_candidate_cleanup_case(
             .expect("retracted candidate requires cleanup"));
         drop(peer_db);
         let reopened = open(&path, "excluded-peer-host");
-        pull_peer_exclusion(
-            &reopened,
-            store.as_ref(),
-            &store_dir,
-            ExpectedHeldCandidate::None,
-        )
-        .await;
+        ExcludedPeer::new(&reopened, store.as_ref(), &store_dir)
+            .pull_exclusion(ExpectedHeldCandidate::None)
+            .await;
         assert!(!crate::database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
@@ -1229,16 +1294,15 @@ async fn run_excluded_author_candidate_cleanup_case(
     }
     finalize_peer_exclusion_detached(owner_device, &target).await;
     if let Some(candidates) = prepared_abandonment {
-        Box::pin(finish_prepared_exclusion_cleanup(
-            &peer_db,
-            store.as_ref(),
-            &store_dir,
-            &signer,
-            write_id,
-            &candidates,
-            &candidate_commit_context,
-            prepared_head_publication,
-        ))
+        Box::pin(
+            ExcludedPeer::new(&peer_db, store.as_ref(), &store_dir).finish_prepared_cleanup(
+                &signer,
+                write_id,
+                &candidates,
+                &candidate_commit_context,
+                prepared_head_publication,
+            ),
+        )
         .await;
         return;
     }
@@ -1278,18 +1342,16 @@ async fn run_excluded_author_candidate_cleanup_case(
         } else {
             ExpectedHeldCandidate::None
         };
-        pull_peer_exclusion(&peer_db, store.as_ref(), &store_dir, expected_held).await;
+        ExcludedPeer::new(&peer_db, store.as_ref(), &store_dir)
+            .pull_exclusion(expected_held)
+            .await;
         if matches!(
             head_publication,
             ExcludedCandidateHeadPublication::AfterHeadReadBack
         ) {
-            pull_peer_exclusion(
-                &peer_db,
-                store.as_ref(),
-                &store_dir,
-                ExpectedHeldCandidate::None,
-            )
-            .await;
+            ExcludedPeer::new(&peer_db, store.as_ref(), &store_dir)
+                .pull_exclusion(ExpectedHeldCandidate::None)
+                .await;
         }
         resume.notify_one();
         drain
@@ -1297,13 +1359,9 @@ async fn run_excluded_author_candidate_cleanup_case(
             .expect("join excluded-author publication")
             .expect_err("second exclusion check blocks candidate head")
     } else {
-        pull_peer_exclusion(
-            &peer_db,
-            store.as_ref(),
-            &store_dir,
-            ExpectedHeldCandidate::None,
-        )
-        .await;
+        ExcludedPeer::new(&peer_db, store.as_ref(), &store_dir)
+            .pull_exclusion(ExpectedHeldCandidate::None)
+            .await;
         if matches!(
             head_publication,
             ExcludedCandidateHeadPublication::ExactLate
@@ -1476,13 +1534,43 @@ async fn run_excluded_author_candidate_cleanup_case(
             }
         }
     }
-    publish_after_absent_proof_detached(
-        head_publication,
-        reopened.clone(),
-        store.clone(),
-        write_id.clone(),
-    )
-    .await;
+    let post_proof_database = reopened.clone();
+    let post_proof_store = store.clone();
+    let post_proof_write_id = write_id.clone();
+    tokio::spawn(async move {
+        if !matches!(
+            head_publication,
+            ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
+                | ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner
+        ) {
+            return;
+        }
+        let candidate = crate::database::StoreDatabase::new(&post_proof_database)
+            .blocked_merge_candidate(post_proof_write_id)
+            .await
+            .expect("reload post-proof candidate")
+            .expect("post-proof candidate remains prepared");
+        match head_publication {
+            ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
+                post_proof_store
+                    .storage
+                    .create_protocol_object(&candidate.head.prepared)
+                    .await
+                    .expect("publish candidate head after absent proof");
+            }
+            ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
+                post_proof_store
+                    .publish_third_candidate_winner(&post_proof_database, &candidate)
+                    .await;
+            }
+            ExcludedCandidateHeadPublication::Absent
+            | ExcludedCandidateHeadPublication::ExactLate
+            | ExcludedCandidateHeadPublication::AfterCommitUpload
+            | ExcludedCandidateHeadPublication::AfterHeadReadBack => unreachable!(),
+        }
+    })
+    .await
+    .expect("join post-proof candidate-head publication");
     if !cleanup_pending
         && matches!(
             head_publication,
@@ -1758,207 +1846,108 @@ async fn run_excluded_author_candidate_cleanup_case(
             | ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner
     ) {
         let (_owner_temp, owner_store_dir) = temp_store_dir();
-        Box::pin(pull_peer_exclusion(
-            &owner_db,
-            store.as_ref(),
-            &owner_store_dir,
-            ExpectedHeldCandidate::None,
-        ))
+        Box::pin(
+            ExcludedPeer::new(&owner_db, store.as_ref(), &owner_store_dir)
+                .pull_exclusion(ExpectedHeldCandidate::None),
+        )
         .await;
     }
 }
 
-async fn publish_prepared_abandonment_head(
-    peer_db: &Database,
-    store: &TestStore,
-    candidates: &crate::database::PreparedMergeAbandonmentCandidates,
-    publication: PreparedAbandonmentHeadPublication,
-) {
-    match publication {
-        PreparedAbandonmentHeadPublication::Absent => {}
-        PreparedAbandonmentHeadPublication::Original => {
-            store
-                .storage
-                .create_protocol_object(&candidates.candidate.head.prepared)
-                .await
-                .expect("publish exact original candidate head");
-        }
-        PreparedAbandonmentHeadPublication::Authority => {
-            store
-                .storage
-                .create_protocol_object(&candidates.authority.commit.prepared)
-                .await
-                .expect("publish abandonment authority commit");
-            store
-                .storage
-                .create_protocol_object(&candidates.authority.head.prepared)
-                .await
-                .expect("publish exact abandonment authority head");
-        }
-        PreparedAbandonmentHeadPublication::ThirdWinner => {
-            store
-                .publish_third_candidate_winner(peer_db, &candidates.candidate)
-                .await;
-        }
-    }
-}
-
-async fn publish_after_absent_proof_detached(
-    publication: ExcludedCandidateHeadPublication,
-    peer_db: Database,
-    store: Arc<TestStore>,
-    write_id: WriteId,
-) {
-    tokio::spawn(async move {
-        if !matches!(
-            publication,
-            ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
-                | ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner
-        ) {
-            return;
-        }
-        let candidate = crate::database::StoreDatabase::new(&peer_db)
-            .blocked_merge_candidate(write_id)
-            .await
-            .expect("reload post-proof candidate")
-            .expect("post-proof candidate remains prepared");
+impl ExcludedPeer<'_> {
+    async fn finish_prepared_cleanup(
+        &self,
+        signer: &UserKeypair,
+        write_id: WriteId,
+        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
+        candidate_commit_context: &ProtocolObjectContext,
+        publication: PreparedAbandonmentHeadPublication,
+    ) {
+        self.pull_exclusion(ExpectedHeldCandidate::None).await;
         match publication {
-            ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
-                store
-                    .storage
-                    .create_protocol_object(&candidate.head.prepared)
+            PreparedAbandonmentHeadPublication::Absent => {}
+            PreparedAbandonmentHeadPublication::Original => {
+                self.store
+                    .publish_prepared_protocol_object(&candidates.candidate.head.prepared)
                     .await
-                    .expect("publish candidate head after absent proof");
+                    .expect("publish exact original candidate head");
             }
-            ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
-                store
-                    .publish_third_candidate_winner(&peer_db, &candidate)
+            PreparedAbandonmentHeadPublication::Authority => {
+                self.store
+                    .publish_prepared_protocol_object(&candidates.authority.commit.prepared)
+                    .await
+                    .expect("publish abandonment authority commit");
+                self.store
+                    .publish_prepared_protocol_object(&candidates.authority.head.prepared)
+                    .await
+                    .expect("publish exact abandonment authority head");
+            }
+            PreparedAbandonmentHeadPublication::ThirdWinner => {
+                self.store
+                    .publish_third_candidate_winner(self.database, &candidates.candidate)
                     .await;
             }
-            ExcludedCandidateHeadPublication::Absent
-            | ExcludedCandidateHeadPublication::ExactLate
-            | ExcludedCandidateHeadPublication::AfterCommitUpload
-            | ExcludedCandidateHeadPublication::AfterHeadReadBack => unreachable!(),
         }
-    })
-    .await
-    .expect("join post-proof candidate-head publication");
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn finish_prepared_exclusion_cleanup(
-    peer_db: &Database,
-    store: &TestStore,
-    store_dir: &StoreDir,
-    signer: &UserKeypair,
-    write_id: WriteId,
-    candidates: &crate::database::PreparedMergeAbandonmentCandidates,
-    candidate_commit_context: &ProtocolObjectContext,
-    publication: PreparedAbandonmentHeadPublication,
-) {
-    pull_peer_exclusion(peer_db, store, store_dir, ExpectedHeldCandidate::None).await;
-    Box::pin(publish_prepared_abandonment_head(
-        peer_db,
-        store,
-        candidates,
-        publication,
-    ))
-    .await;
-    assert_eq!(
-        store
-            .bind_device(peer_db, signer)
-            .await
-            .expect("bind Merge abandonment Store")
-            .abandon_merge_candidate(write_id.clone())
-            .await
-            .expect("exclude prepared abandonment candidates"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-    for reference in [
-        &candidates.candidate.head.value.commit,
-        &candidates.authority.head.value.commit,
-    ] {
-        let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
-            &reference.object,
-            ".json",
-        )
-        .expect("derive cleaned candidate commit prefix");
-        assert!(matches!(
-            store
-                .storage
-                .read_protocol_object(candidate_commit_context, &reference.object, &prefix)
-                .await,
-            Err(crate::storage::StorageError::NotFound(_))
-        ));
-    }
-    let peer_store = store
-        .bind_device(peer_db, signer)
-        .await
-        .expect("bind exclusion cleanup Store");
-    for commit in [
-        &candidates.candidate.commit.value,
-        &candidates.authority.commit.value,
-    ] {
-        if commit.store_package().is_some() {
+        assert_eq!(
+            self.store
+                .bind_device(self.database, signer)
+                .await
+                .expect("bind Merge abandonment Store")
+                .abandon_merge_candidate(write_id.clone())
+                .await
+                .expect("exclude prepared abandonment candidates"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        for reference in [
+            &candidates.candidate.head.value.commit,
+            &candidates.authority.head.value.commit,
+        ] {
+            let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+                &reference.object,
+                ".json",
+            )
+            .expect("derive cleaned candidate commit prefix");
             assert!(matches!(
-                peer_store
-                    .store
-                    .load_store_package_for_test(commit.reference())
-                    .await,
-                Err(StoreError::Object(
-                    crate::storage::StoreObjectError::Storage(
-                        crate::storage::StorageError::NotFound(_)
+                self.store
+                    .read_exact_protocol_object(
+                        candidate_commit_context,
+                        &reference.object,
+                        &prefix,
                     )
-                ))
+                    .await,
+                Err(crate::storage::StorageError::NotFound(_))
             ));
         }
-    }
-    assert_eq!(
-        crate::database::StoreDatabase::new(peer_db)
-            .discard_blocked_write(&write_id)
+        let peer_store = self
+            .store
+            .bind_device(self.database, signer)
             .await
-            .expect("discard excluded prepared abandonment write"),
-        crate::database::BlockedWriteDiscard::Discarded(vec![write_id]),
-    );
-}
-
-async fn pull_peer_exclusion(
-    peer_db: &Database,
-    store: &TestStore,
-    store_dir: &StoreDir,
-    expected_held: ExpectedHeldCandidate<'_>,
-) {
-    let pull = store
-        .pull_into_result(peer_db, store_dir)
-        .await
-        .expect("pull peer exclusion")
-        .1;
-    let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
-        matches!(
-            pull.held_positions.as_slice(),
-            [crate::sync::store::owner::pull::HeldStorePosition {
-                coordinate:
-                    crate::sync::store::owner::pull::HeldStoreCoordinate::Commit {
-                        commit,
-                        ..
-                    },
-                reason: crate::sync::store::owner::pull::HeldStorePositionReason::InactiveDevice {
-                    ..
-                },
-            }] if commit == candidate
-        )
-    };
-    match expected_held {
-        ExpectedHeldCandidate::None => assert!(
-            pull.held_positions.is_empty(),
-            "held: {:?}",
-            pull.held_positions
-        ),
-        ExpectedHeldCandidate::ConcurrentExactOrNone(candidate) => assert!(
-            pull.held_positions.is_empty() || is_exact_candidate_hold(candidate),
-            "expected no hold or exact concurrent candidate {candidate:?}, held: {:?}",
-            pull.held_positions,
-        ),
+            .expect("bind exclusion cleanup Store");
+        for commit in [
+            &candidates.candidate.commit.value,
+            &candidates.authority.commit.value,
+        ] {
+            if commit.store_package().is_some() {
+                assert!(matches!(
+                    peer_store
+                        .store
+                        .load_store_package_for_test(commit.reference())
+                        .await,
+                    Err(StoreError::Object(
+                        crate::storage::StoreObjectError::Storage(
+                            crate::storage::StorageError::NotFound(_)
+                        )
+                    ))
+                ));
+            }
+        }
+        assert_eq!(
+            crate::database::StoreDatabase::new(self.database)
+                .discard_blocked_write(&write_id)
+                .await
+                .expect("discard excluded prepared abandonment write"),
+            crate::database::BlockedWriteDiscard::Discarded(vec![write_id]),
+        );
     }
 }
 
@@ -1991,107 +1980,4 @@ async fn open_published_exclusion_snapshot<'storage>(
         .await
         .expect("open author exclusion snapshot");
     (directory, database)
-}
-
-async fn prepare_transfer_candidate(
-    peer_db: &Database,
-    store: &TestStore,
-    signer: &UserKeypair,
-    label: &str,
-) -> (tempfile::TempDir, StoreDir, WriteId) {
-    peer_db
-        .execute_test_host_write(&format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                 VALUES ('{label}', 'pending', NULL, 1, \
-                         '0000000002000-0000-{label}', '2026-07-18')"
-        ))
-        .await;
-    let (temporary, store_dir) = temp_store_dir();
-    let peer_device = store
-        .bind_device(peer_db, signer)
-        .await
-        .expect("bind transfer candidate Store");
-    assert!(peer_device
-        .prepare_pending_store_write(&store_dir)
-        .await
-        .expect("prepare transfer candidate"));
-    let candidate = crate::database::StoreDatabase::new(peer_db)
-        .oldest_prepared_store_write()
-        .await
-        .expect("load transfer candidate")
-        .expect("transfer candidate exists");
-    let write_id = candidate.commit.value.write_id.clone();
-    crate::database::StoreDatabase::new(peer_db)
-        .set_write_status(
-            &write_id,
-            crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
-                reason: "exercise restored author-exclusion evidence".to_string(),
-            }),
-        )
-        .await
-        .expect("block transfer candidate");
-    (temporary, store_dir, write_id)
-}
-
-async fn race_cancellation_with_ack(
-    reopened: Database,
-    device: TestDevice,
-    reference: StoreDeviceExclusionProposalRef,
-    base_sequence: u64,
-) {
-    let (candidate_staged, resume_candidate) = reopened
-        .arm_test_pause(crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged);
-    let cancel_device = device.clone();
-    let cancel_reference = reference.clone();
-    let cancellation_task = tokio::spawn(async move {
-        cancel_device
-            .cancel_device_exclusion(&cancel_reference)
-            .await
-    });
-    candidate_staged.notified().await;
-
-    let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
-        store_database(&reopened)
-            .materialized_frontier()
-            .await
-            .expect("read competing acknowledgement frontier"),
-    )
-    .expect("shape competing acknowledgement frontier");
-    device
-        .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
-        .await
-        .expect("stage competing acknowledgement");
-    assert_eq!(
-        device
-            .drain_acknowledgements()
-            .await
-            .expect("publish competing acknowledgement"),
-        1
-    );
-    resume_candidate.notify_one();
-    let cancellation = cancellation_task
-        .await
-        .expect("join cancellation publication")
-        .expect("cancel exclusion proposal");
-    assert!(matches!(
-        &cancellation,
-        StoreDeviceExclusionResult::OutcomeActivated {
-            outcome: StoreDeviceExclusionOutcomeRef::Cancelled(_),
-            commit,
-        } if commit.coord.sequence() == base_sequence + 2
-    ));
-    assert!(store_database(&reopened)
-        .store_device_exclusion_freezes()
-        .await
-        .expect("read released exclusion freezes")
-        .is_empty());
-    let operations = device
-        .device_exclusion_operations_for_test()
-        .await
-        .expect("list exclusion operations");
-    assert_eq!(operations.len(), 2);
-    assert!(operations.iter().all(|operation| matches!(
-        operation.status,
-        StoreDeviceExclusionOperationStatus::Completed(_)
-    )));
 }

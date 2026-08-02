@@ -128,6 +128,132 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     }
 
     #[cfg(test)]
+    pub(crate) async fn resign_merge_journal_with_reference_for_test(
+        &mut self,
+        journal: &mut CircleOperationJournal,
+        reference: crate::protocol::store_commit::CircleControlRef,
+        mutate_commit: impl FnOnce(&mut crate::protocol::store_commit::StoreBatchCommit),
+    ) -> Result<(), CircleOperationError> {
+        let old_commit = journal.commit()?;
+        let author = self
+            .database
+            .activated_store_device_registration(old_commit.author_registration.clone())
+            .await?;
+        let device_signer = author.device_signer(self.identity).map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "derive Circle commit device signer: {error}"
+            ))
+        })?;
+        let coord = journal.operation().commit_ref.coord.clone();
+        let stream_activations = old_commit.stream_activations().to_vec();
+        let mut commit = super::preparation::signed_circle_commit(
+            old_commit.store_root_hash,
+            old_commit.write_id.clone(),
+            coord.clone(),
+            old_commit.author_registration.clone(),
+            &author,
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "prepared Circle commit has no validated operations authority: {error}"
+                    ))
+                })?,
+            reference,
+            stream_activations,
+            &device_signer,
+        )?;
+        mutate_commit(&mut commit);
+        commit.signature =
+            crate::keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
+        let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
+        let commit_prepared = self
+            .preparer()
+            .prepare_circle_object(
+                &ProtocolObjectContext::signed_plaintext(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::StoreCommit,
+                ),
+                &crate::protocol::store_commit::commit_semantic_prefix(
+                    commit.candidate_family(),
+                    &stream_id.to_string(),
+                    commit.seq(),
+                    commit.commit_hash(),
+                ),
+                ".json",
+                commit.to_bytes(),
+            )
+            .await?;
+        let commit_ref = crate::protocol::store_commit::StoreBatchCommitRef::from_commit(
+            &commit,
+            coord,
+            commit_prepared.reference().clone(),
+        )
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "build replacement Circle commit reference: {error}"
+            ))
+        })?;
+        let old_head = journal.operation().policy.head.clone();
+        let history_summary = journal.operation().policy.history_summary.clone();
+        let head = crate::protocol::store_commit::StoreDeviceHead::signed(
+            commit.store_root_hash,
+            commit.author_registration.clone(),
+            commit_ref.clone(),
+            history_summary.digest(),
+            old_head.successor,
+            &device_signer,
+        )
+        .map_err(|error| {
+            CircleOperationError::InvalidState(format!(
+                "sign replacement Circle Store head: {error}"
+            ))
+        })?;
+        let head_slot = journal
+            .operation()
+            .prepared_objects
+            .get("store-head")
+            .ok_or_else(|| {
+                CircleOperationError::InvalidState(
+                    "Circle operation has no prepared Store head".to_string(),
+                )
+            })?
+            .reference()
+            .slot()
+            .clone();
+        let head_prepared = self.preparer().prepare_circle_object_at(
+            &ProtocolObjectContext::signed_plaintext(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            ),
+            head_slot,
+            &crate::protocol::store_commit::head_slot_prefix(
+                &commit.author_registration.device_id.to_string(),
+                commit.seq(),
+            ),
+            head.to_bytes(),
+        )?;
+        let operation = journal.operation_mut();
+        operation.commit_bytes = commit.to_bytes();
+        operation.commit_ref = commit_ref;
+        operation
+            .prepared_objects
+            .insert("store-commit".to_string(), commit_prepared);
+        operation
+            .prepared_objects
+            .insert("store-head".to_string(), head_prepared);
+        operation.policy = CircleOperationPolicy {
+            head,
+            history_summary,
+        };
+        operation.uploaded.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) async fn prepare_circle_activation_objects_for_test(
         &mut self,
         draft: crate::protocol::circle::CircleTransitionDraft,
@@ -372,13 +498,34 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
         chosen: crate::protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
-        self.ensure_not_deleted(circle_id).await?;
         let branches = self
             .database
             .circle_control_conflict_branches(circle_id)
             .await?
             .ok_or(CircleOperationError::NotConflicted { circle_id })?;
-        if !branches.contains(&chosen) {
+        let request = self
+            .resolution_request(circle_id, &chosen, &branches, branches.clone())
+            .await?;
+        let journal = self.preparer().prepare_request(request).await?;
+        if journal.circle_id() != circle_id {
+            return Err(CircleOperationError::InvalidState(
+                "prepared Circle control resolution changed Circle identity".to_string(),
+            ));
+        }
+        let operation_id = journal.operation_id.clone();
+        self.database.insert_circle_operation(journal).await?;
+        self.publisher().publish(&operation_id, None).await
+    }
+
+    async fn resolution_request(
+        &self,
+        circle_id: CircleId,
+        chosen: &crate::protocol::circle::CircleControlCoord,
+        retained_branches: &[crate::protocol::circle::CircleControlCoord],
+        conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
+    ) -> Result<CircleOperationRequest, CircleOperationError> {
+        self.ensure_not_deleted(circle_id).await?;
+        if !retained_branches.contains(chosen) {
             return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
         }
         let identity_pubkey = keys::public_key_hex(self.identity);
@@ -401,8 +548,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             retained_branch_authoring_state(circle_id, &identity_pubkey, &chosen_activation)?;
         let previous_control = chosen_activation.reference.clone();
         let mut losing_branches = Vec::new();
-        for branch in &branches {
-            if *branch == chosen {
+        for branch in retained_branches {
+            if branch == chosen {
                 continue;
             }
             let activation = self
@@ -420,29 +567,45 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 selected_metadata,
             });
         }
-        let journal = self
-            .preparer()
-            .prepare_request(CircleOperationRequest::ResolveControl(Box::new(
-                CircleResolveControlRequest {
-                    circle_id,
-                    chosen: chosen_state,
-                    previous_control,
-                    losing_branches,
-                    conflicting_branches: branches,
-                },
-            )))
-            .await?;
-        if journal.circle_id() != circle_id {
-            return Err(CircleOperationError::InvalidState(
-                "prepared Circle control resolution changed Circle identity".to_string(),
-            ));
-        }
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
-        self.publisher().publish(&operation_id, None).await
+        Ok(CircleOperationRequest::ResolveControl(Box::new(
+            CircleResolveControlRequest {
+                circle_id,
+                chosen: chosen_state,
+                previous_control,
+                losing_branches,
+                conflicting_branches,
+            },
+        )))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn resolution_request_for_test(
+        &self,
+        circle_id: CircleId,
+        chosen: &crate::protocol::circle::CircleControlCoord,
+        conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
+    ) -> Result<CircleOperationRequest, CircleOperationError> {
+        let retained_branches = self
+            .database
+            .circle_control_conflict_branches(circle_id)
+            .await?
+            .ok_or(CircleOperationError::NotConflicted { circle_id })?;
+        self.resolution_request(circle_id, chosen, &retained_branches, conflicting_branches)
+            .await
     }
 
     pub(crate) async fn cancel_circle_epoch_close(
+        &mut self,
+        circle_id: CircleId,
+    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+        let operation_id = self
+            .begin_circle_epoch_close_cancellation(circle_id)
+            .await?;
+        self.publisher().publish(&operation_id, None).await?;
+        Ok(operation_id)
+    }
+
+    async fn begin_circle_epoch_close_cancellation(
         &mut self,
         circle_id: CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
@@ -582,10 +745,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .begin_circle_operation_finalization(journal.clone())
             .await?;
-        self.publisher()
-            .publish(&journal.operation_id, None)
-            .await?;
         Ok(journal.operation_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn begin_circle_epoch_close_cancellation_for_test(
+        &mut self,
+        circle_id: CircleId,
+    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+        self.begin_circle_epoch_close_cancellation(circle_id).await
     }
 
     pub(crate) async fn exclude_circle_close_device(

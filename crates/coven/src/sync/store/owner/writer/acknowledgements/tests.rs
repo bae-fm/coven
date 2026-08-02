@@ -226,115 +226,114 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
     );
 }
 
-async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
-    let directory = tempfile::tempdir().expect("acknowledgement database directory");
-    let seed_path = directory.path().join("seed.sqlite3");
-    let winner_path = directory.path().join("winner.sqlite3");
-    let loser_path = directory.path().join("loser.sqlite3");
-    let home = InMemoryCloudHome::new();
-    let signer = UserKeypair::generate();
-    let storage = storage(&home, &signer);
-    let seed = open(&seed_path, "ack-slot-race-device");
-    let seed_device = initialize(&seed, &storage, &signer).await;
-    for destination in [&winner_path, &loser_path] {
-        let destination = destination
-            .to_str()
-            .expect("temporary database path is UTF-8")
-            .to_string();
-        seed.test_sql(move |connection| {
-            connection
-                .execute("VACUUM INTO ?1", [destination])
-                .map(|_| ())
-                .map_err(crate::DbError::from)
-        })
-        .await
-        .expect("copy acknowledgement database");
-    }
-    drop(seed_device);
-    drop(seed);
-
-    let winner_db = open(&winner_path, "ack-slot-race-device");
-    let winner_device = TestDevice::load(&winner_db, storage.clone(), signer.clone())
-        .await
-        .expect("bind winner acknowledgement Store");
-    winner_device
-        .stage_current_acknowledgement("2026-07-16T00:00:01Z")
-        .await
-        .expect("stage exact acknowledgement");
-    let winner = store_database(&winner_db)
-        .oldest_outbound_store_ack()
-        .await
-        .expect("read winner acknowledgement")
-        .expect("winner acknowledgement exists");
-    storage
-        .create_protocol_object(&winner.ack.prepared)
-        .await
-        .expect("publish winner acknowledgement");
-
-    let loser_db = open(&loser_path, "ack-slot-race-device");
-    let loser_device = TestDevice::load(&loser_db, storage.clone(), signer.clone())
-        .await
-        .expect("bind loser acknowledgement Store");
-    loser_device
-        .stage_current_acknowledgement("2026-07-16T00:00:02Z")
-        .await
-        .expect("stage exact acknowledgement");
-    let loser = store_database(&loser_db)
-        .oldest_outbound_store_ack()
-        .await
-        .expect("read losing acknowledgement")
-        .expect("losing acknowledgement exists");
-    assert_eq!(
-        winner.reference.object.slot(),
-        loser.reference.object.slot()
-    );
-    assert_ne!(winner.reference, loser.reference);
-    let losing_candidate = loser_device
-        .prepare_acknowledgement_candidate_for_test(&loser)
-        .await;
-    let losing_object_ids = losing_candidate
-        .acknowledgement_remote_objects(&loser.ack)
-        .expect("load losing acknowledgement candidate graph")
-        .into_iter()
-        .map(|remote| remote.object_id())
-        .collect::<Vec<_>>();
-
-    let result = loser_device.drain_acknowledgements_exact().await;
-    assert_eq!(
-        result.expect("adopt and activate acknowledgement slot winner"),
-        1
-    );
-    assert_eq!(
-        store_database(&loser_db)
-            .latest_local_store_ack()
-            .await
-            .expect("read adopted acknowledgement")
-            .expect("adopted acknowledgement is published")
-            .reference,
-        winner.reference
-    );
-    assert!(store_database(&loser_db)
-        .oldest_outbound_store_ack()
-        .await
-        .expect("read drained acknowledgement outbox")
-        .is_none());
-    assert!(crate::database::StoreDatabase::new(&loser_db)
-        .protocol_inert_object(loser.reference.object)
-        .await
-        .expect("read losing acknowledgement inert state")
-        .is_none());
-    for object_id in losing_object_ids {
-        let exists = loser_db
-            .remote_object_id_exists_for_test(object_id)
-            .await
-            .expect("read losing acknowledgement candidate ownership");
-        assert!(!exists);
-    }
-}
-
 #[tokio::test]
 async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
-    Box::pin(assert_valid_acknowledgement_slot_winner_is_adopted_and_activated()).await;
+    Box::pin(async {
+        let directory = tempfile::tempdir().expect("acknowledgement database directory");
+        let seed_path = directory.path().join("seed.sqlite3");
+        let winner_path = directory.path().join("winner.sqlite3");
+        let loser_path = directory.path().join("loser.sqlite3");
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let seed = open(&seed_path, "ack-slot-race-device");
+        let seed_device = initialize(&seed, &storage, &signer).await;
+        for destination in [&winner_path, &loser_path] {
+            let destination = destination
+                .to_str()
+                .expect("temporary database path is UTF-8")
+                .to_string();
+            seed.test_sql(move |connection| {
+                connection
+                    .execute("VACUUM INTO ?1", [destination])
+                    .map(|_| ())
+                    .map_err(crate::DbError::from)
+            })
+            .await
+            .expect("copy acknowledgement database");
+        }
+        drop(seed_device);
+        drop(seed);
+
+        let winner_db = open(&winner_path, "ack-slot-race-device");
+        let winner_device = TestDevice::load(&winner_db, storage.clone(), signer.clone())
+            .await
+            .expect("bind winner acknowledgement Store");
+        winner_device
+            .stage_current_acknowledgement("2026-07-16T00:00:01Z")
+            .await
+            .expect("stage exact acknowledgement");
+        let winner = store_database(&winner_db)
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read winner acknowledgement")
+            .expect("winner acknowledgement exists");
+        storage
+            .create_protocol_object(&winner.ack.prepared)
+            .await
+            .expect("publish winner acknowledgement");
+
+        let loser_db = open(&loser_path, "ack-slot-race-device");
+        let loser_device = TestDevice::load(&loser_db, storage.clone(), signer.clone())
+            .await
+            .expect("bind loser acknowledgement Store");
+        loser_device
+            .stage_current_acknowledgement("2026-07-16T00:00:02Z")
+            .await
+            .expect("stage exact acknowledgement");
+        let loser = store_database(&loser_db)
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read losing acknowledgement")
+            .expect("losing acknowledgement exists");
+        assert_eq!(
+            winner.reference.object.slot(),
+            loser.reference.object.slot()
+        );
+        assert_ne!(winner.reference, loser.reference);
+        let losing_candidate = loser_device
+            .prepare_acknowledgement_candidate_for_test(&loser)
+            .await;
+        let losing_object_ids = losing_candidate
+            .acknowledgement_remote_objects(&loser.ack)
+            .expect("load losing acknowledgement candidate graph")
+            .into_iter()
+            .map(|remote| remote.object_id())
+            .collect::<Vec<_>>();
+
+        let result = loser_device.drain_acknowledgements_exact().await;
+        assert_eq!(
+            result.expect("adopt and activate acknowledgement slot winner"),
+            1
+        );
+        assert_eq!(
+            store_database(&loser_db)
+                .latest_local_store_ack()
+                .await
+                .expect("read adopted acknowledgement")
+                .expect("adopted acknowledgement is published")
+                .reference,
+            winner.reference
+        );
+        assert!(store_database(&loser_db)
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read drained acknowledgement outbox")
+            .is_none());
+        assert!(crate::database::StoreDatabase::new(&loser_db)
+            .protocol_inert_object(loser.reference.object)
+            .await
+            .expect("read losing acknowledgement inert state")
+            .is_none());
+        for object_id in losing_object_ids {
+            let exists = loser_db
+                .remote_object_id_exists_for_test(object_id)
+                .await
+                .expect("read losing acknowledgement candidate ownership");
+            assert!(!exists);
+        }
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -833,12 +832,7 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let db = open(&path, "circle-ack-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .test_sql(|conn| {
-            Ok(crate::sync::test_helpers::install_test_active_circle(
-                &conn,
-                "ack-circle",
-            ))
-        })
+        .test_sql(|conn| Ok(conn.install_test_active_circle("ack-circle")))
         .await
         .expect("install active Circle");
 
@@ -880,12 +874,7 @@ async fn inactive_circle_stages_no_acknowledgement() {
     let db = open(&path, "inactive-circle-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .test_sql(|conn| {
-            Ok(crate::sync::test_helpers::install_test_inactive_circle(
-                &conn,
-                "inactive-circle",
-            ))
-        })
+        .test_sql(|conn| Ok(conn.install_test_inactive_circle("inactive-circle")))
         .await
         .expect("install inactive Circle");
 
@@ -924,12 +913,7 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let db = open(&path, "circle-ack-restart");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
-        .test_sql(|conn| {
-            Ok(crate::sync::test_helpers::install_test_active_circle(
-                &conn,
-                "restart-circle",
-            ))
-        })
+        .test_sql(|conn| Ok(conn.install_test_active_circle("restart-circle")))
         .await
         .expect("install active Circle");
 
@@ -996,14 +980,9 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-collision");
     let device = initialize(&db, &storage, &signer).await;
-    db.test_sql(|conn| {
-        Ok(crate::sync::test_helpers::install_test_active_circle(
-            &conn,
-            "collision-circle",
-        ))
-    })
-    .await
-    .expect("install active Circle");
+    db.test_sql(|conn| Ok(conn.install_test_active_circle("collision-circle")))
+        .await
+        .expect("install active Circle");
 
     let frontier = device
         .acknowledgement_frontier()

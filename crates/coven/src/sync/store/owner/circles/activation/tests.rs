@@ -506,11 +506,9 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
     let db = crate::sync::test_helpers::open_test_db();
     let circle_id = db
         .test_sql(|conn| {
-            Ok(crate::sync::test_helpers::install_test_active_circle(
-                &conn,
-                "current-control-conflict",
-            )
-            .0)
+            Ok(conn
+                .install_test_active_circle("current-control-conflict")
+                .0)
         })
         .await
         .expect("install founder current state");
@@ -522,7 +520,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         })
         .await
         .expect("load founder current state");
-    let owner = crate::sync::test_helpers::test_circle_owner_keypair();
+    let owner = crate::database::test_circle_owner_keypair();
     let first = branch(
         founder.clone(),
         &owner,

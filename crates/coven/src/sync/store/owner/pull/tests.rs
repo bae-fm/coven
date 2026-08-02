@@ -341,174 +341,168 @@ impl EffectiveAccessFixture {
             .await
             .map(|(_, result)| result)
     }
-}
 
-async fn effective_access_fixture(
-    label: &str,
-    member_database: &Database,
-    owner_store_dir: &crate::store_dir::StoreDir,
-    member_store_dir: &crate::store_dir::StoreDir,
-) -> EffectiveAccessFixture {
-    let owner_database = open_scoped_replay_database();
-    let owner = crate::keys::UserKeypair::generate();
-    let member = crate::keys::UserKeypair::generate();
-    let store = crate::sync::test_helpers::TestStore::create(&owner_database, label, owner.clone())
-        .await
-        .expect("create effective-access Store");
-    store
-        .open_into(&owner_database)
-        .await
-        .expect("open effective-access owner Store");
-    store
-        .invite_member(
-            &owner_database,
-            &owner,
-            &crate::sync::hlc::Hlc::new(
-                format!("{label}-owner"),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &crate::keys::public_key_hex(&member),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &crate::encryption::EncryptionService::from_key([42; 32]),
-            "Effective Access Store",
-        )
-        .await
-        .expect("invite effective-access Store member");
-    let member_device = store
-        .activate_joined_device(
-            &owner_database,
-            member_database,
-            &member,
-            "2026-07-23T00:00:00Z",
-        )
-        .await
-        .expect("activate effective-access member device");
+    async fn publish_row(
+        &self,
+        owner_store_dir: &crate::store_dir::StoreDir,
+        row_id: &str,
+        body: &str,
+        stamp: &str,
+    ) -> StoreBatchCommitRef {
+        let statement = if self
+            .owner_database
+            .scoped_routing_state_for_test(row_id)
+            .await
+            .row
+            .is_some()
+        {
+            format!(
+                "UPDATE notes
+                 SET body = '{body}', _updated_at = '{stamp}'
+                 WHERE id = '{row_id}';"
+            )
+        } else {
+            format!(
+                "INSERT INTO notes (id, audience, body, _updated_at)
+                 VALUES ('{row_id}', '{}', '{body}', '{stamp}');",
+                self.circle_id
+            )
+        };
+        self.owner_database
+            .run_scoped_host_write_for_test(statement)
+            .await;
+        let mut writer = self
+            .owner_device
+            .authorize_writer()
+            .await
+            .expect("authorize effective-access owner writer");
+        assert!(writer
+            .prepare_pending_store_write(owner_store_dir)
+            .await
+            .expect("prepare effective-access Circle row"));
+        assert_eq!(
+            writer
+                .drain_store_writes()
+                .await
+                .expect("publish effective-access Circle row"),
+            1
+        );
+        self.owner_device
+            .latest_local_store_position()
+            .await
+            .expect("load effective-access row position")
+            .expect("effective-access row has a Store position")
+    }
 
-    let owner_store = store
-        .bind_device(&owner_database, &owner)
-        .await
-        .expect("load effective-access owner Store");
-    let circle_id = owner_store
-        .create_circle("0000000001000-0000-owner", "Effective Access")
-        .await
-        .expect("create effective-access Circle");
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-            [42; 32],
-        )),
-        crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        owner.clone(),
-    )
-    .expect("open effective-access owner storage");
-    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-        StoreDatabase::new(&owner_database),
-        crate::sync::test_owner_graph::local_blob_access(
+    async fn create(
+        label: &str,
+        member_database: &Database,
+        owner_store_dir: &crate::store_dir::StoreDir,
+        member_store_dir: &crate::store_dir::StoreDir,
+    ) -> Self {
+        let owner_database = open_scoped_replay_database();
+        let owner = crate::keys::UserKeypair::generate();
+        let member = crate::keys::UserKeypair::generate();
+        let store =
+            crate::sync::test_helpers::TestStore::create(&owner_database, label, owner.clone())
+                .await
+                .expect("create effective-access Store");
+        store
+            .open_into(&owner_database)
+            .await
+            .expect("open effective-access owner Store");
+        store
+            .invite_member(
+                &owner_database,
+                &owner,
+                &crate::sync::hlc::Hlc::new(
+                    format!("{label}-owner"),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &crate::keys::public_key_hex(&member),
+                None,
+                crate::protocol::membership::MemberRole::Member,
+                &crate::encryption::EncryptionService::from_key([42; 32]),
+                "Effective Access Store",
+            )
+            .await
+            .expect("invite effective-access Store member");
+        let member_device = store
+            .activate_joined_device(
+                &owner_database,
+                member_database,
+                &member,
+                "2026-07-23T00:00:00Z",
+            )
+            .await
+            .expect("activate effective-access member device");
+
+        let owner_store = store
+            .bind_device(&owner_database, &owner)
+            .await
+            .expect("load effective-access owner Store");
+        let circle_id = owner_store
+            .create_circle("0000000001000-0000-owner", "Effective Access")
+            .await
+            .expect("create effective-access Circle");
+        let owner_storage = crate::storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
+            crate::storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            owner.clone(),
+        )
+        .expect("open effective-access owner storage");
+        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
             StoreDatabase::new(&owner_database),
-            owner_store_dir.clone(),
-        ),
-        owner_storage,
-        crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(crate::encryption::EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare effective-access owner sync")
-    .initialize()
-    .await
-    .expect("initialize effective-access owner sync");
-    components
-        .add_circle_member(
-            owner_store_dir,
-            circle_id,
-            crate::keys::public_key_hex(&member),
-            crate::protocol::circle::CircleRole::Member,
+            crate::sync::test_owner_graph::local_blob_access(
+                StoreDatabase::new(&owner_database),
+                owner_store_dir.clone(),
+            ),
+            owner_storage,
+            crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_store_root: store.root.clone(),
+            },
+            Some(crate::encryption::EncryptionService::from_key([42; 32])),
         )
         .await
-        .expect("add effective-access Circle member");
-
-    let initial_pull = member_device
-        .pull_store(member_store_dir)
+        .expect("prepare effective-access owner sync")
+        .initialize()
         .await
-        .expect("pull effective-access Circle activation")
-        .1;
-    assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
+        .expect("initialize effective-access owner sync");
+        components
+            .add_circle_member(
+                owner_store_dir,
+                circle_id,
+                crate::keys::public_key_hex(&member),
+                crate::protocol::circle::CircleRole::Member,
+            )
+            .await
+            .expect("add effective-access Circle member");
 
-    EffectiveAccessFixture {
-        owner_database,
-        owner_device: owner_store,
-        member_device,
-        owner,
-        member,
-        store,
-        circle_id,
+        let initial_pull = member_device
+            .pull_store(member_store_dir)
+            .await
+            .expect("pull effective-access Circle activation")
+            .1;
+        assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
+
+        Self {
+            owner_database,
+            owner_device: owner_store,
+            member_device,
+            owner,
+            member,
+            store,
+            circle_id,
+        }
     }
 }
 
 const EFFECTIVE_ACCESS_ROW_ID: &str = "01890a5d-ac96-774b-bcce-b302099c3f75";
 const READD_EFFECTIVE_ACCESS_ROW_ID: &str = "01890a5d-ac96-774b-bcce-b302099c3f76";
-
-async fn publish_effective_access_row(
-    fixture: &EffectiveAccessFixture,
-    owner_store_dir: &crate::store_dir::StoreDir,
-    body: &str,
-    stamp: &str,
-) -> StoreBatchCommitRef {
-    publish_effective_access_row_with_id(
-        fixture,
-        owner_store_dir,
-        EFFECTIVE_ACCESS_ROW_ID,
-        body,
-        stamp,
-    )
-    .await
-}
-
-async fn publish_effective_access_row_with_id(
-    fixture: &EffectiveAccessFixture,
-    owner_store_dir: &crate::store_dir::StoreDir,
-    row_id: &str,
-    body: &str,
-    stamp: &str,
-) -> StoreBatchCommitRef {
-    let statement = if fixture
-        .owner_database
-        .scoped_routing_state_for_test(row_id)
-        .await
-        .row
-        .is_some()
-    {
-        format!(
-            "UPDATE notes
-             SET body = '{body}', _updated_at = '{stamp}'
-             WHERE id = '{row_id}';"
-        )
-    } else {
-        format!(
-            "INSERT INTO notes (id, audience, body, _updated_at)
-             VALUES ('{row_id}', '{}', '{body}', '{stamp}');",
-            fixture.circle_id
-        )
-    };
-    fixture
-        .owner_database
-        .run_scoped_host_write_for_test(statement)
-        .await;
-    assert!(fixture
-        .store
-        .publish_pending(&fixture.owner_database, owner_store_dir)
-        .await
-        .expect("publish effective-access Circle row"));
-    fixture
-        .owner_device
-        .latest_local_store_position()
-        .await
-        .expect("load effective-access row position")
-        .expect("effective-access row has a Store position")
-}
 
 #[test]
 fn later_removal_blocks_historical_circle_access() {
@@ -548,7 +542,7 @@ async fn newly_discovered_store_admission_activates_circle_access() {
     let member_database = open_scoped_replay_database();
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "newly-admitted-member-effective-access",
         &member_database,
         &owner_store_dir,
@@ -581,7 +575,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     let member_database = open_scoped_replay_database_at(&member_path);
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "removed-member-effective-access",
         &member_database,
         &owner_store_dir,
@@ -589,13 +583,14 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     )
     .await;
 
-    let first = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "visible before removal",
-        "0000000002000-0000-owner",
-    )
-    .await;
+    let first = fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "visible before removal",
+            "0000000002000-0000-owner",
+        )
+        .await;
     let first_pull = fixture
         .pull_member(&member_store_dir)
         .await
@@ -610,13 +605,14 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
             .map(|row| row.1.as_str()),
         Some("visible before removal")
     );
-    let hidden_before_removal = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "private immediately before removal",
-        "0000000002500-0000-owner",
-    )
-    .await;
+    let hidden_before_removal = fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "private immediately before removal",
+            "0000000002500-0000-owner",
+        )
+        .await;
     let hidden_before_removal_commit = fixture.load_commit(&hidden_before_removal).await;
     let hidden_before_removal_package_slot =
         exact_circle_package_slot(&hidden_before_removal_commit);
@@ -625,13 +621,14 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     // removal is materialized the owner may no longer publish new Circle content
     // (the Circle is rotation-required), so this models the newest package the
     // removed member must still be pruned from.
-    let late = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "private just before removal",
-        "0000000002800-0000-owner",
-    )
-    .await;
+    let late = fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "private just before removal",
+            "0000000002800-0000-owner",
+        )
+        .await;
     let late_commit = fixture.load_commit(&late).await;
     let late_package_slot = exact_circle_package_slot(&late_commit);
 
@@ -813,7 +810,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     let member_database = open_scoped_replay_database();
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "readded-member-effective-access",
         &member_database,
         &owner_store_dir,
@@ -821,13 +818,14 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     )
     .await;
 
-    publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "visible before removal",
-        "0000000002000-0000-owner",
-    )
-    .await;
+    fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "visible before removal",
+            "0000000002000-0000-owner",
+        )
+        .await;
     let initial_pull = fixture
         .pull_member(&member_store_dir)
         .await
@@ -837,13 +835,14 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     // A Circle package the owner authors before the removal that the member has
     // not yet pulled. The removal pull applies it under the removed membership,
     // exercising the prune of the member's Circle rows.
-    let pre_removal = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "private just before removal",
-        "0000000002500-0000-owner",
-    )
-    .await;
+    let pre_removal = fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "private just before removal",
+            "0000000002500-0000-owner",
+        )
+        .await;
     let pre_removal_commit = fixture.load_commit(&pre_removal).await;
     let pre_removal_package_slot = exact_circle_package_slot(&pre_removal_commit);
 
@@ -932,14 +931,14 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         )
         .await
         .expect("publish Circle successor after Store re-add");
-    publish_effective_access_row_with_id(
-        &fixture,
-        &owner_store_dir,
-        READD_EFFECTIVE_ACCESS_ROW_ID,
-        "visible after re-add",
-        "0000000005000-0000-owner",
-    )
-    .await;
+    fixture
+        .publish_row(
+            &owner_store_dir,
+            READD_EFFECTIVE_ACCESS_ROW_ID,
+            "visible after re-add",
+            "0000000005000-0000-owner",
+        )
+        .await;
 
     fixture.store.home.clear_exact_reads();
     let readd_pull = fixture
@@ -1554,7 +1553,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let member_database = open_scoped_replay_database_at(&member_path);
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "delete-circle-prunes",
         &member_database,
         &owner_store_dir,
@@ -1562,13 +1561,14 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     )
     .await;
 
-    publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "before deletion",
-        "0000000002000-0000-owner",
-    )
-    .await;
+    fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "before deletion",
+            "0000000002000-0000-owner",
+        )
+        .await;
     fixture
         .pull_member(&member_store_dir)
         .await
@@ -1610,14 +1610,14 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
 
     // A pre-deletion Circle package the member has not yet pulled.
-    publish_effective_access_row_with_id(
-        &fixture,
-        &owner_store_dir,
-        READD_EFFECTIVE_ACCESS_ROW_ID,
-        "private before deletion",
-        "0000000002500-0000-owner",
-    )
-    .await;
+    fixture
+        .publish_row(
+            &owner_store_dir,
+            READD_EFFECTIVE_ACCESS_ROW_ID,
+            "private before deletion",
+            "0000000002500-0000-owner",
+        )
+        .await;
 
     fixture.delete_circle().await;
 
@@ -1734,7 +1734,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
     let member_database = open_scoped_replay_database_at(&member_path);
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "delete-non-owner",
         &member_database,
         &owner_store_dir,
@@ -1779,7 +1779,7 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
     let member_database = open_scoped_replay_database_at(&member_path);
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "delete-two-order",
         &member_database,
         &owner_store_dir,
@@ -1789,13 +1789,14 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
 
     // First arrival order: the member applies a pre-deletion package before the
     // deletion is authored, so the row is materialized locally.
-    publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "applied then pruned",
-        "0000000002000-0000-owner",
-    )
-    .await;
+    fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "applied then pruned",
+            "0000000002000-0000-owner",
+        )
+        .await;
     fixture
         .pull_member(&member_store_dir)
         .await
@@ -1844,7 +1845,7 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     let member_database = open_scoped_replay_database_at(&member_path);
     let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let fixture = effective_access_fixture(
+    let fixture = EffectiveAccessFixture::create(
         "delete-historical-spine",
         &member_database,
         &owner_store_dir,
@@ -1855,13 +1856,14 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     // A real Circle package the owner authored before deletion: its encrypted
     // payload is the retained historical package the authority spine must still
     // decrypt and verify against the frozen epoch's key.
-    let package_commit_ref = publish_effective_access_row(
-        &fixture,
-        &owner_store_dir,
-        "authored before deletion",
-        "0000000002000-0000-owner",
-    )
-    .await;
+    let package_commit_ref = fixture
+        .publish_row(
+            &owner_store_dir,
+            EFFECTIVE_ACCESS_ROW_ID,
+            "authored before deletion",
+            "0000000002000-0000-owner",
+        )
+        .await;
     let package_commit = fixture.load_commit(&package_commit_ref).await;
     let [package_ref] = package_commit.circle_packages() else {
         panic!("the pre-deletion Store commit carries one Circle package");

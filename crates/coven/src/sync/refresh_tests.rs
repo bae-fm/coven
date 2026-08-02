@@ -74,6 +74,31 @@ trait RefreshTestStoreOps {
         encryption: &EncryptionService,
         signer: &UserKeypair,
     ) -> WrappedStoreKeyRef;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_refresh_cycle(
+        &self,
+        db: &crate::database::Database,
+        cipher: &RwLock<CloudCipher>,
+        pending_rotation: &PendingRotation,
+        keypair: &UserKeypair,
+        device_id: &str,
+        store_dir: &StoreDir,
+        security: Option<&crate::store_security::StoreSecurity>,
+    ) -> Result<super::cycle::SyncCycleResult, String>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_refresh_cycle_with_storage(
+        &self,
+        sync_storage: std::sync::Arc<dyn SyncStorage>,
+        db: &crate::database::Database,
+        cipher: &RwLock<CloudCipher>,
+        pending_rotation: &PendingRotation,
+        keypair: &UserKeypair,
+        device_id: &str,
+        store_dir: &StoreDir,
+        security: Option<&crate::store_security::StoreSecurity>,
+    ) -> Result<super::cycle::SyncCycleResult, String>;
 }
 
 impl RefreshTestStoreOps for TestStore {
@@ -204,6 +229,67 @@ impl RefreshTestStoreOps for TestStore {
             .expect("create exact wrapped Store key");
         prepared.reference
     }
+
+    async fn run_refresh_cycle(
+        &self,
+        db: &crate::database::Database,
+        cipher: &RwLock<CloudCipher>,
+        pending_rotation: &PendingRotation,
+        keypair: &UserKeypair,
+        device_id: &str,
+        store_dir: &StoreDir,
+        security: Option<&crate::store_security::StoreSecurity>,
+    ) -> Result<super::cycle::SyncCycleResult, String> {
+        self.run_refresh_cycle_with_storage(
+            self.storage.clone(),
+            db,
+            cipher,
+            pending_rotation,
+            keypair,
+            device_id,
+            store_dir,
+            security,
+        )
+        .await
+    }
+
+    async fn run_refresh_cycle_with_storage(
+        &self,
+        sync_storage: std::sync::Arc<dyn SyncStorage>,
+        db: &crate::database::Database,
+        cipher: &RwLock<CloudCipher>,
+        pending_rotation: &PendingRotation,
+        keypair: &UserKeypair,
+        device_id: &str,
+        store_dir: &StoreDir,
+        security: Option<&crate::store_security::StoreSecurity>,
+    ) -> Result<super::cycle::SyncCycleResult, String> {
+        let exact_device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "refresh device has no exact Store registration".to_string())?;
+        let hlc = Hlc::new(
+            device_id.to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
+        run_single_sync_cycle(
+            sync_storage,
+            &exact_device_id,
+            &hlc,
+            &SystemClock,
+            db,
+            cipher,
+            pending_rotation,
+            keypair,
+            security,
+            store_dir,
+            Some(self.home.as_ref()),
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
 }
 
 async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
@@ -215,71 +301,6 @@ async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Databa
         .await
         .expect("open exact refresh Store on owner device");
     (storage, owner_db)
-}
-
-/// Run one real sync cycle for `device_id` over the test Store's encrypted home,
-/// using the same backing storage for protocol objects and wrapped-key reads.
-async fn run_cycle(
-    storage: &TestStore,
-    db: &crate::database::Database,
-    cipher: &RwLock<CloudCipher>,
-    pending_rotation: &PendingRotation,
-    keypair: &UserKeypair,
-    device_id: &str,
-    ld: &StoreDir,
-    security: Option<&crate::store_security::StoreSecurity>,
-) -> Result<super::cycle::SyncCycleResult, String> {
-    run_cycle_with_storage(
-        storage.storage.clone(),
-        storage,
-        db,
-        cipher,
-        pending_rotation,
-        keypair,
-        device_id,
-        ld,
-        security,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_cycle_with_storage(
-    sync_storage: std::sync::Arc<dyn SyncStorage>,
-    storage: &TestStore,
-    db: &crate::database::Database,
-    cipher: &RwLock<CloudCipher>,
-    pending_rotation: &PendingRotation,
-    keypair: &UserKeypair,
-    device_id: &str,
-    ld: &StoreDir,
-    security: Option<&crate::store_security::StoreSecurity>,
-) -> Result<super::cycle::SyncCycleResult, String> {
-    let exact_device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "refresh device has no exact Store registration".to_string())?;
-    let hlc = Hlc::new(
-        device_id.to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
-    run_single_sync_cycle(
-        sync_storage,
-        &exact_device_id,
-        &hlc,
-        &SystemClock,
-        db,
-        cipher,
-        pending_rotation,
-        keypair,
-        security,
-        ld,
-        Some(storage.home.as_ref()),
-        None,
-    )
-    .await
-    .map_err(|error| error.to_string())
 }
 
 struct MembershipReadCounter {
@@ -362,18 +383,18 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("pre-rotation cycle");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("pre-rotation cycle");
     assert_eq!(
         cipher_key(&cipher_b),
         old_key,
@@ -399,18 +420,18 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     );
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("post-rotation cycle");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("post-rotation cycle");
 
     // B's live cipher now holds the rotated key (it can decrypt what A seals under
     // it this cycle), and its keyring was updated so a restart reads the new key —
@@ -572,18 +593,18 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
 
-    let result = run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("an unreferenced wrapped key does not affect the cycle");
+    let result = storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("an unreferenced wrapped key does not affect the cycle");
 
     assert_eq!(
         result.changesets_applied, 1,
@@ -654,18 +675,18 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .await
         .expect("revoke rotates key");
 
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("adopt generation 2");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("adopt generation 2");
     assert_eq!(cipher_generation(&cipher_b), new_key.current_generation());
 
     load_wrapped_store_key(
@@ -676,18 +697,18 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     .await
     .expect("the retained pre-rotation object remains readable");
 
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("replayed old wrapped key is ignored");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("replayed old wrapped key is ignored");
 
     assert_eq!(
         cipher_key(&cipher_b),
@@ -745,18 +766,18 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         current_key,
     )));
 
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("replacement same-generation wrapped key is merged");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("replacement same-generation wrapped key is merged");
 
     assert_eq!(
         cipher_key(&cipher_b),
@@ -855,8 +876,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     .await
     .expect("second owner can revoke");
 
-    Box::pin(run_cycle(
-        &storage,
+    Box::pin(storage.run_refresh_cycle(
         &db_b,
         &cipher_b,
         &PendingRotation::none(),
@@ -1088,18 +1108,18 @@ async fn removed_owner_key_is_not_adopted() {
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let cipher_b = RwLock::new(CloudCipher::Encrypted(rotated.clone()));
 
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("refresh ignores refs authored by a removed owner");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
         cipher_key(&cipher_b),
         rotated.key_bytes(),
@@ -1153,18 +1173,18 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         real_key,
     )));
 
-    run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("an unreferenced attacker object does not affect refresh");
+    storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("an unreferenced attacker object does not affect refresh");
 
     // Critically, B did NOT swap its cipher to the attacker's key.
     assert_eq!(
@@ -1232,17 +1252,17 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
 
-    let result = run_cycle(
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await;
+    let result = storage
+        .run_refresh_cycle(
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await;
     assert!(
         result.is_err(),
         "an exact membership-object failure under a pinned owner must abort the cycle, not fall open: {result:?}",
@@ -1306,19 +1326,19 @@ async fn one_cycle_loads_exact_membership_once() {
         storage.storage.clone(),
         MembershipReadCounter::new(),
     ));
-    run_cycle_with_storage(
-        counter.clone(),
-        &storage,
-        &db_b,
-        &cipher_b,
-        &PendingRotation::none(),
-        &device_b,
-        "B",
-        &ld_b,
-        Some(&security_b),
-    )
-    .await
-    .expect("B's cycle");
+    storage
+        .run_refresh_cycle_with_storage(
+            counter.clone(),
+            &db_b,
+            &cipher_b,
+            &PendingRotation::none(),
+            &device_b,
+            "B",
+            &ld_b,
+            Some(&security_b),
+        )
+        .await
+        .expect("B's cycle");
     assert_eq!(
         counter.interceptor().reads(),
         chain.entries().len() + stream_count,
@@ -1443,8 +1463,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
         let pending_rotation_refresh = PendingRotation::none();
         let (_tmp, ld) = temp_store_dir();
-        Box::pin(run_cycle(
-            &storage,
+        Box::pin(storage.run_refresh_cycle(
             &db,
             &cipher_refresh,
             &pending_rotation_refresh,

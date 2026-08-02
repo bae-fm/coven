@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::blob::{BlobScope, CacheFill, Provenance};
+use crate::blob::{CacheFill, Provenance};
 use crate::clock::{FixedClock, SystemClock};
 use crate::database::Database;
 use crate::database::StoreDatabase;
@@ -118,25 +118,12 @@ async fn run_cycle_m(
     hlc: &Hlc,
     ld: &StoreDir,
 ) {
-    run_cycle_m_result(storage, db, cipher, keypair, hlc, ld)
-        .await
-        .expect("cycle");
-}
-
-async fn run_cycle_m_result(
-    storage: &TestStore,
-    db: &Database,
-    cipher: &RwLock<CloudCipher>,
-    keypair: &UserKeypair,
-    hlc: &Hlc,
-    ld: &StoreDir,
-) -> Result<(), String> {
     storage.open_into(db).await.expect("open exact test Store");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "exact test Store has no local device id".to_string())?;
+        .expect("read exact test Store device id")
+        .expect("exact test Store has a local device id");
     run_single_sync_cycle(
         storage.storage.clone(),
         &device_id,
@@ -152,8 +139,7 @@ async fn run_cycle_m_result(
         None,
     )
     .await
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    .expect("cycle");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,7 +180,9 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let keypair = UserKeypair::generate();
     let storage = Arc::new(cycle_test_store(&db, &keypair).await);
     storage.open_into(&db).await.expect("open exact test Store");
-    let stored = create_exact_blob(&storage, "photos", "maintenance", b"maintenance").await;
+    let stored = storage
+        .create_exact_opaque_blob("photos", "maintenance", b"maintenance")
+        .await;
     db.test_sql(move |database| database.enqueue_blob_delete(&stored, T0))
         .await
         .expect("queue exact maintenance tombstone");
@@ -227,32 +215,6 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
         1,
         "failed maintenance remains queued"
     );
-}
-
-async fn store_package_exists(
-    db: &Database,
-    storage: &TestStore,
-    stream_id: &str,
-    sequence: u64,
-) -> bool {
-    let device = storage
-        .bind_device(db, &storage.signer)
-        .await
-        .expect("bind Store package test device");
-    let Some((reference, _commit)) = device
-        .load_exact_materialized_commit(stream_id, sequence)
-        .await
-        .expect("load exact materialized Store commit")
-    else {
-        return false;
-    };
-    match device.load_store_package_for_test(&reference).await {
-        Ok(package) => package.is_some(),
-        Err(crate::sync::store::StoreError::Object(crate::storage::StoreObjectError::Storage(
-            crate::storage::StorageError::NotFound(_),
-        ))) => false,
-        Err(error) => panic!("load Store package: {error}"),
-    }
 }
 
 trait CycleTestDatabaseOps {
@@ -327,17 +289,52 @@ impl CycleTestDatabaseOps for Database {
     }
 }
 
-async fn local_store_package_exists(db: &Database, storage: &TestStore, sequence: u64) -> bool {
-    let stream_id = db.local_store_stream_id().await;
-    store_package_exists(db, storage, &stream_id, sequence).await
-}
-
 trait CycleTestStoreOps {
+    async fn store_package_exists(&self, db: &Database, stream_id: &str, sequence: u64) -> bool;
+    async fn local_store_package_exists(&self, db: &Database, sequence: u64) -> bool;
+    async fn stored_blob_exists(&self, db: &Database, table: &str, row_id: &str) -> bool;
     async fn retain_store_packages_for_assertion(&self, db: &Database, marker: &[u8]);
     async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &Database);
 }
 
 impl CycleTestStoreOps for TestStore {
+    async fn store_package_exists(&self, db: &Database, stream_id: &str, sequence: u64) -> bool {
+        let device = self
+            .bind_device(db, &self.signer)
+            .await
+            .expect("bind Store package test device");
+        let Some((reference, _commit)) = device
+            .load_exact_materialized_commit(stream_id, sequence)
+            .await
+            .expect("load exact materialized Store commit")
+        else {
+            return false;
+        };
+        match device.load_store_package_for_test(&reference).await {
+            Ok(package) => package.is_some(),
+            Err(crate::sync::store::StoreError::Object(
+                crate::storage::StoreObjectError::Storage(crate::storage::StorageError::NotFound(
+                    _,
+                )),
+            )) => false,
+            Err(error) => panic!("load Store package: {error}"),
+        }
+    }
+
+    async fn local_store_package_exists(&self, db: &Database, sequence: u64) -> bool {
+        let stream_id = db.local_store_stream_id().await;
+        self.store_package_exists(db, &stream_id, sequence).await
+    }
+
+    async fn stored_blob_exists(&self, db: &Database, table: &str, row_id: &str) -> bool {
+        let Some(stored) = db.stored_blob_for_row(table, row_id).await else {
+            return false;
+        };
+        self.contains_stored_blob_object(&stored)
+            .await
+            .expect("verify exact stored blob object")
+    }
+
     async fn retain_store_packages_for_assertion(&self, db: &Database, marker: &[u8]) {
         let device = self
             .open_into(db)
@@ -400,75 +397,8 @@ impl CycleTestStoreOps for TestStore {
     }
 }
 
-async fn create_exact_blob(
-    storage: &TestStore,
-    namespace: &str,
-    id: &str,
-    bytes: &[u8],
-) -> crate::blob::locator::StoredBlobRef {
-    let (uploader, registration, _) = storage
-        .founder_device_authority()
-        .await
-        .expect("load exact founder device authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&uploader, &registration)
-        .expect("validate exact blob write authority");
-    let protection = EncryptionService::from_key([42; 32]);
-    let locator = crate::blob::locator::BlobLocator::opaque(
-        namespace,
-        id,
-        uploader.clone(),
-        crate::blob::locator::RemoteAudience::Store,
-        BlobScope::Master,
-        protection.seal_key_fingerprint(),
-        bytes.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(bytes),
-    )
-    .expect("build exact blob locator");
-    let temp = tempfile::tempdir().expect("create exact blob directory");
-    let plaintext = temp.path().join("plaintext");
-    let spool = temp.path().join("stored");
-    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
-        .await
-        .expect("write exact blob plaintext");
-    let slot = storage
-        .storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate exact blob slot");
-    storage
-        .storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            crate::storage::BlobSpoolProtection::Opaque(protection),
-            &plaintext,
-            &spool,
-        )
-        .await
-        .expect("seal exact blob");
-    let stored = storage
-        .storage
-        .prepare_blob_object(&locator, &authority, slot, &spool)
-        .await
-        .expect("prepare exact blob");
-    let progress = crate::storage::cloud::no_progress();
-    storage
-        .storage
-        .create_blob_object_from_file(&stored, &authority, &spool, &progress)
-        .await
-        .expect("create exact blob");
-    stored
-}
-
 fn fail_exact_create_on(storage: &TestStore, call: usize) {
     storage.home.fail_exact_create_before_call(call);
-}
-
-async fn stored_blob_exists(db: &Database, storage: &TestStore, table: &str, row_id: &str) -> bool {
-    let Some(stored) = db.stored_blob_for_row(table, row_id).await else {
-        return false;
-    };
-    storage.storage.verify_blob_object(&stored).await.is_ok()
 }
 
 fn exercise_pre_attempt_abandonment<'a>(
@@ -1114,137 +1044,6 @@ fn exercise_missing_provider_administrator<'a>(
     })
 }
 
-fn exercise_cancellation_against_inflight_registration<'a>(
-    owner_db: &'a crate::database::StoreDatabase,
-    storage: &'a TestStore,
-    owner: &'a UserKeypair,
-    member: &'a UserKeypair,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
-    Box::pin(async move {
-        let owner_device = storage
-            .bind_store_device(owner_db, owner)
-            .await
-            .expect("bind owner Store");
-        let joining_db = open_test_db();
-        let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
-            pending_dir.path().join("pending-device-join.sqlite"),
-        )
-        .expect("open pending join journal");
-        let offer = owner_device
-            .store
-            .begin_device_join(&pubkey_hex(member))
-            .await
-            .expect("begin exact device join");
-        let mut pending_join = storage
-            .open_pending_device_join(&pending, member, offer.clone())
-            .await
-            .expect("bind pending Store join");
-        let access_request = pending_join
-            .prepare_provider_access_request()
-            .await
-            .expect("prepare exact provider access request");
-        let approval = owner_device
-            .store
-            .authorize_device_provider_access(access_request, None)
-            .await
-            .expect("authorize exact provider access");
-        let registration_request = pending_join
-            .prepare_registration_request(approval)
-            .await
-            .expect("prepare exact registration request");
-        let provisional = owner_device
-            .store
-            .accept_device_registration_request(registration_request)
-            .await
-            .expect("activate exact join attempt");
-        let provider_ready = owner_device
-            .store
-            .publish_device_provider_challenge(provisional.clone())
-            .await
-            .expect("publish same-principal provider readiness");
-        let mut joining_store = pending_join
-            .begin_joining_store(crate::database::StoreDatabase::new(&joining_db))
-            .await
-            .expect("bind joining Store database");
-        let (registration_visible, release_registration_create) =
-            storage.home.pause_after_exact_create_call(1);
-        let mut bootstrap = Box::pin(joining_store.bootstrap(provider_ready, T0));
-        tokio::select! {
-            () = registration_visible.notified() => {}
-            result = &mut bootstrap => panic!(
-                "bootstrap ended before reaching the registration create boundary: {result:?}"
-            ),
-        }
-        let cancellation = owner_device
-            .store
-            .cancel_device_join(provisional.publication_authorization.attempt.clone())
-            .await
-            .expect("cancel while registration create is in flight");
-        let administrator = owner_device
-            .store
-            .close_device_provider_admission(cancellation.clone())
-            .await
-            .expect("close provider admission during late create");
-        let mut cancellation_join = storage
-            .pending_device_join_observation(&pending, &offer)
-            .await
-            .expect("bind concurrent pending Store join")
-            .authorize_closure(member);
-        let joiner = cancellation_join
-            .close(cancellation.clone())
-            .await
-            .expect("close joining device during late create");
-        release_registration_create.notify_one();
-        let bootstrap_result = bootstrap.await;
-        assert!(
-            bootstrap_result.is_err(),
-            "a registration deleted by cancellation cannot complete bootstrap"
-        );
-        let receipt = owner_device
-            .store
-            .prepare_device_join_cleanup(cancellation, administrator, joiner)
-            .await
-            .expect("prepare cleanup after in-flight registration");
-        owner_device
-            .store
-            .activate_device_join_cleanup(receipt)
-            .await
-            .expect("activate cleanup after in-flight registration");
-    })
-}
-
-/// Queue a pending upload whose source file doesn't exist, so the cycle's drain
-/// can't clear it — the entry stays pending, modeling a slow or stuck upload
-/// while we assert the changeset/snapshot aren't held back by it.
-async fn seed_pending_upload(db: &Database) {
-    db.execute_test_sql(&format!(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('pending-root', 'Pending', NULL, 0, '0000000000001-0000-M', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
-         VALUES ('pending-blob', 'pending-root', 'cover', 1, '{}', \
-                 '0000000000001-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"x"),
-    ))
-    .await;
-    let row = db
-        .row_blob_ref("note_photos", "pending-blob")
-        .await
-        .expect("resolve exact pending blob row");
-    db.test_sql(move |database| {
-        database.enqueue_blob_upload(
-            "notes",
-            "pending-root",
-            &row,
-            std::path::Path::new("/nonexistent/pending-blob"),
-            false,
-            T0,
-        )
-    })
-    .await
-    .expect("seed exact pending upload");
-}
-
 /// A pending cloud upload does not hold back a gated-true changeset: the gate
 /// column decides per-row visibility, so a row that is shareable now reaches
 /// peers without waiting for unrelated uploads to finish. The gate still cuts a
@@ -1320,7 +1119,9 @@ async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
     .expect("settle exact pending-upload peer activation");
 
     // A slow/stuck upload for some OTHER unit is pending the whole time.
-    seed_pending_upload(&db).await;
+    db.seed_stuck_blob_upload_for_test(T0)
+        .await
+        .expect("seed exact pending upload");
 
     // One shareable note (its blobs are up → gate on) and one still-private note
     // (its blobs aren't up yet → gate off; the host hasn't flipped it).
@@ -1522,7 +1323,9 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     db.set_protocol_state("local_seq", "1")
         .await
         .expect("seed local_seq");
-    seed_pending_upload(&db).await;
+    db.seed_stuck_blob_upload_for_test(T0)
+        .await
+        .expect("seed exact pending upload");
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
@@ -2169,7 +1972,9 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         .expect("load rejected published snapshot")
         .is_none());
 
-    let stored = create_exact_blob(&storage, "audio", "audio1", b"AUDIO").await;
+    let stored = storage
+        .create_exact_opaque_blob("audio", "audio1", b"AUDIO")
+        .await;
     assert!(!store_dir
         .outbound_blob_spool_path(stored.locator().locator_hash())
         .exists());
@@ -3156,8 +2961,9 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 drop(a_src);
                 drop(producer_db);
                 tokio::spawn(async move {
+                    let cycle = InterceptedCycle::new(&storage, &db_m, &enc, &keypair, &hlc, &ld);
                     // Cycle 1: M pulls A's changeset; the host write fires mid-pull.
-                    run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+                    cycle.run().await;
 
                     // (a) The injected row is present locally on M.
                     assert!(
@@ -3174,7 +2980,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
 
                     // (b) The injected row has its own pending write. Cycle 2 publishes it. A fresh
                     // peer C pulls M's output and must receive 'm_mid'.
-                    run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+                    cycle.run().await;
 
                     device_c
                         .pull_store(&ld)
@@ -3800,7 +3606,9 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         "the make_remote intent stays queued while sealing is paused",
     );
     assert!(
-        !stored_blob_exists(&db, &storage, "note_photos", "hponly").await,
+        !storage
+            .stored_blob_exists(&db, "note_photos", "hponly")
+            .await,
         "no host-provided blob is sealed to the cloud while sealing is paused",
     );
 
@@ -3827,7 +3635,9 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         "completing the make_remote consumes its intent",
     );
     assert!(
-        stored_blob_exists(&db, &storage, "note_photos", "hponly").await,
+        storage
+            .stored_blob_exists(&db, "note_photos", "hponly")
+            .await,
         "the host-provided blob uploads on the first cycle after adoption",
     );
 }
@@ -4736,7 +4546,9 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .expect("read local Store device")
         .expect("local Store device exists");
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
-    let planted = create_exact_blob(&storage, "audio", "audio1", b"AUDIO").await;
+    let planted = storage
+        .create_exact_opaque_blob("audio", "audio1", b"AUDIO")
+        .await;
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
@@ -4772,7 +4584,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .value
         .write_id
         .clone();
-    assert!(!local_store_package_exists(&db, &storage, 2).await);
+    assert!(!storage.local_store_package_exists(&db, 2).await);
 
     storage
         .storage
@@ -4827,11 +4639,13 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     });
     assert_eq!(pending[0].status, blocked);
     assert!(
-        !local_store_package_exists(&db, &storage, 2).await,
+        !storage.local_store_package_exists(&db, 2).await,
         "the blocked write has no package or head",
     );
 
-    let _restored = create_exact_blob(&storage, "audio", "audio1", b"AUDIO").await;
+    let _restored = storage
+        .create_exact_opaque_blob("audio", "audio1", b"AUDIO")
+        .await;
     run_cycle_in_task(
         cycle_storage,
         db.clone(),
@@ -4851,7 +4665,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         blocked,
         "a semantic block is not retried by reconnect",
     );
-    assert!(!local_store_package_exists(&db, &storage, 2).await);
+    assert!(!storage.local_store_package_exists(&db, 2).await);
 }
 
 #[tokio::test]
@@ -4959,43 +4773,63 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     );
 }
 
-/// Like [`run_cycle_m`] but over an arbitrary `&dyn SyncStorage` (e.g. the
-/// host-write injector), still with no cloud home (no outbox drain, no auth
-/// refresh).
-async fn run_cycle_m_storage(
-    storage: &CycleStorageInterceptor,
-    db: &Database,
-    cipher: &RwLock<CloudCipher>,
-    keypair: &UserKeypair,
-    hlc: &Hlc,
-    ld: &StoreDir,
-) {
-    storage
-        .inner
-        .open_into(db)
+struct InterceptedCycle<'a> {
+    storage: &'a CycleStorageInterceptor,
+    database: &'a Database,
+    cipher: &'a RwLock<CloudCipher>,
+    identity: &'a UserKeypair,
+    clock: &'a Hlc,
+    store_dir: &'a StoreDir,
+}
+
+impl<'a> InterceptedCycle<'a> {
+    fn new(
+        storage: &'a CycleStorageInterceptor,
+        database: &'a Database,
+        cipher: &'a RwLock<CloudCipher>,
+        identity: &'a UserKeypair,
+        clock: &'a Hlc,
+        store_dir: &'a StoreDir,
+    ) -> Self {
+        Self {
+            storage,
+            database,
+            cipher,
+            identity,
+            clock,
+            store_dir,
+        }
+    }
+
+    async fn run(&self) {
+        self.storage
+            .inner
+            .open_into(self.database)
+            .await
+            .expect("open exact test Store");
+        let device_id = self
+            .database
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("read exact test device id")
+            .expect("exact test device id exists");
+        run_single_sync_cycle(
+            self.storage.storage.clone(),
+            &device_id,
+            self.clock,
+            &SystemClock,
+            self.database,
+            self.cipher,
+            &PendingRotation::none(),
+            self.identity,
+            None,
+            self.store_dir,
+            None,
+            None,
+        )
         .await
-        .expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read exact test device id")
-        .expect("exact test device id exists");
-    run_single_sync_cycle(
-        storage.storage.clone(),
-        &device_id,
-        hlc,
-        &SystemClock,
-        db,
-        cipher,
-        &PendingRotation::none(),
-        keypair,
-        None,
-        ld,
-        None,
-        None,
-    )
-    .await
-    .expect("cycle");
+        .expect("cycle");
+    }
 }
 
 // ---- changeset reclamation through a real cycle ----
@@ -5099,7 +4933,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
             if frontier.get(&published_stream) == Some(&published)
     ));
     assert!(
-        store_package_exists(&db_m, &storage, &stream_id, 1).await,
+        storage.store_package_exists(&db_m, &stream_id, 1).await,
         "the accepted Merge materialization retains its Store package for replay",
     );
 }
@@ -5225,11 +5059,15 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
         run_cycle_m(&storage, &owner_db, &enc, &owner, &hlc, &ld).await;
 
         assert!(
-            store_package_exists(&owner_db, &storage, &owner_stream, 1).await,
+            storage
+                .store_package_exists(&owner_db, &owner_stream, 1)
+                .await,
             "reclamation keeps the earlier package while an active device is behind",
         );
         assert!(
-            store_package_exists(&owner_db, &storage, &owner_stream, second_sequence).await,
+            storage
+                .store_package_exists(&owner_db, &owner_stream, second_sequence)
+                .await,
             "reclamation keeps the package the behind device still needs",
         );
 
@@ -5311,7 +5149,7 @@ async fn member_device_does_not_create_a_snapshot() {
     .expect("Member Store cycle succeeds");
 
     assert!(
-        local_store_package_exists(&member_db, &storage, 1).await,
+        storage.local_store_package_exists(&member_db, 1).await,
         "the Member's row publishes through its exact Store stream",
     );
     assert!(
@@ -6311,12 +6149,99 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         )
         .await
         .expect("invite exact Member identity");
-    exercise_cancellation_against_inflight_registration(
-        &crate::database::StoreDatabase::new(&owner_db),
-        &storage,
-        &owner,
-        &member,
-    )
+    let owner_database = crate::database::StoreDatabase::new(&owner_db);
+    Box::pin(async {
+        let owner_device = storage
+            .bind_store_device(&owner_database, &owner)
+            .await
+            .expect("bind owner Store");
+        let joining_db = open_test_db();
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+            pending_dir.path().join("pending-device-join.sqlite"),
+        )
+        .expect("open pending join journal");
+        let offer = owner_device
+            .store
+            .begin_device_join(&pubkey_hex(&member))
+            .await
+            .expect("begin exact device join");
+        let mut pending_join = storage
+            .open_pending_device_join(&pending, &member, offer.clone())
+            .await
+            .expect("bind pending Store join");
+        let access_request = pending_join
+            .prepare_provider_access_request()
+            .await
+            .expect("prepare exact provider access request");
+        let approval = owner_device
+            .store
+            .authorize_device_provider_access(access_request, None)
+            .await
+            .expect("authorize exact provider access");
+        let registration_request = pending_join
+            .prepare_registration_request(approval)
+            .await
+            .expect("prepare exact registration request");
+        let provisional = owner_device
+            .store
+            .accept_device_registration_request(registration_request)
+            .await
+            .expect("activate exact join attempt");
+        let provider_ready = owner_device
+            .store
+            .publish_device_provider_challenge(provisional.clone())
+            .await
+            .expect("publish same-principal provider readiness");
+        let mut joining_store = pending_join
+            .begin_joining_store(crate::database::StoreDatabase::new(&joining_db))
+            .await
+            .expect("bind joining Store database");
+        let (registration_visible, release_registration_create) =
+            storage.home.pause_after_exact_create_call(1);
+        let mut bootstrap = Box::pin(joining_store.bootstrap(provider_ready, T0));
+        tokio::select! {
+            () = registration_visible.notified() => {}
+            result = &mut bootstrap => panic!(
+                "bootstrap ended before reaching the registration create boundary: {result:?}"
+            ),
+        }
+        let cancellation = owner_device
+            .store
+            .cancel_device_join(provisional.publication_authorization.attempt.clone())
+            .await
+            .expect("cancel while registration create is in flight");
+        let administrator = owner_device
+            .store
+            .close_device_provider_admission(cancellation.clone())
+            .await
+            .expect("close provider admission during late create");
+        let mut cancellation_join = storage
+            .pending_device_join_observation(&pending, &offer)
+            .await
+            .expect("bind concurrent pending Store join")
+            .authorize_closure(&member);
+        let joiner = cancellation_join
+            .close(cancellation.clone())
+            .await
+            .expect("close joining device during late create");
+        release_registration_create.notify_one();
+        let bootstrap_result = bootstrap.await;
+        assert!(
+            bootstrap_result.is_err(),
+            "a registration deleted by cancellation cannot complete bootstrap"
+        );
+        let receipt = owner_device
+            .store
+            .prepare_device_join_cleanup(cancellation, administrator, joiner)
+            .await
+            .expect("prepare cleanup after in-flight registration");
+        owner_device
+            .store
+            .activate_device_join_cleanup(receipt)
+            .await
+            .expect("activate cleanup after in-flight registration");
+    })
     .await;
 }
 
@@ -6434,16 +6359,15 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
         .expect("invite exact Member identity");
 
     let member_db = open_test_db();
-    crate::sync::test_helpers::install_cross_principal_device_fixture(
-        &storage,
-        &owner_db,
-        &member_db,
-        &member,
-        "member-account",
-        T0,
-    )
-    .await
-    .expect("complete cross-principal device join");
+    storage
+        .install_cross_principal_device(
+            crate::database::StoreDatabase::new(&member_db),
+            &member,
+            "member-account",
+            T0,
+        )
+        .await
+        .expect("complete cross-principal device join");
 
     assert!(
         crate::database::StoreDatabase::new(&member_db)

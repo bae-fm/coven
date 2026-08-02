@@ -1770,42 +1770,4 @@ impl DatabaseTestSql<'_> {
         transaction.rollback().map_err(DbError::from)?;
         Ok(result)
     }
-
-    pub(crate) fn run_internal_store_write<R, E>(
-        &self,
-        synced_tables: &[crate::sync::session::SyncedTable],
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        write_id: crate::WriteId,
-        operation: impl FnOnce(DatabaseTestTransaction<'_, '_>) -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<DbError>,
-    {
-        crate::database::StoreDatabase::run_internal_store_write_transaction_on(
-            self.connection,
-            synced_tables,
-            routing_encryption,
-            write_id,
-            |transaction| operation(DatabaseTestTransaction::new(transaction)),
-        )
-    }
-
-    pub(crate) fn run_prepared_blob_transition_write<R, E>(
-        &self,
-        synced_tables: &[crate::sync::session::SyncedTable],
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        write_id: crate::WriteId,
-        operation: impl FnOnce(DatabaseTestTransaction<'_, '_>) -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<DbError>,
-    {
-        crate::database::StoreDatabase::run_prepared_blob_transition_transaction_on(
-            self.connection,
-            synced_tables,
-            routing_encryption,
-            write_id,
-            |transaction| operation(DatabaseTestTransaction::new(transaction)),
-        )
-    }
 }

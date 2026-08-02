@@ -1018,6 +1018,82 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub(crate) async fn finalized_circle_close_outcome_for_test(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+    ) -> Result<
+        crate::protocol::circle::CircleEpochCloseOutcome,
+        crate::sync::store::CircleOperationError,
+    > {
+        let (successor, _) = self
+            .database
+            .circle_authoring_context(circle_id, &crate::keys::public_key_hex(&self.identity))
+            .await?;
+        let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
+            successor.control.value.state()
+        else {
+            return Err(crate::sync::store::CircleOperationError::InvalidState(
+                "finalized Circle control is not active".to_string(),
+            ));
+        };
+        let crate::protocol::circle::CircleEpochOrigin::Closed { close_id, .. } =
+            &active.common.origin
+        else {
+            return Err(crate::sync::store::CircleOperationError::InvalidState(
+                "finalized Circle control does not name a close outcome".to_string(),
+            ));
+        };
+        let activation = self
+            .database
+            .verified_circle_activation(
+                self.root.reference().clone(),
+                circle_id,
+                successor.control.coord,
+            )
+            .await?
+            .ok_or(crate::sync::store::CircleOperationError::MissingState(
+                "finalized Circle activation",
+            ))?;
+        let outcome_ref = activation
+            .reference
+            .objects()
+            .close_outcome
+            .as_ref()
+            .ok_or(crate::sync::store::CircleOperationError::MissingState(
+                "finalized Circle close outcome",
+            ))?;
+        let context = crate::storage::ProtocolObjectContext::store_encrypted(
+            self.root.reference().store_root_hash,
+            crate::storage::ProtocolObjectDomain::CircleEpochCloseOutcome,
+        );
+        let prefix = crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+            circle_id, *close_id,
+        );
+        let bytes = self
+            .storage
+            .read_protocol_object(&context, &outcome_ref.object, &prefix)
+            .await
+            .map_err(crate::storage::StoreObjectError::from)?;
+        let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
+            crate::protocol::circle::CircleEpochCloseSlotValue::parse(&bytes)?
+        else {
+            return Err(crate::sync::store::CircleOperationError::InvalidState(
+                "finalized Circle close slot holds a cancellation".to_string(),
+            ));
+        };
+        if crate::protocol::circle::CircleEpochCloseOutcomeRef::from_outcome(
+            &outcome,
+            outcome_ref.object.clone(),
+        )? != *outcome_ref
+        {
+            return Err(crate::sync::store::CircleOperationError::InvalidState(
+                "finalized Circle close outcome differs from its exact reference".to_string(),
+            ));
+        }
+        Ok(outcome)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn circle_package_is_retained_for_replay_for_test(
         &self,
         target: crate::protocol::store_commit::CirclePackageRef,

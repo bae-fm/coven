@@ -134,20 +134,21 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         let member_database = open_scoped_replay_database();
         let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
         let (_member_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
-        let fixture = effective_access_fixture(
+        let fixture = EffectiveAccessFixture::create(
             failure.store_id(),
             &member_database,
             &owner_store_dir,
             &member_store_dir,
         )
         .await;
-        let first = publish_effective_access_row(
-            &fixture,
-            &owner_store_dir,
-            "active baseline",
-            "0000000002000-0000-owner",
-        )
-        .await;
+        let first = fixture
+            .publish_row(
+                &owner_store_dir,
+                EFFECTIVE_ACCESS_ROW_ID,
+                "active baseline",
+                "0000000002000-0000-owner",
+            )
+            .await;
         let first_pull = fixture
             .pull_member(&member_store_dir)
             .await
@@ -157,13 +158,14 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}: {first_pull:?}"
         );
 
-        let unavailable = publish_effective_access_row(
-            &fixture,
-            &owner_store_dir,
-            "must not materialize",
-            "0000000003000-0000-owner",
-        )
-        .await;
+        let unavailable = fixture
+            .publish_row(
+                &owner_store_dir,
+                EFFECTIVE_ACCESS_ROW_ID,
+                "must not materialize",
+                "0000000003000-0000-owner",
+            )
+            .await;
         let unavailable_commit = fixture.load_commit(&unavailable).await;
         let unavailable_slot = exact_circle_package_slot(&unavailable_commit);
         match failure {

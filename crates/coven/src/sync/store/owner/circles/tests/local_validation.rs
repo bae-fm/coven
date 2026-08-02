@@ -170,51 +170,59 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
         let [reference] = commit.circle_controls() else {
             panic!("Circle commit carries one control")
         };
-        resign_merge_journal_with_reference(
-            &db,
-            &store,
-            &signer,
-            &mut journal,
-            reference.clone(),
-            move |commit| {
-                let activations = match &mut commit.body {
-                    crate::protocol::store_commit::StoreCommitBody::Operations(operations) => {
-                        &mut operations.stream_activations
-                    }
-                    _ => panic!("Circle commit body carries operations"),
-                };
-                let activation = activations
-                    .iter_mut()
-                    .find(|activation| {
-                        matches!(
-                            activation,
-                            StreamActivation::GrantAuthorized {
-                                anchor: GrantStreamAnchor::CircleRoster { .. },
-                                ..
-                            }
-                        )
-                    })
-                    .expect("founder Circle commit activates its roster stream");
-                let StreamActivation::GrantAuthorized {
-                    grant_id, anchor, ..
-                } = activation
-                else {
-                    unreachable!()
-                };
-                if wrong_grant {
-                    *grant_id = crate::protocol::membership::MembershipGrantId(ObjectHash::digest(
-                        b"another Circle grant",
-                    ));
-                } else {
-                    let GrantStreamAnchor::CircleRoster { circle_id, .. } = anchor else {
+        let device = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind substituted Circle object Store");
+        let mut writer = device
+            .authorize_writer()
+            .await
+            .expect("authorize substituted Circle object Store");
+        writer
+            .circles()
+            .resign_merge_journal_with_reference_for_test(
+                &mut journal,
+                reference.clone(),
+                move |commit| {
+                    let activations = match &mut commit.body {
+                        crate::protocol::store_commit::StoreCommitBody::Operations(operations) => {
+                            &mut operations.stream_activations
+                        }
+                        _ => panic!("Circle commit body carries operations"),
+                    };
+                    let activation = activations
+                        .iter_mut()
+                        .find(|activation| {
+                            matches!(
+                                activation,
+                                StreamActivation::GrantAuthorized {
+                                    anchor: GrantStreamAnchor::CircleRoster { .. },
+                                    ..
+                                }
+                            )
+                        })
+                        .expect("founder Circle commit activates its roster stream");
+                    let StreamActivation::GrantAuthorized {
+                        grant_id, anchor, ..
+                    } = activation
+                    else {
                         unreachable!()
                     };
-                    *circle_id = CircleId::from_bytes([99; 16]);
-                }
-                activations.sort();
-            },
-        )
-        .await;
+                    if wrong_grant {
+                        *grant_id = crate::protocol::membership::MembershipGrantId(
+                            ObjectHash::digest(b"another Circle grant"),
+                        );
+                    } else {
+                        let GrantStreamAnchor::CircleRoster { circle_id, .. } = anchor else {
+                            unreachable!()
+                        };
+                        *circle_id = CircleId::from_bytes([99; 16]);
+                    }
+                    activations.sort();
+                },
+            )
+            .await
+            .expect("re-sign Circle commit with substituted stream authority");
         let store_commit = journal.operation().commit_ref.object.clone();
         let store_head = journal
             .operation()
@@ -288,22 +296,26 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     let [reference] = commit.circle_controls() else {
         panic!("Circle commit carries one control")
     };
-    resign_merge_journal_with_reference(
-        &db,
-        &store,
-        &signer,
-        &mut journal,
-        reference.clone(),
-        move |commit| {
-            let crate::protocol::store_commit::StoreCommitBody::Operations(operations) =
-                &mut commit.body
-            else {
-                panic!("Circle commit body carries operations")
-            };
-            operations.acknowledgement = Some(acknowledgement);
-        },
-    )
-    .await;
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize substituted Circle object Store");
+    writer
+        .circles()
+        .resign_merge_journal_with_reference_for_test(
+            &mut journal,
+            reference.clone(),
+            move |commit| {
+                let crate::protocol::store_commit::StoreCommitBody::Operations(operations) =
+                    &mut commit.body
+                else {
+                    panic!("Circle commit body carries operations")
+                };
+                operations.acknowledgement = Some(acknowledgement);
+            },
+        )
+        .await
+        .expect("re-sign Circle commit with unexpected acknowledgement");
     let store_commit = journal.operation().commit_ref.object.clone();
     let store_head = journal
         .operation()
@@ -436,8 +448,19 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         old_reference.objects().clone(),
         Some(prepared_head.reference().clone()),
     );
-    resign_merge_journal_with_reference(&db, &store, &signer, &mut journal, reference, |_| {})
-        .await;
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind substituted Circle object Store");
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize substituted Circle object Store");
+    writer
+        .circles()
+        .resign_merge_journal_with_reference_for_test(&mut journal, reference, |_| {})
+        .await
+        .expect("re-sign Circle commit with unreserved predecessor");
     let store_commit = journal.operation().commit_ref.object.clone();
     let store_head = journal
         .operation()

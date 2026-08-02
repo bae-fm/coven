@@ -779,11 +779,9 @@ mod tests {
         let circle_id = source
             .test_sql(|connection| {
                 Ok::<_, crate::database::DbError>(
-                    crate::sync::test_helpers::install_test_active_circle(
-                        &connection,
-                        "circle-bootstrap-unscoped",
-                    )
-                    .0,
+                    connection
+                        .install_test_active_circle("circle-bootstrap-unscoped")
+                        .0,
                 )
             })
             .await
@@ -856,6 +854,104 @@ mod tests {
     }
 
     impl PublishedScopedSnapshot {
+        async fn publish(store_id: &str, image_kind: ScopedSnapshotImage) -> Self {
+            let source = open_scoped_snapshot_test_db();
+            let signer = UserKeypair::generate();
+            let store =
+                crate::sync::test_helpers::TestStore::create(&source, store_id, signer.clone())
+                    .await
+                    .expect("create published scoped snapshot Store");
+            let device = store
+                .open_into(&source)
+                .await
+                .expect("load published scoped snapshot membership");
+            let membership = device
+                .membership_for_test()
+                .await
+                .expect("project published scoped snapshot membership");
+            seed_scoped_snapshot_rows(&source).await;
+
+            let image_dir = tempfile::tempdir().expect("published scoped snapshot image directory");
+            let image_path = image_dir.path().to_path_buf();
+            let root = store.root.clone();
+            let image = StoreDatabase::new(&source)
+                .capture_snapshot_image_for_test(
+                    root,
+                    image_path,
+                    Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                )
+                .await
+                .expect("create published scoped snapshot image");
+            let image = match image_kind {
+                ScopedSnapshotImage::Valid => image,
+                ScopedSnapshotImage::UnauthenticatedRoute => {
+                    edit_snapshot_image(image_dir.path(), image, |connection| {
+                        connection
+                            .corrupt_document_route_id()
+                            .expect("tamper private route id");
+                    })
+                }
+                ScopedSnapshotImage::CircleRow => {
+                    let route = source
+                        .test_sql(|database| {
+                            database.document_circle_route("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
+                        })
+                        .await
+                        .expect("load Circle row route");
+                    edit_snapshot_image(image_dir.path(), image, |connection| {
+                        connection
+                            .execute(
+                                "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)",
+                                (
+                                    "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                                    &route.0,
+                                    "Circle document",
+                                    &route.2,
+                                ),
+                            )
+                            .expect("insert Circle row into Store snapshot");
+                        connection
+                            .install_row_route(
+                                &route.1,
+                                "documents",
+                                "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
+                                &route.2,
+                            )
+                            .expect("insert Circle private route into Store snapshot");
+                    })
+                }
+                ScopedSnapshotImage::InvalidCircleMirror => {
+                    edit_snapshot_image(image_dir.path(), image, |connection| {
+                        connection
+                            .replace_first_circle_audience(Some("local"))
+                            .expect("replace Circle mirror with Local audience");
+                    })
+                }
+                ScopedSnapshotImage::OrphanStoreMirror => {
+                    edit_snapshot_image(image_dir.path(), image, |connection| {
+                        connection
+                            .replace_first_circle_audience(None)
+                            .expect("replace Circle mirror with orphan Store audience");
+                    })
+                }
+            };
+            let coverage = CommitFrontier(BTreeMap::new());
+            device
+                .publish_snapshot(image, coverage.clone())
+                .await
+                .expect("publish scoped snapshot");
+            device
+                .publish_acknowledgement(coverage)
+                .await
+                .expect("publish scoped snapshot acknowledgement");
+
+            Self {
+                source,
+                store,
+                membership,
+            }
+        }
+
         async fn open<'storage>(
             &'storage self,
             database_path: &Path,
@@ -896,106 +992,6 @@ mod tests {
         connection
             .into_bytes()
             .expect("serialize edited snapshot image")
-    }
-
-    async fn publish_scoped_snapshot(
-        store_id: &str,
-        image_kind: ScopedSnapshotImage,
-    ) -> PublishedScopedSnapshot {
-        let source = open_scoped_snapshot_test_db();
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(&source, store_id, signer.clone())
-            .await
-            .expect("create published scoped snapshot Store");
-        let device = store
-            .open_into(&source)
-            .await
-            .expect("load published scoped snapshot membership");
-        let membership = device
-            .membership_for_test()
-            .await
-            .expect("project published scoped snapshot membership");
-        seed_scoped_snapshot_rows(&source).await;
-
-        let image_dir = tempfile::tempdir().expect("published scoped snapshot image directory");
-        let image_path = image_dir.path().to_path_buf();
-        let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
-            .capture_snapshot_image_for_test(
-                root,
-                image_path,
-                Some(crate::encryption::EncryptionService::from_key([42; 32])),
-            )
-            .await
-            .expect("create published scoped snapshot image");
-        let image = match image_kind {
-            ScopedSnapshotImage::Valid => image,
-            ScopedSnapshotImage::UnauthenticatedRoute => {
-                edit_snapshot_image(image_dir.path(), image, |connection| {
-                    connection
-                        .corrupt_document_route_id()
-                        .expect("tamper private route id");
-                })
-            }
-            ScopedSnapshotImage::CircleRow => {
-                let route = source
-                    .test_sql(|database| {
-                        database.document_circle_route("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
-                    })
-                    .await
-                    .expect("load Circle row route");
-                edit_snapshot_image(image_dir.path(), image, |connection| {
-                    connection
-                        .execute(
-                            "INSERT INTO documents VALUES (?1, ?2, ?3, ?4)",
-                            (
-                                "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                                &route.0,
-                                "Circle document",
-                                &route.2,
-                            ),
-                        )
-                        .expect("insert Circle row into Store snapshot");
-                    connection
-                        .install_row_route(
-                            &route.1,
-                            "documents",
-                            "2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7",
-                            &route.2,
-                        )
-                        .expect("insert Circle private route into Store snapshot");
-                })
-            }
-            ScopedSnapshotImage::InvalidCircleMirror => {
-                edit_snapshot_image(image_dir.path(), image, |connection| {
-                    connection
-                        .replace_first_circle_audience(Some("local"))
-                        .expect("replace Circle mirror with Local audience");
-                })
-            }
-            ScopedSnapshotImage::OrphanStoreMirror => {
-                edit_snapshot_image(image_dir.path(), image, |connection| {
-                    connection
-                        .replace_first_circle_audience(None)
-                        .expect("replace Circle mirror with orphan Store audience");
-                })
-            }
-        };
-        let coverage = CommitFrontier(BTreeMap::new());
-        device
-            .publish_snapshot(image, coverage.clone())
-            .await
-            .expect("publish scoped snapshot");
-        device
-            .publish_acknowledgement(coverage)
-            .await
-            .expect("publish scoped snapshot acknowledgement");
-
-        PublishedScopedSnapshot {
-            source,
-            store,
-            membership,
-        }
     }
 
     #[tokio::test]
@@ -1307,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_installs_a_valid_scoped_snapshot_with_authenticated_routes() {
         let store_id = "snapshot-valid-private-routes";
-        let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::Valid).await;
+        let fixture = PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::Valid).await;
         let destination = tempfile::tempdir().expect("valid-route bootstrap destination");
         let database_path = destination.path().join("store.db");
         let database = fixture
@@ -1440,7 +1436,8 @@ mod tests {
     async fn bootstrap_rejects_a_signed_snapshot_with_an_unauthenticated_private_route() {
         let store_id = "snapshot-invalid-private-route";
         let fixture =
-            publish_scoped_snapshot(store_id, ScopedSnapshotImage::UnauthenticatedRoute).await;
+            PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::UnauthenticatedRoute)
+                .await;
         let destination = tempfile::tempdir().expect("route-tamper bootstrap destination");
         let database_path = destination.path().join("store.db");
         let result = fixture.open(&database_path).await;
@@ -1463,7 +1460,8 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_rejects_a_store_snapshot_containing_a_circle_row() {
         let store_id = "snapshot-store-image-circle-row";
-        let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::CircleRow).await;
+        let fixture =
+            PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::CircleRow).await;
         let destination = tempfile::tempdir().expect("Circle-row bootstrap destination");
         let database_path = destination.path().join("store.db");
         let result = fixture.open(&database_path).await;
@@ -1487,7 +1485,8 @@ mod tests {
     async fn bootstrap_rejects_an_invalid_opaque_circle_mirror() {
         let store_id = "snapshot-invalid-opaque-circle-mirror";
         let fixture =
-            publish_scoped_snapshot(store_id, ScopedSnapshotImage::InvalidCircleMirror).await;
+            PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::InvalidCircleMirror)
+                .await;
         let destination = tempfile::tempdir().expect("invalid-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
         let result = fixture.open(&database_path).await;
@@ -1511,7 +1510,8 @@ mod tests {
     async fn bootstrap_rejects_an_orphan_store_mirror() {
         let store_id = "snapshot-orphan-store-mirror";
         let fixture =
-            publish_scoped_snapshot(store_id, ScopedSnapshotImage::OrphanStoreMirror).await;
+            PublishedScopedSnapshot::publish(store_id, ScopedSnapshotImage::OrphanStoreMirror)
+                .await;
         let destination = tempfile::tempdir().expect("orphan-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
         let result = fixture.open(&database_path).await;
@@ -1824,106 +1824,109 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
-        Box::pin(run_snapshot_keeps_the_authenticated_blob_graph_closed()).await;
-    }
-
-    async fn run_snapshot_keeps_the_authenticated_blob_graph_closed() {
-        let declaration = crate::sync::session::BlobDecl::new(
-            "photos",
-            crate::blob::Provenance::HostProvided,
-            crate::blob::CacheFill::CacheEager,
-        );
-        let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &source,
-            "snapshot-blob-ownership-graph",
-            signer.clone(),
-        )
-        .await
-        .expect("create exact blob Store");
-        source
-            .execute_test_host_write(
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
-             VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+        Box::pin(async {
+            let declaration = crate::sync::session::BlobDecl::new(
+                "photos",
+                crate::blob::Provenance::HostProvided,
+                crate::blob::CacheFill::CacheEager,
+            );
+            let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
+            let signer = UserKeypair::generate();
+            let store = crate::sync::test_helpers::TestStore::create(
+                &source,
+                "snapshot-blob-ownership-graph",
+                signer.clone(),
             )
-            .await;
-        source
-            .execute_test_host_write(&format!(
-                "INSERT INTO note_photos
+            .await
+            .expect("create exact blob Store");
+            source
+                .execute_test_host_write(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+             VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+                )
+                .await;
+            source
+                .execute_test_host_write(&format!(
+                    "INSERT INTO note_photos
                  (id, note_id, kind, size, hash, _updated_at, created_at)
                  VALUES ('photo1', 'n1', 'cover', 11, '{}',
                          '0000000001000-0000-owner', '2026-01-01')",
-                crate::blob::content_hash(b"cover-bytes"),
-            ))
-            .await;
-        let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
-        crate::store_dir::StoreDir::store_local_blob(
-            &source_dir,
-            "photos",
-            "photo1",
-            b"cover-bytes",
-        )
-        .await
-        .expect("stage source blob");
-        let writer = crate::storage::CloudSyncStorage::new(
-            store.home.clone(),
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
-            crate::storage::BlobPathScheme::Hashed,
-            "snapshot-blob-ownership-graph",
-            signer,
-        )
-        .expect("construct blob writer");
-        crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&source),
-            source_dir.clone(),
-        )
-        .run_cycle(writer)
-        .await
-        .expect("publish source blob");
-
-        let image_dir = tempfile::tempdir().expect("snapshot image directory");
-        let image_path = image_dir.path().to_path_buf();
-        let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
-            .capture_snapshot_image_for_test(root, image_path, None)
+                    crate::blob::content_hash(b"cover-bytes"),
+                ))
+                .await;
+            let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
+            crate::store_dir::StoreDir::store_local_blob(
+                &source_dir,
+                "photos",
+                "photo1",
+                b"cover-bytes",
+            )
             .await
-            .expect("create blob snapshot");
-        let snapshot = crate::database::DatabaseImageTest::from_bytes(&image)
-            .expect("open inspected snapshot");
-        let graph = snapshot
-            .snapshot_blob_graph()
-            .expect("read closed snapshot blob graph");
-        assert_eq!(graph.0, "note_photos");
-        assert_eq!(graph.1, "photo1");
-        assert_eq!(graph.2, "id");
-        assert_eq!(graph.3, "0000000001000-0000-owner");
-        assert_eq!(graph.4.len(), 64);
-        assert_eq!(graph.5.object_id().to_string().len(), 64);
-        assert!(
-            !serde_json::to_string(&graph.5)
-                .expect("serialize snapshot remote blob")
-                .contains(source_dir.storage_dir().to_string_lossy().as_ref()),
-            "snapshot remote blob state must not carry its source StoreDir",
-        );
-        assert!(matches!(
-            graph.5.bytes().stored(),
-            crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
-        ));
-        for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
-            let count = snapshot
-                .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
-                .expect("count snapshot blob ownership table");
-            assert_eq!(count, 1, "snapshot carries one {table} row");
-        }
-        let foreign_key_violations: i64 = snapshot
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .expect("check snapshot blob foreign keys");
-        assert_eq!(foreign_key_violations, 0);
+            .expect("stage source blob");
+            let writer = crate::storage::CloudSyncStorage::new(
+                store.home.clone(),
+                crate::storage::CloudCipher::Encrypted(
+                    crate::encryption::EncryptionService::from_key([42; 32]),
+                ),
+                crate::storage::BlobPathScheme::Hashed,
+                "snapshot-blob-ownership-graph",
+                signer,
+            )
+            .expect("construct blob writer");
+            let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
+                StoreDatabase::new(&source),
+                source_dir.clone(),
+            )
+            .prepare_sync(writer)
+            .await
+            .expect("prepare source blob publication");
+            components
+                .run_cycle(&crate::clock::SystemClock, None, &source_dir, None)
+                .await
+                .expect("publish source blob");
+
+            let image_dir = tempfile::tempdir().expect("snapshot image directory");
+            let image_path = image_dir.path().to_path_buf();
+            let root = store.root.clone();
+            let image = StoreDatabase::new(&source)
+                .capture_snapshot_image_for_test(root, image_path, None)
+                .await
+                .expect("create blob snapshot");
+            let snapshot = crate::database::DatabaseImageTest::from_bytes(&image)
+                .expect("open inspected snapshot");
+            let graph = snapshot
+                .snapshot_blob_graph()
+                .expect("read closed snapshot blob graph");
+            assert_eq!(graph.0, "note_photos");
+            assert_eq!(graph.1, "photo1");
+            assert_eq!(graph.2, "id");
+            assert_eq!(graph.3, "0000000001000-0000-owner");
+            assert_eq!(graph.4.len(), 64);
+            assert_eq!(graph.5.object_id().to_string().len(), 64);
+            assert!(
+                !serde_json::to_string(&graph.5)
+                    .expect("serialize snapshot remote blob")
+                    .contains(source_dir.storage_dir().to_string_lossy().as_ref()),
+                "snapshot remote blob state must not carry its source StoreDir",
+            );
+            assert!(matches!(
+                graph.5.bytes().stored(),
+                crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
+            ));
+            for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
+                let count = snapshot
+                    .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
+                    .expect("count snapshot blob ownership table");
+                assert_eq!(count, 1, "snapshot carries one {table} row");
+            }
+            let foreign_key_violations: i64 = snapshot
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .expect("check snapshot blob foreign keys");
+            assert_eq!(foreign_key_violations, 0);
+        })
+        .await;
     }
 
     fn blob_graph_activation(label: &str) -> crate::protocol::store_commit::StreamActivationId {

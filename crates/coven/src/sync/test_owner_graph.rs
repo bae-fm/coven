@@ -11,7 +11,6 @@ use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobC
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
     database: StoreDatabase,
-    store_dir: StoreDir,
     cache: StoreBlobCache,
     local_access: LocalStoreBlobAccess,
     local_transitions: LocalBlobTransitions,
@@ -42,7 +41,6 @@ impl TestOwnerGraph {
         );
         Self {
             database,
-            store_dir,
             cache,
             local_access,
             local_transitions,
@@ -151,9 +149,9 @@ impl TestOwnerGraph {
         )
     }
 
-    pub(crate) async fn run_cycle(
+    pub(crate) async fn prepare_sync(
         &self,
-        storage: crate::storage::CloudSyncStorage,
+        storage: impl Into<std::sync::Arc<crate::storage::CloudSyncStorage>>,
     ) -> Result<crate::sync::cycle::SyncComponents, String> {
         let expected_store_root = self
             .database
@@ -172,12 +170,8 @@ impl TestOwnerGraph {
         ))
         .await
         .map_err(|error| error.to_string())?;
-        let components = Box::pin(components.initialize())
+        Box::pin(components.initialize())
             .await
-            .map_err(|error| error.to_string())?;
-        Box::pin(components.run_cycle(&crate::clock::SystemClock, None, &self.store_dir, None))
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(components)
+            .map_err(|error| error.to_string())
     }
 }

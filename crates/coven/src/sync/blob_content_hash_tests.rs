@@ -3,12 +3,10 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::blob::locator::{BlobLocator, BlobLocatorError, RemoteAudience, StoredBlobRef};
-use crate::blob::BlobScope;
+use crate::blob::locator::{BlobLocatorError, StoredBlobRef};
 use crate::encryption::EncryptionService;
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::ExactSlotStorage;
-use crate::storage::{BlobSpoolProtection, BlobWriteAuthority, StorageError, SyncStorage};
+use crate::storage::{BlobSpoolProtection, StorageError, SyncStorage};
 use crate::sync::test_helpers::TestStore;
 
 const BLOB_ID: &str = "blobxxxx";
@@ -16,64 +14,6 @@ const STORE_KEY: [u8; 32] = [42; 32];
 
 fn protection() -> EncryptionService {
     EncryptionService::from_key(STORE_KEY)
-}
-
-async fn create_exact_blob(store: &TestStore, bytes: &[u8]) -> StoredBlobRef {
-    let (uploader, registration, _) = store
-        .founder_device_authority()
-        .await
-        .expect("load exact founder blob authority");
-    let authority = BlobWriteAuthority::new(&uploader, &registration)
-        .expect("verify exact founder blob authority");
-    let locator = BlobLocator::opaque(
-        "photos",
-        BLOB_ID,
-        uploader.clone(),
-        RemoteAudience::Store,
-        BlobScope::Master,
-        protection().seal_key_fingerprint(),
-        bytes.len() as u64,
-        ObjectHash::digest(bytes),
-    )
-    .expect("build exact blob locator");
-    let directory = tempfile::tempdir().expect("create blob fixture directory");
-    let plaintext = directory.path().join("plaintext");
-    let spool = directory.path().join("stored");
-    crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
-        .await
-        .expect("write exact blob plaintext");
-    store
-        .storage
-        .seal_blob_to_spool(
-            &locator,
-            &authority,
-            BlobSpoolProtection::Opaque(protection()),
-            &plaintext,
-            &spool,
-        )
-        .await
-        .expect("seal exact blob");
-    let slot = store
-        .storage
-        .allocate_blob_slot(&locator, &authority)
-        .await
-        .expect("allocate exact blob slot");
-    let stored = store
-        .storage
-        .prepare_blob_object(&locator, &authority, slot, &spool)
-        .await
-        .expect("prepare exact blob object");
-    store
-        .storage
-        .create_blob_object_from_file(
-            &stored,
-            &authority,
-            &spool,
-            &crate::storage::cloud::no_progress(),
-        )
-        .await
-        .expect("create exact blob object");
-    stored
 }
 
 #[tokio::test]
@@ -84,8 +24,12 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     assert_eq!(real.len(), planted.len(), "fixture uses equal-size blobs");
     assert_ne!(real, planted);
 
-    let real_blob = create_exact_blob(&store, real).await;
-    let planted_blob = create_exact_blob(&store, planted).await;
+    let real_blob = store
+        .create_exact_opaque_blob("photos", BLOB_ID, real)
+        .await;
+    let planted_blob = store
+        .create_exact_opaque_blob("photos", BLOB_ID, planted)
+        .await;
     assert_ne!(
         real_blob.locator().locator_hash(),
         planted_blob.locator().locator_hash()
@@ -125,8 +69,12 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     );
     assert_ne!(previous, current);
 
-    let previous_blob = create_exact_blob(&store, previous).await;
-    let current_blob = create_exact_blob(&store, current).await;
+    let previous_blob = store
+        .create_exact_opaque_blob("photos", BLOB_ID, previous)
+        .await;
+    let current_blob = store
+        .create_exact_opaque_blob("photos", BLOB_ID, current)
+        .await;
     let previous_stored = store
         .home
         .read_at(previous_blob.object().slot())

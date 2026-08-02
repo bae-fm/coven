@@ -20,8 +20,7 @@ fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, Stri
     database
         .install_test_store_root_authority("scoped-routing-root")
         .expect("install scoped-routing Store root authority");
-    let (circle_id, control) =
-        crate::sync::test_helpers::install_test_active_circle(&database, label);
+    let (circle_id, control) = database.install_test_active_circle(label);
     (
         circle_id.to_string(),
         serde_json::to_string(&control).expect("serialize active Circle control"),
@@ -679,8 +678,7 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
     database
         .install_test_store_root_authority("scoped-routing-root")
         .expect("install scoped-routing Store root authority");
-    let (inactive_circle, _) =
-        crate::sync::test_helpers::install_test_inactive_circle(&database, "inactive-circle");
+    let (inactive_circle, _) = database.install_test_inactive_circle("inactive-circle");
     drop(authority);
 
     for (id, audience, expected_error) in [

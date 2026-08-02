@@ -243,24 +243,21 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     commit_reached.notified().await;
-    let tables = target.synced_tables().to_vec();
     let stamper = target.stamper();
-    let write_id = target.new_write_id();
-    let host_stamp = target
-        .test_sql(move |conn| {
-            conn.run_internal_store_write(&tables, None, write_id, |tx| {
-                let stamp = stamper.stamp();
-                tx.execute(
-                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    let host_stamp = crate::database::StoreDatabase::new(&target)
+        .run_host_store_write_for_test(None, None, move |tx| {
+            let stamp = stamper.stamp();
+            tx.execute(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                          VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
-                    [stamp.as_str()],
-                )
-                .map_err(crate::database::DbError::from)?;
-                Ok::<String, crate::database::DbError>(stamp)
-            })
+                [stamp.as_str()],
+            )
+            .map_err(crate::database::DbError::from)?;
+            Ok::<String, crate::database::DbError>(stamp)
         })
         .await
-        .expect("queued host write commits");
+        .expect("queued host write commits")
+        .value;
     pull.abort();
     let _ = pull.await;
 

@@ -75,6 +75,14 @@ fn tombstone_key(stored: &StoredBlobRef, suffix: &str) -> String {
     format!("{TOMBSTONE_PREFIX}{}{suffix}", tombstone_object_id(stored))
 }
 
+#[cfg(test)]
+pub(crate) fn tombstone_key_for_test(
+    stored: &StoredBlobRef,
+    cipher: &crate::storage::CloudCipher,
+) -> String {
+    tombstone_key(stored, cipher.suffix())
+}
+
 fn stored_cloud_key(stored: &StoredBlobRef) -> &str {
     stored.object().slot().logical_key()
 }

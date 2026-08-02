@@ -23,12 +23,6 @@ impl Database {
         }
     }
 
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn new_write_id(&self) -> WriteId {
-        WriteId::from_generated(self.state.ids.new_id())
-    }
-
     pub(crate) fn store_runtime(&self) -> crate::database::StoreDatabaseRuntime {
         self.state.store_runtime.clone()
     }
@@ -286,11 +280,9 @@ impl Database {
 
     /// Run `f` against the connection and await the result.
     ///
-    /// This is how coven runs bookkeeping, gating reads, raw test writes, and
-    /// apply — anything that needs `&Connection`. Public host writes and coven
-    /// transitions that mutate synced rows wrap their write in a
-    /// [`Self::run_internal_store_write_transaction_on`] transaction (still through
-    /// `call`) so it lands in the pending-changeset journal.
+    /// This is how tests run raw bookkeeping and gating operations that need a
+    /// `&Connection`. Host writes and coven transitions that mutate synced rows
+    /// go through [`StoreDatabase`] so they land in the pending-write journal.
     ///
     /// Hands `f` to the connection thread and awaits its reply, so the SQL runs
     /// off the async executor.

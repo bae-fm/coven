@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -29,15 +29,13 @@ use crate::keys::UserKeypair;
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
-use crate::storage::{CloudCipher, PendingRotation};
 use crate::store_dir::StoreDir;
-use crate::sync::cycle::{run_single_sync_cycle, DeferredLocalBlobDisposition, SyncCycleResult};
+use crate::sync::cycle::DeferredLocalBlobDisposition;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::test_helpers::{
-    exact_tombstone_key, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, plaintext_cipher, remote_root_db, temp_store_dir,
-    TestStore,
+    open_test_db, open_test_db_schema, open_test_db_with_blob,
+    open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use crate::Migration;
@@ -164,111 +162,6 @@ impl BlobTransitionObserver for Recorder {
     }
 }
 
-/// Run one real sync cycle for `device`, with the mock wired as both storage and
-/// cloud home so the upload drain, the gate, the tombstone drain, and the GC all run.
-#[allow(clippy::too_many_arguments)]
-async fn run_cycle(
-    storage: &TestStore,
-    _device: &str,
-    hlc: &Hlc,
-    db: &Database,
-    cipher: &RwLock<CloudCipher>,
-    kp: &UserKeypair,
-    lib: &StoreDir,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> SyncCycleResult {
-    storage.open_into(db).await.expect("open exact test Store");
-    let store_device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read exact local Store device")
-        .expect("test database has an activated Store device");
-    // A fresh gate each call: none of these transition tests exercise a rotation
-    // this device can't adopt.
-    let pending_rotation = PendingRotation::none();
-    let result = run_single_sync_cycle(
-        storage.storage.clone(),
-        &store_device_id,
-        hlc,
-        &SystemClock,
-        db,
-        cipher,
-        &pending_rotation,
-        kp,
-        None,
-        lib,
-        Some(storage.home.as_ref()),
-        observer,
-    )
-    .await
-    .expect("cycle");
-    result
-}
-
-/// Like [`run_cycle`] but surfaces the cycle result instead of unwrapping it, so a
-/// test can drive a cycle expected to fail (e.g. a pull rejected by a schema floor).
-#[allow(clippy::too_many_arguments)]
-async fn try_run_cycle(
-    storage: &TestStore,
-    _device: &str,
-    hlc: &Hlc,
-    db: &Database,
-    cipher: &RwLock<CloudCipher>,
-    kp: &UserKeypair,
-    lib: &StoreDir,
-) -> Result<SyncCycleResult, String> {
-    storage.open_into(db).await.expect("open exact test Store");
-    let store_device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "test database has no activated Store device".to_string())?;
-    let pending_rotation = PendingRotation::none();
-    run_single_sync_cycle(
-        storage.storage.clone(),
-        &store_device_id,
-        hlc,
-        &SystemClock,
-        db,
-        cipher,
-        &pending_rotation,
-        kp,
-        None,
-        lib,
-        Some(storage.home.as_ref()),
-        None,
-    )
-    .await
-    .map_err(|error| error.to_string())
-}
-
-/// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not,
-/// carrying `bytes`'s length and content hash so a peer that later downloads the
-/// blob verifies it. The two seeders below differ only in this flag and where the
-/// blob's bytes live.
-async fn seed_release_rows(
-    db: &Database,
-    note_id: &str,
-    photo_id: &str,
-    cloud_path: &str,
-    shared: u8,
-    bytes: &[u8],
-) {
-    db.execute_test_sql(&format!(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('{note_id}', 'Release', NULL, {shared}, '0000000001000-0000-A', '2026-01-01')"
-    ))
-    .await;
-    db.execute_test_sql(&format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
-            bytes.len(),
-            crate::blob::content_hash(bytes),
-        ),
-    )
-    .await;
-}
-
 /// Insert a Local release: a gated-off note plus a blob-bearing photo with an
 /// external source file registered for it. Returns the external source path.
 async fn seed_local_release(
@@ -279,34 +172,9 @@ async fn seed_local_release(
     cloud_path: &str,
     bytes: &[u8],
 ) -> PathBuf {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes).await;
-    std::fs::create_dir_all(user_dir).unwrap();
-    let src = user_dir.join(format!("{photo_id}.jpg"));
-    std::fs::write(&src, bytes).unwrap();
-    db.register_external_blob_for_test("note_photos", photo_id, &src)
+    db.seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
         .await;
-    src
-}
-
-/// Add a second blob-bearing photo (with its external source registered) to a
-/// release already seeded by [`seed_local_release`] — for the multi-blob tests.
-/// Returns the external source path.
-async fn add_local_photo(
-    db: &Database,
-    user_dir: &std::path::Path,
-    note_id: &str,
-    photo_id: &str,
-    cloud_path: &str,
-    bytes: &[u8],
-) -> PathBuf {
-    db.execute_test_host_write(&format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
-            bytes.len(),
-            crate::blob::content_hash(bytes),
-        ),
-    )
-    .await;
+    std::fs::create_dir_all(user_dir).unwrap();
     let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
     db.register_external_blob_for_test("note_photos", photo_id, &src)
@@ -328,7 +196,8 @@ async fn seed_remote_release(
     cloud_path: &str,
     bytes: &[u8],
 ) {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes).await;
+    db.seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
+        .await;
     crate::store_dir::StoreDir::store_local_blob(store_dir, "fixture_sources", photo_id, bytes)
         .await
         .expect("write exact remote fixture source");
@@ -507,33 +376,6 @@ async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() 
     assert_eq!(count, 2);
 }
 
-async fn publish_fixture_position(
-    storage: &TestStore,
-    db: &Database,
-    store_dir: &StoreDir,
-    note_id: &str,
-) -> u64 {
-    db.execute_test_host_write(&format!(
-        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-             VALUES ('{note_id}', 'fixture position', 1, '0000000001000-0000-A', '2026-01-01')"
-    ))
-    .await;
-    assert!(storage
-        .publish_pending(db, store_dir)
-        .await
-        .expect("publish fixture Store position"));
-    storage
-        .founder_device()
-        .await
-        .expect("retain fixture Store device")
-        .latest_local_store_position()
-        .await
-        .expect("read fixture Store position")
-        .expect("fixture Store write has an exact position")
-        .coord
-        .sequence()
-}
-
 // ===========================================================================
 // Multi-device make_remote / make_local
 // ===========================================================================
@@ -547,11 +389,6 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let db_a = open_test_db_with_blob(photo_decl());
     let store_database_a = StoreDatabase::new(&db_a);
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext_cipher();
-    let hlc_a = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp_a, lib_a) = temp_store_dir();
     let owners_a = TestOwnerGraph::new(StoreDatabase::new(&db_a), lib_a.clone());
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
@@ -567,7 +404,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     .await;
 
     // A cycle while the note is gated off: nothing reaches a peer.
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
     let db_b = open_test_db_with_blob(photo_decl());
     let (_tmp_b, lib_b) = temp_store_dir();
     let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
@@ -591,17 +431,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         .await
         .expect("make_remote");
     let recorder = Recorder::default();
-    let result = run_cycle(
-        &storage,
-        "A",
-        &hlc_a,
-        &db_a,
-        &enc,
-        &kp_a,
-        &lib_a,
-        Some(&recorder),
-    )
-    .await;
+    let result = storage
+        .run_founder_cycle(&lib_a, Some(&recorder))
+        .await
+        .expect("run founder cycle");
 
     // The flip completed this cycle: the gate is on, the intent is gone, the
     // external ref is dropped, the user's source file is left in place, the blob
@@ -643,7 +476,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     );
 
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
     peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
         db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
@@ -697,12 +533,6 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
 async fn re_enqueue_updates_the_pending_upload_pin() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
     let bytes = b"PHOTO-repin".to_vec();
@@ -736,7 +566,10 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
         "the re-enqueue must update the queued upload's pin to the new call's value",
     );
 
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the release is Remote");
     assert!(
@@ -753,12 +586,6 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 async fn re_enqueue_updates_the_pending_upload_source_path() {
     let db = open_test_db_with_blob(photo_decl());
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
     let bytes = b"PHOTO-relocate".to_vec();
@@ -793,7 +620,10 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
         "the re-enqueue repoints the queued upload at the new source",
     );
 
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     assert_eq!(
         shared_flag(&db, "n1").await,
@@ -813,12 +643,6 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let db = open_test_db_with_blob(photo_decl());
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
@@ -836,7 +660,10 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         .make_remote("notes", "n1", false)
         .await
         .expect("make_remote");
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the root is Remote");
     assert!(
@@ -883,14 +710,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let db_a = open_test_db_with_blob(photo_decl());
         let store_database_a = StoreDatabase::new(&db_a);
         let storage = create_store(&db_a, kp_a.clone()).await;
-        let enc = plaintext_cipher();
         let kp_b = UserKeypair::generate();
         let hlc_a = Hlc::new(
             "A".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-        let hlc_b = Hlc::new(
-            "B".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
         );
         let db_b = open_test_db_with_blob(photo_decl());
@@ -921,10 +743,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
         // incremental pull.
         // A pushes the Remote release; B pulls it.
-        Box::pin(run_cycle(
-            &storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None,
-        ))
-        .await;
+        Box::pin(storage.run_founder_cycle(&lib_a, None))
+            .await
+            .expect("run founder cycle");
         peer.pull_store(&lib_b).await.expect("pull peer Store");
         assert!(
             db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
@@ -994,24 +815,18 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
         // A's retract cycle: the gate flip false emits DELETEs and the tombstone drain
         // writes the cloud tombstone.
-        Box::pin(run_cycle(
-            &storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None,
-        ))
-        .await;
+        Box::pin(storage.run_founder_cycle(&lib_a, None))
+            .await
+            .expect("run founder cycle");
         assert!(
-            storage
-                .home
-                .exists(&exact_tombstone_key(&remote_blob))
-                .await
-                .unwrap(),
+            storage.contains_blob_tombstone(&remote_blob).await.unwrap(),
             "the cloud blob is tombstoned",
         );
 
         // B's next cycle pulls the retract: its subtree disappears.
-        Box::pin(run_cycle(
-            &storage, "B", &hlc_b, &db_b, &enc, &kp_b, &lib_b, None,
-        ))
-        .await;
+        Box::pin(peer.run_cycle(&lib_b, None))
+            .await
+            .expect("run peer cycle");
         assert!(
             !db_b
                 .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
@@ -1467,11 +1282,6 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let store_database_a = StoreDatabase::new(&db_a);
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext_cipher();
-    let hlc_a = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp_a, lib_a) = temp_store_dir();
     let owners_a = TestOwnerGraph::new(store_database_a.clone(), lib_a.clone());
     let kp_b = UserKeypair::generate();
@@ -1509,7 +1319,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .expect("invite and activate peer Store device");
 
     // A cycle while gated off: nothing reaches a peer.
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
 
     // make_remote: the photo drains, the gate flips, and this cycle's inline push
     // uploads the cover from the local store and keeps the requested pin.
@@ -1517,7 +1330,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .make_remote("notes", "n1", true)
         .await
         .expect("make_remote");
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
 
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
@@ -1635,12 +1451,6 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let store_database_a = StoreDatabase::new(&db_a);
     let storage = create_store(&db_a, UserKeypair::generate()).await;
     let exact_creates_before = storage.home.exact_create_count();
-    let enc = plaintext_cipher();
-    let kp_a = storage.protocol_founder_keypair();
-    let hlc_a = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (_tmp_a, lib_a) = temp_store_dir();
     let owners_a = TestOwnerGraph::new(store_database_a, lib_a.clone());
     let cover = b"HOST-ONLY-COVER".to_vec();
@@ -1693,7 +1503,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "the host-provided blob is not published before the cycle uploads it"
     );
 
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
 
     assert_eq!(
         shared_flag(&db_a, "n-host").await,
@@ -1746,8 +1559,6 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new(
         "A".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
@@ -1802,7 +1613,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 
     // The crash: Store publication fails, so neither cleanup intent may apply.
     storage.home.fail_exact_create_before_call(1);
-    let failed = try_run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib).await;
+    let failed = storage.run_founder_cycle(&lib, None).await;
     assert!(failed.is_err(), "the Store package append fails");
 
     assert_eq!(
@@ -1841,7 +1652,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     );
 
     // Recovery republishes the prepared write and applies both dispositions.
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     let store_cache =
         crate::sync::store::blob::StoreBlobCache::new(store_database.clone(), lib.clone());
@@ -1895,12 +1709,6 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-PINNED".to_vec();
 
@@ -1916,7 +1724,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     crate::storage::StagedBlobFile::write_for_test(&pinned, &bytes)
         .await
         .unwrap();
-    let sequence = publish_fixture_position(&storage, &db, &lib, "pin-position").await;
+    let sequence = storage.publish_fixture_position(&lib, "pin-position").await;
     db.insert_published_blob_drop_intent_for_test(
         sequence,
         "covers",
@@ -1928,7 +1736,10 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     .await
     .expect("insert published pin disposition");
 
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     assert!(
         !db.published_blob_drop_intent_exists_for_test("cov-pin")
@@ -1945,12 +1756,6 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
 async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-CACHED".to_vec();
 
@@ -1966,7 +1771,9 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     crate::storage::StagedBlobFile::write_for_test(&cached, &bytes)
         .await
         .unwrap();
-    let sequence = publish_fixture_position(&storage, &db, &lib, "cache-position").await;
+    let sequence = storage
+        .publish_fixture_position(&lib, "cache-position")
+        .await;
     db.insert_published_blob_drop_intent_for_test(
         sequence,
         "covers",
@@ -1978,7 +1785,10 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     .await
     .expect("insert published cache disposition");
 
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
 
     assert!(
         !db.published_blob_drop_intent_exists_for_test("cov-cache")
@@ -1999,7 +1809,9 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let (_tmp, lib) = temp_store_dir();
 
-    let sequence = publish_fixture_position(&storage, &db, &lib, "lost-position").await;
+    let sequence = storage
+        .publish_fixture_position(&lib, "lost-position")
+        .await;
     db.insert_published_blob_drop_intent_for_test(
         sequence,
         "covers",
@@ -2040,11 +1852,6 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let kp_b = UserKeypair::generate();
     let db_a = remote_root_db(cover_decl());
     let storage = create_store(&db_a, kp_a.clone()).await;
-    let enc = plaintext_cipher();
-    let hlc_a = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
 
@@ -2071,8 +1878,14 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .invite_and_activate_peer(&db_a, &db_b, &kp_b)
         .await
         .expect("invite and activate peer Store device");
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
-    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
+    storage
+        .run_founder_cycle(&lib_a, None)
+        .await
+        .expect("run founder cycle");
     assert!(
         storage
             .contains_blob_object(
@@ -2423,7 +2236,10 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
 
     // Two photos under one release.
     let _src1 = seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
-    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
+    let src2 = user.join("photobbb.jpg");
+    std::fs::write(&src2, b"second").unwrap();
+    db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
+        .await;
 
     owners
         .make_remote("notes", "n1", true)
@@ -3042,7 +2858,10 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     let user = tmp.path().join("user");
 
     seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
-    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
+    let src2 = user.join("photobbb.jpg");
+    std::fs::write(&src2, b"second").unwrap();
+    db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
+        .await;
 
     owners
         .make_remote("notes", "n1", true)
@@ -3203,12 +3022,6 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let db = open_test_db_with_blob(photo_decl());
     let store_database = StoreDatabase::new(&db);
     let storage = create_store(&db, UserKeypair::generate()).await;
-    let enc = plaintext_cipher();
-    let kp = storage.protocol_founder_keypair();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"round-trip-photo".to_vec();
@@ -3227,7 +3040,10 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .make_remote("notes", "n1", true)
         .await
         .expect("make_remote 1");
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
     assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
     let first_remote = photo_ref(&db, "photoaaa")
         .await
@@ -3252,13 +3068,18 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .await
         .expect("make_local");
     // The retract cycle writes the tombstone.
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
     assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
     assert!(
         storage
-            .home
-            .exists(&exact_tombstone_key(&first_remote))
+            .contains_blob_tombstone(&first_remote)
             .await
             .unwrap(),
         "the make_local tombstoned the cloud blob",
@@ -3270,7 +3091,10 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .make_remote("notes", "n1", true)
         .await
         .expect("make_remote 2");
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    storage
+        .run_founder_cycle(&lib, None)
+        .await
+        .expect("run founder cycle");
     assert_eq!(
         shared_flag(&db, "n1").await,
         1,
@@ -3292,8 +3116,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     assert_ne!(second_remote.object(), first_remote.object());
     assert!(
         storage
-            .home
-            .exists(&exact_tombstone_key(&first_remote))
+            .contains_blob_tombstone(&first_remote)
             .await
             .unwrap(),
         "the old exact object's tombstone remains valid",

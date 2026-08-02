@@ -1199,12 +1199,6 @@ mod tests {
         );
     }
 
-    async fn write_raw_file(path: &std::path::Path, bytes: &[u8]) {
-        crate::storage::StagedBlobFile::write_for_test(path, bytes)
-            .await
-            .expect("write file");
-    }
-
     #[tokio::test]
     async fn builder_open_runs_coven_and_host_migrations() {
         let (_tmp, handle) = open_files_handle();
@@ -1444,7 +1438,9 @@ mod tests {
         let path = dir
             .local_blob_path("media-files", "orphaaaa")
             .expect("local path");
-        write_raw_file(&path, b"orphaned bytes").await;
+        crate::storage::StagedBlobFile::write_for_test(&path, b"orphaned bytes")
+            .await
+            .expect("write orphaned file");
 
         handle
             .write(
@@ -2025,9 +2021,7 @@ mod tests {
         fixture
             .handle
             .invite_member(
-                &crate::keys::public_key_hex(
-                    &crate::sync::test_helpers::test_circle_owner_keypair(),
-                ),
+                &crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair()),
                 None,
                 crate::MemberRole::Member,
             )
@@ -2098,119 +2092,116 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_public_materialization_survives_store_reopen_without_a_cloud_connection(),
-                )
+                tokio::task::spawn_local(async {
+                    let tmp = tempfile::tempdir().expect("temp dir");
+                    let dir = StoreDir::new(tmp.path());
+                    let signer = crate::keys::UserKeypair::generate();
+                    let keyring =
+                        crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
+                    let open = || {
+                        Coven::builder(config(dir.clone()))
+                            .synced_tables(vec![remote_root_files_table()])
+                            .migrations(vec![files_migration()])
+                            .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
+                            .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
+                            .open()
+                            .expect("open remote-root store")
+                    };
+                    let handle = open();
+                    let store = handle
+                        .create_test_store("lib-test", signer.clone())
+                        .await
+                        .expect("create exact test Store");
+                    handle
+                        .connect_sync_with_test_home(
+                            store.home.clone(),
+                            CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+                        )
+                        .await
+                        .expect("connect exact test Store");
+
+                    let expected = b"public materialized blob".to_vec();
+                    let bytes = expected.clone();
+                    let hash = crate::blob::content_hash(&bytes);
+                    let receipt = handle
+                        .write(
+                            {
+                                let bytes = bytes.clone();
+                                move |batch| {
+                                    batch.put_blob("media-files", "materialized-blob", bytes);
+                                    Ok(())
+                                }
+                            },
+                            move |sql| {
+                                sql.execute(
+                                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                                    params![
+                                        "materialized-row",
+                                        "materialized-blob",
+                                        bytes.len() as i64,
+                                        hash,
+                                        sql.stamp()
+                                    ],
+                                )?;
+                                Ok(())
+                            },
+                        )
+                        .await
+                        .expect("write remote-root blob");
+                    let mut status = handle
+                        .subscribe_write_status(&receipt.write_id)
+                        .await
+                        .expect("subscribe to materialized write");
+                    handle.sync_now();
+                    tokio::time::timeout(Duration::from_secs(20), async {
+                        loop {
+                            let current = status.borrow().clone();
+                            match current {
+                                crate::WriteStatus::Published(_) => break,
+                                crate::WriteStatus::Pending | crate::WriteStatus::Publishing => {
+                                    status.changed().await.expect("write status remains open")
+                                }
+                                other => panic!("materialized write did not publish: {other:?}"),
+                            }
+                        }
+                    })
+                    .await
+                    .expect("materialized write publishes");
+                    let reference = handle
+                        .row_blob_ref("files", "materialized-row")
+                        .await
+                        .expect("capture published row blob");
+                    handle
+                        .materialize_row_blob(&reference)
+                        .await
+                        .expect("materialize through the public handle");
+                    let locator_hash = reference
+                        .stored()
+                        .expect("published row has exact storage")
+                        .locator()
+                        .locator_hash();
+                    let cached = dir
+                        .cache_blob_path("media-files", locator_hash)
+                        .expect("exact cache path");
+                    assert_eq!(std::fs::read(&cached).expect("read exact cache"), expected);
+
+                    handle.disconnect_sync();
+                    drop(handle);
+                    let reopened = open();
+                    let reopened_reference = reopened
+                        .row_blob_ref("files", "materialized-row")
+                        .await
+                        .expect("capture reopened row blob");
+                    reopened
+                        .materialize_row_blob(&reopened_reference)
+                        .await
+                        .expect("reopen verifies the materialized cache without cloud storage");
+                })
                 .await
                 .expect("public materialization task");
             })
             .await;
-    }
-
-    async fn run_public_materialization_survives_store_reopen_without_a_cloud_connection() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let signer = crate::keys::UserKeypair::generate();
-        let keyring = crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
-        let open = || {
-            Coven::builder(config(dir.clone()))
-                .synced_tables(vec![remote_root_files_table()])
-                .migrations(vec![files_migration()])
-                .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
-                .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
-                .open()
-                .expect("open remote-root store")
-        };
-        let handle = open();
-        let store = handle
-            .create_test_store("lib-test", signer.clone())
-            .await
-            .expect("create exact test Store");
-        handle
-            .connect_sync_with_test_home(
-                store.home.clone(),
-                CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
-            )
-            .await
-            .expect("connect exact test Store");
-
-        let expected = b"public materialized blob".to_vec();
-        let bytes = expected.clone();
-        let hash = crate::blob::content_hash(&bytes);
-        let receipt = handle
-            .write(
-                {
-                    let bytes = bytes.clone();
-                    move |batch| {
-                        batch.put_blob("media-files", "materialized-blob", bytes);
-                        Ok(())
-                    }
-                },
-                move |sql| {
-                    sql.execute(
-                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            "materialized-row",
-                            "materialized-blob",
-                            bytes.len() as i64,
-                            hash,
-                            sql.stamp()
-                        ],
-                    )?;
-                    Ok(())
-                },
-            )
-            .await
-            .expect("write remote-root blob");
-        let mut status = handle
-            .subscribe_write_status(&receipt.write_id)
-            .await
-            .expect("subscribe to materialized write");
-        handle.sync_now();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let current = status.borrow().clone();
-                match current {
-                    crate::WriteStatus::Published(_) => break,
-                    crate::WriteStatus::Pending | crate::WriteStatus::Publishing => {
-                        status.changed().await.expect("write status remains open")
-                    }
-                    other => panic!("materialized write did not publish: {other:?}"),
-                }
-            }
-        })
-        .await
-        .expect("materialized write publishes");
-        let reference = handle
-            .row_blob_ref("files", "materialized-row")
-            .await
-            .expect("capture published row blob");
-        handle
-            .materialize_row_blob(&reference)
-            .await
-            .expect("materialize through the public handle");
-        let locator_hash = reference
-            .stored()
-            .expect("published row has exact storage")
-            .locator()
-            .locator_hash();
-        let cached = dir
-            .cache_blob_path("media-files", locator_hash)
-            .expect("exact cache path");
-        assert_eq!(std::fs::read(&cached).expect("read exact cache"), expected);
-
-        handle.disconnect_sync();
-        drop(handle);
-        let reopened = open();
-        let reopened_reference = reopened
-            .row_blob_ref("files", "materialized-row")
-            .await
-            .expect("capture reopened row blob");
-        reopened
-            .materialize_row_blob(&reopened_reference)
-            .await
-            .expect("reopen verifies the materialized cache without cloud storage");
     }
 
     #[tokio::test]
@@ -2453,47 +2444,46 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_pending_write_owns_blob_bytes_until_its_publication())
-                    .await
-                    .expect("pending-write blob ownership test task");
+                tokio::task::spawn_local(async {
+                    let (tmp, handle) = open_files_handle();
+                    let dir = StoreDir::new(tmp.path());
+                    let replacement = PendingReplacement::queue(&handle, &dir).await;
+
+                    assert_eq!(
+                        std::fs::read(&replacement.first_path)
+                            .expect("first write still owns its bytes"),
+                        b"first"
+                    );
+                    let overwrite: CovenResult<WriteReceipt<()>> = handle
+                        .write(
+                            |batch| {
+                                batch.put_blob("media-files", "ownedaaa", b"overwritten".to_vec());
+                                Ok(())
+                            },
+                            |sql| {
+                                sql.execute(
+                                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES ('overwrite', 'ownedaaa', 11, ?1, ?2)",
+                                    params![crate::blob::content_hash(b"overwritten"), sql.stamp()],
+                                )?;
+                                Ok(())
+                            },
+                        )
+                        .await;
+                    assert!(matches!(
+                        overwrite,
+                        Err(CovenError::BlobOwnedByPendingWrite { .. })
+                    ));
+                    assert_eq!(
+                        std::fs::read(&replacement.first_path).expect("lease prevents overwrite"),
+                        b"first"
+                    );
+                    replacement.assert_publishes_in_order(&handle).await;
+                })
+                .await
+                .expect("pending-write blob ownership test task");
             })
             .await;
-    }
-
-    async fn run_pending_write_owns_blob_bytes_until_its_publication() {
-        let (tmp, handle) = open_files_handle();
-        let dir = StoreDir::new(tmp.path());
-        let replacement = PendingReplacement::queue(&handle, &dir).await;
-
-        assert_eq!(
-            std::fs::read(&replacement.first_path).expect("first write still owns its bytes"),
-            b"first"
-        );
-        let overwrite: CovenResult<WriteReceipt<()>> = handle
-            .write(
-                |batch| {
-                    batch.put_blob("media-files", "ownedaaa", b"overwritten".to_vec());
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute(
-                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
-                         VALUES ('overwrite', 'ownedaaa', 11, ?1, ?2)",
-                        params![crate::blob::content_hash(b"overwritten"), sql.stamp()],
-                    )?;
-                    Ok(())
-                },
-            )
-            .await;
-        assert!(matches!(
-            overwrite,
-            Err(CovenError::BlobOwnedByPendingWrite { .. })
-        ));
-        assert_eq!(
-            std::fs::read(&replacement.first_path).expect("lease prevents overwrite"),
-            b"first"
-        );
-        replacement.assert_publishes_in_order(&handle).await;
     }
 
     #[tokio::test]
@@ -2501,27 +2491,25 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_pending_write_blob_ownership_survives_restart())
-                    .await
-                    .expect("reopened pending-write blob ownership test task");
+                tokio::task::spawn_local(async {
+                    let tmp = tempfile::tempdir().expect("temp dir");
+                    let dir = StoreDir::new(tmp.path());
+                    let handle = open_files_handle_in(dir.clone());
+                    let replacement = PendingReplacement::queue(&handle, &dir).await;
+                    drop(handle);
+
+                    let reopened = open_files_handle_in(dir);
+                    assert_eq!(
+                        std::fs::read(&replacement.first_path)
+                            .expect("reopened first write still owns its bytes"),
+                        b"first"
+                    );
+                    replacement.assert_publishes_in_order(&reopened).await;
+                })
+                .await
+                .expect("reopened pending-write blob ownership test task");
             })
             .await;
-    }
-
-    async fn run_pending_write_blob_ownership_survives_restart() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let handle = open_files_handle_in(dir.clone());
-        let replacement = PendingReplacement::queue(&handle, &dir).await;
-        drop(handle);
-
-        let reopened = open_files_handle_in(dir);
-        assert_eq!(
-            std::fs::read(&replacement.first_path)
-                .expect("reopened first write still owns its bytes"),
-            b"first"
-        );
-        replacement.assert_publishes_in_order(&reopened).await;
     }
 
     #[tokio::test]
@@ -2566,8 +2554,12 @@ mod tests {
         crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("restore published blob locally");
-        write_raw_file(&pinned, b"old").await;
-        write_raw_file(&cached, b"old").await;
+        crate::storage::StagedBlobFile::write_for_test(&pinned, b"old")
+            .await
+            .expect("write pinned blob");
+        crate::storage::StagedBlobFile::write_for_test(&cached, b"old")
+            .await
+            .expect("write cached blob");
         let old_ref = BlobRef {
             namespace: "media-files".to_string(),
             id: "oldcccc".to_string(),
@@ -2735,7 +2727,9 @@ mod tests {
         let local = dir
             .local_blob_path("media-files", blob_id)
             .expect("local path");
-        write_raw_file(&local, b"live").await;
+        crate::storage::StagedBlobFile::write_for_test(&local, b"live")
+            .await
+            .expect("write local blob");
 
         let (_source_tmp, source) = open_files_handle();
         let storage = Arc::new(
@@ -2780,8 +2774,12 @@ mod tests {
         let cached = dir
             .cache_blob_path("media-files", locator_hash)
             .expect("cache path");
-        write_raw_file(&pinned, b"live").await;
-        write_raw_file(&cached, b"live").await;
+        crate::storage::StagedBlobFile::write_for_test(&pinned, b"live")
+            .await
+            .expect("write pinned blob");
+        crate::storage::StagedBlobFile::write_for_test(&cached, b"live")
+            .await
+            .expect("write cached blob");
         let delete = source
             .sql(|sql| {
                 sql.execute("DELETE FROM files WHERE id = 'remote-deletes'", [])?;
