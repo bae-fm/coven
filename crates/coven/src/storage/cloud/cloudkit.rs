@@ -1746,16 +1746,14 @@ mod tests {
             (stored, release)
         }
 
-        fn write_chunk_manifest_with_upload_id(
-            &self,
-            key: &str,
-            total_len: usize,
-            upload_id: &str,
-        ) {
+        fn write_chunk_manifest(&self, key: &str, total_len: usize) {
             self.write_record(
                 &CloudKitScope::Private,
                 &chunk_manifest_key(key),
-                encode_chunk_manifest(ChunkManifest::new(total_len, upload_id.to_string())),
+                encode_chunk_manifest(ChunkManifest::new(
+                    total_len,
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                )),
             )
             .unwrap();
         }
@@ -2186,10 +2184,6 @@ mod tests {
         );
     }
 
-    fn write_chunk_manifest(ops: &MockCloudKitOps, key: &str, total_len: usize) {
-        ops.write_chunk_manifest_with_upload_id(key, total_len, "0123456789abcdef0123456789abcdef");
-    }
-
     struct FailingBodyReader {
         emitted: bool,
     }
@@ -2536,7 +2530,7 @@ mod tests {
         let first = vec![1u8; CHUNK_SIZE];
         let second = vec![2u8; CHUNK_SIZE];
         let total_len = (CHUNK_SIZE * 2) + 4;
-        write_chunk_manifest(&ops, "chunked.bin", total_len);
+        ops.write_chunk_manifest("chunked.bin", total_len);
         ops.write_chunk_part("chunked.bin", 0, first);
         ops.write_chunk_part("chunked.bin", 1, second);
 
@@ -2578,7 +2572,7 @@ mod tests {
     async fn read_range_chunked_short_chunk_errors_instead_of_panicking() {
         let (ch, ops) = make_cloud_home_with_ops();
         let total_len = CHUNK_SIZE + 8;
-        write_chunk_manifest(&ops, "short-tail.bin", total_len);
+        ops.write_chunk_manifest("short-tail.bin", total_len);
         ops.write_chunk_part("short-tail.bin", 0, vec![1u8; CHUNK_SIZE]);
         ops.write_chunk_part("short-tail.bin", 1, vec![2u8; 4]);
 

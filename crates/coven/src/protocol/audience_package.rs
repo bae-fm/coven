@@ -425,7 +425,7 @@ mod tests {
             device_id: "device-a".to_string(),
             stream_id: AuthorStreamId::from_bytes([4; 32]),
             author_pubkey: "22".repeat(32),
-            author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+            author_owner_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
                 "audience-package owner",
             ),
             seq: 4,

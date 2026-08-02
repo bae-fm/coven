@@ -898,60 +898,6 @@ pub(super) async fn remove_file(path: &Path) -> Result<bool, String> {
     }
 }
 
-/// Every committed file under `dir` as `(path, mtime_ms, size)`.
-#[cfg(test)]
-pub(super) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let mut entries = match tokio::fs::read_dir(&current).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(path = %current.display(), "local blob directory is absent");
-                continue;
-            }
-            Err(error) => return Err(format!("read dir {}: {error}", current.display())),
-        };
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    return Err(format!(
-                        "read dir entry under {}: {error}",
-                        current.display()
-                    ))
-                }
-            };
-            let path = entry.path();
-            let metadata = match entry.metadata().await {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!(path = %path.display(), "local blob vanished during directory walk");
-                    continue;
-                }
-                Err(error) => return Err(format!("stat entry {}: {error}", path.display())),
-            };
-            if metadata.is_dir() {
-                stack.push(path);
-            } else if !is_temp_blob_path(&path) {
-                files.push((path, mtime_millis(&metadata)?, metadata.len()));
-            }
-        }
-    }
-    Ok(files)
-}
-
-#[cfg(test)]
-fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
-    Ok(metadata
-        .modified()
-        .map_err(|e| format!("modified time: {e}"))?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("modified time predates Unix epoch: {e}"))?
-        .as_millis() as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1365,39 +1311,6 @@ mod tests {
 
         assert_eq!(read(&path).await.expect("read destination"), b"committed");
         assert!(temp_entries(tmp.path()).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn walk_absent_root_is_empty() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let absent = tmp.path().join("absent");
-
-        assert!(walk_files(&absent)
-            .await
-            .expect("walk absent root")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn walk_reports_committed_files_and_filters_temps() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let root = tmp.path().join("blobs");
-        let committed = root.join("nested").join("blob.bin");
-        let temp = root
-            .join("nested")
-            .join(format!("{TEMP_BLOB_PREFIX}in-progress"));
-        AtomicStagedFile::write_for_test(&committed, b"blob")
-            .await
-            .expect("write blob");
-        tokio::fs::write(&temp, b"partial")
-            .await
-            .expect("write temp");
-
-        let files = walk_files(&root).await.expect("walk files");
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].0, committed);
-        assert_eq!(files[0].2, 4);
     }
 
     #[tokio::test]

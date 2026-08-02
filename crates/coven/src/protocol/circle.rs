@@ -676,10 +676,10 @@ mod tests {
         super::super::membership::founder_entry(
             label,
             owner,
-            crate::sync::test_helpers::test_membership_grant_id(label),
+            crate::protocol::causal_grants::MembershipGrantId::from_test_label(label),
             "founder",
             membership,
-            crate::sync::test_helpers::test_founder_provider_admin(label),
+            crate::protocol::provider::FounderProviderAdminGrant::from_test_label(label),
         )
     }
 
@@ -764,6 +764,67 @@ mod tests {
         stream_id: super::super::membership::AuthorStreamId,
     }
 
+    impl MergeDeviceAuthority {
+        fn circle_control_reference(
+            &self,
+            control: &PreparedCircleControl,
+            label: &str,
+        ) -> super::super::store_commit::CircleControlRef {
+            let control_object = exact_object(&format!("{label}/control"), &control.bytes);
+            let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+                "store-v1/test/{label}/control-head/1.json"
+            ))
+            .expect("valid test Circle control-head slot");
+            let activation = super::super::store_commit::StreamActivation::grant_authorized(
+                control.value.store_root_hash,
+                self.reference.clone(),
+                control.value.author_grant_id(),
+                super::super::store_commit::GrantStreamAnchor::CircleControl {
+                    circle_id: control.value.circle_id,
+                    first_slot: head_slot.clone(),
+                },
+            );
+            let head = CircleControlHead::signed(
+                &control.value,
+                control_object.clone(),
+                super::super::store_commit::SuccessorLink {
+                    activation: activation.activation_id(),
+                    predecessor: None,
+                    next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                        "store-v1/test/{label}/control-head/2.json"
+                    ))
+                    .expect("valid next test Circle control-head slot"),
+                },
+                &self.device_signer,
+            );
+            let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle control head");
+            let head_object = crate::storage::ExactObjectRef::new(
+                head_slot,
+                head_bytes.len() as u64,
+                ObjectHash::digest(&head_bytes),
+            );
+            let objects = super::super::store_commit::CircleActivationObjects {
+                control: control_object,
+                close_intent: None,
+                close_outcome: None,
+                close_cancellation: None,
+                roster_entries: BTreeMap::new(),
+                roster_heads: Vec::new(),
+                roster_resolutions: BTreeMap::new(),
+                metadata_entries: BTreeMap::new(),
+                metadata_heads: Vec::new(),
+                access: Vec::new(),
+            };
+            super::super::store_commit::CircleControlRef {
+                circle_id: control.value.circle_id,
+                control: control.coord.clone(),
+                head_hash: head.head_hash(),
+                head_object,
+                objects,
+            }
+        }
+    }
+
     fn merge_device_authority(
         identity: &UserKeypair,
         store_root_hash: ObjectHash,
@@ -820,65 +881,6 @@ mod tests {
             reference,
             device_signer,
             stream_id,
-        }
-    }
-
-    fn merge_control_reference(
-        control: &PreparedCircleControl,
-        device: &MergeDeviceAuthority,
-        label: &str,
-    ) -> super::super::store_commit::CircleControlRef {
-        let control_object = exact_object(&format!("{label}/control"), &control.bytes);
-        let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
-            "store-v1/test/{label}/control-head/1.json"
-        ))
-        .expect("valid test Circle control-head slot");
-        let activation = super::super::store_commit::StreamActivation::grant_authorized(
-            control.value.store_root_hash,
-            device.reference.clone(),
-            control.value.author_grant_id(),
-            super::super::store_commit::GrantStreamAnchor::CircleControl {
-                circle_id: control.value.circle_id,
-                first_slot: head_slot.clone(),
-            },
-        );
-        let head = CircleControlHead::signed(
-            &control.value,
-            control_object.clone(),
-            super::super::store_commit::SuccessorLink {
-                activation: activation.activation_id(),
-                predecessor: None,
-                next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
-                    "store-v1/test/{label}/control-head/2.json"
-                ))
-                .expect("valid next test Circle control-head slot"),
-            },
-            &device.device_signer,
-        );
-        let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle control head");
-        let head_object = crate::storage::ExactObjectRef::new(
-            head_slot,
-            head_bytes.len() as u64,
-            ObjectHash::digest(&head_bytes),
-        );
-        let objects = super::super::store_commit::CircleActivationObjects {
-            control: control_object,
-            close_intent: None,
-            close_outcome: None,
-            close_cancellation: None,
-            roster_entries: BTreeMap::new(),
-            roster_heads: Vec::new(),
-            roster_resolutions: BTreeMap::new(),
-            metadata_entries: BTreeMap::new(),
-            metadata_heads: Vec::new(),
-            access: Vec::new(),
-        };
-        super::super::store_commit::CircleControlRef {
-            circle_id: control.value.circle_id,
-            control: control.coord.clone(),
-            head_hash: head.head_hash(),
-            head_object,
-            objects,
         }
     }
 
@@ -1254,7 +1256,7 @@ mod tests {
             bytes: serde_json::to_vec(&control).expect("serialize control"),
             value: control,
         };
-        let reference = merge_control_reference(&control, &device, "multi-owner");
+        let reference = device.circle_control_reference(&control, "multi-owner");
         let first_coord = super::super::store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 1,
@@ -1397,7 +1399,7 @@ mod tests {
             bytes: serde_json::to_vec(&second_value).expect("serialize second founder control"),
             value: second_value,
         };
-        let second_reference = merge_control_reference(&second_control, &device, "second-founder");
+        let second_reference = device.circle_control_reference(&second_control, "second-founder");
         let second_coord = super::super::store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 2,

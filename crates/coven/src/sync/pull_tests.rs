@@ -615,16 +615,6 @@ fn missing_exact_membership_authority_positions(
         .collect()
 }
 
-fn membership_coord(chain: &MembershipChain, author_pubkey: &str, seq: u64) -> MembershipCoord {
-    let entry = chain
-        .entries()
-        .iter()
-        .filter(|entry| entry.author_pubkey == author_pubkey)
-        .nth(usize::try_from(seq - 1).expect("membership sequence fits usize"))
-        .unwrap_or_else(|| panic!("missing membership coordinate {author_pubkey}/{seq}"));
-    entry.coord()
-}
-
 fn membership_author_stream(
     chain: &MembershipChain,
     signer: &UserKeypair,
@@ -946,6 +936,51 @@ struct ExactPublishedCommit {
     head_object: crate::storage::ExactObjectRef,
 }
 
+impl ExactPublishedCommit {
+    fn sign_commit_with_package(
+        &self,
+        schema_version: u32,
+        membership_authority: crate::protocol::store_commit::StoreOperationMembershipAuthority,
+        package_bytes: &[u8],
+        package_object: crate::storage::ExactObjectRef,
+    ) -> crate::protocol::store_commit::StoreBatchCommit {
+        crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+            self.commit.store_root_hash,
+            self.commit.write_id.clone(),
+            self.reference.coord.clone(),
+            self.commit.author_registration.clone(),
+            &self.registration,
+            self.commit.order.clone(),
+            self.commit.membership_state.clone(),
+            self.commit.device_state.clone(),
+            membership_authority,
+            crate::protocol::store_commit::StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: self.commit.control().cloned(),
+                device_join_attempt_decisions: self.commit.device_join_attempt_decisions().to_vec(),
+                device_join_outcomes: self.commit.device_join_outcomes().to_vec(),
+                device_join_cleanup_receipts: self.commit.device_join_cleanup_receipts().to_vec(),
+                provider_access_grants: self.commit.provider_access_grants().to_vec(),
+                device_registrations: self.commit.device_registrations().to_vec(),
+                device_exclusion_proposals: self.commit.device_exclusion_proposals().to_vec(),
+                device_exclusion_outcomes: self.commit.device_exclusion_outcomes().to_vec(),
+                stream_activations: self.commit.stream_activations().to_vec(),
+                circle_controls: self.commit.circle_controls().to_vec(),
+                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+                    candidate_family: self.commit.candidate_family(),
+                    schema_version,
+                    bytes: package_bytes,
+                    object: package_object,
+                }),
+                circle_packages: &[],
+            },
+            &self.device_signer,
+        )
+        .expect("re-sign exact Store commit")
+    }
+}
+
 async fn load_exact_published_commit(
     storage: &TestStore,
     reference: crate::protocol::store_commit::StoreBatchCommitRef,
@@ -1244,8 +1279,7 @@ async fn resign_exact_commit(
             .clone()
             .expect("published Merge operations commit carries membership authority"),
     };
-    let mut commit = sign_exact_commit_with_package(
-        graph,
+    let mut commit = graph.sign_commit_with_package(
         schema_version,
         crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
         &package_bytes,
@@ -1257,49 +1291,6 @@ async fn resign_exact_commit(
             crate::keys::sign_hex(&graph.device_signer, &commit.canonical_signed_bytes()).1;
     }
     commit
-}
-
-fn sign_exact_commit_with_package(
-    graph: &ExactPublishedCommit,
-    schema_version: u32,
-    membership_authority: crate::protocol::store_commit::StoreOperationMembershipAuthority,
-    package_bytes: &[u8],
-    package_object: crate::storage::ExactObjectRef,
-) -> crate::protocol::store_commit::StoreBatchCommit {
-    crate::protocol::store_commit::StoreBatchCommit::signed_operations(
-        graph.commit.store_root_hash,
-        graph.commit.write_id.clone(),
-        graph.reference.coord.clone(),
-        graph.commit.author_registration.clone(),
-        &graph.registration,
-        graph.commit.order.clone(),
-        graph.commit.membership_state.clone(),
-        graph.commit.device_state.clone(),
-        membership_authority,
-        crate::protocol::store_commit::StoreCommitOperationsInput {
-            acknowledgement: None,
-            circle_acknowledgements: Vec::new(),
-            control: graph.commit.control().cloned(),
-            device_join_attempt_decisions: graph.commit.device_join_attempt_decisions().to_vec(),
-            device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),
-            device_join_cleanup_receipts: graph.commit.device_join_cleanup_receipts().to_vec(),
-            provider_access_grants: graph.commit.provider_access_grants().to_vec(),
-            device_registrations: graph.commit.device_registrations().to_vec(),
-            device_exclusion_proposals: graph.commit.device_exclusion_proposals().to_vec(),
-            device_exclusion_outcomes: graph.commit.device_exclusion_outcomes().to_vec(),
-            stream_activations: graph.commit.stream_activations().to_vec(),
-            circle_controls: graph.commit.circle_controls().to_vec(),
-            store_package: Some(crate::protocol::store_commit::StorePackageInput {
-                candidate_family: graph.commit.candidate_family(),
-                schema_version,
-                bytes: package_bytes,
-                object: package_object,
-            }),
-            circle_packages: &[],
-        },
-        &graph.device_signer,
-    )
-    .expect("re-sign exact Store commit")
 }
 
 async fn replace_exact_package_bytes(
@@ -1362,8 +1353,7 @@ async fn replace_store_package_with_malformed_bytes(
         )
         .await
         .expect("publish malformed exact Store package");
-    let malformed_commit = sign_exact_commit_with_package(
-        &graph,
+    let malformed_commit = graph.sign_commit_with_package(
         SCHEMA_VERSION,
         graph
             .commit
@@ -1517,6 +1507,26 @@ impl crate::sync::test_helpers::StorageInterceptor for FaultingStorage {
             return Err(crate::storage::StorageError::Storage(
                 "forced exact blob read failure".to_string(),
             ));
+        }
+        Ok(())
+    }
+}
+
+struct MissingProtocolSlot {
+    semantic_prefix: String,
+}
+
+#[async_trait]
+impl StorageInterceptor for MissingProtocolSlot {
+    async fn before_protocol_read(
+        &self,
+        read: ProtocolRead,
+        semantic_prefix: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        if read == ProtocolRead::Slot && semantic_prefix == self.semantic_prefix {
+            return Err(crate::storage::StorageError::NotFound(format!(
+                "lagging provider omits {semantic_prefix}"
+            )));
         }
         Ok(())
     }
@@ -5945,7 +5955,6 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     let founder = UserKeypair::generate();
     let db1 = open_test_db();
     let storage = create_store(&db1, founder.clone()).await;
-    let founder_pk = hex::encode(founder.public_key());
 
     let chain = exact_membership_chain(&storage).await;
 
@@ -5962,7 +5971,12 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         "dev1",
         1,
         &cs,
-        Some(membership_coord(&chain, &founder_pk, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
     let graph = load_exact_published_commit(&storage, reference).await;
@@ -6284,7 +6298,12 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         "devM",
         1,
         &changeset,
-        Some(membership_coord(&chain, &owner_pubkey, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
     let stream_id = commit_stream_id(&reference);
@@ -6391,7 +6410,12 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         "devOwner",
         1,
         &cs,
-        Some(membership_coord(&chain, &owner_pk, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
     let stream_id = commit_stream_id(&reference);
@@ -6480,7 +6504,12 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         "devOwner",
         1,
         &changeset,
-        Some(membership_coord(&chain, &owner_pk, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
 
@@ -6679,11 +6708,8 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
-    // The mock signs every head with the owner key, so the member's device head is
-    // owner-authored — a current member — and passes the head-authorization check
-    // even while the member's own Add is still invisible to the LIST.
-    let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let owner_db = open_test_db();
+    let storage = create_store(&owner_db, owner.clone()).await;
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
     let mut chain = exact_membership_chain(&storage).await;
@@ -6697,25 +6723,51 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
             "2026-03-01T00:01:00Z".to_string(),
         )
         .expect("active Owner signs membership grant");
+    let lagging_authority = add_member.coord();
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
+    let hidden_head = chain
+        .head_ref_for_stream(
+            &lagging_authority.author_pubkey,
+            &lagging_authority.author_owner_grant,
+            lagging_authority.stream_id,
+        )
+        .expect("published member Add head")
+        .object
+        .slot()
+        .logical_key()
+        .strip_suffix(".json")
+        .expect("membership head slot key has a .json suffix")
+        .to_string();
+
+    let member_db = open_test_db();
+    storage
+        .activate_joined_device(&owner_db, &member_db, &member, "2026-03-01T00:02:00Z")
+        .await
+        .expect("activate member device");
     // The member authors a signed changeset, stamping the grant coordinate of the
     // entry that authorizes them: (owner, 2), the Add that is lagging the LIST.
     let cs = capture_bytes(
-        &db1,
+        &member_db,
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
         ],
     )
     .await;
-    let reference = publish_exact_changeset_with_authority(
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    let reference = sync_for_test(
+        &member_db,
+        member_db.synced_tables(),
+        cs,
+        0,
         &storage,
-        "devM",
-        1,
-        &cs,
-        Some(membership_coord(&chain, &owner_pk, 1)),
+        "",
+        &member,
+        &member_store_dir,
     )
-    .await;
+    .await
+    .expect("publish member Store changeset")
+    .expect("member Store changeset produces a commit");
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
@@ -6723,7 +6775,39 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let lagging = Arc::new(InterceptedStorage::new(
+        storage.storage.clone(),
+        MissingProtocolSlot {
+            semantic_prefix: hidden_head,
+        },
+    ));
+    let (_pull_temp, pull_store_dir) = temp_store_dir();
+    let store = crate::sync::store::Store::open(
+        crate::database::StoreDatabase::new(&db2),
+        lagging,
+        &storage.root,
+        &owner,
+    )
+    .await
+    .expect("open Store through lagging membership listing")
+    .store;
+    let mut writer = store
+        .authorize_writer()
+        .await
+        .expect("authorize pull through lagging membership listing");
+    let activation = writer
+        .pull(&pull_store_dir, None)
+        .await
+        .expect("materialize member device activation through lagging membership listing");
+    assert!(
+        activation.held_positions.is_empty(),
+        "device activation must materialize before its stream is discovered: {activation:#?}"
+    );
+    let result = writer
+        .pull(&pull_store_dir, None)
+        .await
+        .expect("pull through lagging membership listing");
+    let updated = materialized_sequences(&db2).await;
 
     // The lagging entry was fetched by coordinate and the changeset applied — not
     // dropped as non-member, and not surfaced as a rejection.
@@ -6756,6 +6840,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
             "2026-03-01T00:01:00Z".to_string(),
         )
         .expect("active Owner signs outsider grant");
+    let unrelated_authority = add_outsider.coord();
     publish_exact_membership_entry(&storage, &mut chain, add_outsider, &owner).await;
 
     // Replace the valid commit's authority with another membership coordinate.
@@ -6768,14 +6853,9 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         ],
     )
     .await;
-    let reference = publish_exact_changeset_with_authority(
-        &storage,
-        "devX",
-        1,
-        &cs,
-        Some(membership_coord(&chain, &owner_pk, 2)),
-    )
-    .await;
+    let reference =
+        publish_exact_changeset_with_authority(&storage, "devX", 1, &cs, Some(unrelated_authority))
+            .await;
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
@@ -6835,7 +6915,12 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         "dev1",
         1,
         &cs,
-        Some(membership_coord(&chain, &owner_pk, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
     let graph = load_exact_published_commit(&storage, reference).await;
@@ -7188,27 +7273,11 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .strip_suffix(".json")
         .expect("membership head slot key has a .json suffix")
         .to_string();
-    struct LaggingHeadSlot {
-        hidden: String,
-    }
-    #[async_trait]
-    impl StorageInterceptor for LaggingHeadSlot {
-        async fn before_protocol_read(
-            &self,
-            read: ProtocolRead,
-            semantic_prefix: &str,
-        ) -> Result<(), crate::storage::StorageError> {
-            if read == ProtocolRead::Slot && semantic_prefix == self.hidden {
-                return Err(crate::storage::StorageError::NotFound(format!(
-                    "lagging provider omits {semantic_prefix}"
-                )));
-            }
-            Ok(())
-        }
-    }
     let lagging = std::sync::Arc::new(InterceptedStorage::new(
         storage.storage.clone(),
-        LaggingHeadSlot { hidden },
+        MissingProtocolSlot {
+            semantic_prefix: hidden,
+        },
     ));
 
     // The lagging view is refused outright: the walk comes up shorter than the
@@ -7318,10 +7387,9 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
             "2026-03-01T00:01:00Z".to_string(),
         )
         .expect("active Owner signs membership grant");
+    let owner_grant = add_member.coord();
     let grant_bytes = serde_json::to_vec(&add_member).expect("serialize exact membership grant");
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
-
-    let owner_grant = membership_coord(&chain, &owner_pk, 2);
     let relocated_prefix = crate::protocol::store_commit::membership_entry_semantic_prefix(
         &relocated_author,
         &owner_grant.author_owner_grant,
@@ -7518,8 +7586,8 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
             "2026-03-01T00:03:00Z".to_string(),
         )
         .expect("active Owner removes membership grant");
+    let remove_coord = remove_member.coord();
     publish_exact_membership_entry(&storage, &mut chain, remove_member, &owner).await;
-    let remove_coord = membership_coord(&chain, &owner_pk, 3);
     let remove_head = chain
         .head_ref_for_stream(
             &remove_coord.author_pubkey,
@@ -7644,7 +7712,12 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         "devA",
         1,
         &cs,
-        Some(membership_coord(&chain, &owner_pk, 1)),
+        Some(
+            chain
+                .founder_coord()
+                .cloned()
+                .expect("exact membership has a founder coordinate"),
+        ),
     )
     .await;
     let stream_id = commit_stream_id(&reference);

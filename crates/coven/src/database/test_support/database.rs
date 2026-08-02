@@ -1,6 +1,27 @@
 use crate::database::{Database, DatabaseTestSql, DbError};
 
 impl Database {
+    pub(crate) async fn insert_published_blob_drop_intent_for_test(
+        &self,
+        sequence: u64,
+        namespace: &str,
+        blob_id: &str,
+        bytes: &[u8],
+        locator_hash: crate::protocol::store_commit::ObjectHash,
+        disposition: crate::sync::cycle::DeferredLocalBlobDisposition,
+    ) -> Result<(), DbError> {
+        let drop = crate::sync::cycle::DeferredLocalBlobDrop {
+            namespace: namespace.to_string(),
+            id: blob_id.to_string(),
+            size: bytes.len() as u64,
+            plaintext_hash: crate::protocol::store_commit::ObjectHash::digest(bytes),
+            locator_hash,
+            disposition,
+        };
+        self.test_sql(move |database| database.insert_published_blob_drop_intent(sequence, &drop))
+            .await
+    }
+
     pub(crate) async fn remote_object_for_test(
         &self,
         object: crate::storage::ExactObjectRef,

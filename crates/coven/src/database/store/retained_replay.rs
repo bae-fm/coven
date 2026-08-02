@@ -822,10 +822,9 @@ mod tests {
                 .expect("insert protocol state");
         }
         let database = crate::database::DatabaseTestSql::new(connection);
-        crate::sync::test_helpers::install_test_store_root_authority(
-            &database,
-            "retained-replay-fixture",
-        );
+        database
+            .install_test_store_root_authority("retained-replay-fixture")
+            .expect("install retained-replay Store root authority");
         let cursor = founder_membership_cursor_key(connection)
             .expect("derive founder membership cursor")
             .expect("founder membership cursor");

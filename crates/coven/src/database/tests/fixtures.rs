@@ -213,18 +213,3 @@ pub(super) fn blob_binding_table() -> SyncedTable {
         .with_cloud_path_column("cloud_path"),
     )
 }
-
-pub(super) fn insert_blob_row(conn: &Connection, row_id: &str, stamp: &str, bytes: &[u8]) {
-    conn.execute(
-        "INSERT INTO photos (id, size, hash, cloud_path, _updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            row_id,
-            bytes.len() as i64,
-            ObjectHash::digest(bytes).to_string(),
-            format!("photos/{row_id}.bin"),
-            stamp,
-        ],
-    )
-    .expect("insert blob row");
-}

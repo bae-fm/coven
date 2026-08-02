@@ -23,186 +23,6 @@ pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn test_membership_grant_id(
-    label: &str,
-) -> crate::protocol::causal_grants::MembershipGrantId {
-    crate::protocol::causal_grants::MembershipGrantId(
-        crate::protocol::store_commit::ObjectHash::digest(label.as_bytes()),
-    )
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn test_founder_provider_admin(
-    label: &str,
-) -> crate::protocol::provider::FounderProviderAdminGrant {
-    use crate::protocol::provider::{
-        ExactSlotProbeReceipt, ExactSlotProbeTranscript, LostResponseProbeReceipt,
-        ProbeCreateAttempt, ProbeCreateOutcome, ProbePayloadLabel, ProbeRangeReceipt,
-        ProviderAdminGrantId, ProviderCapabilityProof, ProviderProbeId, PROBE_RANGE_END,
-        PROBE_RANGE_START,
-    };
-    use crate::storage::{
-        ProviderDeviceBinding, ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
-    };
-    let probe_id = ProviderProbeId::from_bytes(*ObjectHash::digest(label.as_bytes()).as_bytes());
-    let slot = crate::storage::cloud::ObjectSlot::logical(format!(
-        "store-v1/test/{label}/provider-probe/exact"
-    ))
-    .expect("valid exact-probe test slot");
-    let first =
-        crate::protocol::provider::probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
-    let second =
-        crate::protocol::provider::probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
-    let accepted = crate::storage::ExactObjectRef::new(
-        slot.clone(),
-        first.len() as u64,
-        ObjectHash::digest(&first),
-    );
-    let lost_slot = crate::storage::cloud::ObjectSlot::logical(format!(
-        "store-v1/test/{label}/provider-probe/lost-response"
-    ))
-    .expect("valid lost-response test slot");
-    let lost_payload =
-        crate::protocol::provider::probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-    let lost_ref = crate::storage::ExactObjectRef::new(
-        lost_slot.clone(),
-        lost_payload.len() as u64,
-        ObjectHash::digest(&lost_payload),
-    );
-    let device = ProviderDeviceBinding {
-        principal: ProviderPrincipalId::CustomS3Credential {
-            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
-        },
-    };
-    let store = StoreProviderBinding::S3 {
-        endpoint: S3EndpointBinding::Custom {
-            origin: "https://test.invalid".to_string(),
-        },
-        region: "test-region".to_string(),
-        bucket: format!("{label}-bucket"),
-        key_prefix: None,
-    };
-    let transcript = ExactSlotProbeTranscript {
-        probe_id,
-        logical_key: slot.logical_key().to_string(),
-        slot,
-        contenders: [
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&first),
-                outcome: ProbeCreateOutcome::Created,
-            },
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&second),
-                outcome: ProbeCreateOutcome::RejectedOccupied,
-            },
-        ],
-        accepted: accepted.clone(),
-        full_read_hash: accepted.stored_hash(),
-        range: ProbeRangeReceipt {
-            start: PROBE_RANGE_START,
-            end: PROBE_RANGE_END,
-            bytes_hash: ObjectHash::digest(
-                &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
-            ),
-        },
-        delete_verified_absent: true,
-        lost_response: LostResponseProbeReceipt {
-            logical_key: lost_slot.logical_key().to_string(),
-            slot: lost_slot,
-            payload_hash: ObjectHash::digest(&lost_payload),
-            settled: lost_ref,
-            readback_hash: ObjectHash::digest(&lost_payload),
-            delete_verified_absent: true,
-        },
-    };
-    crate::protocol::provider::FounderProviderAdminGrant {
-        grant_id: ProviderAdminGrantId(ObjectHash::digest(
-            format!("{label} provider admin grant").as_bytes(),
-        )),
-        provider: device.clone(),
-        access: crate::protocol::provider::ProviderAccessLocator::S3SharedCredentialGeneration {
-            generation: 1,
-            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
-        },
-        capability: ProviderCapabilityProof {
-            exact_slots: ExactSlotProbeReceipt::from_transcript(transcript, &store, &device),
-        },
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn install_test_store_root_authority(
-    database: &crate::database::DatabaseTestSql<'_>,
-    label: &str,
-) -> crate::protocol::store_commit::ObjectHash {
-    use crate::protocol::store_commit::{
-        GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId, StoreProtocolRoot,
-        STORE_PROTOCOL_VERSION,
-    };
-    use crate::storage::cloud::ObjectSlot;
-    use crate::storage::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
-
-    let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
-        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-    ))
-    .expect("fixed test signing key is hexadecimal")
-    .try_into()
-    .expect("fixed test signing key is 64 bytes");
-    let signer = UserKeypair::from_signing_key_bytes(&keypair_bytes)
-        .expect("fixed test signing key is valid");
-    let sync_routing_hash: ObjectHash = database
-        .required_protocol_state(crate::database::SYNC_ROUTING_HASH_STATE_KEY)
-        .expect("test Store has a sync-routing hash")
-        .parse()
-        .expect("test Store sync-routing hash is valid");
-    let root_slot = ObjectSlot::logical(
-        crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
-    )
-    .expect("valid test Store root slot");
-    let descriptor = StoreCreationDescriptor {
-        version: STORE_PROTOCOL_VERSION,
-        creation_id: StoreCreationId::from_random_bytes(
-            *ObjectHash::digest(label.as_bytes()).as_bytes(),
-        ),
-        provider: StoreProviderBinding::S3 {
-            endpoint: S3EndpointBinding::Custom {
-                origin: "https://test.invalid".to_string(),
-            },
-            region: "test-region".to_string(),
-            bucket: format!("{label}-bucket"),
-            key_prefix: None,
-        },
-        schema_version: 1,
-        sync_routing_hash,
-        founder_pubkey: crate::keys::public_key_hex(&signer),
-        founder_grant: test_membership_grant_id(&format!("{label} founder grant")),
-        root_slot: root_slot.clone(),
-        founder_registration: ObjectSlot::logical(format!(
-            "store-v1/test/{label}/registration.json"
-        ))
-        .expect("valid test founder registration slot"),
-        founder_provider_admin: test_founder_provider_admin(label),
-        founder_membership: GrantStreamAnchor::StoreMembership {
-            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
-                .expect("valid test founder membership slot"),
-        },
-        founder_recovery: GrantStreamAnchor::OwnerRecovery {
-            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/recovery/1.json"))
-                .expect("valid test founder recovery slot"),
-        },
-    };
-    let root = StoreProtocolRoot::signed(descriptor, &signer).expect("sign test Store root");
-    let bytes = root.to_bytes();
-    let hash = root.object_hash();
-    let object = ExactObjectRef::new(root_slot, bytes.len() as u64, ObjectHash::digest(&bytes));
-    database
-        .install_store_root_authority(hash, &bytes, &object)
-        .expect("install test Store root authority");
-    hash
-}
-
-#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn install_test_active_circle(
     database: &crate::database::DatabaseTestSql<'_>,
     label: &str,
@@ -285,10 +105,10 @@ fn install_test_circle_current_state(
         crate::protocol::membership::founder_entry(
             label,
             owner,
-            test_membership_grant_id(label),
+            crate::protocol::causal_grants::MembershipGrantId::from_test_label(label),
             "founder",
             membership,
-            test_founder_provider_admin(label),
+            crate::protocol::provider::FounderProviderAdminGrant::from_test_label(label),
         )
     }
 
@@ -599,22 +419,6 @@ fn install_test_circle_current_state(
         Some(&CircleRole::Owner)
     );
     (creation.circle_id, control.coord)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn test_row_routing_id(
-    database: &crate::database::DatabaseTestSql<'_>,
-    generation_one_key: [u8; 32],
-    table: &str,
-    row_id: &str,
-) -> crate::protocol::circle::RowRoutingId {
-    let root_hash = database
-        .store_root_hash()
-        .expect("test Store root authority is installed");
-    let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
-    let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
-        .expect("test keyring has one generation-one key");
-    crate::protocol::circle::row_routing_id(&key, table, row_id)
 }
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`

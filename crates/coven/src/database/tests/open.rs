@@ -59,7 +59,9 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     .expect("remove malformed authority");
     let signer = crate::keys::UserKeypair::generate();
     let founder_provider_admin =
-        crate::sync::test_helpers::test_founder_provider_admin("required-store-root");
+        crate::protocol::provider::FounderProviderAdminGrant::from_test_label(
+            "required-store-root",
+        );
     let descriptor = crate::protocol::store_commit::StoreCreationDescriptor {
         version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
         creation_id: crate::protocol::store_commit::StoreCreationId::from_nonce(
@@ -76,7 +78,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         schema_version: db.schema_version(),
         sync_routing_hash: db.sync_routing_hash(),
         founder_pubkey: crate::keys::public_key_hex(&signer),
-        founder_grant: crate::sync::test_helpers::test_membership_grant_id(
+        founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
             "required-store-root founder",
         ),
         root_slot: crate::storage::cloud::ObjectSlot::logical(

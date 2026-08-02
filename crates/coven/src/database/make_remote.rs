@@ -28,22 +28,6 @@ impl Database {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn make_remote_intent_exists(
-        conn: &Connection,
-        root_table: &str,
-        root_id: &str,
-    ) -> Result<bool, DbError> {
-        conn.query_row(
-            "SELECT 1 FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
-            (root_table, root_id),
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(DbError::from)
-    }
-
     pub(crate) fn make_remote_intent_state(
         conn: &Connection,
         root_table: &str,

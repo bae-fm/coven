@@ -31,7 +31,7 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, PendingRotation};
 use crate::store_dir::StoreDir;
-use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
+use crate::sync::cycle::{run_single_sync_cycle, DeferredLocalBlobDisposition, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::test_helpers::{
@@ -550,25 +550,6 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
         .unwrap()
 }
 
-async fn scoped_store_state(db: &Database) -> [i64; 4] {
-    let mut counts = [0; 4];
-    for (index, table) in [
-        crate::database::DatabaseTestTable::named("store_writes"),
-        crate::database::DatabaseTestTable::named("store_write_partitions"),
-        crate::database::DatabaseTestTable::named("_coven_row_routes"),
-        crate::database::DatabaseTestTable::named("_coven_audience"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        counts[index] = db
-            .test_sql(move |database| database.table_row_count(table))
-            .await
-            .expect("read scoped Store table count");
-    }
-    counts
-}
-
 async fn assert_scoped_flip_journaled_atomically(
     db: &Database,
     expected_changes: &[(&str, crate::changeset::ChangeOp)],
@@ -634,40 +615,32 @@ async fn assert_scoped_flip_journaled_atomically(
     );
 }
 
-/// Insert a `published_blob_drop_intents` row directly, to reconstruct the durable
-/// bookkeeping a crash leaves when a drain applies a disposition but dies before
-/// clearing its intent.
-async fn insert_published_drop_intent(
-    db: &Database,
-    seq: i64,
-    namespace: &str,
-    blob_id: &str,
-    bytes: &[u8],
-    locator_hash: ObjectHash,
-    disposition: &str,
-) {
-    let drop = crate::sync::cycle::DeferredLocalBlobDrop {
-        namespace: namespace.to_string(),
-        id: blob_id.to_string(),
-        size: bytes.len() as u64,
-        plaintext_hash: ObjectHash::digest(bytes),
-        locator_hash,
-        disposition: crate::sync::cycle::DeferredLocalBlobDisposition::from_db(disposition)
-            .expect("test drop disposition"),
-    };
-    db.test_sql(move |database| database.insert_published_blob_drop_intent(seq as u64, &drop))
-        .await
-        .expect("insert published blob drop intent");
-}
-
 #[tokio::test]
 async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() {
     let db = open_test_db();
     let first = ObjectHash::digest(b"first locator");
     let second = ObjectHash::digest(b"second locator");
 
-    insert_published_drop_intent(&db, 1, "covers", "shared-id", b"first", first, "cache").await;
-    insert_published_drop_intent(&db, 1, "covers", "shared-id", b"second", second, "pin").await;
+    db.insert_published_blob_drop_intent_for_test(
+        1,
+        "covers",
+        "shared-id",
+        b"first",
+        first,
+        DeferredLocalBlobDisposition::Cache,
+    )
+    .await
+    .expect("insert first published blob drop intent");
+    db.insert_published_blob_drop_intent_for_test(
+        1,
+        "covers",
+        "shared-id",
+        b"second",
+        second,
+        DeferredLocalBlobDisposition::Pin,
+    )
+    .await
+    .expect("insert second published blob drop intent");
 
     let count = db
         .test_sql(|database| database.published_blob_drop_intent_count(1, "covers", "shared-id"))
@@ -1203,7 +1176,10 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         &bytes,
     )
     .await;
-    let store_state_before = scoped_store_state(&db).await;
+    let store_state_before = db
+        .test_sql(|database| database.scoped_store_state_counts())
+        .await
+        .expect("read scoped Store state");
 
     let gate_stamp_before = gate_stamp(&db, "n-scoped").await;
     let dest_dir = tmp.path().join("destination");
@@ -1266,7 +1242,12 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         pending_deletes(&db).await.is_empty(),
         "no cloud deletion is enqueued",
     );
-    assert_eq!(scoped_store_state(&db).await, store_state_before);
+    assert_eq!(
+        db.test_sql(|database| database.scoped_store_state_counts())
+            .await
+            .expect("read scoped Store state"),
+        store_state_before
+    );
 
     make_local(
         &db,
@@ -1345,7 +1326,10 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         .await
         .expect("queue scoped user-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
-    let store_state_before = scoped_store_state(&db).await;
+    let store_state_before = db
+        .test_sql(|database| database.scoped_store_state_counts())
+        .await
+        .expect("read scoped Store state");
 
     let error = match drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None).await {
         Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
@@ -1385,7 +1369,12 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     );
     assert_eq!(shared_flag(&db, "n-user-scoped").await, 0);
     assert_eq!(gate_stamp(&db, "n-user-scoped").await, stamp_before);
-    assert_eq!(scoped_store_state(&db).await, store_state_before);
+    assert_eq!(
+        db.test_sql(|database| database.scoped_store_state_counts())
+            .await
+            .expect("read scoped Store state"),
+        store_state_before
+    );
 
     let outcome = drain_uploads(
         &db,
@@ -1464,7 +1453,10 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         .await
         .expect("queue scoped host-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
-    let store_state_before = scoped_store_state(&db).await;
+    let store_state_before = db
+        .test_sql(|database| database.scoped_store_state_counts())
+        .await
+        .expect("read scoped Store state");
 
     let error = match drain_uploads(&db, &storage, &lib, &SystemClock, &hlc, None, None).await {
         Err(error) => error,
@@ -1502,7 +1494,12 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         has_intent(&db, "notes", "n-host-scoped").await,
         "the transition intent remains queued",
     );
-    assert_eq!(scoped_store_state(&db).await, store_state_before);
+    assert_eq!(
+        db.test_sql(|database| database.scoped_store_state_counts())
+            .await
+            .expect("read scoped Store state"),
+        store_state_before
+    );
 
     let completed = drain_uploads(
         &db,
@@ -2001,16 +1998,16 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
         .await
         .unwrap();
     let sequence = publish_fixture_position(&storage, &db, &lib, "pin-position").await;
-    insert_published_drop_intent(
-        &db,
-        sequence as i64,
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
         "covers",
         "cov-pin",
         &bytes,
         crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
-        "pin",
+        DeferredLocalBlobDisposition::Pin,
     )
-    .await;
+    .await
+    .expect("insert published pin disposition");
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -2049,16 +2046,16 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
         .await
         .unwrap();
     let sequence = publish_fixture_position(&storage, &db, &lib, "cache-position").await;
-    insert_published_drop_intent(
-        &db,
-        sequence as i64,
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
         "covers",
         "cov-cache",
         &bytes,
         crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
-        "cache",
+        DeferredLocalBlobDisposition::Cache,
     )
-    .await;
+    .await
+    .expect("insert published cache disposition");
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -2080,16 +2077,16 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let (_tmp, lib) = temp_store_dir();
 
     let sequence = publish_fixture_position(&storage, &db, &lib, "lost-position").await;
-    insert_published_drop_intent(
-        &db,
-        sequence as i64,
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
         "covers",
         "cov-lost",
         b"missing",
         crate::sync::test_helpers::test_cache_locator_hash("cov-lost"),
-        "pin",
+        DeferredLocalBlobDisposition::Pin,
     )
-    .await;
+    .await
+    .expect("insert lost published pin disposition");
 
     let error = crate::sync::test_owner_graph::local_blob_access(store_database, lib.clone())
         .drain_published_blob_drop_intents(sequence)

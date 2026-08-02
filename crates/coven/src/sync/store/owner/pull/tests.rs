@@ -407,6 +407,15 @@ struct EffectiveAccessFixture {
     circle_id: crate::protocol::circle::CircleId,
 }
 
+impl EffectiveAccessFixture {
+    fn effective_access_members(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::from([
+            crate::keys::public_key_hex(&self.owner),
+            crate::keys::public_key_hex(&self.member),
+        ])
+    }
+}
+
 async fn effective_access_fixture(
     label: &str,
     member_database: &Database,
@@ -1679,15 +1688,6 @@ async fn owner_delete_circle(fixture: &EffectiveAccessFixture) {
         .expect("delete the Circle");
 }
 
-fn effective_access_members(
-    fixture: &EffectiveAccessFixture,
-) -> std::collections::BTreeSet<String> {
-    std::collections::BTreeSet::from([
-        crate::keys::public_key_hex(&fixture.owner),
-        crate::keys::public_key_hex(&fixture.member),
-    ])
-}
-
 #[tokio::test]
 async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
@@ -1774,7 +1774,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let owner_circles = StoreDatabase::new(&fixture.owner_database)
         .get_circles(
             &crate::keys::public_key_hex(&fixture.owner),
-            effective_access_members(&fixture),
+            fixture.effective_access_members(),
         )
         .await
         .expect("list owner Circles after deletion");
@@ -1819,7 +1819,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let member_circles = StoreDatabase::new(&member_database)
         .get_circles(
             &crate::keys::public_key_hex(&fixture.member),
-            effective_access_members(&fixture),
+            fixture.effective_access_members(),
         )
         .await
         .expect("list member Circles after deletion");
@@ -1896,7 +1896,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
     let circles = StoreDatabase::new(&member_database)
         .get_circles(
             &crate::keys::public_key_hex(&fixture.member),
-            effective_access_members(&fixture),
+            fixture.effective_access_members(),
         )
         .await
         .expect("list member Circles after the refused deletion");
@@ -1969,7 +1969,7 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
     let circles = StoreDatabase::new(&member_database)
         .get_circles(
             &crate::keys::public_key_hex(&fixture.member),
-            effective_access_members(&fixture),
+            fixture.effective_access_members(),
         )
         .await
         .expect("list member Circles after the later deletion");

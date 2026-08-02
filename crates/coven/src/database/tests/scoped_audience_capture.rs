@@ -9,12 +9,17 @@ fn routing_keyring() -> MasterKeyring {
 
 fn routing_id(conn: &rusqlite::Connection, table: &str, row_id: &str) -> String {
     let database = crate::database::DatabaseTestSql::new(conn);
-    crate::sync::test_helpers::test_row_routing_id(&database, [7; 32], table, row_id).to_string()
+    database
+        .row_routing_id([7; 32], table, row_id)
+        .expect("derive test row-routing id")
+        .to_string()
 }
 
 fn seed_store_root(conn: &rusqlite::Connection) {
     let database = crate::database::DatabaseTestSql::new(conn);
-    crate::sync::test_helpers::install_test_store_root_authority(&database, "scoped-routing-root");
+    database
+        .install_test_store_root_authority("scoped-routing-root")
+        .expect("install scoped-routing Store root authority");
 }
 
 fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {

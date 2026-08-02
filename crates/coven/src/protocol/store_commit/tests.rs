@@ -18,23 +18,44 @@ struct Fixture {
     package: Vec<u8>,
 }
 
+impl Fixture {
+    fn circle_control_coord(&self, control_hash: ObjectHash) -> CircleControlCoord {
+        CircleControlCoord {
+            device_id: self.registration.device_id.to_string(),
+            stream_id: self.commit_ref.coord.stream_id,
+            author_pubkey: keys::public_key_hex(&self.signer),
+            author_owner_grant: self.root.descriptor.founder_grant.clone(),
+            seq: 1,
+            control_hash,
+        }
+    }
+
+    fn sign_candidate_abandonment(
+        &self,
+        manifests: Vec<CandidateCleanupManifest>,
+    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+        let signer = self.registration.device_signer(&self.signer).unwrap();
+        StoreBatchCommit::signed_with_candidate_abandonment(
+            self.root_ref.store_root_hash,
+            WriteId::from_generated("abandon-candidates".to_string()),
+            self.commit_ref.coord.clone(),
+            self.registration_ref.clone(),
+            &self.registration,
+            self.commit.order.clone(),
+            self.commit.membership_state.clone(),
+            self.commit.device_state.clone(),
+            manifests,
+            &signer,
+        )
+    }
+}
+
 fn slot(key: String) -> ObjectSlot {
     ObjectSlot::logical(key).expect("valid test object slot")
 }
 
 fn exact(key: String, bytes: &[u8]) -> ExactObjectRef {
     ExactObjectRef::new(slot(key), bytes.len() as u64, ObjectHash::digest(bytes))
-}
-
-fn test_circle_control_coord(fixture: &Fixture, control_hash: ObjectHash) -> CircleControlCoord {
-    CircleControlCoord {
-        device_id: fixture.registration.device_id.to_string(),
-        stream_id: fixture.commit_ref.coord.stream_id,
-        author_pubkey: keys::public_key_hex(&fixture.signer),
-        author_owner_grant: fixture.root.descriptor.founder_grant.clone(),
-        seq: 1,
-        control_hash,
-    }
 }
 
 fn circle_activation(
@@ -455,8 +476,9 @@ fn commit_stream_activation_validation_rejects_wrong_authority_order_and_identit
 fn fixture() -> Fixture {
     let signer = UserKeypair::generate();
     let founder_grant =
-        crate::sync::test_helpers::test_membership_grant_id("store-a founder grant");
-    let provider_admin = crate::sync::test_helpers::test_founder_provider_admin("store-a");
+        crate::protocol::causal_grants::MembershipGrantId::from_test_label("store-a founder grant");
+    let provider_admin =
+        crate::protocol::provider::FounderProviderAdminGrant::from_test_label("store-a");
     let founder_recovery = GrantStreamAnchor::OwnerRecovery {
         first_slot: slot("store-v1/recovery/founder/1.json".to_string()),
     };
@@ -1221,31 +1243,13 @@ fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanu
     }
 }
 
-fn sign_candidate_abandonment(
-    fixture: &Fixture,
-    manifests: Vec<CandidateCleanupManifest>,
-) -> Result<StoreBatchCommit, StoreProtocolError> {
-    let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    StoreBatchCommit::signed_with_candidate_abandonment(
-        fixture.root_ref.store_root_hash,
-        WriteId::from_generated("abandon-candidates".to_string()),
-        fixture.commit_ref.coord.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        fixture.commit.order.clone(),
-        fixture.commit.membership_state.clone(),
-        fixture.commit.device_state.clone(),
-        manifests,
-        &signer,
-    )
-}
-
 #[test]
 fn candidate_abandonment_is_signed_canonical_cleanup_authority() {
     let fixture = fixture();
     let first = candidate_cleanup_manifest(&fixture, "first candidate");
     let second = candidate_cleanup_manifest(&fixture, "second candidate");
-    let commit = sign_candidate_abandonment(&fixture, vec![second.clone(), first.clone()])
+    let commit = fixture
+        .sign_candidate_abandonment(vec![second.clone(), first.clone()])
         .expect("sign candidate abandonment");
 
     assert!(commit.candidate_objects.objects.is_empty());
@@ -1271,7 +1275,7 @@ fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
     let fixture = fixture();
     let manifest = candidate_cleanup_manifest(&fixture, "candidate");
     assert!(matches!(
-        sign_candidate_abandonment(&fixture, vec![manifest.clone(), manifest.clone()]),
+        fixture.sign_candidate_abandonment(vec![manifest.clone(), manifest.clone()]),
         Err(StoreProtocolError::Malformed(reason))
             if reason.contains("strictly sorted and unique")
     ));
@@ -1282,7 +1286,7 @@ fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
         b"different stored bytes",
     );
     assert!(matches!(
-        sign_candidate_abandonment(&fixture, vec![inexact]),
+        fixture.sign_candidate_abandonment(vec![inexact]),
         Err(StoreProtocolError::Malformed(reason))
             if reason.contains("does not match stored size/hash")
     ));
@@ -1308,7 +1312,7 @@ fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
         &noncanonical.candidate.canonical_signed_bytes,
     );
     assert!(matches!(
-        sign_candidate_abandonment(&fixture, vec![noncanonical]),
+        fixture.sign_candidate_abandonment(vec![noncanonical]),
         Err(StoreProtocolError::Malformed(reason))
             if reason.contains("not canonical")
     ));
@@ -1322,7 +1326,7 @@ fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
         &unsigned.candidate.canonical_signed_bytes,
     );
     assert!(matches!(
-        sign_candidate_abandonment(&fixture, vec![unsigned]),
+        fixture.sign_candidate_abandonment(vec![unsigned]),
         Err(StoreProtocolError::InvalidSignature)
     ));
 }
@@ -1330,11 +1334,9 @@ fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
 #[test]
 fn candidate_abandonment_rejects_retained_authority_target() {
     let fixture = fixture();
-    let inner = sign_candidate_abandonment(
-        &fixture,
-        vec![candidate_cleanup_manifest(&fixture, "candidate")],
-    )
-    .expect("sign inner candidate abandonment");
+    let inner = fixture
+        .sign_candidate_abandonment(vec![candidate_cleanup_manifest(&fixture, "candidate")])
+        .expect("sign inner candidate abandonment");
     let bytes = inner.to_bytes();
     let retained = CandidateCleanupManifest {
         candidate: StoreBatchCommitDeletionTarget {
@@ -1356,7 +1358,7 @@ fn candidate_abandonment_rejects_retained_authority_target() {
     };
 
     assert!(matches!(
-        sign_candidate_abandonment(&fixture, vec![retained]),
+        fixture.sign_candidate_abandonment(vec![retained]),
         Err(StoreProtocolError::Malformed(reason))
             if reason.contains("retained authority")
     ));
@@ -1367,7 +1369,8 @@ fn parsed_candidate_abandonment_rejects_noncanonical_manifest_order() {
     let fixture = fixture();
     let first = candidate_cleanup_manifest(&fixture, "first candidate");
     let second = candidate_cleanup_manifest(&fixture, "second candidate");
-    let mut commit = sign_candidate_abandonment(&fixture, vec![first, second])
+    let mut commit = fixture
+        .sign_candidate_abandonment(vec![first, second])
         .expect("sign candidate abandonment");
     let StoreCommitBody::AbandonCandidates { manifests } = &mut commit.body else {
         panic!("commit carries candidate abandonment")
@@ -1552,10 +1555,7 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
         super::super::remote_object::CandidateExclusiveObjectDomain::CirclePackage {
             reference: CirclePackageRef {
                 circle_id: CircleId::from_bytes([9; 16]),
-                control: test_circle_control_coord(
-                    &fixture,
-                    ObjectHash::digest(b"substituted control"),
-                ),
+                control: fixture.circle_control_coord(ObjectHash::digest(b"substituted control")),
                 package,
                 key_fingerprint: KeyFingerprint::from_bytes([7; 32]),
             },
@@ -1580,10 +1580,8 @@ fn candidate_manifest_rejects_one_exact_object_reached_twice() {
         .expect("fixture commit carries a Store package");
     operations.circle_packages.push(CirclePackageRef {
         circle_id: CircleId::from_bytes([8; 16]),
-        control: test_circle_control_coord(
-            &fixture,
-            ObjectHash::digest(b"duplicate exact object control"),
-        ),
+        control: fixture
+            .circle_control_coord(ObjectHash::digest(b"duplicate exact object control")),
         package,
         key_fingerprint: KeyFingerprint::from_bytes([9; 32]),
     });
@@ -1656,7 +1654,7 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
         },
         bootstrap: None,
     };
-    let control = test_circle_control_coord(&fixture, control_hash);
+    let control = fixture.circle_control_coord(control_hash);
     let mut operations = fixture
         .commit
         .operations()

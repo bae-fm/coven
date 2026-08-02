@@ -2322,11 +2322,13 @@ mod tests {
         secret_key: String,
     }
 
-    fn test_creds() -> TestCreds {
-        TestCreds {
-            endpoint: test_env("COVEN_TEST_S3_URL", "http://localhost:19000"),
-            access_key: test_env("COVEN_TEST_S3_KEY", "coventest"),
-            secret_key: test_env("COVEN_TEST_S3_SECRET", "coventestpass"),
+    impl TestCreds {
+        fn from_env() -> Self {
+            Self {
+                endpoint: test_env("COVEN_TEST_S3_URL", "http://localhost:19000"),
+                access_key: test_env("COVEN_TEST_S3_KEY", "coventest"),
+                secret_key: test_env("COVEN_TEST_S3_SECRET", "coventestpass"),
+            }
         }
     }
 
@@ -2361,46 +2363,48 @@ mod tests {
         secret_key: String,
     }
 
-    fn existing_s3_object_env() -> Option<ExistingS3ObjectEnv> {
-        let names = [
-            "COVEN_TEST_S3_BUCKET",
-            "COVEN_TEST_S3_REGION",
-            "COVEN_TEST_S3_URL",
-            "COVEN_TEST_S3_EXISTING_KEY",
-            "COVEN_TEST_S3_KEY",
-            "COVEN_TEST_S3_SECRET",
-        ];
-        let mut values = Vec::with_capacity(names.len());
-        let mut missing = Vec::new();
-        for name in names {
-            match optional_test_env(name) {
-                Some(value) => values.push(value),
-                None => missing.push(name),
+    impl ExistingS3ObjectEnv {
+        fn from_env() -> Option<Self> {
+            let names = [
+                "COVEN_TEST_S3_BUCKET",
+                "COVEN_TEST_S3_REGION",
+                "COVEN_TEST_S3_URL",
+                "COVEN_TEST_S3_EXISTING_KEY",
+                "COVEN_TEST_S3_KEY",
+                "COVEN_TEST_S3_SECRET",
+            ];
+            let mut values = Vec::with_capacity(names.len());
+            let mut missing = Vec::new();
+            for name in names {
+                match optional_test_env(name) {
+                    Some(value) => values.push(value),
+                    None => missing.push(name),
+                }
             }
+            if !missing.is_empty() {
+                eprintln!(
+                    "skipping live S3 object test; unset env vars: {}",
+                    missing.join(", ")
+                );
+                return None;
+            }
+            let [bucket, region, endpoint, key, access_key, secret_key]: [String; 6] =
+                values.try_into().expect("collected every live S3 env var");
+            Some(Self {
+                bucket,
+                region,
+                endpoint,
+                key,
+                access_key,
+                secret_key,
+            })
         }
-        if !missing.is_empty() {
-            eprintln!(
-                "skipping live S3 object test; unset env vars: {}",
-                missing.join(", ")
-            );
-            return None;
-        }
-        let [bucket, region, endpoint, key, access_key, secret_key]: [String; 6] =
-            values.try_into().expect("collected every live S3 env var");
-        Some(ExistingS3ObjectEnv {
-            bucket,
-            region,
-            endpoint,
-            key,
-            access_key,
-            secret_key,
-        })
     }
 
     #[tokio::test]
     #[ignore]
     async fn read_range_succeeds_against_existing_s3_object() {
-        let creds = test_creds();
+        let creds = TestCreds::from_env();
         let bucket = required_test_env("COVEN_TEST_S3_BUCKET");
         let region = test_env("COVEN_TEST_S3_REGION", "us-east-1");
         let key = required_test_env("COVEN_TEST_S3_EXISTING_KEY");
@@ -2445,7 +2449,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn s3_big_stack_reads_real_bytes_from_existing_object() {
-        let Some(env) = existing_s3_object_env() else {
+        let Some(env) = ExistingS3ObjectEnv::from_env() else {
             return;
         };
 
@@ -2488,7 +2492,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn probe_succeeds_against_existing_bucket() {
-        let creds = test_creds();
+        let creds = TestCreds::from_env();
         let bucket = format!("coven-probe-ok-{}", uuid::Uuid::new_v4());
         let home = open_cloud_home(
             bucket,
@@ -2508,7 +2512,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn probe_fails_for_missing_bucket() {
-        let creds = test_creds();
+        let creds = TestCreds::from_env();
         let bucket = format!("coven-probe-missing-{}", uuid::Uuid::new_v4());
         let home = open_cloud_home(
             bucket.clone(),
@@ -2536,7 +2540,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn probe_fails_for_bad_secret_key() {
-        let creds = test_creds();
+        let creds = TestCreds::from_env();
         let bucket = format!("coven-probe-badkey-{}", uuid::Uuid::new_v4());
         // Provision the bucket with the good creds so the only difference is the bad secret.
         let good = open_cloud_home(

@@ -2,9 +2,7 @@ use super::test_support::{
     author_exclusion_activation_evidence, clear_table, table_row_count, OutboxAttempt,
     RetainedRegistrationTamper,
 };
-use super::{
-    Connection, Database, DatabaseTestTable, DatabaseTestTransaction, DbError, ExternalBlobRecords,
-};
+use super::{Connection, DatabaseTestTable, DatabaseTestTransaction, DbError, ExternalBlobRecords};
 use rusqlite::OptionalExtension;
 
 /// Test-only SQL access to Coven's retained database connection.
@@ -62,6 +60,15 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn table_row_count(&self, table: DatabaseTestTable) -> Result<i64, DbError> {
         table_row_count(self.connection, table)
+    }
+
+    pub(crate) fn scoped_store_state_counts(&self) -> Result<[i64; 4], DbError> {
+        Ok([
+            self.table_row_count(DatabaseTestTable::named("store_writes"))?,
+            self.table_row_count(DatabaseTestTable::named("store_write_partitions"))?,
+            self.table_row_count(DatabaseTestTable::named("_coven_row_routes"))?,
+            self.table_row_count(DatabaseTestTable::named("_coven_audience"))?,
+        ])
     }
 
     pub(crate) fn table_has_rows(&self, table: DatabaseTestTable) -> Result<bool, DbError> {
@@ -367,11 +374,9 @@ impl DatabaseTestSql<'_> {
         ),
         DbError,
     > {
-        let root_hash = self.store_root_hash()?;
-        let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
-        let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let routing_id = crate::protocol::circle::row_routing_id(&key, "notes", row_id).to_string();
+        let routing_id = self
+            .row_routing_id(generation_one_key, "notes", row_id)?
+            .to_string();
         let row = self
             .connection
             .query_row(
@@ -401,6 +406,19 @@ impl DatabaseTestSql<'_> {
             .optional()
             .map_err(DbError::from)?;
         Ok((row, route, mirror))
+    }
+
+    pub(crate) fn row_routing_id(
+        &self,
+        generation_one_key: [u8; 32],
+        table: &str,
+        row_id: &str,
+    ) -> Result<crate::protocol::circle::RowRoutingId, DbError> {
+        let root_hash = self.store_root_hash()?;
+        let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
+        let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        Ok(crate::protocol::circle::row_routing_id(&key, table, row_id))
     }
 
     pub(crate) fn retained_merge_input(
@@ -1064,7 +1082,16 @@ impl DatabaseTestSql<'_> {
         root_table: &str,
         root_id: &str,
     ) -> Result<bool, DbError> {
-        Database::make_remote_intent_exists(self.connection, root_table, root_id)
+        self.connection
+            .query_row(
+                "SELECT 1 FROM blob_make_remote_intents
+                 WHERE root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|value| value.is_some())
+            .map_err(DbError::from)
     }
 
     pub(crate) fn enqueue_blob_upload(
@@ -1193,6 +1220,30 @@ impl DatabaseTestSql<'_> {
                     drop.plaintext_hash.to_string(),
                     drop.locator_hash.to_string(),
                     drop.disposition.as_db()
+                ],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn insert_blob_row(
+        &self,
+        row_id: &str,
+        stamp: &str,
+        bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let size = i64::try_from(bytes.len())
+            .map_err(|error| DbError::Message(format!("test blob size is invalid: {error}")))?;
+        self.connection
+            .execute(
+                "INSERT INTO photos (id, size, hash, cloud_path, _updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    row_id,
+                    size,
+                    crate::protocol::store_commit::ObjectHash::digest(bytes).to_string(),
+                    format!("photos/{row_id}.bin"),
+                    stamp,
                 ],
             )
             .map(|_| ())
@@ -1474,6 +1525,78 @@ impl DatabaseTestSql<'_> {
                  BEGIN SELECT RAISE(ABORT, 'forced set_protocol_state failure'); END;",
             )
             .map_err(DbError::from)
+    }
+
+    pub(crate) fn install_test_store_root_authority(
+        &self,
+        label: &str,
+    ) -> Result<crate::protocol::store_commit::ObjectHash, DbError> {
+        use crate::protocol::store_commit::{
+            GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
+            StoreProtocolRoot, STORE_PROTOCOL_VERSION,
+        };
+        use crate::storage::cloud::ObjectSlot;
+        use crate::storage::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
+
+        let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ))
+        .expect("fixed test signing key is hexadecimal")
+        .try_into()
+        .expect("fixed test signing key is 64 bytes");
+        let signer = crate::keys::UserKeypair::from_signing_key_bytes(&keypair_bytes)
+            .expect("fixed test signing key is valid");
+        let sync_routing_hash: ObjectHash = self
+            .required_protocol_state(crate::database::SYNC_ROUTING_HASH_STATE_KEY)?
+            .parse()
+            .map_err(|error| DbError::Message(format!("test Store sync-routing hash: {error}")))?;
+        let root_slot = ObjectSlot::logical(
+            crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        let descriptor = StoreCreationDescriptor {
+            version: STORE_PROTOCOL_VERSION,
+            creation_id: StoreCreationId::from_random_bytes(
+                *ObjectHash::digest(label.as_bytes()).as_bytes(),
+            ),
+            provider: StoreProviderBinding::S3 {
+                endpoint: S3EndpointBinding::Custom {
+                    origin: "https://test.invalid".to_string(),
+                },
+                region: "test-region".to_string(),
+                bucket: format!("{label}-bucket"),
+                key_prefix: None,
+            },
+            schema_version: 1,
+            sync_routing_hash,
+            founder_pubkey: crate::keys::public_key_hex(&signer),
+            founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
+                &format!("{label} founder grant"),
+            ),
+            root_slot: root_slot.clone(),
+            founder_registration: ObjectSlot::logical(format!(
+                "store-v1/test/{label}/registration.json"
+            ))
+            .map_err(|error| DbError::Message(error.to_string()))?,
+            founder_provider_admin:
+                crate::protocol::provider::FounderProviderAdminGrant::from_test_label(label),
+            founder_membership: GrantStreamAnchor::StoreMembership {
+                first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            },
+            founder_recovery: GrantStreamAnchor::OwnerRecovery {
+                first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/recovery/1.json"))
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            },
+        };
+        let root = StoreProtocolRoot::signed(descriptor, &signer)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let bytes = root.to_bytes();
+        let hash = root.object_hash();
+        let object = ExactObjectRef::new(root_slot, bytes.len() as u64, ObjectHash::digest(&bytes));
+        self.install_store_root_authority(hash, &bytes, &object)?;
+        Ok(hash)
     }
 
     pub(crate) fn install_store_root_authority(

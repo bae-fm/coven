@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::test_runtime::on_a_deep_stack;
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::joining::encode;
@@ -27,34 +28,6 @@ fn timing() -> DeviceJoinTransportTiming {
         poll: Duration::from_millis(2),
         deadline: Duration::from_secs(60),
     }
-}
-
-/// Run a test body on a thread with room for these flows' poll frames.
-///
-/// Unoptimized builds of the join operations reserve several times more stack
-/// per `poll` frame than optimized ones, and an unwind composes many of them in
-/// one body. The usual escape — `tokio::spawn`, which moves the task to a
-/// worker thread — is closed here because the cleanup-receipt preparation's
-/// future is not `Send`, so the whole runtime moves to the fat thread instead.
-fn on_a_deep_stack<Body, Fut>(body: Body)
-where
-    Body: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build the test runtime")
-                .block_on(body());
-        })
-        .expect("spawn the test thread")
-        .join()
-        // Carry the body's own panic across the thread boundary rather than
-        // reporting an opaque join failure in its place.
-        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
 }
 
 fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {

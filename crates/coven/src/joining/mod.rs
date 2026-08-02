@@ -5,6 +5,8 @@ mod transport;
 #[cfg(test)]
 mod facade_tests;
 #[cfg(test)]
+mod test_runtime;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod transport_tests;

@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::test_runtime::on_a_deep_stack;
 use crate::sync::test_helpers::*;
 
 fn timing() -> crate::DeviceJoinTransportTiming {
@@ -161,29 +162,6 @@ fn one_shot() -> crate::DeviceJoinTransportTiming {
     }
 }
 
-/// Run a test body on a thread with room for these flows' poll frames, carrying
-/// its own runtime because the join is not `Send`.
-fn on_a_deep_stack<Body, Fut>(body: Body)
-where
-    Body: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build the test runtime")
-                .block_on(body());
-        })
-        .expect("spawn the test thread")
-        // Carry the body's own panic across the thread boundary rather than
-        // reporting an opaque join failure in its place.
-        .join()
-        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
-}
-
 /// A host can cancel an invited join through its handle, and the joining device
 /// closes its own side through the same facade — leaving the attempt's slots
 /// gone and nothing pending on either side.
@@ -218,11 +196,6 @@ async fn run_a_facade_only_host_cancels_an_invited_join() {
     }
 
     let closing = fixture.close_over_test_home(&scanned, &join_request, timing());
-    // A connected handle runs its sync loop, which publishes Store operations
-    // of its own. A commit that loses that race is refused *before it
-    // persists*, so the unwind resumes from its journal and the caller retries
-    // the whole operation — the contract every Store write here keeps. The
-    // assertion is that it converges, not that it wins the first race.
     // A connected handle runs its sync loop, which publishes Store operations
     // of its own. A commit that loses that race is refused *before it
     // persists*, so the unwind resumes from its journal and the caller retries
@@ -317,23 +290,7 @@ async fn run_a_facade_only_host_abandons_an_invited_join() {
 /// to a saved member config without either naming an engine type.
 #[test]
 fn a_facade_only_host_runs_a_whole_device_join() {
-    // These flows compose more `poll` frames than a test thread's stack holds
-    // in an unoptimized build, and the join is not `Send`, so it carries its
-    // own runtime on a deeper thread.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build the test runtime")
-                .block_on(run_a_facade_only_host_runs_a_whole_device_join());
-        })
-        .expect("spawn the test thread")
-        .join()
-        // Carry the body's own panic across the thread boundary rather than
-        // reporting an opaque join failure in its place.
-        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    on_a_deep_stack(run_a_facade_only_host_runs_a_whole_device_join);
 }
 
 async fn run_a_facade_only_host_runs_a_whole_device_join() {

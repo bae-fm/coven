@@ -395,8 +395,12 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
     let table = blob_binding_table();
     let tables = vec![table];
     let gates = Gates::from_tables(&conn, &tables).expect("build gates");
-    insert_blob_row(&conn, "winner", "0000000001000-0000-a", b"winner bytes");
-    insert_blob_row(&conn, "loser", "0000000002000-0000-b", b"loser bytes");
+    DatabaseTestSql::new(&conn)
+        .insert_blob_row("winner", "0000000001000-0000-a", b"winner bytes")
+        .expect("insert winning blob row");
+    DatabaseTestSql::new(&conn)
+        .insert_blob_row("loser", "0000000002000-0000-b", b"loser bytes")
+        .expect("insert losing blob row");
 
     let package = AudiencePackage::store(
         ObjectHash::digest(b"root"),
@@ -476,7 +480,9 @@ fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
     .expect("create photos");
     let tables = vec![blob_binding_table()];
     let gates = Gates::from_tables(&conn, &tables).expect("build gates");
-    insert_blob_row(&conn, "photo", "0000000001000-0000-a", b"actual bytes");
+    DatabaseTestSql::new(&conn)
+        .insert_blob_row("photo", "0000000001000-0000-a", b"actual bytes")
+        .expect("insert blob row");
     let package = AudiencePackage::store(
         ObjectHash::digest(b"root"),
         test_candidate_family(),

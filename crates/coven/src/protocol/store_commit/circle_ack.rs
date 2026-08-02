@@ -230,7 +230,7 @@ mod tests {
                 ObjectHash::digest(b"circle-ack-stream"),
             ),
             author_pubkey: "circle-ack-author-pubkey".to_string(),
-            author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+            author_owner_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
                 "circle-ack-owner",
             ),
             seq: 1,

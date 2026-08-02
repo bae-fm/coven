@@ -4172,10 +4172,10 @@ mod tests {
         founder_entry(
             store_id,
             owner,
-            crate::sync::test_helpers::test_membership_grant_id(store_id),
+            crate::protocol::causal_grants::MembershipGrantId::from_test_label(store_id),
             created_at,
             membership,
-            crate::sync::test_helpers::test_founder_provider_admin(store_id),
+            crate::protocol::provider::FounderProviderAdminGrant::from_test_label(store_id),
         )
     }
 

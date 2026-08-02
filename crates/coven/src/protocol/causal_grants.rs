@@ -309,6 +309,13 @@ impl<'de> Deserialize<'de> for AuthorStreamId {
 #[serde(transparent)]
 pub struct MembershipGrantId(pub ObjectHash);
 
+impl MembershipGrantId {
+    #[cfg(test)]
+    pub(crate) fn from_test_label(label: &str) -> Self {
+        Self(ObjectHash::digest(label.as_bytes()))
+    }
+}
+
 impl fmt::Display for MembershipGrantId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, formatter)

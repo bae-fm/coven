@@ -26,7 +26,7 @@ fn circle_control() -> CircleControlCoord {
         device_id: "device-a".to_string(),
         stream_id: crate::protocol::causal_grants::AuthorStreamId::from_bytes([4; 32]),
         author_pubkey: "22".repeat(32),
-        author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(
+        author_owner_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
             "row blob reference owner",
         ),
         seq: 1,

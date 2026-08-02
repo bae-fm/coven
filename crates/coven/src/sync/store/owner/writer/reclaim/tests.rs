@@ -824,7 +824,9 @@ fn claim_control(label: &str, seq: u64) -> CircleControlCoord {
             label.as_bytes(),
         )),
         author_pubkey: format!("{label}-pubkey"),
-        author_owner_grant: crate::sync::test_helpers::test_membership_grant_id(label),
+        author_owner_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
+            label,
+        ),
         seq,
         control_hash: ObjectHash::digest(format!("{label}:{seq}").as_bytes()),
     }

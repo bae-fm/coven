@@ -165,6 +165,89 @@ pub struct FounderProviderAdminGrant {
     pub capability: ProviderCapabilityProof,
 }
 
+impl FounderProviderAdminGrant {
+    #[cfg(test)]
+    pub(crate) fn from_test_label(label: &str) -> Self {
+        let probe_id =
+            ProviderProbeId::from_bytes(*ObjectHash::digest(label.as_bytes()).as_bytes());
+        let slot = ObjectSlot::logical(format!("store-v1/test/{label}/provider-probe/exact"))
+            .expect("valid exact-probe test slot");
+        let first = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
+        let second = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
+        let accepted =
+            ExactObjectRef::new(slot.clone(), first.len() as u64, ObjectHash::digest(&first));
+        let lost_slot = ObjectSlot::logical(format!(
+            "store-v1/test/{label}/provider-probe/lost-response"
+        ))
+        .expect("valid lost-response test slot");
+        let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
+        let lost_ref = ExactObjectRef::new(
+            lost_slot.clone(),
+            lost_payload.len() as u64,
+            ObjectHash::digest(&lost_payload),
+        );
+        let device = ProviderDeviceBinding {
+            principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+                access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
+            },
+        };
+        let store = StoreProviderBinding::S3 {
+            endpoint: crate::storage::S3EndpointBinding::Custom {
+                origin: "https://test.invalid".to_string(),
+            },
+            region: "test-region".to_string(),
+            bucket: format!("{label}-bucket"),
+            key_prefix: None,
+        };
+        let transcript = ExactSlotProbeTranscript {
+            probe_id,
+            logical_key: slot.logical_key().to_string(),
+            slot,
+            contenders: [
+                ProbeCreateAttempt {
+                    payload_hash: ObjectHash::digest(&first),
+                    outcome: ProbeCreateOutcome::Created,
+                },
+                ProbeCreateAttempt {
+                    payload_hash: ObjectHash::digest(&second),
+                    outcome: ProbeCreateOutcome::RejectedOccupied,
+                },
+            ],
+            accepted: accepted.clone(),
+            full_read_hash: accepted.stored_hash(),
+            range: ProbeRangeReceipt {
+                start: PROBE_RANGE_START,
+                end: PROBE_RANGE_END,
+                bytes_hash: ObjectHash::digest(
+                    &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
+                ),
+            },
+            delete_verified_absent: true,
+            lost_response: LostResponseProbeReceipt {
+                logical_key: lost_slot.logical_key().to_string(),
+                slot: lost_slot,
+                payload_hash: ObjectHash::digest(&lost_payload),
+                settled: lost_ref,
+                readback_hash: ObjectHash::digest(&lost_payload),
+                delete_verified_absent: true,
+            },
+        };
+        Self {
+            grant_id: ProviderAdminGrantId(ObjectHash::digest(
+                format!("{label} provider admin grant").as_bytes(),
+            )),
+            provider: device.clone(),
+            access: ProviderAccessLocator::S3SharedCredentialGeneration {
+                generation: 1,
+                access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
+            },
+            capability: ProviderCapabilityProof {
+                exact_slots: ExactSlotProbeReceipt::from_transcript(transcript, &store, &device),
+            },
+        }
+    }
+}
+
 impl ProviderCapabilityProof {
     pub fn verify(
         &self,
