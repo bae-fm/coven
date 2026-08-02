@@ -21,11 +21,12 @@ from urllib.parse import unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[2]
-INDEX_PATH = ROOT / "target" / "ownership-audit" / "index.json"
-GRAPH_PATH = ROOT / "target" / "ownership-audit" / "graph.html"
-ANALYZER_LOG_PATH = ROOT / "target" / "ownership-audit" / "rust-analyzer.log"
+ARTIFACT_DIR = ROOT / ".ownership-audit"
+INDEX_PATH = ARTIFACT_DIR / "index.json"
+GRAPH_PATH = ARTIFACT_DIR / "graph.html"
+ANALYZER_LOG_PATH = ARTIFACT_DIR / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
-CACHE_DIR = INDEX_PATH.parent / "cache"
+CACHE_DIR = ARTIFACT_DIR / "cache"
 CACHE_SCHEMA = 2
 SEMANTIC_CACHE_SCHEMA = 2
 CACHE_CHECKPOINT_INTERVAL = 100
