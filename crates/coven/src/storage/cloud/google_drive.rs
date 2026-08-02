@@ -31,7 +31,7 @@ const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
 const LOGICAL_KEY_PROPERTY: &str = "covenLogicalKey";
 const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 
-pub(super) fn supports_all_drives(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+pub(crate) fn supports_all_drives(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request.query(&[("supportsAllDrives", "true")])
 }
 
@@ -109,7 +109,7 @@ fn list_file_query(folder_id: &str, prefix: &str) -> String {
     )
 }
 
-pub(super) fn folder_search_query(folder_name: &str) -> String {
+pub(crate) fn folder_search_query(folder_name: &str) -> String {
     drive_file_query(
         None,
         DriveNameMatch::Equals,

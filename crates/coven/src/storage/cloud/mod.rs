@@ -40,6 +40,10 @@ mod test_server;
 
 pub use factory::create_cloud_home;
 pub(crate) use factory::CloudHomeFactory;
+#[cfg(feature = "oauth-providers")]
+pub(crate) use google_drive::{folder_search_query, supports_all_drives};
+#[cfg(feature = "oauth-providers")]
+pub(crate) use setup::SetupError;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
