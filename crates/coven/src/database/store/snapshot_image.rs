@@ -90,6 +90,79 @@ impl SnapshotDatabaseImage {
         Self::prepare(path)?.write_new(plaintext)
     }
 
+    fn prepare_snapshot(
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> Result<Self, SnapshotImageError> {
+        Self::prepare(store_dir.as_ref().join("snapshot.db"))
+    }
+
+    fn capture(
+        self,
+        connection: &Connection,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        store_dir: &crate::store_dir::StoreDir,
+        tables: &[SyncedTable],
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        audience: &crate::protocol::circle::Audience,
+    ) -> Result<CreatedSnapshot, SnapshotImageError> {
+        if tables.is_empty() {
+            return self.finish(Err(SnapshotImageError::NoSyncedTables));
+        }
+
+        let gates = match crate::database::Gates::from_tables(connection, tables) {
+            Ok(gates) => gates,
+            Err(error) => {
+                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+            }
+        };
+        let routing_key = if gates.has_scoped_graph() {
+            let encryption = match routing_encryption {
+                Some(encryption) => encryption,
+                None => {
+                    return self.finish(Err(SnapshotImageError::Projection(
+                        "scoped snapshot creation requires Store routing encryption".to_string(),
+                    )));
+                }
+            };
+            match crate::protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
+            {
+                Ok(routing_key) => Some(routing_key),
+                Err(error) => {
+                    return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                }
+            }
+        } else {
+            None
+        };
+
+        let path_str = self
+            .path()
+            .to_str()
+            .expect("temp path should be valid UTF-8");
+        if let Err(error) = connection.execute("VACUUM INTO ?1", [path_str]) {
+            return self.finish(Err(SnapshotImageError::VacuumFailed(error.to_string())));
+        }
+        if let Err(error) = self.project(root, tables, routing_key.as_ref(), audience) {
+            return self.finish(Err(error));
+        }
+        let blobs = match self.blob_facts(connection, store_dir, tables) {
+            Ok(blobs) => blobs,
+            Err(error) => return self.finish(Err(error)),
+        };
+        if matches!(audience, crate::protocol::circle::Audience::Circle(_)) {
+            if let Err(error) = self.strip_circle_transport_state() {
+                return self.finish(Err(error));
+            }
+        }
+
+        let plaintext = self.read_and_discard()?;
+        info!(plaintext_size = plaintext.len(), "created snapshot");
+        Ok(CreatedSnapshot {
+            db_image: plaintext,
+            blobs,
+        })
+    }
+
     fn write_new(mut self, plaintext: &[u8]) -> Result<Self, SnapshotImageError> {
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
@@ -514,16 +587,20 @@ impl StoreDatabase {
         let tables = self.synced_tables().to_vec();
         self.connection
             .call(move |connection| {
-                create_snapshot_for_audience(
-                    connection,
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    routing_encryption.as_ref(),
-                    &crate::protocol::circle::Audience::Store,
-                )
-                .map(|snapshot| snapshot.db_image)
-                .map_err(snapshot_image_db_error)
+                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                    .and_then(|image| {
+                        image.capture(
+                            connection,
+                            &root,
+                            &store_dir,
+                            &tables,
+                            routing_encryption.as_ref(),
+                            &crate::protocol::circle::Audience::Store,
+                        )
+                    })
+                    .map(|snapshot| snapshot.db_image)
+                    .map_err(snapshot_image_db_error)
             })
             .await
     }
@@ -539,16 +616,20 @@ impl StoreDatabase {
         let tables = self.synced_tables().to_vec();
         self.connection
             .call(move |connection| {
-                create_snapshot_for_audience(
-                    connection,
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    Some(&routing_encryption),
-                    &crate::protocol::circle::Audience::Circle(circle_id),
-                )
-                .map(|snapshot| snapshot.db_image)
-                .map_err(snapshot_image_db_error)
+                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                    .and_then(|image| {
+                        image.capture(
+                            connection,
+                            &root,
+                            &store_dir,
+                            &tables,
+                            Some(&routing_encryption),
+                            &crate::protocol::circle::Audience::Circle(circle_id),
+                        )
+                    })
+                    .map(|snapshot| snapshot.db_image)
+                    .map_err(snapshot_image_db_error)
             })
             .await
     }
@@ -569,15 +650,19 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 require_no_unpublished_store_writes(connection)?;
-                let snapshot = create_snapshot_for_audience(
-                    connection,
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    routing_encryption.as_ref(),
-                    &crate::protocol::circle::Audience::Store,
-                )
-                .map_err(snapshot_image_db_error)?;
+                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                    .and_then(|image| {
+                        image.capture(
+                            connection,
+                            &root,
+                            &store_dir,
+                            &tables,
+                            routing_encryption.as_ref(),
+                            &crate::protocol::circle::Audience::Store,
+                        )
+                    })
+                    .map_err(snapshot_image_db_error)?;
                 let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
@@ -604,15 +689,19 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 require_no_unpublished_store_writes(connection)?;
-                let snapshot = create_snapshot_for_audience(
-                    connection,
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    Some(&routing_encryption),
-                    &crate::protocol::circle::Audience::Circle(circle_id),
-                )
-                .map_err(snapshot_image_db_error)?;
+                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                    .and_then(|image| {
+                        image.capture(
+                            connection,
+                            &root,
+                            &store_dir,
+                            &tables,
+                            Some(&routing_encryption),
+                            &crate::protocol::circle::Audience::Circle(circle_id),
+                        )
+                    })
+                    .map_err(snapshot_image_db_error)?;
                 let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
@@ -644,10 +733,9 @@ impl StoreDatabase {
                         "retained Merge materialization cache lock is poisoned".to_string(),
                     )
                 })?;
-                let replay = crate::database::replay_retained_merge_projection_on(
+                let replay = retained.replay_projection_on(
                     &transaction,
                     &root,
-                    &mut retained,
                     &blob_decls,
                     &gates,
                     &tables,
@@ -667,15 +755,19 @@ impl StoreDatabase {
                         "Circle close cutoff is not an exact retained Store frontier".to_string(),
                     ));
                 }
-                create_snapshot_for_audience(
-                    &replay,
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    Some(&routing_encryption),
-                    &crate::protocol::circle::Audience::Circle(circle_id),
-                )
-                .map_err(snapshot_image_db_error)
+                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                    .and_then(|image| {
+                        image.capture(
+                            &replay,
+                            &root,
+                            &store_dir,
+                            &tables,
+                            Some(&routing_encryption),
+                            &crate::protocol::circle::Audience::Circle(circle_id),
+                        )
+                    })
+                    .map_err(snapshot_image_db_error)
             })
             .await
     }
@@ -703,65 +795,6 @@ fn require_no_unpublished_store_writes(connection: &Connection) -> Result<(), Db
         ));
     }
     Ok(())
-}
-
-fn create_snapshot_for_audience(
-    connection: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    temp_dir: &Path,
-    tables: &[SyncedTable],
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    audience: &crate::protocol::circle::Audience,
-) -> Result<CreatedSnapshot, SnapshotImageError> {
-    if tables.is_empty() {
-        return Err(SnapshotImageError::NoSyncedTables);
-    }
-
-    let gates = crate::database::Gates::from_tables(connection, tables)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-    let routing_key = if gates.has_scoped_graph() {
-        let encryption = routing_encryption.ok_or_else(|| {
-            SnapshotImageError::Projection(
-                "scoped snapshot creation requires Store routing encryption".to_string(),
-            )
-        })?;
-        Some(
-            crate::protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
-        )
-    } else {
-        None
-    };
-
-    let snapshot_store_dir = crate::store_dir::StoreDir::new(temp_dir);
-    let snapshot_image =
-        SnapshotDatabaseImage::prepare(snapshot_store_dir.as_ref().join("snapshot.db"))?;
-    let snapshot_path = snapshot_image.path();
-    let path_str = snapshot_path
-        .to_str()
-        .expect("temp path should be valid UTF-8");
-    if let Err(error) = connection.execute("VACUUM INTO ?1", [path_str]) {
-        return snapshot_image.finish(Err(SnapshotImageError::VacuumFailed(error.to_string())));
-    }
-    if let Err(error) = snapshot_image.project(root, tables, routing_key.as_ref(), audience) {
-        return snapshot_image.finish(Err(error));
-    }
-    let blobs = match snapshot_image.blob_facts(connection, &snapshot_store_dir, tables) {
-        Ok(blobs) => blobs,
-        Err(error) => return snapshot_image.finish(Err(error)),
-    };
-    if matches!(audience, crate::protocol::circle::Audience::Circle(_)) {
-        if let Err(error) = snapshot_image.strip_circle_transport_state() {
-            return snapshot_image.finish(Err(error));
-        }
-    }
-
-    let plaintext = snapshot_image.read_and_discard()?;
-    info!(plaintext_size = plaintext.len(), "created snapshot");
-    Ok(CreatedSnapshot {
-        db_image: plaintext,
-        blobs,
-    })
 }
 
 const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[

@@ -827,8 +827,9 @@ pub(super) async fn prepare_founder_graph(
     }))
 }
 
-async fn rollback_founder_exact_objects(
-    storage: &dyn SyncStorage,
+pub(super) async fn rollback_founder_publication(
+    db: &StoreDatabase,
+    storage: &dyn crate::storage::SyncStorage,
     graph: &crate::database::DurableFounderGraph,
 ) -> Result<(), String> {
     let mut objects = vec![
@@ -846,22 +847,6 @@ async fn rollback_founder_exact_objects(
             Ok(()) | Err(crate::storage::StorageError::SlotCollision(_)) => {}
             Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
         }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
-}
-
-pub(super) async fn rollback_founder_publication(
-    db: &StoreDatabase,
-    storage: &dyn crate::storage::SyncStorage,
-    graph: &crate::database::DurableFounderGraph,
-) -> Result<(), String> {
-    let mut failures = Vec::new();
-    if let Err(error) = rollback_founder_exact_objects(storage, graph).await {
-        failures.push(error);
     }
     if !failures.is_empty() {
         return Err(failures.join("; "));

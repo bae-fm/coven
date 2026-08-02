@@ -655,10 +655,12 @@ class SemanticCacheTests(unittest.TestCase):
             manifest = crate / "Cargo.toml"
             library_path = crate / "src" / "lib.rs"
             build_path = crate / "build.rs"
+            tool_path = root / "ownership_audit.py"
             library_path.parent.mkdir(parents=True)
             manifest.write_text("[package]\nname = \"sample\"\n")
             library_path.write_text("struct Model { value: u8 }\n")
             build_path.write_text("fn main() { first(); }\n")
+            tool_path.write_text("graph assembly version one\n")
             metadata = {
                 "packages": [
                     {
@@ -689,16 +691,22 @@ class SemanticCacheTests(unittest.TestCase):
                 )
 
             original_root = ownership_audit.ROOT
+            original_file = ownership_audit.__file__
             ownership_audit.ROOT = root
+            ownership_audit.__file__ = str(tool_path)
             try:
                 baseline = fingerprint()
+                tool_path.write_text("graph assembly version two\n")
+                changed_tool = fingerprint()
                 library_path.write_text("struct Model { value: u16 }\n")
                 changed_library = fingerprint()
                 build_path.write_text("fn main() { second(); }\n")
                 changed_build = fingerprint()
             finally:
                 ownership_audit.ROOT = original_root
+                ownership_audit.__file__ = original_file
 
+        self.assertEqual(baseline, changed_tool)
         self.assertEqual(baseline, changed_library)
         self.assertNotEqual(changed_library, changed_build)
 
@@ -715,6 +723,7 @@ class SemanticCacheTests(unittest.TestCase):
                 "fn stable() { same_target(); }\n"
             )
             model_path.write_text(
+                "/// First wording.\n"
                 "struct Wrapper { child: Alias }\n"
                 "type Alias = First;\n"
                 "struct Unrelated { value: u8 }\n"
@@ -752,12 +761,21 @@ class SemanticCacheTests(unittest.TestCase):
             try:
                 baseline = fingerprints()
                 model_path.write_text(
+                    "/// Second wording.\n"
+                    "struct Wrapper { child: Alias }\n"
+                    "type Alias = First;\n"
+                    "struct Unrelated { value: u8 }\n"
+                )
+                changed_comment = fingerprints()
+                model_path.write_text(
+                    "/// Second wording.\n"
                     "struct Wrapper { child: Alias }\n"
                     "type Alias = Second;\n"
                     "struct Unrelated { value: u8 }\n"
                 )
                 changed_dependency = fingerprints()
                 model_path.write_text(
+                    "/// Second wording.\n"
                     "struct Wrapper { child: Alias }\n"
                     "type Alias = Second;\n"
                     "struct Unrelated { value: u16 }\n"
@@ -766,6 +784,8 @@ class SemanticCacheTests(unittest.TestCase):
             finally:
                 ownership_audit.ROOT = original_root
 
+        self.assertEqual(baseline["caller"], changed_comment["caller"])
+        self.assertEqual(baseline["stable"], changed_comment["stable"])
         self.assertNotEqual(baseline["caller"], changed_dependency["caller"])
         self.assertEqual(baseline["stable"], changed_dependency["stable"])
         self.assertEqual(
@@ -1280,6 +1300,48 @@ class SemanticIndexTests(unittest.TestCase):
         ])
         self.assertFalse(nodes["store::publish_snapshot"]["ready"])
         self.assertEqual(graph["summary"]["ready"], 1)
+
+    def test_cfg_realm_distinguishes_production_alternatives_from_test_only_paths(self):
+        oauth = self.graph_record(
+            "sample::oauth::generate_code_verifier",
+            effects=["randomness"],
+            cfg_paths=[
+                ['#[cfg(any(test, feature = "oauth-providers"))]'],
+            ],
+        )
+        merged_variants = self.graph_record(
+            "sample::protocol_root::load_pinned",
+            effects=["storage-read"],
+            cfg_paths=[
+                ['#[cfg(any(test, feature = "test-utils"))]'],
+                ['#[cfg(not(any(test, feature = "test-utils")))]'],
+            ],
+        )
+        test_only = self.graph_record(
+            "sample::fixtures::install",
+            effects=["database-write"],
+            cfg_paths=[
+                ['#[cfg(any(test, feature = "test-utils"))]'],
+            ],
+        )
+
+        graph = ownership_audit.build_graph_data(
+            {
+                "callables": [oauth, merged_variants, test_only],
+                "reach_throughs": {},
+            }
+        )
+        nodes = {
+            node["component"]: node
+            for node in graph["nodes"]
+            if node["kind"] == "unbound"
+        }
+
+        self.assertEqual(nodes[oauth["symbol"]]["realm"], "production")
+        self.assertEqual(
+            nodes[merged_variants["symbol"]]["realm"], "production"
+        )
+        self.assertEqual(nodes[test_only["symbol"]]["realm"], "test")
 
     def test_receiverless_associated_stateful_function_is_unbound(self):
         constructor = self.graph_record(
@@ -1804,6 +1866,99 @@ class SemanticIndexTests(unittest.TestCase):
             if node["kind"] == "unbound"
         )
         self.assertTrue(workflow["ready"])
+
+    def test_verified_receiver_cycle_is_resolved(self):
+        history = self.graph_record(
+            "sample::history::<History>::verify",
+            module="sample::history",
+            kind="method",
+            receiver_type="History",
+            parameters=[{"name": "self", "type": "&mut self"}],
+            effects=["database-read"],
+        )
+        activation = self.graph_record(
+            "sample::history::<Activation>::load",
+            module="sample::history",
+            kind="method",
+            receiver_type="Activation",
+            parameters=[{"name": "self", "type": "&mut self"}],
+            effects=["cryptography"],
+        )
+        history["callees"] = [
+            {"symbol": activation["symbol"], "sites": [{}]}
+        ]
+        history["callers"] = [
+            {"symbol": activation["symbol"], "sites": [{}]}
+        ]
+        activation["callees"] = [
+            {"symbol": history["symbol"], "sites": [{}]}
+        ]
+        activation["callers"] = [
+            {"symbol": history["symbol"], "sites": [{}]}
+        ]
+        decisions = {
+            (history["symbol"], history["signature"]): {
+                "classification": "owner-method",
+                "owner": "History",
+                "status": "verified",
+            },
+            (activation["symbol"], activation["signature"]): {
+                "classification": "operation-method",
+                "owner": "Activation",
+                "status": "verified",
+            },
+        }
+
+        graph = ownership_audit.build_graph_data(
+            {"callables": [history, activation], "reach_throughs": {}},
+            decisions,
+        )
+
+        self.assertEqual(graph["summary"]["unbound"], 0)
+        resolved = next(
+            node for node in graph["nodes"] if node["kind"] == "resolved"
+        )
+        self.assertEqual(
+            resolved["classifications"],
+            ["operation-method", "owner-method"],
+        )
+
+    def test_callback_body_does_not_block_the_executor(self):
+        caller = self.graph_record(
+            "sample::run",
+            callees=[
+                {"symbol": "sample::execute", "sites": [{}]},
+                {"symbol": "sample::run::<closure@1:1>", "sites": [{}]},
+            ],
+        )
+        callback = self.graph_record(
+            "sample::run::<closure@1:1>",
+            kind="closure",
+            enclosing_callable=caller["symbol"],
+            effects=["database-write"],
+        )
+        executor = self.graph_record(
+            "sample::execute",
+            effects=["database-write"],
+            callers=[{"symbol": caller["symbol"], "sites": [{}]}],
+            callees=[
+                {
+                    "symbol": callback["symbol"],
+                    "sites": [{"role": "callable-argument"}],
+                }
+            ],
+        )
+
+        graph = ownership_audit.build_graph_data(
+            {"callables": [caller, callback, executor], "reach_throughs": {}}
+        )
+        nodes = {node["label"]: node for node in graph["nodes"]}
+
+        self.assertTrue(nodes["sample::execute"]["ready"])
+        self.assertEqual(
+            nodes["sample::run"]["blockers"],
+            [nodes["sample::execute"]["id"]],
+        )
 
     def test_graph_html_contains_svg_and_embedded_index(self):
         html = ownership_audit.render_graph_html(

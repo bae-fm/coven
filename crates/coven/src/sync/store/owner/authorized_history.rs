@@ -1081,17 +1081,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .activated_store_device_registration_records()
             .await?;
-        let storage = self.storage;
-        let root = self.root.reference().clone();
         let mut candidates = Vec::new();
         for (registration_ref, registration) in registrations {
-            for snapshot in snapshot::load_store_snapshot_stream(
-                storage,
-                &root,
-                &registration_ref,
-                &registration,
-            )
-            .await?
+            for snapshot in self
+                .history_verifier
+                .load_store_snapshot_stream(&registration_ref, &registration)
+                .await?
             {
                 if !frontier.covers(&snapshot.meta.coverage)
                     || snapshot.meta.state.devices.state_hash() != device_state.state_hash()

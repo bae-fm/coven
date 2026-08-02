@@ -9,12 +9,18 @@ use crate::protocol::remote_object::{
 use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
+    StoreRootRef,
 };
-use crate::storage::PreparedExactObject;
-use crate::sync::VerifiedCircleActivations;
+use crate::storage::{ExactObjectRef, PreparedExactObject};
+use crate::sync::{
+    activated_merge_membership_remote_objects, ApplyOutcome, HeldStorePositionReason,
+    LocalStoreMembership, MembershipAuthorityBytes, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, VerifiedCircleActivations,
+};
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::candidate_records::PreparedMergeCandidate;
 use super::materialization_models::{
@@ -259,6 +265,403 @@ impl RetainedMergeMaterializationCache {
         }
         Ok(index)
     }
+
+    pub(crate) fn replay_projection_on(
+        &mut self,
+        live: &rusqlite::Transaction<'_>,
+        root: &StoreRootRef,
+        blob_decls: &BlobDecls,
+        gates: &crate::database::Gates,
+        synced_tables: &[SyncedTable],
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        retracted: &BTreeSet<StoreBatchCommitRef>,
+        history_cut: Option<&CommitFrontier>,
+        include_local_write_overlays: bool,
+        local_store_membership: LocalStoreMembership,
+    ) -> Result<rusqlite::Connection, DbError> {
+        let baseline = StoreDatabase::generation_zero_replay_baseline_on(live)?;
+        let replay = baseline.open_image()?;
+        replay
+            .pragma_update(None, "foreign_keys", "ON")
+            .map_err(DbError::from)?;
+        let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
+        let circle_bootstraps = StoreDatabase::circle_bootstrap_replay_inputs_on(live)?;
+        let mut circle_bootstrap_cuts = BTreeMap::new();
+        for (activation_commit, bootstrap) in &circle_bootstraps {
+            crate::database::verify_circle_bootstrap_image(
+                bootstrap.image_bytes(),
+                bootstrap.reference(),
+                bootstrap.circle_id(),
+                synced_tables,
+                routing_key,
+            )
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "verify retained Circle {} bootstrap: {error}",
+                    bootstrap.circle_id()
+                ))
+            })?;
+            let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+            crate::database::install_circle_bootstrap_image_on(
+                &tx,
+                synced_tables,
+                activation_commit,
+                bootstrap,
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            if circle_bootstrap_cuts
+                .insert(
+                    bootstrap.circle_id(),
+                    bootstrap.reference().coverage.clone(),
+                )
+                .is_some()
+            {
+                return Err(DbError::Message(format!(
+                    "retained replay has duplicate Circle {} bootstraps",
+                    bootstrap.circle_id()
+                )));
+            }
+        }
+        let retained = self.replay_inputs_on(live, root)?;
+        let circle_epochs = self.circle_replay_epoch_index_on(live)?;
+        let active_references = retained
+            .iter()
+            .filter(|materialization| {
+                !retracted.contains(materialization.commit_ref())
+                    && history_cut
+                        .is_none_or(|cutoff| cutoff.covers_commit(materialization.commit_ref()))
+            })
+            .map(|materialization| materialization.commit_ref().clone())
+            .collect::<BTreeSet<_>>();
+        for materialization in retained
+            .iter()
+            .filter(|materialization| active_references.contains(materialization.commit_ref()))
+        {
+            let mut dependencies = materialization
+                .commit()
+                .order
+                .dependencies()
+                .values()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if let Some(predecessor) = materialization.commit().order.predecessor() {
+                dependencies.insert(predecessor.clone());
+            }
+            for dependency in dependencies {
+                if retracted.contains(&dependency) {
+                    return Err(DbError::Message(format!(
+                        "surviving retained Merge commit {:?} depends on retracted commit {:?}",
+                        materialization.commit_ref(),
+                        dependency
+                    )));
+                }
+                if !active_references.contains(&dependency)
+                    && !replay_dependency_is_baseline_covered(&dependency, &baseline.exact_cut)
+                {
+                    return Err(DbError::Message(format!(
+                        "surviving retained Merge commit {:?} has unretained dependency {:?}",
+                        materialization.commit_ref(),
+                        dependency
+                    )));
+                }
+            }
+        }
+        let active_accepted_writes = retained
+            .iter()
+            .filter(|materialization| active_references.contains(materialization.commit_ref()))
+            .map(|materialization| materialization.commit().write_id.clone())
+            .collect::<BTreeSet<_>>();
+        let retracted_writes = retained
+            .iter()
+            .filter(|materialization| retracted.contains(materialization.commit_ref()))
+            .map(|materialization| materialization.commit().write_id.clone())
+            .collect::<BTreeSet<_>>();
+        let write_overlays = if include_local_write_overlays {
+            StoreDatabase::load_merge_replay_write_overlays_on(
+                live,
+                &active_accepted_writes,
+                &retracted_writes,
+            )?
+        } else {
+            Vec::new()
+        };
+        let mut pending = retained
+            .into_iter()
+            .filter(|materialization| active_references.contains(materialization.commit_ref()))
+            .map(|materialization| (materialization.commit_ref().clone(), materialization))
+            .collect::<BTreeMap<_, _>>();
+        let mut applied = BTreeSet::new();
+        while !pending.is_empty() {
+            let ready = pending
+                .iter()
+                .filter_map(|(reference, materialization)| {
+                    let predecessor_ready = materialization
+                        .commit()
+                        .order
+                        .predecessor()
+                        .is_none_or(|predecessor| {
+                            replay_dependency_is_settled(predecessor, &applied, &baseline.exact_cut)
+                        });
+                    let dependencies_ready = materialization
+                        .commit()
+                        .order
+                        .dependencies()
+                        .values()
+                        .all(|dependency| {
+                            replay_dependency_is_settled(dependency, &applied, &baseline.exact_cut)
+                        });
+                    (predecessor_ready && dependencies_ready).then(|| reference.clone())
+                })
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Err(DbError::Message(
+                    "retained Merge replay is cyclic or has an unresolved dependency".to_string(),
+                ));
+            }
+            let mut made_progress = false;
+            for reference in ready {
+                let materialization = pending
+                    .get(&reference)
+                    .expect("ready retained replay input remains pending")
+                    .clone();
+                let timestamp_policy = match materialization.package_application() {
+                    None => IncomingTimestampPolicy::LocallyAuthored,
+                    Some(RetainedPackageApplication::Received { receiver_wall_ms }) => {
+                        IncomingTimestampPolicy::Received { receiver_wall_ms }
+                    }
+                    Some(RetainedPackageApplication::LocallyAuthored) => {
+                        IncomingTimestampPolicy::LocallyAuthored
+                    }
+                };
+                let mut retained_packages = Vec::new();
+                for package in materialization.packages() {
+                    if let crate::protocol::audience_package::PackageAudience::Circle {
+                        circle_id,
+                        control,
+                        ..
+                    } = package.audience()
+                    {
+                        if circle_bootstrap_cuts
+                            .get(circle_id)
+                            .is_some_and(|cut| cut.covers_commit(materialization.commit_ref()))
+                        {
+                            continue;
+                        }
+                        if !circle_epochs.permits(
+                            materialization.commit_ref(),
+                            *circle_id,
+                            control,
+                        )? {
+                            continue;
+                        }
+                        if !local_store_membership.retains_circle_rows() {
+                            continue;
+                        }
+                    }
+                    retained_packages.push(package.clone());
+                }
+                let package_application = if retained_packages.is_empty() {
+                    None
+                } else {
+                    Some(materialization.package_application().ok_or_else(|| {
+                        DbError::Message(
+                            "retained Merge packages lack their application timestamp".to_string(),
+                        )
+                    })?)
+                };
+                let packages = retained_packages
+                    .into_iter()
+                    .map(|package| {
+                        let changeset =
+                            ValidatedChangeset::new(package.changeset().to_vec(), schema.clone())
+                                .map_err(|error| {
+                                DbError::Message(format!(
+                                    "retained Merge replay changeset: {error}"
+                                ))
+                            })?;
+                        Ok(PreparedMergeMaterializationPackage { package, changeset })
+                    })
+                    .collect::<Result<Vec<_>, DbError>>()?;
+                let membership_remote_objects = if let Some(objects) =
+                    materialization.membership_objects()
+                {
+                    let retained_membership_bytes = |object: &ExactObjectRef,
+                                                     kind: &str|
+                     -> Result<
+                        MembershipAuthorityBytes,
+                        DbError,
+                    > {
+                        let object_id = remote_object_id(object);
+                        let remote = load_remote_object_on(live, object_id).map_err(|error| {
+                            DbError::Message(format!(
+                                "load retained Merge membership {kind} {object_id} for replay: {error}"
+                            ))
+                        })?;
+                        if remote.object() != object {
+                            return Err(DbError::Message(format!(
+                                "retained Merge membership {kind} {object_id} has different exact object"
+                            )));
+                        }
+                        let stored = remote
+                            .bytes()
+                            .stored()
+                            .inline_bytes()
+                            .ok_or_else(|| {
+                                DbError::Message(format!(
+                                    "retained Merge membership {kind} {object_id} has no inline stored bytes"
+                                ))
+                            })?
+                            .to_vec();
+                        Ok(MembershipAuthorityBytes::new(
+                            remote.bytes().canonical_semantic_bytes().to_vec(),
+                            stored,
+                        ))
+                    };
+                    let family = materialization.commit().candidate_family();
+                    let owner = materialization.commit_ref();
+                    let entry_bytes = retained_membership_bytes(&objects.entry().object, "entry")?;
+                    let head_bytes = retained_membership_bytes(&objects.head().object, "head")?;
+                    let resolution_bytes = objects
+                        .resolution()
+                        .map(|resolution| {
+                            retained_membership_bytes(&resolution.object, "resolution")
+                        })
+                        .transpose()?;
+                    activated_merge_membership_remote_objects(
+                        family,
+                        objects,
+                        entry_bytes,
+                        head_bytes,
+                        resolution_bytes,
+                        owner,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                } else {
+                    Vec::new()
+                };
+                let replay_materialization = PreparedMergeMaterialization {
+                    root: materialization.root().clone(),
+                    verified_commit: materialization.verified_commit().clone(),
+                    activation_head: materialization.activation_head().clone(),
+                    activation_head_object: materialization.activation_head_object().clone(),
+                    history_summary: materialization.history_summary().clone(),
+                    membership_objects: materialization.membership_objects().cloned(),
+                    membership_remote_objects,
+                    registrations: materialization.registrations().to_vec(),
+                    packages,
+                    device_operations: materialization.device_operations().clone(),
+                    circle_activations: materialization.circle_activations().clone(),
+                    package_application,
+                };
+                let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+                let outcome = MergeMaterializationTransaction::new(&tx)
+                    .apply_prepared_merge_materialization(
+                        blob_decls,
+                        gates,
+                        synced_tables,
+                        routing_key,
+                        local_store_membership,
+                        timestamp_policy,
+                        Some(&circle_bootstrap_cuts),
+                        replay_materialization,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "apply retained Merge commit {reference:?} during canonical replay: {error}"
+                        ))
+                    })?;
+                match outcome.outcome {
+                    ApplyOutcome::Applied(_) => {
+                        tx.commit().map_err(DbError::from)?;
+                        pending.remove(&reference);
+                        applied.insert(reference);
+                        made_progress = true;
+                    }
+                    ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency) => {
+                        tx.rollback().map_err(DbError::from)?;
+                    }
+                    ApplyOutcome::Held(reason) => {
+                        tx.rollback().map_err(DbError::from)?;
+                        return Err(DbError::Message(format!(
+                            "retained Merge replay held accepted commit {reference:?}: {reason:?}"
+                        )));
+                    }
+                }
+            }
+            if !made_progress {
+                return Err(DbError::Message(
+                    "retained Merge replay has an unresolved foreign-key dependency".to_string(),
+                ));
+            }
+        }
+        for overlay in write_overlays {
+            let tx = replay.unchecked_transaction().map_err(DbError::from)?;
+            tx.pragma_update(None, "defer_foreign_keys", "ON")
+                .map_err(DbError::from)?;
+            let partitions = overlay
+                .partitions
+                .store
+                .into_iter()
+                .chain(overlay.partitions.circles)
+                .chain(overlay.partitions.local);
+            for partition in partitions {
+                let changeset = ValidatedChangeset::new(partition.changeset, schema.clone())
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "local replay write {} changeset: {error}",
+                            overlay.write_id
+                        ))
+                    })?;
+                let applied = MergeMaterializationTransaction::new(&tx)
+                    .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
+                if applied.had_fk_violations || !applied.constraint_conflict_tables.is_empty() {
+                    return Err(DbError::Message(format!(
+                        "local replay write {} conflicts with accepted history",
+                        overlay.write_id
+                    )));
+                }
+            }
+            let violations: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if violations {
+                return Err(DbError::Message(format!(
+                    "local replay write {} violates foreign keys",
+                    overlay.write_id
+                )));
+            }
+            tx.commit().map_err(DbError::from)?;
+        }
+        Ok(replay)
+    }
+}
+
+fn replay_dependency_is_settled(
+    dependency: &StoreBatchCommitRef,
+    applied: &BTreeSet<StoreBatchCommitRef>,
+    baseline: &CommitFrontier,
+) -> bool {
+    if applied.contains(dependency) {
+        return true;
+    }
+    replay_dependency_is_baseline_covered(dependency, baseline)
+}
+
+fn replay_dependency_is_baseline_covered(
+    dependency: &StoreBatchCommitRef,
+    baseline: &CommitFrontier,
+) -> bool {
+    baseline
+        .0
+        .get(&dependency.coord.stream_id)
+        .is_some_and(|covered| {
+            covered.coord.sequence() > dependency.coord.sequence
+                || (covered.coord.sequence() == dependency.coord.sequence && covered == dependency)
+        })
 }
 
 pub(crate) struct CircleReplayEpochIndex {

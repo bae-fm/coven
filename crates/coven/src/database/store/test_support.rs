@@ -246,10 +246,9 @@ impl StoreDatabase {
                             "retained Merge materialization cache lock is poisoned".to_string(),
                         )
                     })?;
-                let retained = crate::database::replay_retained_merge_projection_on(
+                let retained = retained_merge_materializations.replay_projection_on(
                     &transaction,
                     &root,
-                    &mut retained_merge_materializations,
                     &blob_decls,
                     &gates,
                     &tables,
@@ -272,10 +271,9 @@ impl StoreDatabase {
                 transaction
                     .execute("DELETE FROM circle_bootstrap_coverage", [])
                     .map_err(DbError::from)?;
-                let sabotaged = crate::database::replay_retained_merge_projection_on(
+                let sabotaged = retained_merge_materializations.replay_projection_on(
                     &transaction,
                     &root,
-                    &mut retained_merge_materializations,
                     &blob_decls,
                     &gates,
                     &tables,

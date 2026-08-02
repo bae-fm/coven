@@ -136,20 +136,18 @@ impl StoreDatabase {
                         || installs_circle_bootstrap
                         || !retracted.is_empty()
                     {
-                        let replay =
-                            crate::database::replay_retained_merge_projection_on(
-                                &tx,
-                                &root,
-                                &mut transaction_cache,
-                                &blob_decls,
-                                &gates,
-                                &synced_tables,
-                                routing_key.as_ref(),
-                                &retracted,
-                                None,
-                                true,
-                                local_store_membership,
-                            )?;
+                        let replay = transaction_cache.replay_projection_on(
+                            &tx,
+                            &root,
+                            &blob_decls,
+                            &gates,
+                            &synced_tables,
+                            routing_key.as_ref(),
+                            &retracted,
+                            None,
+                            true,
+                            local_store_membership,
+                        )?;
                         let mut host_changes = rusqlite::session::Session::new(&tx)
                             .map_err(DbError::from)?;
                         for table in &synced_tables {

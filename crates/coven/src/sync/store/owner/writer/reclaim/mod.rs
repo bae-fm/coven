@@ -2820,22 +2820,18 @@ impl AuthorizedReclaim<'_, '_> {
     ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
         let storage = self.storage.clone();
         let root = self.root.clone();
+        let mut history = self.history();
         let mut authorized = Vec::new();
         for (registration_ref, registration) in registrations {
-            for snapshot in super::snapshot::load_store_snapshot_stream(
-                storage.as_ref(),
-                &root,
-                registration_ref,
-                registration,
-            )
-            .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+            for snapshot in history
+                .load_store_snapshot_stream(registration_ref, registration)
+                .await
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
             {
                 authorized.push(snapshot);
             }
         }
-        let selected = match self
-            .history()
+        let selected = match history
             .select_maximal_stable_store_snapshot(authorized)
             .await
         {

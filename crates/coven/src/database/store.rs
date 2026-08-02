@@ -92,7 +92,6 @@ pub(crate) use merge_materialization_transaction::{
 pub(crate) use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
 pub(crate) use pull_replay::{
     install_circle_bootstrap_image_on, install_circle_bootstrap_remote_objects_on,
-    replay_retained_merge_projection_on,
 };
 pub(crate) use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,

@@ -187,6 +187,7 @@ impl StoreDatabase {
         let row = row.clone();
         let tables = self.synced_tables().to_vec();
         let gates = self.gates();
+        let blob_decls = self.blob_decls();
         let write_id = self.new_store_write_id();
         self.connection
             .call(move |connection| {
@@ -273,12 +274,15 @@ impl StoreDatabase {
                         ))
                     })?;
                 let publication_write_id = write_id.clone();
-                StoreDatabase::run_prepared_blob_transition_transaction_on(
+                super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
                     connection,
                     &tables,
+                    &gates,
+                    &blob_decls,
                     routing_encryption.as_ref(),
                     write_id,
-                    |transaction| {
+                )?
+                .execute(|transaction| {
                         write_gate(
                             transaction,
                             &root_table,
@@ -300,8 +304,7 @@ impl StoreDatabase {
                             &root_id,
                             &publication_write_id,
                         )
-                    },
-                )?;
+                    })?;
                 Ok(PostUpload::MadeRemote {
                     root_table,
                     root_id,
@@ -326,14 +329,18 @@ impl StoreDatabase {
         let tables = self.synced_tables().to_vec();
         let write_id = self.new_store_write_id();
         let gates = self.gates();
+        let blob_decls = self.blob_decls();
         self.connection
             .call(move |connection| {
-                StoreDatabase::run_prepared_blob_transition_transaction_on(
+                super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
                     connection,
                     &tables,
+                    &gates,
+                    &blob_decls,
                     routing_encryption.as_ref(),
                     write_id,
-                    |transaction| {
+                )?
+                .execute(|transaction| {
                         let remote = Database::row_blob_refs_for_root_on(
                             transaction,
                             &gates,
@@ -429,8 +436,8 @@ impl StoreDatabase {
                             cloud_outbox.enqueue_delete(&materialized.stored, &stamp)?;
                         }
                         Ok(())
-                    },
-                )
+                    })
+                .map(|receipt| receipt.value)
             })
             .await
     }

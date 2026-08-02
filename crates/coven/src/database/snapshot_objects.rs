@@ -88,7 +88,69 @@ pub(crate) fn validate_snapshot_blob_plans_on(
     blobs: &[PreparedSnapshotBlob],
 ) -> Result<(), DbError> {
     for blob in blobs {
-        validate_snapshot_blob_plan_on(conn, gates, synced_tables, owner, blob)?;
+        blob.remote
+            .validate()
+            .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
+        let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
+        if owners != [owner] {
+            return Err(DbError::Message(
+                "snapshot blob owner differs from the verified snapshot stream activation"
+                    .to_string(),
+            ));
+        }
+        if blob.bindings.is_empty()
+            || blob.bindings.iter().any(|binding| {
+                binding.blob().object() != blob.remote.object()
+                    || binding.blob().locator().audience() != blob.authority.remote_audience()
+            })
+            || blob
+                .spool_path
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(DbError::Message(
+                "snapshot blob plan has inconsistent exact references".to_string(),
+            ));
+        }
+        for binding in &blob.bindings {
+            let table = synced_tables
+                .iter()
+                .find(|table| table.name() == binding.table())
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "snapshot blob names undeclared table {:?}",
+                        binding.table()
+                    ))
+                })?;
+            let declaration = table.blob().ok_or_else(|| {
+                DbError::Message(format!(
+                    "snapshot blob names table {:?} without a blob declaration",
+                    table.name()
+                ))
+            })?;
+            let row = live_blob_row(conn, table.name(), binding.row_id(), declaration)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "snapshot blob row {:?}/{:?} is absent",
+                        table.name(),
+                        binding.row_id()
+                    ))
+                })?;
+            let audience = gate::live_row_audience(conn, gates, table.name(), binding.row_id())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let audience = RemoteAudience::try_from(audience)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            validate_live_blob_locator(
+                binding.table(),
+                binding.row_id(),
+                binding.column(),
+                binding.row_stamp(),
+                binding.blob(),
+                declaration,
+                &row,
+                &audience,
+            )?;
+        }
     }
     Ok(())
 }
@@ -134,78 +196,6 @@ pub(super) fn validate_snapshot_object_owner_records_on(
                 )));
             }
         }
-    }
-    Ok(())
-}
-
-fn validate_snapshot_blob_plan_on(
-    conn: &Connection,
-    gates: &Gates,
-    synced_tables: &[SyncedTable],
-    expected_owner: &crate::protocol::remote_object::SnapshotObjectOwner,
-    blob: &PreparedSnapshotBlob,
-) -> Result<(), DbError> {
-    blob.remote
-        .validate()
-        .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
-    let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
-    if owners != [expected_owner] {
-        return Err(DbError::Message(
-            "snapshot blob owner differs from the verified snapshot stream activation".to_string(),
-        ));
-    }
-    if blob.bindings.is_empty()
-        || blob.bindings.iter().any(|binding| {
-            binding.blob().object() != blob.remote.object()
-                || binding.blob().locator().audience() != blob.authority.remote_audience()
-        })
-        || blob
-            .spool_path
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
-    {
-        return Err(DbError::Message(
-            "snapshot blob plan has inconsistent exact references".to_string(),
-        ));
-    }
-    for binding in &blob.bindings {
-        let table = synced_tables
-            .iter()
-            .find(|table| table.name() == binding.table())
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "snapshot blob names undeclared table {:?}",
-                    binding.table()
-                ))
-            })?;
-        let declaration = table.blob().ok_or_else(|| {
-            DbError::Message(format!(
-                "snapshot blob names table {:?} without a blob declaration",
-                table.name()
-            ))
-        })?;
-        let row =
-            live_blob_row(conn, table.name(), binding.row_id(), declaration)?.ok_or_else(|| {
-                DbError::Message(format!(
-                    "snapshot blob row {:?}/{:?} is absent",
-                    table.name(),
-                    binding.row_id()
-                ))
-            })?;
-        let audience = gate::live_row_audience(conn, gates, table.name(), binding.row_id())
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let audience = RemoteAudience::try_from(audience)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        validate_live_blob_locator(
-            binding.table(),
-            binding.row_id(),
-            binding.column(),
-            binding.row_stamp(),
-            binding.blob(),
-            declaration,
-            &row,
-            &audience,
-        )?;
     }
     Ok(())
 }

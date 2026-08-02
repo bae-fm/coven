@@ -302,7 +302,7 @@ impl StoreDatabase {
             .connection
             .call(move |connection| {
                 let mut staged = staged;
-                let result = StoreDatabase::run_store_write_transaction_on(
+                let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
                     connection,
                     &tables,
                     &gates,
@@ -310,7 +310,10 @@ impl StoreDatabase {
                     routing_encryption.as_ref(),
                     blob_staging.as_ref(),
                     write_id,
-                    |transaction| -> Result<R, HostWriteError<E>> {
+                )
+                .map_err(HostWriteError::from)
+                .and_then(|transaction| {
+                    transaction.execute(|transaction| -> Result<R, HostWriteError<E>> {
                         let cleanup_intents = deleted
                             .iter()
                             .map(|blob| {
@@ -401,8 +404,8 @@ impl StoreDatabase {
                             Ok(Err(error)) => Err(HostWriteError::Host(error)),
                             Err(_) => Err(HostWriteError::WriteClosurePanicked),
                         }
-                    },
-                );
+                    })
+                });
 
                 match result {
                     Ok(receipt) => {

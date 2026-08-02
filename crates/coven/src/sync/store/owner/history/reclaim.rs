@@ -71,6 +71,19 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.load_ref(reference).await
     }
 
+    pub(crate) async fn load_store_snapshot_stream(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<
+        Vec<crate::database::PublishedStoreSnapshot>,
+        super::super::writer::snapshot::SnapshotError,
+    > {
+        self.history
+            .load_store_snapshot_stream(registration_ref, registration)
+            .await
+    }
+
     pub(crate) async fn load_covered_commits(
         &mut self,
         coverage: &CommitFrontier,

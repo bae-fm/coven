@@ -2,20 +2,18 @@
 
 mod publication;
 mod removal;
-mod resolution;
 
 use crate::sync::store::membership::InviteError;
 
 pub(crate) use publication::AuthorizedMembershipPublication;
 pub(crate) use publication::{validate_prepared_publication, validate_prepared_transition};
-pub(super) use removal::revoke_member_durable;
-pub(super) use resolution::resolve_membership_conflict;
+pub(super) use removal::AuthorizedMembershipRevocation;
 
 use super::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
     exact_owned_remote, MembershipMutationPlan, MembershipMutationProgress, MutationPersistence,
     PreparedMembershipPublication, PreparedMembershipTransition, ReplacementWrappedKey,
-    ResolveMutationPlan, RevokeMembershipPublication, RevokeMutationPlan,
+    RevokeMembershipPublication, RevokeMutationPlan,
 };
 
 pub(super) fn chain_with_exact_entry(

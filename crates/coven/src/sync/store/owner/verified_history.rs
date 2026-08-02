@@ -35,7 +35,7 @@ use super::{device_join, reclaim as store_reclaim};
 
 pub(super) mod join_validation;
 mod membership;
-pub(super) use membership::VerifiedPrefixMembershipActivation;
+use membership::VerifiedPrefixMembershipActivation;
 pub(super) mod registration;
 use join_validation::*;
 use registration::*;
@@ -914,7 +914,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         )
         .map_err(|error| error.to_string())?;
         let request_membership = self
-            .commit_verifier
             .load_membership_at_verified_prefix(
                 &acceptance.request.predecessor_membership.heads,
                 &acceptance.request.predecessor_membership.resolutions,
@@ -1516,7 +1515,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             commit_predecessor_references(verified_commit),
         )?;
         let membership = self
-            .commit_verifier
             .load_membership_at_verified_prefix(
                 &request.predecessor_membership.heads,
                 &request.predecessor_membership.resolutions,
@@ -2506,14 +2504,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         verified_activations: &VerifiedMergeMembershipPrefix,
         pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        self.commit_verifier
-            .load_membership_at_verified_prefix(
-                heads,
-                resolutions,
-                verified_activations,
-                pending_resolution,
-            )
-            .await
+        VerifiedPrefixMembershipActivation::new(
+            &self.root,
+            &self.commit_verifier,
+            verified_activations,
+        )
+        .load_at_exact_heads(heads, resolutions, pending_resolution)
+        .await
     }
 
     pub(crate) async fn load_predecessor_membership(
@@ -3030,6 +3027,17 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
+    pub(crate) async fn load_store_snapshot_stream(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, super::writer::snapshot::SnapshotError>
+    {
+        self.commit_verifier
+            .load_store_snapshot_stream(registration_ref, registration)
+            .await
+    }
+
     pub(crate) async fn load_reclaim_authorization(
         &self,
         reference: &super::super::ReclaimAuthorizationRef,
@@ -3494,7 +3502,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         let verified_membership_activations =
             verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
         let membership = self
-            .commit_verifier
             .load_membership_at_verified_prefix(
                 &membership_state.heads,
                 &membership_state.resolutions,
@@ -4537,7 +4544,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             let pending_resolution =
                 Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
             let membership = self
-                .commit_verifier
                 .load_membership_at_verified_prefix(
                     &commit.membership_state.heads,
                     &commit.membership_state.resolutions,

@@ -1,11 +1,8 @@
 use super::pull::*;
+use super::verified_history::predecessor_verifies_owner;
 use super::verified_history::registration::{
     device_state_has_active_registration, device_state_has_pending_proposal,
     registration_attempt_error, RegistrationLoadError,
-};
-use super::verified_history::{
-    predecessor_verifies_owner, VerifiedMergeConflictResolutionActivation,
-    VerifiedMergeMembershipPrefix, VerifiedPrefixMembershipActivation,
 };
 use crate::protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
 use crate::protocol::remote_object;
@@ -218,18 +215,6 @@ impl<'a> StoreCommitVerifier<'a> {
             remote_objects,
             proof,
         }))
-    }
-
-    pub(crate) async fn load_membership_at_verified_prefix(
-        &self,
-        heads: &[crate::protocol::membership::MembershipHeadRef],
-        resolutions: &[crate::protocol::membership::StoreMembershipConflictResolutionRef],
-        verified_activations: &VerifiedMergeMembershipPrefix,
-        pending_resolution: Option<&VerifiedMergeConflictResolutionActivation>,
-    ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        VerifiedPrefixMembershipActivation::new(&self.root, self, verified_activations)
-            .load_at_exact_heads(heads, resolutions, pending_resolution)
-            .await
     }
 
     pub(super) fn from_verified_root(
@@ -1277,6 +1262,90 @@ impl<'a> StoreCommitVerifier<'a> {
             )
             .await?;
         Ok((reference.clone(), opened.value))
+    }
+
+    pub(crate) async fn load_store_snapshot_stream(
+        &self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, super::writer::snapshot::SnapshotError>
+    {
+        let mut slot = match &registration.snapshots {
+            DeviceStreamAnchor::StoreSnapshots { first_slot } => first_slot.clone(),
+            _ => {
+                return Err(super::writer::snapshot::SnapshotError::PublicationState(
+                    "local Store registration has no snapshot stream anchor".to_string(),
+                ));
+            }
+        };
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotMeta,
+        );
+        let mut generation = 0_u64;
+        let mut predecessor = None;
+        let mut snapshots = Vec::new();
+        loop {
+            let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), generation);
+            let (bytes, object) = match self
+                .storage
+                .read_protocol_slot(&context, &slot, &prefix)
+                .await
+            {
+                Ok(value) => value,
+                Err(StorageError::NotFound(_)) => break,
+                Err(error) => {
+                    return Err(super::writer::snapshot::SnapshotError::Bucket(error));
+                }
+            };
+            let expected_root = self.root.reference().clone();
+            let expected_registration_ref = registration_ref.clone();
+            let expected_registration = registration.clone();
+            let expected_object = object.clone();
+            let (reference, meta) = run_blocking_object_verification(
+                &prefix,
+                &object,
+                Box::new(move || {
+                    let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
+                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    let reference = StoreSnapshotRef {
+                        generation,
+                        snapshot_hash: semantic_hash,
+                        object: expected_object,
+                    };
+                    let meta = super::writer::snapshot::verify_store_snapshot_bytes(
+                        &expected_root,
+                        &expected_registration_ref,
+                        &expected_registration,
+                        &reference,
+                        &bytes,
+                    )
+                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    Ok((reference, meta))
+                }),
+            )
+            .await
+            .map_err(super::writer::snapshot::SnapshotError::StoreObject)?;
+            if meta.predecessor != predecessor {
+                return Err(super::writer::snapshot::SnapshotError::Parse(
+                    "Store snapshot stream has an invalid exact predecessor".to_string(),
+                ));
+            }
+            let successor_slot = meta.successor.next_slot.clone();
+            slot = successor_slot.clone();
+            predecessor = Some(reference.clone());
+            snapshots.push(crate::database::PublishedStoreSnapshot {
+                reference,
+                successor_slot,
+                meta,
+            });
+            generation = generation.checked_add(1).ok_or_else(|| {
+                super::writer::snapshot::SnapshotError::Parse(
+                    "Store snapshot generation overflow".to_string(),
+                )
+            })?;
+        }
+        Ok(snapshots)
     }
 
     pub(crate) async fn load_device_join_attempt_evidence(

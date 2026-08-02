@@ -75,7 +75,7 @@ pub(crate) use audience::{
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
     store_audience_transitions, validate_scoped_foreign_key_audiences,
     validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
-    PartitionedAudienceWrite, RoutingChanges, StoreAudienceTransitions,
+    RoutingChanges, StoreAudienceTransitions,
 };
 pub(crate) use model::Gates;
 #[cfg(test)]

@@ -18,7 +18,7 @@ use crate::keys::UserKeypair;
 use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
+    StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 
@@ -670,75 +670,6 @@ pub(crate) fn verify_store_snapshot_bytes(
     Ok(meta)
 }
 
-pub(crate) async fn load_store_snapshot_stream(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-) -> Result<Vec<crate::database::PublishedStoreSnapshot>, SnapshotError> {
-    let mut slot = snapshot_first_slot(registration)?.clone();
-    let context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreSnapshotMeta,
-    );
-    let mut generation = 0_u64;
-    let mut predecessor = None;
-    let mut snapshots = Vec::new();
-    loop {
-        let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), generation);
-        let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
-            Ok(value) => value,
-            Err(crate::storage::StorageError::NotFound(_)) => break,
-            Err(error) => return Err(SnapshotError::Bucket(error)),
-        };
-        let verify_root = root.clone();
-        let verify_registration_ref = registration_ref.clone();
-        let verify_registration = registration.clone();
-        let verify_object = object.clone();
-        let (reference, meta) = crate::storage::run_blocking_object_verification(
-            &prefix,
-            &object,
-            Box::new(move || {
-                let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-                let reference = StoreSnapshotRef {
-                    generation,
-                    snapshot_hash: semantic_hash,
-                    object: verify_object,
-                };
-                let meta = verify_store_snapshot_bytes(
-                    &verify_root,
-                    &verify_registration_ref,
-                    &verify_registration,
-                    &reference,
-                    &bytes,
-                )
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-                Ok((reference, meta))
-            }),
-        )
-        .await
-        .map_err(SnapshotError::StoreObject)?;
-        if meta.predecessor != predecessor {
-            return Err(SnapshotError::Parse(
-                "Store snapshot stream has an invalid exact predecessor".to_string(),
-            ));
-        }
-        let successor_slot = meta.successor.next_slot.clone();
-        slot = successor_slot.clone();
-        predecessor = Some(reference.clone());
-        snapshots.push(crate::database::PublishedStoreSnapshot {
-            reference,
-            successor_slot,
-            meta,
-        });
-        generation = generation.checked_add(1).ok_or_else(|| {
-            SnapshotError::Parse("Store snapshot generation overflow".to_string())
-        })?;
-    }
-    Ok(snapshots)
-}
-
 pub(crate) fn select_maximal_store_snapshot(
     mut candidates: Vec<crate::database::PublishedStoreSnapshot>,
 ) -> Option<crate::database::PublishedStoreSnapshot> {
@@ -830,7 +761,8 @@ impl<'storage> SnapshotBootstrapAuthority<'storage> {
         let mut authorized = Vec::new();
         for (registration_ref, registration) in registrations {
             authorized.extend(
-                load_store_snapshot_stream(self.storage, root, &registration_ref, &registration)
+                self.history_verifier
+                    .load_store_snapshot_stream(&registration_ref, &registration)
                     .await?,
             );
         }

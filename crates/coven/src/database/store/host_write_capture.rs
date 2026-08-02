@@ -10,7 +10,7 @@ use crate::database::{attach_session, capture_changeset, local_merge_stream_id_o
 use crate::database::{
     audience_moves, capture_routing_changes, is_routing_table, partition_outbound,
     validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
-    Gates, PartitionedAudienceWrite, RoutingChanges,
+    Gates, RoutingChanges,
 };
 use crate::encryption::EncryptionService;
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
@@ -20,6 +20,17 @@ use super::*;
 enum AudienceBlobMoveMaterialization<'a> {
     Host(&'a crate::sync::HostWriteBlobStaging),
     PreparedTransition,
+}
+
+pub(super) struct CapturedStoreWriteTransaction<'connection, 'operation> {
+    transaction: rusqlite::Transaction<'connection>,
+    changes_before: u64,
+    synced_tables: &'operation [SyncedTable],
+    gates: &'operation Gates,
+    blob_decls: &'operation BlobDecls,
+    routing: StoreWriteRouting<'operation>,
+    blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
+    write_id: WriteId,
 }
 
 pub(crate) struct HostWriteBlobTransaction<'transaction, 'connection> {
@@ -354,36 +365,6 @@ impl StoreDatabase {
         })
     }
 
-    pub(crate) fn partition_captured_write_on(
-        tx: &rusqlite::Transaction<'_>,
-        captured: &[u8],
-        gates: &Gates,
-        routing: StoreWriteRouting<'_>,
-    ) -> Result<PartitionedAudienceWrite, DbError> {
-        match routing {
-            StoreWriteRouting::MergeScoped(encryption) => {
-                let store_root_hash = required_store_root_authority_on(tx)?.store_root_hash;
-                let key =
-                    crate::protocol::circle::derive_row_routing_key(encryption, store_root_hash)
-                        .map_err(|error| {
-                            DbError::Message(format!("derive row routing key: {error}"))
-                        })?;
-                let routing_changeset = capture_routing_changes(tx, captured, gates, &key)
-                    .map_err(|error| {
-                        DbError::Message(format!("capture scoped routing changes: {error}"))
-                    })?;
-                partition_outbound(tx, captured, &routing_changeset, gates).map_err(|error| {
-                    DbError::Message(format!("partition scoped host transaction: {error}"))
-                })
-            }
-            StoreWriteRouting::Unscoped => {
-                partition_outbound(tx, captured, &RoutingChanges::empty(), gates).map_err(|error| {
-                    DbError::Message(format!("partition gated host transaction: {error}"))
-                })
-            }
-        }
-    }
-
     fn store_write_routing<'a>(
         gates: &Gates,
         routing_encryption: Option<&'a EncryptionService>,
@@ -540,6 +521,7 @@ impl StoreDatabase {
         Ok(status)
     }
 
+    #[cfg(test)]
     pub(crate) fn run_store_write_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
@@ -553,7 +535,7 @@ impl StoreDatabase {
     where
         E: From<DbError>,
     {
-        Self::run_store_write_transaction_with_blob_materialization_on(
+        CapturedStoreWriteTransaction::begin(
             conn,
             synced_tables,
             gates,
@@ -561,34 +543,100 @@ impl StoreDatabase {
             routing_encryption,
             blob_staging.map(AudienceBlobMoveMaterialization::Host),
             write_id,
-            f,
+        )
+        .map_err(E::from)?
+        .execute(f)
+    }
+}
+
+impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operation> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn begin_host(
+        connection: &'connection Connection,
+        synced_tables: &'operation [SyncedTable],
+        gates: &'operation Gates,
+        blob_decls: &'operation BlobDecls,
+        routing_encryption: Option<&'operation EncryptionService>,
+        blob_staging: Option<&'operation crate::sync::HostWriteBlobStaging>,
+        write_id: WriteId,
+    ) -> Result<Self, DbError> {
+        Self::begin(
+            connection,
+            synced_tables,
+            gates,
+            blob_decls,
+            routing_encryption,
+            blob_staging.map(AudienceBlobMoveMaterialization::Host),
+            write_id,
         )
     }
 
-    fn run_store_write_transaction_with_blob_materialization_on<R, E>(
-        conn: &Connection,
-        synced_tables: &[SyncedTable],
-        gates: &Gates,
-        blob_decls: &BlobDecls,
-        routing_encryption: Option<&EncryptionService>,
-        blob_materialization: Option<AudienceBlobMoveMaterialization<'_>>,
+    pub(super) fn begin_prepared_blob_transition(
+        connection: &'connection Connection,
+        synced_tables: &'operation [SyncedTable],
+        gates: &'operation Gates,
+        blob_decls: &'operation BlobDecls,
+        routing_encryption: Option<&'operation EncryptionService>,
         write_id: WriteId,
+    ) -> Result<Self, DbError> {
+        Self::begin(
+            connection,
+            synced_tables,
+            gates,
+            blob_decls,
+            routing_encryption,
+            Some(AudienceBlobMoveMaterialization::PreparedTransition),
+            write_id,
+        )
+    }
+
+    fn begin(
+        connection: &'connection Connection,
+        synced_tables: &'operation [SyncedTable],
+        gates: &'operation Gates,
+        blob_decls: &'operation BlobDecls,
+        routing_encryption: Option<&'operation EncryptionService>,
+        blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
+        write_id: WriteId,
+    ) -> Result<Self, DbError> {
+        let routing = StoreDatabase::store_write_routing(gates, routing_encryption)?;
+        let changes_before = connection.total_changes();
+        let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+        Ok(Self {
+            transaction,
+            changes_before,
+            synced_tables,
+            gates,
+            blob_decls,
+            routing,
+            blob_materialization,
+            write_id,
+        })
+    }
+
+    pub(super) fn execute<R, E>(
+        self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
     where
         E: From<DbError>,
     {
+        let Self {
+            transaction: tx,
+            changes_before,
+            synced_tables,
+            gates,
+            blob_decls,
+            routing,
+            blob_materialization,
+            write_id,
+        } = self;
         (|| {
-            let routing = Self::store_write_routing(gates, routing_encryption).map_err(E::from)?;
-            let changes_before = conn.total_changes();
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(DbError::from)
-                .map_err(E::from)?;
             let mut journal = attach_session(&tx, synced_tables).map_err(E::from)?;
             let value = f(&tx)?;
             let mut captured =
-                Self::drain_host_change_journal(&mut journal, synced_tables).map_err(E::from)?;
+                StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
+                    .map_err(E::from)?;
             validate_scoped_foreign_key_audiences(&tx, gates)
                 .map_err(|error| DbError::Message(error.to_string()))
                 .map_err(E::from)?;
@@ -607,20 +655,58 @@ impl StoreDatabase {
                 let moves = audience_moves(&tx, &captured, gates)
                     .map_err(|error| DbError::Message(error.to_string()))
                     .map_err(E::from)?;
-                if Self::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
+                if StoreDatabase::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
                     .map_err(E::from)?
                 {
-                    captured = Self::drain_host_change_journal(&mut journal, synced_tables)
-                        .map_err(E::from)?;
+                    captured =
+                        StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
+                            .map_err(E::from)?;
                 }
             }
             drop(journal);
-            let partitioned = Self::partition_captured_write_on(&tx, &captured, gates, routing)
-                .map_err(E::from)?;
-            let mut blob_facts =
-                Self::capture_partition_blob_facts_on(&tx, &partitioned.partitions, blob_decls)
-                    .map_err(E::from)?;
-            blob_facts = Self::capture_audience_move_blob_facts_on(
+            let partitioned = match routing {
+                StoreWriteRouting::MergeScoped(encryption) => {
+                    let store_root_hash = required_store_root_authority_on(&tx)
+                        .map_err(E::from)?
+                        .store_root_hash;
+                    let key = crate::protocol::circle::derive_row_routing_key(
+                        encryption,
+                        store_root_hash,
+                    )
+                    .map_err(|error| {
+                        E::from(DbError::Message(format!("derive row routing key: {error}")))
+                    })?;
+                    let routing_changeset = capture_routing_changes(&tx, &captured, gates, &key)
+                        .map_err(|error| {
+                            E::from(DbError::Message(format!(
+                                "capture scoped routing changes: {error}"
+                            )))
+                        })?;
+                    partition_outbound(&tx, &captured, &routing_changeset, gates).map_err(
+                        |error| {
+                            E::from(DbError::Message(format!(
+                                "partition scoped host transaction: {error}"
+                            )))
+                        },
+                    )?
+                }
+                StoreWriteRouting::Unscoped => {
+                    partition_outbound(&tx, &captured, &RoutingChanges::empty(), gates).map_err(
+                        |error| {
+                            E::from(DbError::Message(format!(
+                                "partition gated host transaction: {error}"
+                            )))
+                        },
+                    )?
+                }
+            };
+            let mut blob_facts = StoreDatabase::capture_partition_blob_facts_on(
+                &tx,
+                &partitioned.partitions,
+                blob_decls,
+            )
+            .map_err(E::from)?;
+            blob_facts = StoreDatabase::capture_audience_move_blob_facts_on(
                 &tx,
                 &partitioned.moves,
                 blob_decls,
@@ -665,13 +751,16 @@ impl StoreDatabase {
                 }
             };
             let committed = (|| {
-                let rows_changed = conn.total_changes().saturating_sub(changes_before);
+                let rows_changed = tx.total_changes().saturating_sub(changes_before);
                 let local_stream_id = local_merge_stream_id_on(&tx)?;
-                let inverse_changeset = Self::invert_changeset(&captured)?;
+                let inverse_changeset = StoreDatabase::invert_changeset(&captured)?;
                 let base = StoreWriteBase {
-                    dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())?,
+                    dependencies: StoreDatabase::materialized_frontier_on(
+                        &tx,
+                        local_stream_id.as_deref(),
+                    )?,
                 };
-                let status = Self::insert_store_write_on(
+                let status = StoreDatabase::insert_store_write_on(
                     &tx,
                     &write_id,
                     &partitioned.partitions,
@@ -703,7 +792,9 @@ impl StoreDatabase {
             })
         })()
     }
+}
 
+impl StoreDatabase {
     #[cfg(test)]
     pub(crate) fn run_internal_store_write_transaction_on<R, E>(
         conn: &Connection,
@@ -725,6 +816,7 @@ impl StoreDatabase {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn run_prepared_blob_transition_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
@@ -745,6 +837,7 @@ impl StoreDatabase {
         )
     }
 
+    #[cfg(test)]
     fn run_coven_store_write_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
@@ -762,7 +855,7 @@ impl StoreDatabase {
         let blob_decls = BlobDecls::from_tables(conn, synced_tables)
             .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
-        Self::run_store_write_transaction_with_blob_materialization_on(
+        CapturedStoreWriteTransaction::begin(
             conn,
             synced_tables,
             &gates,
@@ -770,8 +863,9 @@ impl StoreDatabase {
             routing_encryption,
             blob_materialization,
             write_id,
-            f,
         )
+        .map_err(E::from)?
+        .execute(f)
         .map(|receipt| receipt.value)
     }
 

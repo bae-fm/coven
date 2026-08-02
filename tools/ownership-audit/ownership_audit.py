@@ -27,6 +27,7 @@ ANALYZER_LOG_PATH = ROOT / "target" / "ownership-audit" / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
 CACHE_DIR = INDEX_PATH.parent / "cache"
 CACHE_SCHEMA = 2
+SEMANTIC_CACHE_SCHEMA = 2
 CACHE_CHECKPOINT_INTERVAL = 100
 
 SEMANTIC_DECLARATION_KINDS = {
@@ -423,6 +424,20 @@ def trait_callable(source_file: SourceFile, index: int) -> bool:
     return False
 
 
+def outermost_erasure_spans(
+    spans: Iterable[tuple[int, int, bytes]],
+) -> list[tuple[int, int, bytes]]:
+    outermost: list[tuple[int, int, bytes]] = []
+    for start, end, replacement in sorted(
+        spans,
+        key=lambda span: (span[0], -span[1]),
+    ):
+        if outermost and start < outermost[-1][1]:
+            continue
+        outermost.append((start, end, replacement))
+    return outermost
+
+
 def callable_erasure_spans(source_file: SourceFile) -> list[tuple[int, int, bytes]]:
     spans: list[tuple[int, int, bytes]] = []
     for index, node in enumerate(source_file.nodes):
@@ -436,18 +451,37 @@ def callable_erasure_spans(source_file: SourceFile) -> list[tuple[int, int, byte
                 )
         else:
             spans.append((node.start, node.end, b""))
-    outermost: list[tuple[int, int, bytes]] = []
-    for start, end, replacement in sorted(spans):
-        if outermost and start < outermost[-1][1]:
-            continue
-        outermost.append((start, end, replacement))
-    return outermost
+    return outermost_erasure_spans(spans)
+
+
+def comment_erasure_spans(
+    source_file: SourceFile,
+    start: int = 0,
+    end: int | None = None,
+) -> list[tuple[int, int, bytes]]:
+    limit = len(source_file.data) if end is None else end
+    return [
+        (node.start, node.end, b"")
+        for node in source_file.nodes
+        if node.kind == "COMMENT" and start <= node.start and node.end <= limit
+    ]
+
+
+def semantic_erasure_spans(
+    source_file: SourceFile,
+) -> list[tuple[int, int, bytes]]:
+    return outermost_erasure_spans(
+        [
+            *callable_erasure_spans(source_file),
+            *comment_erasure_spans(source_file),
+        ]
+    )
 
 
 def semantic_source_surface(source_file: SourceFile) -> bytes:
     output = bytearray()
     cursor = 0
-    for start, end, replacement in callable_erasure_spans(source_file):
+    for start, end, replacement in semantic_erasure_spans(source_file):
         output.extend(source_file.data[cursor:start])
         output.extend(replacement)
         cursor = end
@@ -483,7 +517,9 @@ def semantic_workspace_cache_fingerprint(
     tool_identity: str | None = None,
 ) -> str:
     digest = hashlib.sha256()
-    digest.update(f"ownership-audit-semantic-surface-v{CACHE_SCHEMA}\0".encode())
+    digest.update(
+        f"ownership-audit-semantic-surface-v{SEMANTIC_CACHE_SCHEMA}\0".encode()
+    )
     digest.update(
         json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
     )
@@ -491,8 +527,6 @@ def semantic_workspace_cache_fingerprint(
     digest.update(
         (analyzer_identity() if tool_identity is None else tool_identity).encode()
     )
-    digest.update(b"\0tool\0")
-    digest.update(Path(__file__).read_bytes())
     for path in full_semantic_source_paths(metadata, source_files):
         digest.update(b"\0path\0")
         digest.update(path.relative_to(ROOT).as_posix().encode())
@@ -510,11 +544,19 @@ def semantic_range_surface(
     end: int,
     replacements: list[tuple[int, int, bytes]] | None = None,
 ) -> bytes:
-    spans = replacements or [
-        (span_start, span_end, replacement)
-        for span_start, span_end, replacement in callable_erasure_spans(source_file)
-        if start <= span_start and span_end <= end
-    ]
+    spans = outermost_erasure_spans(
+        [
+            *(
+                replacements
+                or [
+                    (span_start, span_end, replacement)
+                    for span_start, span_end, replacement in callable_erasure_spans(source_file)
+                    if start <= span_start and span_end <= end
+                ]
+            ),
+            *comment_erasure_spans(source_file, start, end),
+        ]
+    )
     output = bytearray()
     cursor = start
     for span_start, span_end, replacement in sorted(spans):
@@ -631,7 +673,7 @@ def semantic_declaration_fingerprints(
     for component in components:
         digest = hashlib.sha256()
         digest.update(
-            f"ownership-audit-declaration-component-v{CACHE_SCHEMA}\0".encode()
+            f"ownership-audit-declaration-component-v{SEMANTIC_CACHE_SCHEMA}\0".encode()
         )
         for name in component["members"]:
             digest.update(b"\0name\0")
@@ -666,7 +708,9 @@ def semantic_entry_source_fingerprint(
     start = source_file.offset(record["range"]["start"])
     end = source_file.offset(record["range"]["end"])
     digest = hashlib.sha256()
-    digest.update(f"ownership-audit-semantic-source-v{CACHE_SCHEMA}\0".encode())
+    digest.update(
+        f"ownership-audit-semantic-source-v{SEMANTIC_CACHE_SCHEMA}\0".encode()
+    )
     digest.update(b"\0symbol\0")
     digest.update(record["symbol"].encode())
     digest.update(b"\0callable\0")
@@ -777,7 +821,9 @@ def semantic_entry_cache_fingerprint(
     source_fingerprint: str,
 ) -> str:
     digest = hashlib.sha256()
-    digest.update(f"ownership-audit-semantic-entry-v{CACHE_SCHEMA}\0".encode())
+    digest.update(
+        f"ownership-audit-semantic-entry-v{SEMANTIC_CACHE_SCHEMA}\0".encode()
+    )
     digest.update(view_fingerprint.encode())
     digest.update(b"\0source\0")
     digest.update(source_fingerprint.encode())
@@ -835,7 +881,7 @@ def open_semantic_view_cache(
     )
     metadata = dict(connection.execute("SELECT key, value FROM metadata"))
     expected = {
-        "schema": str(CACHE_SCHEMA),
+        "schema": str(SEMANTIC_CACHE_SCHEMA),
         "fingerprint": fingerprint,
     }
     if metadata != expected:
@@ -2958,6 +3004,13 @@ def lexical_call_candidates(
     ]
 
 
+def is_callable_argument_edge(edge: dict[str, Any]) -> bool:
+    sites = edge.get("sites", [])
+    return bool(sites) and all(
+        site.get("role") == "callable-argument" for site in sites
+    )
+
+
 def call_components(
     records: list[dict[str, Any]],
     *,
@@ -2996,16 +3049,10 @@ def call_components(
             if edge["symbol"] not in symbols:
                 continue
             target = anchor_by_symbol[edge["symbol"]]
-            target_record = records_by_symbol[edge["symbol"]]
             if (
                 collapse_nested
-                and target_record.get("kind") in {"closure", "async-block"}
                 and source != target
-                and edge.get("sites")
-                and all(
-                    site.get("role") == "callable-argument"
-                    for site in edge["sites"]
-                )
+                and is_callable_argument_edge(edge)
             ):
                 continue
             if source == target:
@@ -4085,6 +4132,89 @@ def read_index() -> dict[str, Any]:
     return json.loads(INDEX_PATH.read_text())
 
 
+def split_cfg_arguments(arguments: str) -> list[str] | None:
+    parts = []
+    start = 0
+    depth = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(arguments):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif character == "," and depth == 0:
+            parts.append(arguments[start:index].strip())
+            start = index + 1
+    if quoted or depth != 0:
+        return None
+    tail = arguments[start:].strip()
+    if tail:
+        parts.append(tail)
+    elif arguments.strip():
+        return None
+    return parts
+
+
+def cfg_possible_without_test(expression: str) -> set[bool]:
+    expression = expression.strip()
+    if expression == "test" or re.fullmatch(
+        r'feature\s*=\s*"test-utils"', expression
+    ):
+        return {False}
+    call = re.fullmatch(r"(all|any|not)\s*\((.*)\)", expression, re.DOTALL)
+    if call is None:
+        return {False, True}
+    arguments = split_cfg_arguments(call.group(2))
+    if arguments is None:
+        return {False, True}
+    values = [cfg_possible_without_test(argument) for argument in arguments]
+    if call.group(1) == "not":
+        if len(values) != 1:
+            return {False, True}
+        return {not value for value in values[0]}
+    if call.group(1) == "all":
+        possible = {True}
+        for argument_values in values:
+            possible = {
+                left and right
+                for left in possible
+                for right in argument_values
+            }
+        return possible
+    possible = {False}
+    for argument_values in values:
+        possible = {
+            left or right
+            for left in possible
+            for right in argument_values
+        }
+    return possible
+
+
+def cfg_condition_is_test_only(condition: str) -> bool:
+    matched = re.fullmatch(
+        r"\s*#\s*\[\s*cfg\s*\((.*)\)\s*\]\s*",
+        condition,
+        re.DOTALL,
+    )
+    if matched is None:
+        return False
+    return True not in cfg_possible_without_test(matched.group(1))
+
+
 def record_realm(record: dict[str, Any]) -> str:
     if "macro_origin" in record:
         return "macro"
@@ -4108,8 +4238,7 @@ def record_realm(record: dict[str, Any]) -> str:
     )
     test_configuration = bool(record.get("cfg_paths")) and all(
         any(
-            "test" in condition
-            or 'feature = "test-utils"' in condition
+            cfg_condition_is_test_only(condition)
             for condition in conditions
         )
         for conditions in record["cfg_paths"]
@@ -4399,16 +4528,17 @@ def component_candidate_owner(
     return (owner, score) if score >= 2 and score > next_score else None
 
 
-def verified_free_workflow(
+def verified_component_disposition(
     records: list[dict[str, Any]],
     decisions: dict[tuple[str, str], dict[str, Any]],
 ) -> tuple[bool, list[str]]:
-    accepted = {
+    resolved_without_owner = {
         "boundary",
         "callback-adapter",
         "dependency-primitive",
         "transformation",
     }
+    resolved_on_receiver = {"operation-method", "owner-method"}
     classifications = []
     for record in records:
         if record["kind"] in {"closure", "async-block"}:
@@ -4419,10 +4549,16 @@ def verified_free_workflow(
         if (
             decision is None
             or decision.get("status") != "verified"
-            or decision.get("classification") not in accepted
         ):
             return False, []
-        classifications.append(decision["classification"])
+        classification = decision.get("classification")
+        if classification in resolved_without_owner:
+            classifications.append(classification)
+            continue
+        if classification in resolved_on_receiver and has_receiver(record):
+            classifications.append(classification)
+            continue
+        return False, []
     return True, sorted(set(classifications))
 
 
@@ -4613,7 +4749,7 @@ def build_graph_data(
         realm = component_realm(members)
         crate = members[0]["crate"]
         owner = component_owner(members, records_by_symbol)
-        verified, classifications = verified_free_workflow(
+        verified, classifications = verified_component_disposition(
             members,
             decisions,
         )
@@ -4739,6 +4875,8 @@ def build_graph_data(
         if source is None:
             continue
         for edge in record.get("callees", []):
+            if is_callable_argument_edge(edge):
+                continue
             target_record = records_by_symbol.get(edge["symbol"])
             target = (
                 component_to_node.get(target_record.get("component"))

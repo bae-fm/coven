@@ -340,14 +340,6 @@ async fn post_token_request(
     token_resp.into_tokens(status, clock)
 }
 
-/// Generate a random PKCE code verifier (43-128 URL-safe characters).
-#[cfg(any(test, feature = "oauth-providers"))]
-pub(crate) fn generate_code_verifier() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
 /// Compute the S256 PKCE code challenge from a verifier.
 #[cfg(any(test, feature = "oauth-providers"))]
 pub(crate) fn code_challenge(verifier: &str) -> String {
@@ -386,8 +378,10 @@ pub(crate) fn build_authorize_url(
     config: &OAuthConfig,
     redirect_uri: &str,
 ) -> Result<AuthorizeRequest, OAuthError> {
-    let verifier = generate_code_verifier();
-    let state = generate_code_verifier();
+    let mut entropy = [0_u8; 64];
+    rand::rng().fill_bytes(&mut entropy);
+    let verifier = URL_SAFE_NO_PAD.encode(&entropy[..32]);
+    let state = URL_SAFE_NO_PAD.encode(&entropy[32..]);
     let challenge = code_challenge(&verifier);
 
     let mut auth_params = vec![
@@ -833,9 +827,15 @@ mod tests {
     #[cfg(feature = "oauth-providers")]
     use test_support::{oauth_config, serve_token_response};
 
+    #[cfg(feature = "oauth-providers")]
     #[test]
     fn pkce_verifier_is_url_safe() {
-        let verifier = generate_code_verifier();
+        let request = build_authorize_url(
+            &oauth_config("http://token.example/token".to_string()),
+            "http://localhost/callback",
+        )
+        .expect("build authorize request");
+        let verifier = request.verifier;
         assert!(verifier.len() >= 43);
         assert!(verifier
             .chars()
@@ -852,8 +852,8 @@ mod tests {
 
     #[test]
     fn pkce_challenge_is_base64url() {
-        let verifier = generate_code_verifier();
-        let challenge = code_challenge(&verifier);
+        let verifier = "test-verifier-string";
+        let challenge = code_challenge(verifier);
         assert!(challenge
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));

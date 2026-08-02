@@ -104,15 +104,6 @@ struct PartitionGroup {
     group: Changegroup,
 }
 
-pub(crate) fn partition_outbound(
-    conn: &Connection,
-    changeset: &[u8],
-    routing: &RoutingChanges,
-    gates: &Gates,
-) -> Result<PartitionedAudienceWrite, GateError> {
-    unsafe { partition_outbound_raw(conn, changeset, routing, gates) }
-}
-
 pub(crate) fn filter_inbound_circle_changeset(
     conn: &Connection,
     changeset: &[u8],
@@ -1130,143 +1121,147 @@ pub(crate) fn audience_moves(
     Ok(moves)
 }
 
-unsafe fn partition_outbound_raw(
+pub(crate) fn partition_outbound(
     conn: &Connection,
     changeset: &[u8],
     routing: &RoutingChanges,
     gates: &Gates,
 ) -> Result<PartitionedAudienceWrite, GateError> {
-    let mut groups = AudiencePartitionGroups::new(conn, gates);
-    let audience_moves = audience_moves(conn, changeset, gates)?;
-    let mut ancestor_inserts = HashSet::new();
-    let mut ancestor_deletes = HashSet::new();
-    let captured_deletes = collect_deletes(changeset)?;
-    let mut non_local_deletes = HashSet::new();
-    let deleted_audiences = captured_deleted_audiences(conn, &captured_deletes, gates)?;
-    let store_changeset = gate_store_outbound(conn, changeset, gates)?;
-    let mut store_rows = HashSet::new();
-    for_each_change(&store_changeset, |iter, row| {
-        let row_id = row
-            .pk()
-            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-        store_rows.insert((row.table.clone(), row_id.to_string()));
-        groups.group(Audience::Store)?.group.add_change(iter)?;
-        Ok(())
-    })?;
-    for_each_change(changeset, |iter, row| {
-        if !gates.tables.contains_key(&row.table) {
-            return Ok(());
-        }
-        if row_audience_move(conn, gates, &row)?.is_some() {
-            return Ok(());
-        }
-        let row_id = row
-            .pk()
-            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-        let row_key = (row.table.clone(), row_id.to_string());
-        let audience = if !gates.table_is_scoped(&row.table) {
-            if store_rows.contains(&row_key) {
-                Audience::Store
-            } else {
-                Audience::Local
-            }
-        } else if row.op == ffi::SQLITE_DELETE {
-            routing
-                .deleted_rows
-                .get(&row_key)
-                .or_else(|| deleted_audiences.get(&row_key))
-                .cloned()
-                .map(Ok)
-                .unwrap_or_else(|| change_audience(conn, gates, &row))?
-        } else {
-            change_audience(conn, gates, &row)?
-        };
-        if audience != Audience::Local {
-            if row.op == ffi::SQLITE_INSERT {
-                let component = scoped_materialization_rows(conn, gates, row_key.clone())?;
-                ancestor_inserts.extend(required_store_ancestors(conn, gates, &component)?);
-            } else if row.op == ffi::SQLITE_DELETE {
-                non_local_deletes.insert(row_key);
-            }
-        }
-        if gates.table_is_scoped(&row.table) || audience == Audience::Local {
-            let partition = groups.group(audience)?;
-            partition.group.add_change(iter)?;
-        }
-        Ok(())
-    })?;
-    for (table, id) in required_store_ancestors_for_deleted_rows(
-        conn,
-        gates,
-        &captured_deletes,
-        &non_local_deletes,
-    )? {
-        if !gates.row_kept(conn, &table, &id)? {
-            ancestor_deletes.insert((table, id));
-        }
-    }
-    for audience_move in &audience_moves {
-        let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
-        let ancestors = required_store_ancestors(conn, gates, &component)?;
-        if audience_move.source == Audience::Local && audience_move.destination != Audience::Local {
-            ancestor_inserts.extend(ancestors.iter().cloned());
-        } else if audience_move.source != Audience::Local
-            && audience_move.destination == Audience::Local
-        {
-            for (table, id) in ancestors {
-                if !gates.row_kept(conn, &table, &id)? {
-                    ancestor_deletes.insert((table, id));
-                }
-            }
-        }
-        if audience_move.destination != Audience::Local {
-            groups.add_materialization(
-                &component,
-                FullStateDirection::Inserts,
-                audience_move.destination.clone(),
-            )?;
-        }
-    }
-    if !ancestor_inserts.is_empty() {
-        groups.add_materialization(
-            &ancestor_inserts,
-            FullStateDirection::Inserts,
-            Audience::Store,
-        )?;
-    }
-    if !ancestor_deletes.is_empty() {
-        groups.add_materialization(
-            &ancestor_deletes,
-            FullStateDirection::Deletes,
-            Audience::Store,
-        )?;
-    }
-    for_each_change(&routing.store_mirror, |iter, row| {
-        if row.table != "_coven_audience" {
-            return Err(GateError::Sql(
-                format!("unexpected Store mirror changeset table {}", row.table),
-                rusqlite::Error::InvalidQuery,
-            ));
-        }
-        groups.group(Audience::Store)?.group.add_change(iter)?;
-        Ok(())
-    })?;
-    for (audience, routes) in &routing.private_routes {
-        for_each_change(routes, |iter, row| {
-            if row.table != "_coven_row_routes" || row.op != ffi::SQLITE_INSERT {
-                return Err(GateError::InvalidInboundAudiencePackage(
-                    "generated private routes must be complete INSERT images".to_string(),
-                ));
-            }
-            groups.group(audience.clone())?.group.add_change(iter)?;
+    unsafe {
+        let mut groups = AudiencePartitionGroups::new(conn, gates);
+        let audience_moves = audience_moves(conn, changeset, gates)?;
+        let mut ancestor_inserts = HashSet::new();
+        let mut ancestor_deletes = HashSet::new();
+        let captured_deletes = collect_deletes(changeset)?;
+        let mut non_local_deletes = HashSet::new();
+        let deleted_audiences = captured_deleted_audiences(conn, &captured_deletes, gates)?;
+        let store_changeset = gate_store_outbound(conn, changeset, gates)?;
+        let mut store_rows = HashSet::new();
+        for_each_change(&store_changeset, |iter, row| {
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            store_rows.insert((row.table.clone(), row_id.to_string()));
+            groups.group(Audience::Store)?.group.add_change(iter)?;
             Ok(())
         })?;
+        for_each_change(changeset, |iter, row| {
+            if !gates.tables.contains_key(&row.table) {
+                return Ok(());
+            }
+            if row_audience_move(conn, gates, &row)?.is_some() {
+                return Ok(());
+            }
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let row_key = (row.table.clone(), row_id.to_string());
+            let audience = if !gates.table_is_scoped(&row.table) {
+                if store_rows.contains(&row_key) {
+                    Audience::Store
+                } else {
+                    Audience::Local
+                }
+            } else if row.op == ffi::SQLITE_DELETE {
+                routing
+                    .deleted_rows
+                    .get(&row_key)
+                    .or_else(|| deleted_audiences.get(&row_key))
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| change_audience(conn, gates, &row))?
+            } else {
+                change_audience(conn, gates, &row)?
+            };
+            if audience != Audience::Local {
+                if row.op == ffi::SQLITE_INSERT {
+                    let component = scoped_materialization_rows(conn, gates, row_key.clone())?;
+                    ancestor_inserts.extend(required_store_ancestors(conn, gates, &component)?);
+                } else if row.op == ffi::SQLITE_DELETE {
+                    non_local_deletes.insert(row_key);
+                }
+            }
+            if gates.table_is_scoped(&row.table) || audience == Audience::Local {
+                let partition = groups.group(audience)?;
+                partition.group.add_change(iter)?;
+            }
+            Ok(())
+        })?;
+        for (table, id) in required_store_ancestors_for_deleted_rows(
+            conn,
+            gates,
+            &captured_deletes,
+            &non_local_deletes,
+        )? {
+            if !gates.row_kept(conn, &table, &id)? {
+                ancestor_deletes.insert((table, id));
+            }
+        }
+        for audience_move in &audience_moves {
+            let component = audience_move.rows.iter().cloned().collect::<HashSet<_>>();
+            let ancestors = required_store_ancestors(conn, gates, &component)?;
+            if audience_move.source == Audience::Local
+                && audience_move.destination != Audience::Local
+            {
+                ancestor_inserts.extend(ancestors.iter().cloned());
+            } else if audience_move.source != Audience::Local
+                && audience_move.destination == Audience::Local
+            {
+                for (table, id) in ancestors {
+                    if !gates.row_kept(conn, &table, &id)? {
+                        ancestor_deletes.insert((table, id));
+                    }
+                }
+            }
+            if audience_move.destination != Audience::Local {
+                groups.add_materialization(
+                    &component,
+                    FullStateDirection::Inserts,
+                    audience_move.destination.clone(),
+                )?;
+            }
+        }
+        if !ancestor_inserts.is_empty() {
+            groups.add_materialization(
+                &ancestor_inserts,
+                FullStateDirection::Inserts,
+                Audience::Store,
+            )?;
+        }
+        if !ancestor_deletes.is_empty() {
+            groups.add_materialization(
+                &ancestor_deletes,
+                FullStateDirection::Deletes,
+                Audience::Store,
+            )?;
+        }
+        for_each_change(&routing.store_mirror, |iter, row| {
+            if row.table != "_coven_audience" {
+                return Err(GateError::Sql(
+                    format!("unexpected Store mirror changeset table {}", row.table),
+                    rusqlite::Error::InvalidQuery,
+                ));
+            }
+            groups.group(Audience::Store)?.group.add_change(iter)?;
+            Ok(())
+        })?;
+        for (audience, routes) in &routing.private_routes {
+            for_each_change(routes, |iter, row| {
+                if row.table != "_coven_row_routes" || row.op != ffi::SQLITE_INSERT {
+                    return Err(GateError::InvalidInboundAudiencePackage(
+                        "generated private routes must be complete INSERT images".to_string(),
+                    ));
+                }
+                groups.group(audience.clone())?.group.add_change(iter)?;
+                Ok(())
+            })?;
+        }
+        let partitions = groups.finish()?;
+        Ok(PartitionedAudienceWrite {
+            partitions,
+            moves: audience_moves,
+        })
     }
-    let partitions = groups.finish()?;
-    Ok(PartitionedAudienceWrite {
-        partitions,
-        moves: audience_moves,
-    })
 }
 
 pub(crate) fn validate_scoped_foreign_key_audiences(

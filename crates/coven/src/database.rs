@@ -174,7 +174,7 @@ pub(crate) use gate::{
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
     store_audience_transitions, validate_scoped_foreign_key_audiences,
     validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
-    GateError, Gates, PartitionedAudienceWrite, RoutingChanges, StoreAudienceTransitions,
+    GateError, Gates, RoutingChanges, StoreAudienceTransitions,
 };
 #[cfg(test)]
 pub(crate) use gate::{
@@ -213,19 +213,18 @@ pub(crate) use schema_introspection::{
 pub(crate) use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on, projection_table_names,
-    replay_retained_merge_projection_on, verify_circle_bootstrap_image, BlockedWriteDiscard,
-    CandidateCleanupObject, CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimObject,
-    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
-    IncomingTimestampPolicy, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation,
-    MergeMaterializationTransaction, OutboxEntry, OutboxOperation, OutboxUploadState,
-    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, ReclaimCommitActivation,
-    ReclaimedStorePackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, RetainedReplayAuthority, RetainedReplayBaseline,
-    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, SnapshotBlobAudience,
-    SnapshotDatabaseImage, SnapshotImageError, SnapshotPublicationPermit, StoreDatabase,
-    StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation,
-    TableSchema, ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
-    WinningRow, GENERATION_ZERO,
+    verify_circle_bootstrap_image, BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot,
+    DeviceJoinJournalStore, DurableStoreReclaimObject, DurableStoreReclaimOperation,
+    HostWriteBlobTransaction, HostWriteError, HostWriteOperation, IncomingTimestampPolicy,
+    MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation,
+    OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
+    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
+    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
+    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotPublicationPermit,
+    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
+    StoreWritePreparation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
 #[cfg(test)]
 pub(crate) use store::{
@@ -235,6 +234,7 @@ pub(crate) use store::{
 #[cfg(test)]
 pub(crate) use store::{
     resolve_and_apply_changeset, resolve_and_apply_changeset_with_schema_on, ApplyResult,
+    MergeMaterializationTransaction,
 };
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, SqlReadContext, WriteBatch};
@@ -615,9 +615,9 @@ impl<K: Clone + PartialEq> TestPausePoints<K> {
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
 /// open. One connection thread owns this for the connection's whole life; every
 /// database access runs against it, so access is serialized. Changeset capture is
-/// per-transaction — [`Database::run_store_write_transaction_on`] attaches a
-/// session for the span of one host write and drains it into the existing write records —
-/// so no capture state lives on the core between calls.
+/// per-transaction: the host-write transaction retains one attached session for
+/// its full span and drains it into the existing write records, so no capture
+/// state lives on the core between calls.
 ///
 /// `DatabaseCore` holds only `Send` fields (a `rusqlite::Connection`, which is
 /// `Send`, plus `Arc`s and a `u32`), so it is `Send` by construction — the
