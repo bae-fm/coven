@@ -173,6 +173,9 @@ EFFECT_PATTERNS = {
 }
 CALL_NODE_KINDS = {"CALL_EXPR", "METHOD_CALL_EXPR", "MACRO_CALL"}
 CALLABLE_NODE_KINDS = {"FN", "CLOSURE_EXPR"}
+TEST_ENTRY_ATTRIBUTE = re.compile(
+    r"#\s*\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:test|test_case|rstest)\b"
+)
 CONTENT_MODIFIED = -32801
 ANALYZER_TOOLCHAIN = "1.97.1"
 
@@ -1404,14 +1407,23 @@ def is_test_context(
 ) -> bool:
     candidates = [index, *(ancestor for ancestor, _ in ancestors(source_file, index))]
     return any(
-        re.search(
-            r"#\s*\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
-            r"(?:test|test_case|rstest)\b",
-            source_file.text(source_file.nodes[child]),
-        )
+        TEST_ENTRY_ATTRIBUTE.search(source_file.text(source_file.nodes[child]))
         for candidate in candidates
         for child in source_file.nodes[candidate].children
         if source_file.nodes[child].kind == "ATTR"
+    )
+
+
+def is_test_entry(
+    source_file: SourceFile,
+    index: int,
+) -> bool:
+    return any(
+        source_file.nodes[child].kind == "ATTR"
+        and TEST_ENTRY_ATTRIBUTE.search(
+            source_file.text(source_file.nodes[child])
+        )
+        for child in source_file.nodes[index].children
     )
 
 
@@ -2061,6 +2073,7 @@ def inventory_file(
                 "visibility": visibility(signature),
                 "cfg": cfg,
                 "test_context": is_test_context(source_file, index),
+                "test_entry": named and is_test_entry(source_file, index),
                 "retained_dependencies": retained_dependencies(signature),
                 "ambient_dependencies": matches(body, AMBIENT_PATTERNS),
                 "effects": matches(body, EFFECT_PATTERNS),
@@ -4543,6 +4556,9 @@ def verified_component_disposition(
     for record in records:
         if record["kind"] in {"closure", "async-block"}:
             continue
+        if record.get("test_entry", False):
+            classifications.append("boundary")
+            continue
         decision = decisions.get(
             decision_key(record["symbol"], record["signature"])
         )
@@ -5862,7 +5878,9 @@ def unclassified(
     return [
         record
         for record in index["callables"]
-        if decision_key(record["symbol"], record["signature"]) not in decisions
+        if record.get("kind") not in {"closure", "async-block"}
+        and not record.get("test_entry", False)
+        and decision_key(record["symbol"], record["signature"]) not in decisions
     ]
 
 

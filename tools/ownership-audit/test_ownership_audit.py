@@ -564,6 +564,29 @@ async fn writes() {
         self.assertTrue(records)
         self.assertTrue(all(record["test_context"] for record in records))
 
+    def test_inventory_distinguishes_test_entries_from_test_helpers(self):
+        records = self.inventory(
+            """
+#[cfg(test)]
+fn helper() {}
+
+#[test]
+fn direct_test() { helper(); }
+
+#[tokio::test]
+async fn async_test() { helper(); }
+
+#[rstest]
+fn generated_test() { helper(); }
+"""
+        )
+        by_name = {record["name"]: record for record in records}
+
+        self.assertFalse(by_name["helper"]["test_entry"])
+        self.assertTrue(by_name["direct_test"]["test_entry"])
+        self.assertTrue(by_name["async_test"]["test_entry"])
+        self.assertTrue(by_name["generated_test"]["test_entry"])
+
     def test_nested_functions_belong_to_their_enclosing_callable(self):
         records = self.inventory(
             """
@@ -644,6 +667,34 @@ status = "verified"
                 decisions,
             ),
             [],
+        )
+
+    def test_test_entries_and_lexical_bodies_do_not_need_ledger_rows(self):
+        test_entry = {
+            "symbol": "sample::writes",
+            "signature": "fn writes()",
+            "kind": "free",
+            "test_entry": True,
+        }
+        closure = {
+            "symbol": "sample::writes::<closure@2:5>",
+            "signature": "|| persist()",
+            "kind": "closure",
+            "enclosing_callable": test_entry["symbol"],
+        }
+        helper = {
+            "symbol": "sample::persist",
+            "signature": "fn persist()",
+            "kind": "free",
+            "test_entry": False,
+        }
+
+        self.assertEqual(
+            ownership_audit.unclassified(
+                {"callables": [test_entry, closure, helper]},
+                {},
+            ),
+            [helper],
         )
 
 
@@ -1817,6 +1868,39 @@ class SemanticIndexTests(unittest.TestCase):
         nodes = {node["label"]: node for node in graph["nodes"]}
         self.assertEqual(nodes["sync::run"]["kind"], "resolved")
         self.assertTrue(nodes["sample::main"]["ready"])
+
+    def test_test_entry_is_a_boundary_without_hiding_its_helper(self):
+        helper = self.graph_record(
+            "sample::tests::persist_fixture",
+            effects=["database-write"],
+            test_context=True,
+        )
+        test_entry = self.graph_record(
+            "sample::tests::writes",
+            test_context=True,
+            test_entry=True,
+            callees=[{"symbol": helper["symbol"], "sites": [{}]}],
+        )
+        helper["callers"] = [
+            {"symbol": test_entry["symbol"], "sites": [{}]}
+        ]
+
+        graph = ownership_audit.build_graph_data(
+            {"callables": [test_entry, helper], "reach_throughs": {}},
+        )
+        nodes = {
+            node["component"]: node
+            for node in graph["nodes"]
+            if node["kind"] != "capability"
+        }
+
+        self.assertEqual(nodes[test_entry["symbol"]]["kind"], "resolved")
+        self.assertEqual(
+            nodes[test_entry["symbol"]]["classifications"],
+            ["boundary"],
+        )
+        self.assertEqual(nodes[helper["symbol"]]["kind"], "unbound")
+        self.assertTrue(nodes[helper["symbol"]]["ready"])
 
     def test_verified_transformation_does_not_block_its_caller(self):
         transformation = self.graph_record(
