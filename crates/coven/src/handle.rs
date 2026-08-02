@@ -1363,83 +1363,100 @@ mod tests {
         }
     }
 
-    async fn queue_host_blob(
-        handle: &CovenHandle,
-        id: &str,
-        cloud_path: &str,
-        bytes: &[u8],
-        remote: bool,
-    ) -> crate::WriteId {
-        let note_id = format!("note-{id}");
-        let id = id.to_string();
-        let cloud_path = cloud_path.to_string();
-        let bytes = bytes.to_vec();
-        let size = bytes.len() as i64;
-        let hash = crate::blob::content_hash(&bytes);
-        let write = handle
-            .write(
-                {
-                    let id = id.clone();
-                    let bytes = bytes.clone();
-                    move |batch| {
-                        batch.put_blob("images", id, bytes);
-                        Ok(())
-                    }
-                },
-                {
-                    let id = id.clone();
-                    move |sql| {
-                        let stamp = sql.stamp();
-                        sql.execute(
-                            "INSERT INTO notes \
-                             (id, title, shared, _updated_at, created_at) \
-                             VALUES (?1, 'blob owner', ?2, ?3, '2026-01-01')",
-                            rusqlite::params![note_id, remote as i64, stamp],
-                        )?;
-                        sql.execute(
-                            "INSERT INTO note_photos \
-                             (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
-                             VALUES (?1, ?2, 'cover', ?3, ?4, ?5, '2026-01-01', ?6)",
-                            rusqlite::params![id, note_id, size, hash, stamp, cloud_path],
-                        )?;
-                        Ok(())
-                    }
-                },
-            )
-            .await
-            .expect("queue host blob write");
-        write.write_id
+    trait HostBlobTestOps {
+        async fn queue_host_blob(
+            &self,
+            id: &str,
+            cloud_path: &str,
+            bytes: &[u8],
+            remote: bool,
+        ) -> crate::WriteId;
+
+        async fn wait_for_host_blob_publication(
+            &self,
+            id: &str,
+            write_id: &crate::WriteId,
+        ) -> RowBlobRef;
     }
 
-    async fn wait_for_host_blob_publication(
-        handle: &CovenHandle,
-        id: &str,
-        write_id: &crate::WriteId,
-    ) -> RowBlobRef {
-        let mut status = handle
-            .subscribe_write_status(write_id)
-            .await
-            .expect("subscribe to host blob publication");
-        handle.sync_now();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let current = status.borrow().clone();
-                match current {
-                    crate::WriteStatus::Published(_) => break,
-                    crate::WriteStatus::Pending | crate::WriteStatus::Publishing => status
-                        .changed()
-                        .await
-                        .expect("write status channel remains open"),
-                    other => panic!("host blob write did not publish: {other:?}"),
+    impl HostBlobTestOps for CovenHandle {
+        async fn queue_host_blob(
+            &self,
+            id: &str,
+            cloud_path: &str,
+            bytes: &[u8],
+            remote: bool,
+        ) -> crate::WriteId {
+            let note_id = format!("note-{id}");
+            let id = id.to_string();
+            let cloud_path = cloud_path.to_string();
+            let bytes = bytes.to_vec();
+            let size = bytes.len() as i64;
+            let hash = crate::blob::content_hash(&bytes);
+            let write = self
+                .write(
+                    {
+                        let id = id.clone();
+                        let bytes = bytes.clone();
+                        move |batch| {
+                            batch.put_blob("images", id, bytes);
+                            Ok(())
+                        }
+                    },
+                    {
+                        let id = id.clone();
+                        move |sql| {
+                            let stamp = sql.stamp();
+                            sql.execute(
+                                "INSERT INTO notes \
+                                 (id, title, shared, _updated_at, created_at) \
+                                 VALUES (?1, 'blob owner', ?2, ?3, '2026-01-01')",
+                                rusqlite::params![note_id, remote as i64, stamp],
+                            )?;
+                            sql.execute(
+                                "INSERT INTO note_photos \
+                                 (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+                                 VALUES (?1, ?2, 'cover', ?3, ?4, ?5, '2026-01-01', ?6)",
+                                rusqlite::params![id, note_id, size, hash, stamp, cloud_path],
+                            )?;
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .expect("queue host blob write");
+            write.write_id
+        }
+
+        async fn wait_for_host_blob_publication(
+            &self,
+            id: &str,
+            write_id: &crate::WriteId,
+        ) -> RowBlobRef {
+            let mut status = self
+                .subscribe_write_status(write_id)
+                .await
+                .expect("subscribe to host blob publication");
+            self.sync_now();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let current = status.borrow().clone();
+                    match current {
+                        crate::WriteStatus::Published(_) => break,
+                        crate::WriteStatus::Pending | crate::WriteStatus::Publishing => status
+                            .changed()
+                            .await
+                            .expect("write status channel remains open"),
+                        other => panic!("host blob write did not publish: {other:?}"),
+                    }
                 }
-            }
-        })
-        .await
-        .expect("host blob publishes");
-        handle
-            .row_blob_ref("note_photos", id)
+            })
             .await
-            .expect("capture published host blob row")
+            .expect("host blob publishes");
+            self.row_blob_ref("note_photos", id)
+                .await
+                .expect("capture published host blob row")
+        }
     }
 
     async fn publish_host_blob(
@@ -1448,8 +1465,8 @@ mod tests {
         cloud_path: &str,
         bytes: &[u8],
     ) -> RowBlobRef {
-        let write_id = queue_host_blob(handle, id, cloud_path, bytes, true).await;
-        wait_for_host_blob_publication(handle, id, &write_id).await
+        let write_id = handle.queue_host_blob(id, cloud_path, bytes, true).await;
+        handle.wait_for_host_blob_publication(id, &write_id).await
     }
 
     #[tokio::test]
@@ -1886,7 +1903,9 @@ mod tests {
         // The loop prepares the exact blob upload from the pending Store write,
         // then the observer pauses before it can drain the queue itself.
         let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
-        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+            .await;
         handle
             .make_remote("notes", "note-cover-1", false)
             .await
@@ -2035,7 +2054,9 @@ mod tests {
         assert!(!handle.is_syncing());
 
         let plaintext = b"caller-driven-cover-art".to_vec();
-        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+            .await;
         handle
             .make_remote("notes", "note-cover-1", false)
             .await
@@ -2187,7 +2208,9 @@ mod tests {
         let plaintext: Vec<u8> = (0..3 * CHUNK as usize + 17)
             .map(|value| (value % 251) as u8)
             .collect();
-        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .queue_host_blob("cover-1", "cover-cover-1.jpg", &plaintext, false)
+            .await;
         handle
             .make_remote("notes", "note-cover-1", false)
             .await

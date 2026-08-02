@@ -86,6 +86,12 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "initialize",
     ),
     (
+        "crates/coven/src/blob/delete_tests.rs",
+        "TombstoneCollector",
+        "load",
+    ),
+    ("crates/coven/src/coven.rs", "RemoteOnlyStoreBlob", "create"),
+    (
         "crates/coven/src/sync/test_helpers.rs",
         "TestDevice",
         "create",

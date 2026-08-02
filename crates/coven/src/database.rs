@@ -229,10 +229,7 @@ pub(crate) use store::{
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
 #[cfg(test)]
-pub(crate) use store::{
-    select_author_exclusion_activation_locator, store_package_is_retained_for_replay_for_test,
-    AuthorExclusionLocatorTamper,
-};
+pub(crate) use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store::{SqlContext, SqlReadContext, WriteBatch};
 pub(crate) use store_authority_records::{

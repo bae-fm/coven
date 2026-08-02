@@ -858,13 +858,18 @@ mod tests {
             .expect("create exact test Store")
     }
 
-    async fn publish_current_writes(handle: &CovenHandle) {
-        let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(handle, &keypair).await;
-        handle
-            .publish_test_store(&storage)
-            .await
-            .expect("publish pending Store write");
+    trait CovenHandleWriteTestOps {
+        async fn publish_current_writes(&self);
+    }
+
+    impl CovenHandleWriteTestOps for CovenHandle {
+        async fn publish_current_writes(&self) {
+            let keypair = crate::keys::UserKeypair::generate();
+            let storage = merge_test_storage(self, &keypair).await;
+            self.publish_test_store(&storage)
+                .await
+                .expect("publish pending Store write");
+        }
     }
 
     #[tokio::test]
@@ -1622,82 +1627,84 @@ mod tests {
         source_object: ObjectSlot,
     }
 
-    async fn remote_only_store_blob() -> RemoteOnlyStoreBlob {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let signer = crate::keys::UserKeypair::generate();
-        let encryption = crate::EncryptionService::from_key([42; 32]);
-        let handle = Coven::builder(config(dir.clone()))
-            .synced_tables(vec![scoped_files_table()])
-            .migrations(vec![scoped_files_migration()])
-            .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
-            .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
-            .open()
-            .expect("open scoped blob store");
-        let store = handle
-            .create_test_store("lib-test", signer)
-            .await
-            .expect("create exact test Store");
-        let destination_circle = handle
-            .install_test_active_circle("blob-circle")
-            .await
-            .expect("install Circle authority");
+    impl RemoteOnlyStoreBlob {
+        async fn create() -> Self {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let dir = StoreDir::new(tmp.path());
+            let signer = crate::keys::UserKeypair::generate();
+            let encryption = crate::EncryptionService::from_key([42; 32]);
+            let handle = Coven::builder(config(dir.clone()))
+                .synced_tables(vec![scoped_files_table()])
+                .migrations(vec![scoped_files_migration()])
+                .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
+                .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
+                .open()
+                .expect("open scoped blob store");
+            let store = handle
+                .create_test_store("lib-test", signer)
+                .await
+                .expect("create exact test Store");
+            let destination_circle = handle
+                .install_test_active_circle("blob-circle")
+                .await
+                .expect("install Circle authority");
 
-        let bytes = b"remote-only-circle-blob".to_vec();
-        let hash = crate::blob::content_hash(&bytes);
-        handle
-            .write(
-                {
-                    let bytes = bytes.clone();
-                    move |batch| {
-                        batch.put_blob("media-files", "circleblob", bytes);
+            let bytes = b"remote-only-circle-blob".to_vec();
+            let hash = crate::blob::content_hash(&bytes);
+            handle
+                .write(
+                    {
+                        let bytes = bytes.clone();
+                        move |batch| {
+                            batch.put_blob("media-files", "circleblob", bytes);
+                            Ok(())
+                        }
+                    },
+                    move |sql| {
+                        sql.execute(
+                            "INSERT INTO files
+                             (id, blob_id, size, hash, audience, _updated_at)
+                             VALUES ('circle-file', 'circleblob', ?1, ?2, ?3, ?4)",
+                            params![
+                                bytes.len() as i64,
+                                hash,
+                                Option::<String>::None,
+                                sql.stamp()
+                            ],
+                        )?;
                         Ok(())
-                    }
-                },
-                move |sql| {
-                    sql.execute(
-                        "INSERT INTO files
-                         (id, blob_id, size, hash, audience, _updated_at)
-                         VALUES ('circle-file', 'circleblob', ?1, ?2, ?3, ?4)",
-                        params![
-                            bytes.len() as i64,
-                            hash,
-                            Option::<String>::None,
-                            sql.stamp()
-                        ],
-                    )?;
-                    Ok(())
-                },
+                    },
+                )
+                .await
+                .expect("write Store blob");
+            handle
+                .publish_test_store(&store)
+                .await
+                .expect("publish Store blob");
+            let source_object = handle
+                .row_blob_ref("files", "circle-file")
+                .await
+                .expect("capture published Store blob")
+                .stored()
+                .expect("published Store blob has exact storage")
+                .object()
+                .slot()
+                .clone();
+            std::fs::remove_file(
+                dir.local_blob_path("media-files", "circleblob")
+                    .expect("local blob path"),
             )
-            .await
-            .expect("write Store blob");
-        handle
-            .publish_test_store(&store)
-            .await
-            .expect("publish Store blob");
-        let source_object = handle
-            .row_blob_ref("files", "circle-file")
-            .await
-            .expect("capture published Store blob")
-            .stored()
-            .expect("published Store blob has exact storage")
-            .object()
-            .slot()
-            .clone();
-        std::fs::remove_file(
-            dir.local_blob_path("media-files", "circleblob")
-                .expect("local blob path"),
-        )
-        .expect("remove local plaintext to leave a remote-only source");
+            .expect("remove local plaintext to leave a remote-only source");
 
-        RemoteOnlyStoreBlob {
-            _tmp: tmp,
-            dir,
-            handle,
-            store,
-            encryption,
-            destination_circle,
-            source_object,
+            Self {
+                _tmp: tmp,
+                dir,
+                handle,
+                store,
+                encryption,
+                destination_circle,
+                source_object,
+            }
         }
     }
 
@@ -1716,7 +1723,7 @@ mod tests {
 
     #[tokio::test]
     async fn audience_move_requires_remote_only_blob_before_committing_sql() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
         ExactSlotStorage::delete_at(fixture.store.home.as_ref(), &fixture.source_object)
             .await
             .expect("remove the only remote source");
@@ -1763,7 +1770,7 @@ mod tests {
 
     #[tokio::test]
     async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
         let destination_circle_value = fixture.destination_circle.to_string();
         let result = fixture
             .handle
@@ -1801,7 +1808,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
 
         fixture
             .handle
@@ -1850,7 +1857,7 @@ mod tests {
 
     #[tokio::test]
     async fn journal_failure_removes_only_the_audience_move_spool_and_rolls_back_sql() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
         fixture
             .handle
             .connect_sync_with_test_home(
@@ -1902,7 +1909,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
         fixture
             .handle
             .connect_sync_with_test_home(
@@ -2002,7 +2009,7 @@ mod tests {
 
     #[tokio::test]
     async fn audience_move_publishes_from_precommit_spool_after_source_disappears() {
-        let fixture = remote_only_store_blob().await;
+        let fixture = RemoteOnlyStoreBlob::create().await;
         fixture
             .handle
             .connect_sync_with_test_home(
@@ -2283,7 +2290,7 @@ mod tests {
             })
             .await
             .expect("seed row");
-        publish_current_writes(&handle).await;
+        handle.publish_current_writes().await;
         crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
             .await
             .expect("restore published blob locally");
@@ -2323,118 +2330,122 @@ mod tests {
             .exists());
     }
 
-    async fn queue_replacement_before_sync(
-        handle: &CovenHandle,
-        store_dir: &StoreDir,
-    ) -> (WriteId, WriteId, std::path::PathBuf) {
-        let first = handle
-            .write(
-                |batch| {
-                    batch.put_blob("media-files", "ownedaaa", b"first".to_vec());
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute(
-                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
-                         VALUES ('owned-file', 'ownedaaa', 5, ?1, ?2)",
-                        params![crate::blob::content_hash(b"first"), sql.stamp()],
-                    )?;
-                    Ok(())
-                },
-            )
-            .await
-            .expect("queue first blob write");
-        let first_path = store_dir
-            .local_blob_path("media-files", "ownedaaa")
-            .expect("first blob path");
-        let first_blob = BlobRef {
-            namespace: "media-files".to_string(),
-            id: "ownedaaa".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::HostProvided,
-            fill: CacheFill::CacheLazy,
-        };
-        let second = handle
-            .write(
-                move |batch| {
-                    batch.put_blob("media-files", "ownedbbb", b"second".to_vec());
-                    batch.delete_blob(first_blob);
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute(
-                        "UPDATE files SET blob_id = 'ownedbbb', size = 6, hash = ?1, \
-                         _updated_at = ?2 \
-                         WHERE id = 'owned-file'",
-                        params![crate::blob::content_hash(b"second"), sql.stamp()],
-                    )?;
-                    Ok(())
-                },
-            )
-            .await
-            .expect("queue replacement write");
-        (first.write_id, second.write_id, first_path)
+    struct PendingReplacement {
+        first_write: WriteId,
+        second_write: WriteId,
+        first_path: std::path::PathBuf,
     }
 
-    async fn assert_replacement_publishes_in_order(
-        handle: &CovenHandle,
-        first_write: &WriteId,
-        second_write: &WriteId,
-        first_path: &std::path::Path,
-    ) {
-        let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(handle, &keypair).await;
-        handle
-            .publish_test_store(&storage)
-            .await
-            .expect("publish pending Store write");
-
-        let first_sequence = match handle
-            .write_status(first_write)
-            .await
-            .expect("first status")
-        {
-            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
-            status => panic!("first replacement write is not published: {status:?}"),
-        };
-        assert_eq!(
-            handle
-                .write_status(second_write)
+    impl PendingReplacement {
+        async fn queue(handle: &CovenHandle, store_dir: &StoreDir) -> Self {
+            let first = handle
+                .write(
+                    |batch| {
+                        batch.put_blob("media-files", "ownedaaa", b"first".to_vec());
+                        Ok(())
+                    },
+                    |sql| {
+                        sql.execute(
+                            "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES ('owned-file', 'ownedaaa', 5, ?1, ?2)",
+                            params![crate::blob::content_hash(b"first"), sql.stamp()],
+                        )?;
+                        Ok(())
+                    },
+                )
                 .await
-                .expect("second status after first publication"),
-            crate::WriteStatus::Pending,
-            "one Store publication consumes one pending host transaction",
-        );
+                .expect("queue first blob write");
+            let first_path = store_dir
+                .local_blob_path("media-files", "ownedaaa")
+                .expect("first blob path");
+            let first_blob = BlobRef {
+                namespace: "media-files".to_string(),
+                id: "ownedaaa".to_string(),
+                scope: BlobScope::Master,
+                cloud_path: None,
+                provenance: Provenance::HostProvided,
+                fill: CacheFill::CacheLazy,
+            };
+            let second = handle
+                .write(
+                    move |batch| {
+                        batch.put_blob("media-files", "ownedbbb", b"second".to_vec());
+                        batch.delete_blob(first_blob);
+                        Ok(())
+                    },
+                    |sql| {
+                        sql.execute(
+                            "UPDATE files SET blob_id = 'ownedbbb', size = 6, hash = ?1, \
+                         _updated_at = ?2 \
+                         WHERE id = 'owned-file'",
+                            params![crate::blob::content_hash(b"second"), sql.stamp()],
+                        )?;
+                        Ok(())
+                    },
+                )
+                .await
+                .expect("queue replacement write");
+            Self {
+                first_write: first.write_id,
+                second_write: second.write_id,
+                first_path,
+            }
+        }
 
-        handle
-            .publish_test_store(&storage)
-            .await
-            .expect("publish pending Store write");
-        let second_sequence = match handle
-            .write_status(second_write)
-            .await
-            .expect("second status")
-        {
-            crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
-            status => panic!("second replacement write is not published: {status:?}"),
-        };
-        assert_eq!(
-            second_sequence,
-            first_sequence + 1,
-            "replacement writes publish in their host transaction order"
-        );
-        let blob_objects = storage
-            .home
-            .keys()
-            .into_iter()
-            .filter(|key| key.starts_with("media-files/opaque/"))
-            .count();
-        assert_eq!(blob_objects, 2, "both row versions upload their blob bytes");
-        assert!(
-            !first_path.exists(),
-            "the first write releases its local bytes after publication"
-        );
+        async fn assert_publishes_in_order(&self, handle: &CovenHandle) {
+            let keypair = crate::keys::UserKeypair::generate();
+            let storage = merge_test_storage(handle, &keypair).await;
+            handle
+                .publish_test_store(&storage)
+                .await
+                .expect("publish pending Store write");
+
+            let first_sequence = match handle
+                .write_status(&self.first_write)
+                .await
+                .expect("first status")
+            {
+                crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+                status => panic!("first replacement write is not published: {status:?}"),
+            };
+            assert_eq!(
+                handle
+                    .write_status(&self.second_write)
+                    .await
+                    .expect("second status after first publication"),
+                crate::WriteStatus::Pending,
+                "one Store publication consumes one pending host transaction",
+            );
+
+            handle
+                .publish_test_store(&storage)
+                .await
+                .expect("publish pending Store write");
+            let second_sequence = match handle
+                .write_status(&self.second_write)
+                .await
+                .expect("second status")
+            {
+                crate::WriteStatus::Published(position) => position.commit().coord.sequence(),
+                status => panic!("second replacement write is not published: {status:?}"),
+            };
+            assert_eq!(
+                second_sequence,
+                first_sequence + 1,
+                "replacement writes publish in their host transaction order"
+            );
+            let blob_objects = storage
+                .home
+                .keys()
+                .into_iter()
+                .filter(|key| key.starts_with("media-files/opaque/"))
+                .count();
+            assert_eq!(blob_objects, 2, "both row versions upload their blob bytes");
+            assert!(
+                !self.first_path.exists(),
+                "the first write releases its local bytes after publication"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2452,11 +2463,10 @@ mod tests {
     async fn run_pending_write_owns_blob_bytes_until_its_publication() {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
-        let (first_write, second_write, first_path) =
-            queue_replacement_before_sync(&handle, &dir).await;
+        let replacement = PendingReplacement::queue(&handle, &dir).await;
 
         assert_eq!(
-            std::fs::read(&first_path).expect("first write still owns its bytes"),
+            std::fs::read(&replacement.first_path).expect("first write still owns its bytes"),
             b"first"
         );
         let overwrite: CovenResult<WriteReceipt<()>> = handle
@@ -2480,11 +2490,10 @@ mod tests {
             Err(CovenError::BlobOwnedByPendingWrite { .. })
         ));
         assert_eq!(
-            std::fs::read(&first_path).expect("lease prevents overwrite"),
+            std::fs::read(&replacement.first_path).expect("lease prevents overwrite"),
             b"first"
         );
-        assert_replacement_publishes_in_order(&handle, &first_write, &second_write, &first_path)
-            .await;
+        replacement.assert_publishes_in_order(&handle).await;
     }
 
     #[tokio::test]
@@ -2503,17 +2512,16 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
-        let (first_write, second_write, first_path) =
-            queue_replacement_before_sync(&handle, &dir).await;
+        let replacement = PendingReplacement::queue(&handle, &dir).await;
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
         assert_eq!(
-            std::fs::read(&first_path).expect("reopened first write still owns its bytes"),
+            std::fs::read(&replacement.first_path)
+                .expect("reopened first write still owns its bytes"),
             b"first"
         );
-        assert_replacement_publishes_in_order(&reopened, &first_write, &second_write, &first_path)
-            .await;
+        replacement.assert_publishes_in_order(&reopened).await;
     }
 
     #[tokio::test]
@@ -2539,7 +2547,7 @@ mod tests {
             })
             .await
             .expect("seed row");
-        publish_current_writes(&handle).await;
+        handle.publish_current_writes().await;
         let published = handle
             .row_blob_ref("files", "file-1")
             .await
@@ -2618,7 +2626,7 @@ mod tests {
             })
             .await
             .expect("seed row");
-        publish_current_writes(&handle).await;
+        handle.publish_current_writes().await;
         let published = handle
             .row_blob_ref("files", "file-1")
             .await

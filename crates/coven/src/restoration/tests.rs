@@ -390,31 +390,34 @@ fn owner_recovery_authority(
     })
 }
 
-async fn published_owner_recovery_authority(
-    device: &TestDevice,
-    owner: &UserKeypair,
-) -> RestoreAuthority {
-    let protocol = device.protocol_root();
-    let root = device.store_root();
-    let owner_grant = protocol.descriptor.founder_grant.clone();
-    let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
-        root,
-        &pubkey_hex(owner),
-        &owner_grant,
-        &protocol.descriptor.founder_recovery,
-    )
-    .expect("derive published recovery activation");
-    RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
-        owner_identity_secret: hex::encode(owner.to_keypair_bytes()),
-        owner_grant: owner_grant.clone(),
-        recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
-            owner_grant,
-            position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
-                activation,
+trait OwnerRecoveryTestDevice {
+    fn published_owner_recovery_authority(&self, owner: &UserKeypair) -> RestoreAuthority;
+}
+
+impl OwnerRecoveryTestDevice for TestDevice {
+    fn published_owner_recovery_authority(&self, owner: &UserKeypair) -> RestoreAuthority {
+        let protocol = self.protocol_root();
+        let root = self.store_root();
+        let owner_grant = protocol.descriptor.founder_grant.clone();
+        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+            root,
+            &pubkey_hex(owner),
+            &owner_grant,
+            &protocol.descriptor.founder_recovery,
+        )
+        .expect("derive published recovery activation");
+        RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
+            owner_identity_secret: hex::encode(owner.to_keypair_bytes()),
+            owner_grant: owner_grant.clone(),
+            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+                owner_grant,
+                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                    activation,
+                },
             },
-        },
-        published_at: "2026-07-17T00:00:00Z".to_string(),
-    })
+            published_at: "2026-07-17T00:00:00Z".to_string(),
+        })
+    }
 }
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
@@ -874,7 +877,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let store_keys = StoreKeys::bind(store_id.to_string());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
-    let authority = published_owner_recovery_authority(&owner_device, &owner_keypair).await;
+    let authority = owner_device.published_owner_recovery_authority(&owner_keypair);
     let migrations = test_migrations();
     let reached_config_save = std::cell::Cell::new(false);
     let result = crate::restoration::restore_from_cloud(
@@ -1002,7 +1005,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
 #[tokio::test]
 async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_device() {
     let fixture = Box::pin(prepare_owner_recovery_restore()).await;
-    Box::pin(assert_owner_recovery_restore(fixture)).await;
+    Box::pin(fixture.assert_restored()).await;
 }
 
 struct OwnerRecoveryRestoreFixture {
@@ -1012,6 +1015,71 @@ struct OwnerRecoveryRestoreFixture {
     migrations: Vec<crate::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
+}
+
+impl OwnerRecoveryRestoreFixture {
+    async fn assert_restored(self) {
+        let Self {
+            code,
+            owner_pubkey,
+            tables,
+            migrations,
+            cloudkit_ops,
+            app,
+        } = self;
+        let layout = StoreLayout::new(app.path());
+        let config = Box::pin(restore_from_code(
+            &code,
+            &tables,
+            &migrations,
+            None,
+            crate::custody::KeyCustody::Keyring,
+            crate::identity_custody::IdentityCustody::Keyring,
+            crate::oauth::OAuthClients::empty(),
+            None,
+            Some(cloudkit_ops),
+            &layout,
+            Arc::new(SystemClock),
+            Arc::new(SequentialIdProvider::new("unused-recovery-device")),
+            |_status: &str| {},
+            &tokio::sync::watch::channel(false).1,
+        ))
+        .await
+        .expect("restore through OwnerRecovery code");
+        let (restored, _stamper) = Database::open(
+            &config.store_dir.db_path(),
+            tables,
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            config.device_id.clone(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &migrations,
+        )
+        .expect("open recovered database");
+        let store_device_id = restored
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("load recovered Store device identity")
+            .expect("recovered Store device identity exists");
+        assert_eq!(
+            restored
+                .get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)
+                .await
+                .expect("load recovered Store owner"),
+            Some(owner_pubkey),
+            "restore pins the verified chain founder as the Store owner",
+        );
+        let activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation = restored
+            .test_sql(move |database| {
+                database.store_device_registration_activation(&store_device_id)
+            })
+            .await
+            .expect("load config device activation");
+        assert!(matches!(
+            activation,
+            crate::protocol::store_commit::StoreDeviceRegistrationActivation::Recovery { .. }
+        ));
+    }
 }
 
 async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
@@ -1060,7 +1128,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         .publish_acknowledgement(snapshot_coverage)
         .await
         .expect("publish recovery snapshot acknowledgement");
-    let authority = published_owner_recovery_authority(&owner_device, &owner).await;
+    let authority = owner_device.published_owner_recovery_authority(&owner);
     let code = encode_restore_code(&RestoreCode {
         v: crate::restoration::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
@@ -1081,67 +1149,6 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         cloudkit_ops,
         app,
     }
-}
-
-async fn assert_owner_recovery_restore(fixture: OwnerRecoveryRestoreFixture) {
-    let OwnerRecoveryRestoreFixture {
-        code,
-        owner_pubkey,
-        tables,
-        migrations,
-        cloudkit_ops,
-        app,
-    } = fixture;
-    let layout = StoreLayout::new(app.path());
-    let config = Box::pin(restore_from_code(
-        &code,
-        &tables,
-        &migrations,
-        None,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
-        crate::oauth::OAuthClients::empty(),
-        None,
-        Some(cloudkit_ops),
-        &layout,
-        Arc::new(SystemClock),
-        Arc::new(SequentialIdProvider::new("unused-recovery-device")),
-        |_status: &str| {},
-        &tokio::sync::watch::channel(false).1,
-    ))
-    .await
-    .expect("restore through OwnerRecovery code");
-    let (restored, _stamper) = Database::open(
-        &config.store_dir.db_path(),
-        tables,
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        config.device_id.clone(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &migrations,
-    )
-    .expect("open recovered database");
-    let store_device_id = restored
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("load recovered Store device identity")
-        .expect("recovered Store device identity exists");
-    assert_eq!(
-        restored
-            .get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)
-            .await
-            .expect("load recovered Store owner"),
-        Some(owner_pubkey),
-        "restore pins the verified chain founder as the Store owner",
-    );
-    let activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation = restored
-        .test_sql(move |database| database.store_device_registration_activation(&store_device_id))
-        .await
-        .expect("load config device activation");
-    assert!(matches!(
-        activation,
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation::Recovery { .. }
-    ));
 }
 
 /// A restored continuation preserves its imported immutable snapshot generation.

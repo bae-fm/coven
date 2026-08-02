@@ -663,34 +663,4 @@ impl StoreDatabase {
             })
             .await
     }
-
-    #[cfg(test)]
-    pub(crate) async fn enqueue_blob_delete_for_test(
-        &self,
-        stored: crate::blob::locator::StoredBlobRef,
-        created_at: String,
-    ) -> Result<(), DbError> {
-        self.connection
-            .call(move |connection| {
-                crate::database::CloudOutboxRecords::new(connection)
-                    .enqueue_delete(&stored, &created_at)
-            })
-            .await
-    }
-}
-
-#[cfg(test)]
-pub(crate) async fn store_package_is_retained_for_replay_for_test(
-    database: &Database,
-    package: crate::protocol::store_commit::StorePackageRef,
-    activation: crate::protocol::store_commit::StoreBatchCommitRef,
-) -> Result<bool, DbError> {
-    let database = StoreDatabase::new(database);
-    let root = database
-        .local_store_root_ref()
-        .await?
-        .ok_or_else(|| DbError::Message("test Store root is not installed".to_string()))?;
-    database
-        .store_package_is_retained_for_replay(root, package, activation)
-        .await
 }

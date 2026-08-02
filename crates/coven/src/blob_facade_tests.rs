@@ -50,20 +50,30 @@ fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
 /// Write a note and a photo row pointing at `path`, registering the file in the
 /// same write — the order a host must use, since the registration binds to the
 /// row version this write produces.
-async fn write_note_with_external_photo(
-    handle: &crate::CovenHandle,
-    note_id: &str,
-    photo_id: &str,
-    path: &std::path::Path,
-    bytes: &[u8],
-) -> Result<(), crate::CovenError> {
-    let hash = crate::content_hash(bytes);
-    let size = bytes.len() as i64;
-    let note = note_id.to_string();
-    let photo = photo_id.to_string();
-    let path = path.to_path_buf();
-    handle
-        .sql(move |sql| {
+trait ExternalPhotoTestHost {
+    async fn write_note_with_external_photo(
+        &self,
+        note_id: &str,
+        photo_id: &str,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> Result<(), crate::CovenError>;
+}
+
+impl ExternalPhotoTestHost for crate::CovenHandle {
+    async fn write_note_with_external_photo(
+        &self,
+        note_id: &str,
+        photo_id: &str,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> Result<(), crate::CovenError> {
+        let hash = crate::content_hash(bytes);
+        let size = bytes.len() as i64;
+        let note = note_id.to_string();
+        let photo = photo_id.to_string();
+        let path = path.to_path_buf();
+        self.sql(move |sql| {
             sql.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES (?1, 'Note', 0, ?2, ?2)",
@@ -79,6 +89,7 @@ async fn write_note_with_external_photo(
         })
         .await
         .map(|_| ())
+    }
 }
 
 /// A file coven references but does not own reads back through the handle, and
@@ -94,7 +105,8 @@ async fn an_external_file_reads_back_through_the_handle() {
     let path = user_dir.path().join("photo.jpg");
     std::fs::write(&path, &bytes).expect("write the user's file");
 
-    write_note_with_external_photo(&handle, "note-1", "photo-1", &path, &bytes)
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
         .await
         .expect("register the external file in the write that created the row");
 
@@ -178,8 +190,9 @@ async fn a_host_provided_table_refuses_an_external_file() {
     let path = user_dir.path().join("photo.jpg");
     std::fs::write(&path, b"bytes").expect("write the user's file");
 
-    let refused =
-        write_note_with_external_photo(&handle, "note-1", "photo-1", &path, b"bytes").await;
+    let refused = handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, b"bytes")
+        .await;
     assert!(
         refused.is_err(),
         "a host-provided table must refuse an external file, got {refused:?}",
@@ -270,7 +283,8 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     let bytes = b"a photo the user owns".to_vec();
     let path = user_dir.path().join("photo.jpg");
     std::fs::write(&path, &bytes).expect("write the user's file");
-    write_note_with_external_photo(&handle, "note-1", "photo-1", &path, &bytes)
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
         .await
         .expect("write the note and register its photo");
 
@@ -528,7 +542,8 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
     let bytes = b"never uploaded".to_vec();
     let path = user_dir.path().join("photo.jpg");
     std::fs::write(&path, &bytes).expect("write the user's file");
-    write_note_with_external_photo(&handle, "note-1", "photo-1", &path, &bytes)
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
         .await
         .expect("write the note and register its photo");
 
@@ -561,7 +576,8 @@ async fn the_handle_reports_where_a_row_s_user_file_lives() {
     let bytes = b"the original the host still needs to read".to_vec();
     let path = user_dir.path().join("original.flac");
     std::fs::write(&path, &bytes).expect("write the user's file");
-    write_note_with_external_photo(&handle, "note-1", "photo-1", &path, &bytes)
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
         .await
         .expect("register the user's file");
 

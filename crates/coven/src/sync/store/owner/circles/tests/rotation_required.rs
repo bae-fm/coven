@@ -2700,10 +2700,9 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     let deleted_at = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:11:00+00:00")
         .expect("valid tombstone instant")
         .with_timezone(&chrono::Utc);
-    let enqueued = stored.clone();
-    let store_database = StoreDatabase::new(&fixture.db);
-    store_database
-        .enqueue_blob_delete_for_test(enqueued, "2026-07-23T00:11:00Z".to_string())
+    fixture
+        .db
+        .enqueue_blob_delete_for_test(&stored, "2026-07-23T00:11:00Z")
         .await
         .expect("enqueue the blob deletion");
     let cipher = std::sync::RwLock::new(crate::storage::CloudCipher::Encrypted(

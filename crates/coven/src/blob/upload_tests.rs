@@ -268,6 +268,59 @@ struct UploadFixture {
     home: Arc<InstrumentedHome>,
 }
 
+impl UploadFixture {
+    async fn drain(
+        &self,
+        store_dir: &StoreDir,
+        clock: &dyn Clock,
+        observer: Option<&dyn BlobTransitionObserver>,
+    ) -> Result<DrainOutcome, DbError> {
+        let (registration_ref, registration) = self.database.local_blob_write_authority().await?;
+        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        BlobUploadQueue::new(
+            &self.database,
+            &self.storage,
+            authority,
+            store_dir,
+            clock,
+            &Hlc::new(
+                "test-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+            ),
+            None,
+            observer,
+        )
+        .drain()
+        .await
+    }
+
+    async fn journal(&self, blob_id: &str) -> crate::database::OutboxEntry {
+        self.db
+            .get_pending_cloud_uploads()
+            .await
+            .expect("read upload journals")
+            .into_iter()
+            .find(|entry| {
+                matches!(
+                    &entry.operation,
+                    crate::database::OutboxOperation::Upload { row, .. }
+                        if row.blob().id == blob_id
+                )
+            })
+            .expect("upload journal exists")
+    }
+
+    async fn journal_attempt(&self, blob_id: &str) -> crate::database::OutboxAttempt {
+        let blob_id = blob_id.to_string();
+        self.db
+            .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
+            .await
+            .expect("read journal attempt")
+            .expect("journal exists")
+    }
+}
+
 async fn upload_fixture(uploads: usize) -> UploadFixture {
     upload_fixture_with_home(uploads, Arc::new(InstrumentedHome::new())).await
 }
@@ -383,58 +436,6 @@ async fn plant_uploads(
         .await
         .expect("enqueue real make_remote upload journals");
     paths
-}
-
-async fn run_drain(
-    fixture: &UploadFixture,
-    store_dir: &StoreDir,
-    clock: &dyn Clock,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<DrainOutcome, DbError> {
-    let (registration_ref, registration) = fixture.database.local_blob_write_authority().await?;
-    let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-        .map_err(|error| DbError::Message(error.to_string()))?;
-    BlobUploadQueue::new(
-        &fixture.database,
-        &fixture.storage,
-        authority,
-        store_dir,
-        clock,
-        &Hlc::new(
-            "test-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        ),
-        None,
-        observer,
-    )
-    .drain()
-    .await
-}
-
-async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::database::OutboxEntry {
-    fixture
-        .db
-        .get_pending_cloud_uploads()
-        .await
-        .expect("read upload journals")
-        .into_iter()
-        .find(|entry| {
-            matches!(
-                &entry.operation,
-                crate::database::OutboxOperation::Upload { row, .. } if row.blob().id == blob_id
-            )
-        })
-        .expect("upload journal exists")
-}
-
-async fn journal_attempt(fixture: &UploadFixture, blob_id: &str) -> crate::database::OutboxAttempt {
-    let blob_id = blob_id.to_string();
-    fixture
-        .db
-        .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
-        .await
-        .expect("read journal attempt")
-        .expect("journal exists")
 }
 
 fn is_created(entry: &crate::database::OutboxEntry) -> bool {
@@ -565,7 +566,8 @@ async fn empty_queue_reports_itself_rather_than_a_zero_count() {
     let fixture = upload_fixture(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert!(matches!(outcome, DrainOutcome::QueueEmpty));
@@ -582,15 +584,17 @@ async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
     plant_uploads(&fixture, &store_dir, &[("twice001", b"bytes")], false).await;
 
     assert_eq!(
-        run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        fixture
+            .drain(&store_dir, &fixed_clock(T0), None)
             .await
             .unwrap()
             .uploaded(),
         1
     );
-    assert!(is_created(&journal(&fixture, "twice001").await));
+    assert!(is_created(&fixture.journal("twice001").await));
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(
@@ -619,7 +623,8 @@ async fn provider_upload_failure_remains_typed() {
     .await;
     fixture.home.fail_creates();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.failures().failures().len(), 1);
@@ -644,7 +649,8 @@ async fn bad_item_does_not_block_good_later_item() {
     .await;
     tokio::fs::remove_file(&paths[0]).await.unwrap();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 1);
@@ -653,8 +659,8 @@ async fn bad_item_does_not_block_good_later_item() {
         outcome.failures().failures()[0].cause,
         super::upload::UploadFailureCause::Storage(_)
     ));
-    assert_eq!(journal_attempt(&fixture, "bad00001").await.0, 1);
-    assert!(is_created(&journal(&fixture, "good0001").await));
+    assert_eq!(fixture.journal_attempt("bad00001").await.0, 1);
+    assert!(is_created(&fixture.journal("good0001").await));
 }
 
 #[tokio::test]
@@ -668,12 +674,13 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
         .mark_committed(2)
         .unwrap();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 0);
     assert_eq!(fixture.home.create_calls(), 0);
-    let (_, error, _) = journal_attempt(&fixture, "rotate01").await;
+    let (_, error, _) = fixture.journal_attempt("rotate01").await;
     assert!(error.unwrap().contains("PeerCommitted { generation: 2 }"));
 }
 
@@ -684,22 +691,19 @@ async fn failure_persists_attempt_count_and_last_error() {
     plant_uploads(&fixture, &store_dir, &[("retry001", b"bytes")], false).await;
     fixture.home.fail_creates();
 
-    run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    let (attempt, error, _) = journal_attempt(&fixture, "retry001").await;
+    let (attempt, error, _) = fixture.journal_attempt("retry001").await;
     assert_eq!(attempt, 1);
     assert!(error.unwrap().contains("induced exact create failure"));
 
-    run_drain(
-        &fixture,
-        &store_dir,
-        &fixed_clock("2024-06-01T00:00:31Z"),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(journal_attempt(&fixture, "retry001").await.0, 2);
+    fixture
+        .drain(&store_dir, &fixed_clock("2024-06-01T00:00:31Z"), None)
+        .await
+        .unwrap();
+    assert_eq!(fixture.journal_attempt("retry001").await.0, 2);
     assert_eq!(fixture.home.create_calls(), 2);
 }
 
@@ -709,7 +713,7 @@ async fn backoff_skips_item_inside_window() {
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("backoff1", b"bytes")], false).await;
     fixture.home.fail_creates();
-    let entry = journal(&fixture, "backoff1").await;
+    let entry = fixture.journal("backoff1").await;
     fixture
         .db
         .record_cloud_outbox_failure(&entry, "prior", T0)
@@ -717,31 +721,31 @@ async fn backoff_skips_item_inside_window() {
         .unwrap();
 
     let observer = RecordingObserver::new();
-    let outcome = run_drain(
-        &fixture,
-        &store_dir,
-        &fixed_clock("2024-06-01T00:00:10Z"),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
+    let outcome = fixture
+        .drain(
+            &store_dir,
+            &fixed_clock("2024-06-01T00:00:10Z"),
+            Some(&observer),
+        )
+        .await
+        .unwrap();
     // The entry is still queued, just not due — reported as its own disposition
     // so a caller cannot read the skipped pass as a drained queue.
     assert!(matches!(outcome, DrainOutcome::AllInBackoff));
     assert_eq!(fixture.home.create_calls(), 0);
     assert!(observer.events().is_empty());
-    assert_eq!(journal_attempt(&fixture, "backoff1").await.0, 1);
+    assert_eq!(fixture.journal_attempt("backoff1").await.0, 1);
 
-    run_drain(
-        &fixture,
-        &store_dir,
-        &fixed_clock("2024-06-01T00:00:31Z"),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
+    fixture
+        .drain(
+            &store_dir,
+            &fixed_clock("2024-06-01T00:00:31Z"),
+            Some(&observer),
+        )
+        .await
+        .unwrap();
     assert_eq!(fixture.home.create_calls(), 1);
-    assert_eq!(journal_attempt(&fixture, "backoff1").await.0, 2);
+    assert_eq!(fixture.journal_attempt("backoff1").await.0, 2);
 }
 
 #[tokio::test]
@@ -755,7 +759,7 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
         false,
     )
     .await;
-    let entry = journal(&fixture, "badtime1").await;
+    let entry = fixture.journal("badtime1").await;
     let entry_id = entry.id;
     fixture
         .db
@@ -763,13 +767,9 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
         .await
         .expect("corrupt last_attempt_at");
 
-    let result = run_drain(
-        &fixture,
-        &store_dir,
-        &fixed_clock("2024-06-01T00:00:10Z"),
-        None,
-    )
-    .await;
+    let result = fixture
+        .drain(&store_dir, &fixed_clock("2024-06-01T00:00:10Z"), None)
+        .await;
     let error = match result {
         Ok(_) => panic!("a corrupt retry timestamp must fail the drain"),
         Err(error) => error,
@@ -784,12 +784,12 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
         "the corrupt entry produces no remote effect",
     );
     assert_eq!(
-        journal_attempt(&fixture, "badtime1").await.0,
+        fixture.journal_attempt("badtime1").await.0,
         1,
         "the corrupt journal row remains unchanged",
     );
     assert_eq!(
-        journal_attempt(&fixture, "healthy1").await.0,
+        fixture.journal_attempt("healthy1").await.0,
         0,
         "the earlier healthy journal row remains unchanged",
     );
@@ -802,7 +802,8 @@ async fn observer_fires_started_then_uploaded_on_success() {
     plant_uploads(&fixture, &store_dir, &[("observe1", b"bytes")], false).await;
     let observer = RecordingObserver::new();
 
-    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -823,7 +824,8 @@ async fn observer_fires_started_then_failed_on_failure() {
     fixture.home.fail_creates();
     let observer = RecordingObserver::new();
 
-    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -843,7 +845,8 @@ async fn observer_receives_advancing_midfile_progress() {
         .slow_creates(1000, std::time::Duration::from_millis(500));
     let observer = RecordingObserver::new();
 
-    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -978,13 +981,14 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
     plant_uploads(&fixture, &store_dir, &[("pinaaaa1", bytes)], true).await;
 
     assert_eq!(
-        run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        fixture
+            .drain(&store_dir, &fixed_clock(T0), None)
             .await
             .unwrap()
             .uploaded(),
         1
     );
-    let entry = journal(&fixture, "pinaaaa1").await;
+    let entry = fixture.journal("pinaaaa1").await;
     let locator_hash = created_stored(&entry).locator().locator_hash();
     let pinned = store_dir.pinned_blob_path("photos", locator_hash).unwrap();
     assert_eq!(tokio::fs::read(pinned).await.unwrap(), bytes);
@@ -1006,10 +1010,11 @@ async fn unpinned_upload_populates_nothing_on_write() {
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     plant_uploads(&fixture, &store_dir, &[("unpaaaa1", b"UNPINNED")], false).await;
 
-    run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
-    let entry = journal(&fixture, "unpaaaa1").await;
+    let entry = fixture.journal("unpaaaa1").await;
     let locator_hash = created_stored(&entry).locator().locator_hash();
     assert!(!store_dir
         .pinned_blob_path("photos", locator_hash)
@@ -1031,12 +1036,13 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     std::fs::write(&pinned_namespace, b"blocker").unwrap();
     plant_uploads(&fixture, &store_dir, &[("pinfail1", b"PIN")], true).await;
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 0);
     assert_eq!(outcome.failures().failures().len(), 1);
-    let entry = journal(&fixture, "pinfail1").await;
+    let entry = fixture.journal("pinfail1").await;
     assert!(is_created(&entry));
     assert!(
         ExactSlotStorage::read_at(fixture.home.as_ref(), created_slot(&entry))
@@ -1069,12 +1075,13 @@ async fn limit_one_drains_every_entry_in_order() {
     let ids = seed_uploads(&fixture, &store_dir, 3).await;
     let observer = RecordingObserver::new();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 3);
     for id in &ids {
-        assert!(is_created(&journal(&fixture, id).await));
+        assert!(is_created(&fixture.journal(id).await));
     }
     let sequence = observer
         .events()
@@ -1106,14 +1113,15 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
     let ids = seed_uploads(&fixture, &store_dir, 4).await;
     home.enable_barrier();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 4);
     assert_eq!(home.max_inflight(), 2);
     assert_eq!(home.keys().len(), 4);
     for id in ids {
-        assert!(is_created(&journal(&fixture, &id).await));
+        assert!(is_created(&fixture.journal(&id).await));
     }
 }
 
@@ -1134,14 +1142,15 @@ async fn concurrent_drain_isolates_a_failed_upload() {
     .await;
     tokio::fs::remove_file(&paths[1]).await.unwrap();
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 2);
     assert_eq!(outcome.failures().failures().len(), 1);
-    assert!(is_created(&journal(&fixture, "good000a").await));
-    assert!(is_created(&journal(&fixture, "good000c").await));
-    assert_eq!(journal_attempt(&fixture, "bad0000b").await.0, 1);
+    assert!(is_created(&fixture.journal("good000a").await));
+    assert!(is_created(&fixture.journal("good000c").await));
+    assert_eq!(fixture.journal_attempt("bad0000b").await.0, 1);
 }
 
 #[tokio::test]
@@ -1151,7 +1160,8 @@ async fn paused_queue_admits_nothing_under_concurrency() {
     let ids = seed_uploads(&fixture, &store_dir, 3).await;
     let observer = PausingObserver::new(0);
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     // The pass reports the pause rather than a zero count, so a caller cannot
@@ -1160,7 +1170,7 @@ async fn paused_queue_admits_nothing_under_concurrency() {
     assert_eq!(fixture.home.create_calls(), 0);
     assert!(observer.started().is_empty());
     for id in ids {
-        assert!(!is_created(&journal(&fixture, &id).await));
+        assert!(!is_created(&fixture.journal(&id).await));
     }
 }
 
@@ -1171,11 +1181,12 @@ async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     let ids = seed_uploads(&fixture, &store_dir, 2).await;
     let observer = PausingObserver::new(1);
 
-    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 1);
     assert_eq!(observer.started(), vec![ids[0].clone()]);
-    assert!(is_created(&journal(&fixture, &ids[0]).await));
-    assert!(!is_created(&journal(&fixture, &ids[1]).await));
+    assert!(is_created(&fixture.journal(&ids[0]).await));
+    assert!(!is_created(&fixture.journal(&ids[1]).await));
 }

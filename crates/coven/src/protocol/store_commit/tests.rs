@@ -48,6 +48,226 @@ impl Fixture {
             &signer,
         )
     }
+
+    fn joined_registration(
+        &self,
+        identity: &UserKeypair,
+        label: &str,
+    ) -> (StoreDeviceRegistration, StoreDeviceRegistrationRef) {
+        let registration = StoreDeviceRegistration::signed(
+            self.root_ref.clone(),
+            StoreDeviceRegistrationOrigin::Join {
+                attempt_id: DeviceJoinAttemptId::from_hash(ObjectHash::digest(label.as_bytes())),
+                attempt_slot: slot(format!("store-v1/tests/{label}/join-attempt.json")),
+                outcome_slot: slot(format!("store-v1/tests/{label}/join-outcome.json")),
+            },
+            crate::storage::ProviderDeviceBinding {
+                principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+                    access_key_id_hash: ObjectHash::digest(label.as_bytes()),
+                },
+            },
+            DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: slot(format!("store-v1/tests/{label}/announcements/1.json")),
+            },
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: slot(format!("store-v1/tests/{label}/acks/1.json")),
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: slot(format!("store-v1/tests/{label}/snapshots/1.json")),
+            },
+            identity,
+        )
+        .expect("sign joined registration");
+        let bytes = registration.to_bytes();
+        let reference = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            exact(
+                format!(
+                    "{}.json",
+                    registration_semantic_prefix(&registration.device_id.to_string())
+                ),
+                &bytes,
+            ),
+        );
+        (registration, reference)
+    }
+
+    fn signed_ack(&self, last_sync: &str) -> StoreAck {
+        StoreAck::signed(
+            self.root_ref.store_root_hash,
+            self.registration_ref.clone(),
+            1,
+            StoreHistoryCut(BTreeMap::new()),
+            self.commit.device_state.clone(),
+            None,
+            StoreAckExclusionState {
+                proposal_freezes: Vec::new(),
+            },
+            last_sync.to_string(),
+            SuccessorLink {
+                activation: self
+                    .registration
+                    .store_acknowledgement_activation(&self.registration_ref)
+                    .expect("derive acknowledgement activation")
+                    .activation_id(),
+                predecessor: None,
+                next_slot: slot("store-v1/acks/founder/2.json".to_string()),
+            },
+            &self
+                .registration
+                .device_signer(&self.signer)
+                .expect("derive device signer"),
+        )
+        .expect("sign Store acknowledgement")
+    }
+
+    fn resign(&self, commit: &mut StoreBatchCommit) {
+        let signer = self.registration.device_signer(&self.signer).unwrap();
+        commit.signature = keys::sign_hex(&signer, &commit.canonical_signed_bytes()).1;
+    }
+
+    fn candidate_cleanup_manifest(&self, label: &str) -> CandidateCleanupManifest {
+        let package = label.as_bytes();
+        let write_id = WriteId::from_generated(format!("{label}-write"));
+        let order = self.commit.order.clone();
+        let sequence = order.seq();
+        let family = CandidateFamilyId::derive(
+            self.root_ref.store_root_hash,
+            &self.registration_ref,
+            &write_id,
+            &order,
+        );
+        let package_object = exact(
+            format!(
+                "{}.pkg",
+                package_semantic_prefix(
+                    family,
+                    &self.commit_ref.coord.stream_id.to_string(),
+                    sequence,
+                    ObjectHash::digest(package),
+                )
+            ),
+            package,
+        );
+        let signer = self.registration.device_signer(&self.signer).unwrap();
+        let commit = StoreBatchCommit::signed(
+            self.root_ref.store_root_hash,
+            write_id,
+            self.commit_ref.coord.clone(),
+            self.registration_ref.clone(),
+            &self.registration,
+            order,
+            self.commit.membership_state.clone(),
+            self.commit.device_state.clone(),
+            self.commit
+                .operations_membership_authority()
+                .expect("fixture carries membership authority"),
+            StorePackageInput {
+                candidate_family: family,
+                schema_version: 3,
+                bytes: package,
+                object: package_object,
+            },
+            &signer,
+        )
+        .expect("sign candidate commit");
+        let bytes = commit.to_bytes();
+        CandidateCleanupManifest {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: self.commit_ref.coord.clone(),
+                object: exact(
+                    format!(
+                        "{}.json",
+                        commit_semantic_prefix(
+                            commit.candidate_family(),
+                            &self.commit_ref.coord.stream_id.to_string(),
+                            commit.seq(),
+                            commit.commit_hash(),
+                        )
+                    ),
+                    &bytes,
+                ),
+                canonical_signed_bytes: bytes,
+            },
+        }
+    }
+
+    fn closed_store_package(&self) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>, Vec<u8>) {
+        let write_id = WriteId::from_generated("closed-package-graph".to_string());
+        let order = self.commit.order.clone();
+        let sequence = order.seq();
+        let family = CandidateFamilyId::derive(
+            self.root_ref.store_root_hash,
+            &self.registration_ref,
+            &write_id,
+            &order,
+        );
+        let package = super::super::audience_package::AudiencePackage::store(
+            self.root_ref.store_root_hash,
+            family,
+            write_id.clone(),
+            self.commit_ref.coord.clone(),
+            3,
+            b"closed graph changeset".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        let semantic = package.to_bytes();
+        let stored = b"encrypted closed graph package".to_vec();
+        let package_object = exact(
+            format!(
+                "{}.pkg",
+                package_semantic_prefix(
+                    family,
+                    &self.commit_ref.coord.stream_id.to_string(),
+                    sequence,
+                    ObjectHash::digest(&semantic),
+                )
+            ),
+            &stored,
+        );
+        let signer = self.registration.device_signer(&self.signer).unwrap();
+        let commit = StoreBatchCommit::signed(
+            self.root_ref.store_root_hash,
+            write_id,
+            self.commit_ref.coord.clone(),
+            self.registration_ref.clone(),
+            &self.registration,
+            order,
+            self.commit.membership_state.clone(),
+            self.commit.device_state.clone(),
+            self.commit
+                .operations_membership_authority()
+                .expect("fixture carries membership authority"),
+            StorePackageInput {
+                candidate_family: family,
+                schema_version: 3,
+                bytes: &semantic,
+                object: package_object,
+            },
+            &signer,
+        )
+        .unwrap();
+        let commit_bytes = commit.to_bytes();
+        let reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            self.commit_ref.coord.clone(),
+            exact(
+                format!(
+                    "{}.json",
+                    commit_semantic_prefix(
+                        family,
+                        &self.commit_ref.coord.stream_id.to_string(),
+                        sequence,
+                        commit.commit_hash(),
+                    )
+                ),
+                &commit_bytes,
+            ),
+        )
+        .unwrap();
+        (commit, reference, semantic, stored)
+    }
 }
 
 fn slot(key: String) -> ObjectSlot {
@@ -73,56 +293,13 @@ fn circle_activation(
     )
 }
 
-fn joined_registration(
-    fixture: &Fixture,
-    identity: &UserKeypair,
-    label: &str,
-) -> (StoreDeviceRegistration, StoreDeviceRegistrationRef) {
-    let registration = StoreDeviceRegistration::signed(
-        fixture.root_ref.clone(),
-        StoreDeviceRegistrationOrigin::Join {
-            attempt_id: DeviceJoinAttemptId::from_hash(ObjectHash::digest(label.as_bytes())),
-            attempt_slot: slot(format!("store-v1/tests/{label}/join-attempt.json")),
-            outcome_slot: slot(format!("store-v1/tests/{label}/join-outcome.json")),
-        },
-        crate::storage::ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
-                access_key_id_hash: ObjectHash::digest(label.as_bytes()),
-            },
-        },
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: slot(format!("store-v1/tests/{label}/announcements/1.json")),
-        },
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: slot(format!("store-v1/tests/{label}/acks/1.json")),
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: slot(format!("store-v1/tests/{label}/snapshots/1.json")),
-        },
-        identity,
-    )
-    .expect("sign joined registration");
-    let bytes = registration.to_bytes();
-    let reference = StoreDeviceRegistrationRef::from_registration(
-        &registration,
-        exact(
-            format!(
-                "{}.json",
-                registration_semantic_prefix(&registration.device_id.to_string())
-            ),
-            &bytes,
-        ),
-    );
-    (registration, reference)
-}
-
 #[test]
 fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
     let fixture = fixture();
     let candidate_identity = UserKeypair::generate();
     let candidate_pubkey = keys::public_key_hex(&candidate_identity);
     let (candidate, candidate_ref) =
-        joined_registration(&fixture, &candidate_identity, "promotion-candidate");
+        fixture.joined_registration(&candidate_identity, "promotion-candidate");
     let request = OwnerPromotionRequest::signed(
         OwnerPromotionId::from_generated("promotion-1".to_string()),
         &fixture.root_ref,
@@ -1026,38 +1203,9 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     ));
 }
 
-fn signed_test_ack(fixture: &Fixture, last_sync: &str) -> StoreAck {
-    StoreAck::signed(
-        fixture.root_ref.store_root_hash,
-        fixture.registration_ref.clone(),
-        1,
-        StoreHistoryCut(BTreeMap::new()),
-        fixture.commit.device_state.clone(),
-        None,
-        StoreAckExclusionState {
-            proposal_freezes: Vec::new(),
-        },
-        last_sync.to_string(),
-        SuccessorLink {
-            activation: fixture
-                .registration
-                .store_acknowledgement_activation(&fixture.registration_ref)
-                .expect("derive acknowledgement activation")
-                .activation_id(),
-            predecessor: None,
-            next_slot: slot("store-v1/acks/founder/2.json".to_string()),
-        },
-        &fixture
-            .registration
-            .device_signer(&fixture.signer)
-            .expect("derive device signer"),
-    )
-    .expect("sign Store acknowledgement")
-}
-
 #[test]
 fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
-    let ack = signed_test_ack(&fixture(), "2026-07-16T00:00:00Z");
+    let ack = fixture().signed_ack("2026-07-16T00:00:00Z");
     let bytes = ack.to_bytes();
     let semantic_hash = StoreAck::semantic_hash_from_bytes(&bytes).unwrap();
 
@@ -1067,7 +1215,7 @@ fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
 
 #[test]
 fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_ref() {
-    let ack = signed_test_ack(&fixture(), "2026-07-18T00:00:00Z");
+    let ack = fixture().signed_ack("2026-07-18T00:00:00Z");
     let value = serde_json::to_value(ack).unwrap();
 
     assert!(value.get("registration").is_some());
@@ -1171,83 +1319,11 @@ fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
     );
 }
 
-fn resign_commit(commit: &mut StoreBatchCommit, fixture: &Fixture) {
-    let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    commit.signature = keys::sign_hex(&signer, &commit.canonical_signed_bytes()).1;
-}
-
-fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanupManifest {
-    let package = label.as_bytes();
-    let write_id = WriteId::from_generated(format!("{label}-write"));
-    let order = fixture.commit.order.clone();
-    let sequence = order.seq();
-    let family = CandidateFamilyId::derive(
-        fixture.root_ref.store_root_hash,
-        &fixture.registration_ref,
-        &write_id,
-        &order,
-    );
-    let package_object = exact(
-        format!(
-            "{}.pkg",
-            package_semantic_prefix(
-                family,
-                &fixture.commit_ref.coord.stream_id.to_string(),
-                sequence,
-                ObjectHash::digest(package),
-            )
-        ),
-        package,
-    );
-    let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let commit = StoreBatchCommit::signed(
-        fixture.root_ref.store_root_hash,
-        write_id,
-        fixture.commit_ref.coord.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        order,
-        fixture.commit.membership_state.clone(),
-        fixture.commit.device_state.clone(),
-        fixture
-            .commit
-            .operations_membership_authority()
-            .expect("fixture carries membership authority"),
-        StorePackageInput {
-            candidate_family: family,
-            schema_version: 3,
-            bytes: package,
-            object: package_object,
-        },
-        &signer,
-    )
-    .expect("sign candidate commit");
-    let bytes = commit.to_bytes();
-    CandidateCleanupManifest {
-        candidate: StoreBatchCommitDeletionTarget {
-            coord: fixture.commit_ref.coord.clone(),
-            object: exact(
-                format!(
-                    "{}.json",
-                    commit_semantic_prefix(
-                        commit.candidate_family(),
-                        &fixture.commit_ref.coord.stream_id.to_string(),
-                        commit.seq(),
-                        commit.commit_hash(),
-                    )
-                ),
-                &bytes,
-            ),
-            canonical_signed_bytes: bytes,
-        },
-    }
-}
-
 #[test]
 fn candidate_abandonment_is_signed_canonical_cleanup_authority() {
     let fixture = fixture();
-    let first = candidate_cleanup_manifest(&fixture, "first candidate");
-    let second = candidate_cleanup_manifest(&fixture, "second candidate");
+    let first = fixture.candidate_cleanup_manifest("first candidate");
+    let second = fixture.candidate_cleanup_manifest("second candidate");
     let commit = fixture
         .sign_candidate_abandonment(vec![second.clone(), first.clone()])
         .expect("sign candidate abandonment");
@@ -1273,7 +1349,7 @@ fn candidate_abandonment_is_signed_canonical_cleanup_authority() {
 #[test]
 fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
     let fixture = fixture();
-    let manifest = candidate_cleanup_manifest(&fixture, "candidate");
+    let manifest = fixture.candidate_cleanup_manifest("candidate");
     assert!(matches!(
         fixture.sign_candidate_abandonment(vec![manifest.clone(), manifest.clone()]),
         Err(StoreProtocolError::Malformed(reason))
@@ -1295,7 +1371,7 @@ fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
 #[test]
 fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
     let fixture = fixture();
-    let manifest = candidate_cleanup_manifest(&fixture, "candidate");
+    let manifest = fixture.candidate_cleanup_manifest("candidate");
     let candidate: StoreBatchCommit =
         serde_json::from_slice(&manifest.candidate.canonical_signed_bytes).unwrap();
 
@@ -1335,7 +1411,7 @@ fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
 fn candidate_abandonment_rejects_retained_authority_target() {
     let fixture = fixture();
     let inner = fixture
-        .sign_candidate_abandonment(vec![candidate_cleanup_manifest(&fixture, "candidate")])
+        .sign_candidate_abandonment(vec![fixture.candidate_cleanup_manifest("candidate")])
         .expect("sign inner candidate abandonment");
     let bytes = inner.to_bytes();
     let retained = CandidateCleanupManifest {
@@ -1367,8 +1443,8 @@ fn candidate_abandonment_rejects_retained_authority_target() {
 #[test]
 fn parsed_candidate_abandonment_rejects_noncanonical_manifest_order() {
     let fixture = fixture();
-    let first = candidate_cleanup_manifest(&fixture, "first candidate");
-    let second = candidate_cleanup_manifest(&fixture, "second candidate");
+    let first = fixture.candidate_cleanup_manifest("first candidate");
+    let second = fixture.candidate_cleanup_manifest("second candidate");
     let mut commit = fixture
         .sign_candidate_abandonment(vec![first, second])
         .expect("sign candidate abandonment");
@@ -1376,7 +1452,7 @@ fn parsed_candidate_abandonment_rejects_noncanonical_manifest_order() {
         panic!("commit carries candidate abandonment")
     };
     manifests.reverse();
-    resign_commit(&mut commit, &fixture);
+    fixture.resign(&mut commit);
 
     assert!(matches!(
         commit.verify_at(
@@ -1395,7 +1471,7 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
 
     let mut omitted = fixture.commit.clone();
     omitted.candidate_objects.objects.clear();
-    resign_commit(&mut omitted, &fixture);
+    fixture.resign(&mut omitted);
     assert!(matches!(
         omitted.verify_at(
             fixture.root_ref.store_root_hash,
@@ -1411,7 +1487,7 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
         .candidate_objects
         .objects
         .push(invented.candidate_objects.objects[0].clone());
-    resign_commit(&mut invented, &fixture);
+    fixture.resign(&mut invented);
     assert!(matches!(
         invented.verify_at(
             fixture.root_ref.store_root_hash,
@@ -1425,7 +1501,7 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
     let mut substituted = fixture.commit.clone();
     substituted.candidate_objects.family =
         CandidateFamilyId::from_hash(ObjectHash::digest(b"substituted candidate family"));
-    resign_commit(&mut substituted, &fixture);
+    fixture.resign(&mut substituted);
     assert!(matches!(
         substituted.verify_at(
             fixture.root_ref.store_root_hash,
@@ -1437,90 +1513,10 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
     ));
 }
 
-fn closed_store_package_fixture(
-    fixture: &Fixture,
-) -> (StoreBatchCommit, StoreBatchCommitRef, Vec<u8>, Vec<u8>) {
-    let write_id = WriteId::from_generated("closed-package-graph".to_string());
-    let order = fixture.commit.order.clone();
-    let sequence = order.seq();
-    let family = CandidateFamilyId::derive(
-        fixture.root_ref.store_root_hash,
-        &fixture.registration_ref,
-        &write_id,
-        &order,
-    );
-    let package = super::super::audience_package::AudiencePackage::store(
-        fixture.root_ref.store_root_hash,
-        family,
-        write_id.clone(),
-        fixture.commit_ref.coord.clone(),
-        3,
-        b"closed graph changeset".to_vec(),
-        Vec::new(),
-    )
-    .unwrap();
-    let semantic = package.to_bytes();
-    let stored = b"encrypted closed graph package".to_vec();
-    let package_object = exact(
-        format!(
-            "{}.pkg",
-            package_semantic_prefix(
-                family,
-                &fixture.commit_ref.coord.stream_id.to_string(),
-                sequence,
-                ObjectHash::digest(&semantic),
-            )
-        ),
-        &stored,
-    );
-    let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let commit = StoreBatchCommit::signed(
-        fixture.root_ref.store_root_hash,
-        write_id,
-        fixture.commit_ref.coord.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.registration,
-        order,
-        fixture.commit.membership_state.clone(),
-        fixture.commit.device_state.clone(),
-        fixture
-            .commit
-            .operations_membership_authority()
-            .expect("fixture carries membership authority"),
-        StorePackageInput {
-            candidate_family: family,
-            schema_version: 3,
-            bytes: &semantic,
-            object: package_object,
-        },
-        &signer,
-    )
-    .unwrap();
-    let commit_bytes = commit.to_bytes();
-    let reference = StoreBatchCommitRef::from_commit(
-        &commit,
-        fixture.commit_ref.coord.clone(),
-        exact(
-            format!(
-                "{}.json",
-                commit_semantic_prefix(
-                    family,
-                    &fixture.commit_ref.coord.stream_id.to_string(),
-                    sequence,
-                    commit.commit_hash(),
-                )
-            ),
-            &commit_bytes,
-        ),
-    )
-    .unwrap();
-    (commit, reference, semantic, stored)
-}
-
 #[test]
 fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_material() {
     let fixture = fixture();
-    let (commit, owner, semantic, stored) = closed_store_package_fixture(&fixture);
+    let (commit, owner, semantic, stored) = fixture.closed_store_package();
     let package = commit.store_package().cloned().unwrap();
     let graph = super::super::remote_object::CandidateObjectGraph::from_commit(&commit).unwrap();
     assert!(matches!(

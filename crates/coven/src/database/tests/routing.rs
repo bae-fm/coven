@@ -230,8 +230,9 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
         .contains("Local partition carries a Circle control"));
 }
 
-async fn assert_local_only_scoped_write(name: &str) {
-    let (_temp, db, _) = capture_scoped_write_then_reopen(name).await;
+#[tokio::test]
+async fn merge_local_only_scoped_write_is_not_pending() {
+    let (_temp, db, _) = capture_scoped_write_then_reopen("merge-local-only").await;
     let store_database = StoreDatabase::new(&db);
     let routing = EncryptionService::from_key([7; 32]);
     let receipt = store_database
@@ -286,11 +287,6 @@ async fn assert_local_only_scoped_write(name: &str) {
     })
     .await
     .expect("verify durable local-only journal");
-}
-
-#[tokio::test]
-async fn merge_local_only_scoped_write_is_not_pending() {
-    assert_local_only_scoped_write("merge-local-only").await;
 }
 
 /// A transaction whose rows are all Circle-scoped emits one package per Circle
