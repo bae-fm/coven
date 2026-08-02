@@ -33,7 +33,6 @@ SEMANTIC_DECLARATION_KINDS = {
     "CONST",
     "ENUM",
     "EXTERN_BLOCK",
-    "EXTERN_CRATE",
     "IMPL",
     "MACRO_RULES",
     "MODULE",
@@ -42,7 +41,6 @@ SEMANTIC_DECLARATION_KINDS = {
     "TRAIT",
     "TYPE_ALIAS",
     "UNION",
-    "USE",
 }
 RUST_KEYWORDS = {
     "Self",
@@ -564,7 +562,7 @@ def semantic_declaration_surfaces(
                 )
             name = direct_name(source_file, index)
             names = {name[0]} if name is not None else set()
-            if node.kind in {"EXTERN_BLOCK", "EXTERN_CRATE", "IMPL", "USE"}:
+            if node.kind in {"EXTERN_BLOCK", "IMPL"}:
                 header_end = next(
                     (
                         source_file.nodes[child].start

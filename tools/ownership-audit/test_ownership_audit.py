@@ -777,6 +777,69 @@ class SemanticCacheTests(unittest.TestCase):
             changed_unrelated["stable"],
         )
 
+    def test_unrelated_grouped_import_does_not_invalidate_a_type_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "lib.rs"
+            model_path = source_root / "model.rs"
+            unrelated_path = source_root / "unrelated.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text(
+                "use crate::model::Wrapper;\n"
+                "fn caller(value: &Wrapper) { value.read(); }\n"
+                "fn stable() { same_target(); }\n"
+            )
+            model_path.write_text(
+                "struct Wrapper;\n"
+                "struct First;\n"
+                "struct Second;\n"
+            )
+
+            def fingerprints() -> dict[str, str]:
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, model_path, unrelated_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                declaration_surfaces = (
+                    ownership_audit.semantic_declaration_surfaces(source_files)
+                )
+                source_fingerprints = (
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        records,
+                        records,
+                        source_files,
+                        declaration_surfaces,
+                    )
+                )
+                return {
+                    record["name"]: source_fingerprints[record["symbol"]]
+                    for record in records
+                    if record["path"] == "crates/sample/src/lib.rs"
+                }
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                unrelated_path.write_text(
+                    "use crate::model::{Wrapper, First};\n"
+                )
+                baseline = fingerprints()
+                unrelated_path.write_text(
+                    "use crate::model::{Wrapper, Second};\n"
+                )
+                changed = fingerprints()
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(baseline["caller"], changed["caller"])
+        self.assertEqual(baseline["stable"], changed["stable"])
+
     def test_semantic_cache_invalidates_only_the_callable_whose_body_changed(self):
         def fingerprints(root: Path, path: Path, source: str):
             source_file = ownership_audit.parse_source(path, source)
