@@ -61,16 +61,16 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         )
         .await
         .expect("activate second Owner device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
-        &founder_db,
-        &first_owner_db,
-        &founder,
-        &first_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote first Owner");
+    store
+        .promote_active_member_fixture(
+            &founder_db,
+            &first_owner_db,
+            &founder,
+            &first_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote first Owner");
 
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let second_device = store
@@ -87,16 +87,16 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         .expect("pull second Owner through the first promotion");
     assert!(pull.held_positions.is_empty());
 
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
-        &founder_db,
-        &second_owner_db,
-        &founder,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote second Owner");
+    store
+        .promote_active_member_fixture(
+            &founder_db,
+            &second_owner_db,
+            &founder,
+            &second_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote second Owner");
 
     let membership = store
         .bind_device(&founder_db, &founder)
@@ -151,8 +151,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .await
         .expect("load Member promotion target");
 
-    Box::pin(crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
+    Box::pin(store.promote_active_member_fixture(
         &owner_db,
         &member_db,
         &owner,
@@ -415,13 +414,13 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
 
     // A queued host write composes against the same next position the
     // finalization will, and takes it the moment it drains.
-    crate::sync::test_helpers::host_exec(
-        &owner_db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    owner_db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \
                  '0000000001000-0000-owner', '2026-07-20')",
-    )
-    .await;
+        )
+        .await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let loaded_owner_store = store
         .bind_device(&owner_db, &owner)
@@ -499,8 +498,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         ended.state,
     );
 
-    Box::pin(crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
+    Box::pin(store.promote_active_member_fixture(
         &owner_db,
         &member_db,
         &owner,

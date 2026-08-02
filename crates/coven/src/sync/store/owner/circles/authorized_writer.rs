@@ -84,6 +84,70 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) async fn prepare_create_for_test(
+        &mut self,
+        metadata_stamp: &str,
+        name: &str,
+    ) -> Result<CircleOperationJournal, CircleOperationError> {
+        self.preparer().prepare_create(metadata_stamp, name).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_prepared_operation_for_test(
+        &mut self,
+        operation_id: &crate::protocol::circle::CircleOperationId,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    ) -> Result<(), CircleOperationError> {
+        self.publisher().publish(operation_id, routing_key).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_circle_object_for_test(
+        &mut self,
+        context: &crate::storage::ProtocolObjectContext,
+        semantic_prefix: &str,
+        extension: &str,
+        bytes: Vec<u8>,
+    ) -> Result<crate::storage::PreparedExactObject, CircleOperationError> {
+        self.preparer()
+            .prepare_circle_object(context, semantic_prefix, extension, bytes)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_circle_object_at_for_test(
+        &mut self,
+        context: &crate::storage::ProtocolObjectContext,
+        slot: crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+        bytes: Vec<u8>,
+    ) -> Result<crate::storage::PreparedExactObject, CircleOperationError> {
+        self.preparer()
+            .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_circle_activation_objects_for_test(
+        &mut self,
+        draft: crate::protocol::circle::CircleTransitionDraft,
+        history: &CircleTransitionHistory,
+        candidate_family: crate::protocol::store_commit::CandidateFamilyId,
+    ) -> Result<
+        (
+            crate::protocol::circle::PreparedCircleTransition,
+            crate::protocol::store_commit::CircleActivationObjects,
+            std::collections::BTreeMap<String, crate::storage::PreparedExactObject>,
+            Option<crate::storage::ExactObjectRef>,
+            Vec<crate::protocol::store_commit::StreamActivation>,
+        ),
+        CircleOperationError,
+    > {
+        self.preparer()
+            .prepare_circle_activation_objects(draft, history, &[], candidate_family)
+            .await
+    }
+
     pub(crate) fn close(&mut self) -> close_responses::CircleCloseCoordinator<'_, 'storage> {
         close_responses::CircleCloseCoordinator::new(
             self.writer,
@@ -715,7 +779,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
         member_pubkey: String,
         role: CircleRole,
-        bootstrap: crate::sync::store::snapshot::SnapshotCut,
+        bootstrap: crate::sync::store::SnapshotCut,
         routing_key: &crate::protocol::circle::RowRoutingKey,
     ) -> Result<(), CircleOperationError> {
         let (current, activation_commit, reference) =

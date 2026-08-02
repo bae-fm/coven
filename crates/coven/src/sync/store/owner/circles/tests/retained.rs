@@ -36,15 +36,13 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         )
         .await
         .expect("activate successor exact device fixture");
-    let journal = prepare_circle_operation(
-        &successor_db,
-        &store.storage,
-        "0000000001003-0000-successor",
-        "Revoked Circle",
-        &successor,
-    )
-    .await
-    .expect("prepare operation while successor is authorized");
+    let journal = store
+        .bind_device(&successor_db, &successor)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
+        .await
+        .expect("prepare operation while successor is authorized");
     StoreDatabase::new(&successor_db)
         .insert_circle_operation(journal.clone())
         .await
@@ -94,21 +92,23 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .open_into(&successor_db)
         .await
         .expect("load successor's replacement membership grant");
-    let later = prepare_circle_operation(
-        &successor_db,
-        &store.storage,
-        "0000000001004-0000-successor",
-        "Later Circle",
-        &successor,
-    )
-    .await
-    .expect("prepare still-authorized operation");
+    let later = store
+        .bind_device(&successor_db, &successor)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001004-0000-successor", "Later Circle")
+        .await
+        .expect("prepare still-authorized operation");
     StoreDatabase::new(&successor_db)
         .insert_circle_operation(later.clone())
         .await
         .expect("persist still-authorized operation");
 
-    resume_circle_operations(&successor_db, &store.storage, &successor)
+    store
+        .bind_device(&successor_db, &successor)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("revoked journal is blocked without interrupting the resume loop");
 
@@ -142,7 +142,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         }]
     );
     assert_eq!(
-        activation_count(&successor_db, journal.circle_id()).await,
+        StoreDatabase::new(&successor_db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
         0
     );
 }
@@ -188,15 +191,13 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         )
         .await
         .expect("invite retained Circle peer");
-    let journal = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000001000-0000-founder",
-        "Household",
-        &founder,
-    )
-    .await
-    .expect("prepare retained Circle activation");
+    let journal = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-founder", "Household")
+        .await
+        .expect("prepare retained Circle activation");
     for object in journal.operation().prepared_objects.values() {
         store
             .storage
@@ -210,10 +211,13 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");
-    let verified =
-        load_circle_activations(&db, &store.storage, commit_ref, &commit, &author, &founder)
-            .await
-            .expect("verify retained Circle activation fixture");
+    let verified = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind retained Circle activation Store")
+        .load_circle_activations(commit_ref, &commit, &author)
+        .await
+        .expect("verify retained Circle activation fixture");
     let retained = verified
         .to_retained()
         .expect("serialize retained Circle activation");

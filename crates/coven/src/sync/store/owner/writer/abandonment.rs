@@ -7,6 +7,7 @@ use crate::protocol::store_commit::{
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
 use crate::sync::store::owner::verified_history::prepare_merge_abandonment_history_summary;
+use std::sync::Arc;
 
 impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn prepare_merge_candidate_abandonment(

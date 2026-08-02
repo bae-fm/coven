@@ -3,57 +3,33 @@ use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
 use crate::storage::cloud::ObjectSlot;
 use crate::storage::ExactObjectRef;
-use crate::sync::test_helpers::{host_exec, open_test_db, temp_store_dir, TestStore};
+use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
 
 fn store_database(db: &crate::database::Database) -> crate::database::StoreDatabase {
     crate::database::StoreDatabase::new(db)
 }
 
-async fn retained_history(
-    db: &crate::database::Database,
-    store: &TestStore,
-) -> Vec<crate::database::OwnedVerifiedMergeMaterialization> {
-    store
-        .bind_device(db, &store.signer)
-        .await
-        .expect("load retained-history Store")
-        .retained_merge_replay_inputs_for_test()
-        .await
-        .expect("load retained verified Merge history")
-}
-
 async fn publish_note(
     db: &crate::database::Database,
-    store: &TestStore,
+    device: &crate::sync::test_helpers::TestDevice,
     store_dir: &crate::store_dir::StoreDir,
     sequence: u64,
 ) {
-    host_exec(
-        db,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_host_write(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('history-{sequence}', 'history', NULL, 1, \
                      '0000000001000-0000-history', '2026-07-21')"
-        ),
-    )
+    ))
     .await;
-    let loaded = store
-        .bind_device(db, &store.signer)
-        .await
-        .expect("load Merge Store");
-    let mut writer = loaded
-        .authorize_writer()
-        .await
-        .expect("authorize Merge Store writer");
     assert!(
-        writer
+        device
             .prepare_pending_store_write(store_dir)
             .await
             .expect("prepare Merge Store write"),
         "host write produces a prepared Store commit",
     );
     assert_eq!(
-        writer
+        device
             .drain_store_writes()
             .await
             .expect("publish Merge Store write"),
@@ -72,13 +48,20 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
     )
     .await
     .expect("create Merge Store");
+    let device = store
+        .bind_device(&db, &store.signer)
+        .await
+        .expect("bind materialized-history Store");
     let (_temp, store_dir) = temp_store_dir();
 
     for sequence in 1..=history_length {
-        publish_note(&db, &store, &store_dir, sequence).await;
+        publish_note(&db, &device, &store_dir, sequence).await;
     }
 
-    let retained = retained_history(&db, &store).await;
+    let retained = device
+        .retained_merge_replay_inputs_for_test()
+        .await
+        .expect("load retained verified Merge history");
     assert_eq!(
         retained.len() as u64,
         history_length,
@@ -101,7 +84,7 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
         .clone();
 
     store.home.clear_exact_reads();
-    publish_note(&db, &store, &store_dir, history_length + 1).await;
+    publish_note(&db, &device, &store_dir, history_length + 1).await;
 
     let reread = store
         .home
@@ -112,82 +95,87 @@ async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectS
     (reread, registration_anchor_head_slot)
 }
 
-async fn published_history(
-    history_length: u64,
-) -> (
-    crate::database::Database,
-    TestStore,
-    String,
-    MembershipChain,
-    tempfile::TempDir,
-    crate::store_dir::StoreDir,
-) {
-    let signer = UserKeypair::generate();
-    let db = open_test_db();
-    let store = TestStore::create(
-        &db,
-        &format!("checkpoint-sabotage-{history_length}"),
-        signer,
-    )
-    .await
-    .expect("create Merge Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("load local Store device id")
-        .expect("created Store has a local device id");
-    let membership = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("load Merge Store")
-        .membership_for_test()
-        .await
-        .expect("load Merge membership");
-    let (temp, store_dir) = temp_store_dir();
-    for sequence in 1..=history_length {
-        publish_note(&db, &store, &store_dir, sequence).await;
-    }
-    (db, store, device_id, membership, temp, store_dir)
+struct PublishedHistory {
+    db: crate::database::Database,
+    store: TestStore,
+    device: crate::sync::test_helpers::TestDevice,
+    membership: MembershipChain,
+    _temp: tempfile::TempDir,
+    store_dir: crate::store_dir::StoreDir,
 }
 
-async fn prepare_sabotaged_successor(
-    db: &crate::database::Database,
-    store: &TestStore,
-    store_dir: &crate::store_dir::StoreDir,
-) -> String {
-    host_exec(
-        db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+impl PublishedHistory {
+    async fn publish(history_length: u64) -> Self {
+        let signer = UserKeypair::generate();
+        let db = open_test_db();
+        let store = TestStore::create(
+            &db,
+            &format!("checkpoint-sabotage-{history_length}"),
+            signer,
+        )
+        .await
+        .expect("create Merge Store");
+        let device = store
+            .bind_device(&db, &store.signer)
+            .await
+            .expect("load Merge Store");
+        let membership = device
+            .membership_for_test()
+            .await
+            .expect("load Merge membership");
+        let (temp, store_dir) = temp_store_dir();
+        for sequence in 1..=history_length {
+            publish_note(&db, &device, &store_dir, sequence).await;
+        }
+        Self {
+            db,
+            store,
+            device,
+            membership,
+            _temp: temp,
+            store_dir,
+        }
+    }
+
+    async fn retained_history(&self) -> Vec<crate::database::OwnedVerifiedMergeMaterialization> {
+        self.device
+            .retained_merge_replay_inputs_for_test()
+            .await
+            .expect("load retained verified Merge history")
+    }
+
+    async fn prepare_sabotaged_successor(&self) -> String {
+        self.db
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('sabotaged-successor', 'history', NULL, 1, \
                  '0000000002000-0000-history', '2026-07-21')",
-    )
-    .await;
-    let loaded = store
-        .bind_device(db, &store.signer)
-        .await
-        .expect("load sabotaged successor Store");
-    let mut writer = loaded
-        .authorize_writer()
-        .await
-        .expect("authorize sabotaged successor writer");
-    match writer.prepare_pending_store_write(store_dir).await {
-        Err(error) => error.to_string(),
-        Ok(true) => writer
-            .drain_store_writes()
+            )
+            .await;
+        match self
+            .device
+            .prepare_pending_store_write(&self.store_dir)
             .await
-            .expect_err("checkpoint sabotage must fail before remote publication")
-            .to_string(),
-        Ok(false) => panic!("sabotaged host write produced no pending Store write"),
+        {
+            Err(error) => error.to_string(),
+            Ok(true) => self
+                .device
+                .drain_store_writes()
+                .await
+                .expect_err("checkpoint sabotage must fail before remote publication")
+                .to_string(),
+            Ok(false) => panic!("sabotaged host write produced no pending Store write"),
+        }
     }
 }
 
 async fn assert_signed_head_rejects_summary(
-    db: &crate::database::Database,
+    device: &crate::sync::test_helpers::TestDevice,
     retained: &crate::database::OwnedVerifiedMergeMaterialization,
     summary: &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 ) {
-    let state = store_database(db)
-        .resolved_store_device_state(&retained.history_summary().post_state)
+    let state = device
+        .resolved_store_device_state_for_test(&retained.history_summary().post_state)
         .await
         .expect("load retained post-state");
     let head_ref = StoreDeviceHeadRef {
@@ -226,17 +214,19 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
 
 #[tokio::test]
 async fn missing_frontier_retained_row_has_no_cloud_fallback() {
-    let (db, store, _device_id, _membership, _temp, store_dir) = published_history(1).await;
-    let retained = retained_history(&db, &store).await;
+    let fixture = PublishedHistory::publish(1).await;
+    let retained = fixture.retained_history().await;
     let reference = retained[0].commit_ref().clone();
     let reference = reference.clone();
-    db.test_sql(move |database| {
-        database.delete_retained_materialization_without_foreign_keys(&reference)
-    })
-    .await
-    .expect("remove retained frontier row");
+    fixture
+        .db
+        .test_sql(move |database| {
+            database.delete_retained_materialization_without_foreign_keys(&reference)
+        })
+        .await
+        .expect("remove retained frontier row");
 
-    let error = prepare_sabotaged_successor(&db, &store, &store_dir).await;
+    let error = fixture.prepare_sabotaged_successor().await;
     assert!(
         !error.is_empty(),
         "missing retained frontier returned an empty error"
@@ -246,20 +236,23 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
 #[tokio::test]
 async fn outbound_successor_rejects_missing_or_forged_device_state() {
     for delete_state in [true, false] {
-        let (db, store, _device_id, _membership, _temp, store_dir) = published_history(1).await;
-        let retained = retained_history(&db, &store).await;
+        let fixture = PublishedHistory::publish(1).await;
+        let retained = fixture.retained_history().await;
         let encoded =
             serde_json::to_string(retained[0].commit_ref()).expect("serialize commit ref");
         if delete_state {
-            db.test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
+            fixture
+                .db
+                .test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
                 .await
                 .expect("delete checkpoint state");
         } else {
-            let state = store_database(&db)
-                .resolved_store_device_state(&retained[0].history_summary().post_state)
+            let state = fixture
+                .device
+                .resolved_store_device_state_for_test(&retained[0].history_summary().post_state)
                 .await
                 .expect("load canonical retained state");
-            let root = crate::database::StoreDatabase::new(&db)
+            let root = crate::database::StoreDatabase::new(&fixture.db)
                 .local_store_root_ref()
                 .await
                 .expect("load Store root")
@@ -280,11 +273,13 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             let forged = state
                 .activate_owner_recovery(grant, activation)
                 .expect("construct another canonical device state");
-            db.test_sql(move |conn| conn.replace_device_state_snapshot(&encoded, &forged))
+            fixture
+                .db
+                .test_sql(move |conn| conn.replace_device_state_snapshot(&encoded, &forged))
                 .await
                 .expect("forge canonical checkpoint state");
         }
-        let error = prepare_sabotaged_successor(&db, &store, &store_dir).await;
+        let error = fixture.prepare_sabotaged_successor().await;
         assert!(
             !error.is_empty(),
             "checkpoint-state sabotage returned an empty error"
@@ -294,15 +289,12 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
 
 #[tokio::test]
 async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
-    let (db, store, _device_id, _membership, _temp, _store_dir) = published_history(2).await;
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("bind checkpoint Store");
-    let retained = retained_history(&db, &store).await;
+    let fixture = PublishedHistory::publish(2).await;
+    let retained = fixture.retained_history().await;
     let current = retained.last().expect("two retained commits");
-    let state = store_database(&db)
-        .resolved_store_device_state(&current.history_summary().post_state)
+    let state = fixture
+        .device
+        .resolved_store_device_state_for_test(&current.history_summary().post_state)
         .await
         .expect("load retained post-state");
     let original_head_ref = StoreDeviceHeadRef {
@@ -326,7 +318,8 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
         "changing summary bytes must fail the accepted head digest",
     );
 
-    let forged_head = device
+    let forged_head = fixture
+        .device
         .sign_device_head_for_test(
             current.commit_ref().clone(),
             omitted.digest(),
@@ -358,7 +351,8 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 
     let mut omitted_head = current.history_summary().clone();
     omitted_head.announcement_frontier.clear();
-    let forged_head = device
+    let forged_head = fixture
+        .device
         .sign_device_head_for_test(
             current.commit_ref().clone(),
             omitted_head.digest(),
@@ -391,24 +385,21 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_acknowledgement() {
-    let (db, store, _device_id, _membership, _temp, _store_dir) = published_history(1).await;
+    let fixture = PublishedHistory::publish(1).await;
     let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
-        store_database(&db)
+        store_database(&fixture.db)
             .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("bind retained acknowledgement Store");
-    device
+    fixture
+        .device
         .publish_acknowledgement(coverage)
         .await
         .expect("publish retained acknowledgement");
 
-    let retained = retained_history(&db, &store).await;
+    let retained = fixture.retained_history().await;
     let current = retained.last().expect("acknowledgement commit is retained");
     assert_eq!(
         current.history_summary().acknowledgements.len(),
@@ -417,14 +408,17 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
     );
     let mut omitted = current.history_summary().clone();
     omitted.acknowledgements.clear();
-    assert_signed_head_rejects_summary(&db, current, &omitted).await;
+    assert_signed_head_rejects_summary(&fixture.device, current, &omitted).await;
 }
 
-async fn history_with_member_removal() -> (
-    crate::database::Database,
-    TestStore,
-    crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-) {
+struct MemberRemovalHistory {
+    db: crate::database::Database,
+    store: TestStore,
+    device: crate::sync::test_helpers::TestDevice,
+    summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+}
+
+async fn history_with_member_removal() -> MemberRemovalHistory {
     let db = open_test_db();
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
@@ -454,16 +448,10 @@ async fn history_with_member_removal() -> (
         .activate_joined_device(&db, &member_db, &member, "2026-07-21T00:00:00Z")
         .await
         .expect("activate removable member device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
-        &db,
-        &member_db,
-        &owner,
-        &member,
-        &encryption,
-    )
-    .await
-    .expect("promote removable member to Owner");
+    store
+        .promote_active_member_fixture(&db, &member_db, &owner, &member, &encryption)
+        .await
+        .expect("promote removable member to Owner");
     let custody = crate::sync::test_helpers::TestCustody::default();
     let security = crate::sync::test_helpers::test_store_security(
         "retained-removal-proof",
@@ -483,21 +471,38 @@ async fn history_with_member_removal() -> (
         )
         .await
         .expect("remove retained member");
-    let retained = retained_history(&db, &store).await;
+    let device = store
+        .bind_device(&db, &store.signer)
+        .await
+        .expect("bind retained-removal Store");
+    let retained = device
+        .retained_merge_replay_inputs_for_test()
+        .await
+        .expect("load retained removal history");
     let summary = retained
         .last()
         .expect("removal activation is retained")
         .history_summary()
         .clone();
-    (db, store, summary)
+    MemberRemovalHistory {
+        db,
+        store,
+        device,
+        summary,
+    }
 }
 
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_membership_removal() {
-    let (db, store, summary) = Box::pin(history_with_member_removal()).await;
-    let retained = retained_history(&db, &store).await;
+    let fixture = Box::pin(history_with_member_removal()).await;
+    let retained = fixture
+        .device
+        .retained_merge_replay_inputs_for_test()
+        .await
+        .expect("load retained removal history");
     let current = retained.last().expect("removal activation is retained");
-    let removal = summary
+    let removal = fixture
+        .summary
         .membership_proofs
         .iter()
         .find_map(|(reference, proof)| {
@@ -508,15 +513,16 @@ async fn signed_head_rejects_an_omitted_membership_removal() {
             .then(|| reference.clone())
         })
         .expect("retained history contains the removal control proof");
-    let mut omitted = summary;
+    let mut omitted = fixture.summary;
     omitted.membership_proofs.remove(&removal);
-    assert_signed_head_rejects_summary(&db, current, &omitted).await;
+    assert_signed_head_rejects_summary(&fixture.device, current, &omitted).await;
 }
 
 #[tokio::test]
 async fn membership_checkpoint_floor_includes_the_activating_control() {
-    let (_db, _store, summary) = Box::pin(history_with_member_removal()).await;
-    let control = summary
+    let fixture = Box::pin(history_with_member_removal()).await;
+    let control = fixture
+        .summary
         .membership_proofs
         .values()
         .find(|proof| {
@@ -526,7 +532,8 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
             )
         })
         .expect("retained history contains the removal control proof");
-    assert!(summary
+    assert!(fixture
+        .summary
         .membership_floor
         .effective_coordinates
         .contains(&control.entry.coord));
@@ -534,8 +541,9 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
 
 #[tokio::test]
 async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() {
-    let (_db, _store, mut summary) = Box::pin(history_with_member_removal()).await;
-    let proof = summary
+    let mut fixture = Box::pin(history_with_member_removal()).await;
+    let proof = fixture
+        .summary
         .membership_proofs
         .values_mut()
         .find(|proof| {
@@ -562,27 +570,19 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
         },
     );
     assert!(
-        summary.validate_shape().is_err(),
+        fixture.summary.validate_shape().is_err(),
         "retained membership proof accepted a resolution reference without its signed value",
     );
 }
 
 #[tokio::test]
 async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
-    run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control().await;
-}
-
-async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
-    let (db, store, _summary) = Box::pin(history_with_member_removal()).await;
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("load snapshot Store");
+    let fixture = Box::pin(history_with_member_removal()).await;
     let directory = tempfile::tempdir().expect("create snapshot image directory");
     let snapshot_dir = directory.path().to_path_buf();
-    let database = store_database(&db);
+    let database = store_database(&fixture.db);
     let image = database
-        .capture_snapshot_image_for_test(store.root.clone(), snapshot_dir, None)
+        .capture_snapshot_image_for_test(fixture.store.root.clone(), snapshot_dir, None)
         .await
         .expect("create checkpoint snapshot image");
     let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
@@ -592,11 +592,12 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
             .expect("load snapshot coverage"),
     )
     .expect("derive snapshot coverage");
-    let meta = device
+    let meta = fixture
+        .device
         .publish_snapshot(image, coverage)
         .await
         .expect("publish checkpoint snapshot");
-    let published = crate::database::StoreDatabase::new(&db)
+    let published = crate::database::StoreDatabase::new(&fixture.db)
         .latest_local_store_snapshot()
         .await
         .expect("load published snapshot")
@@ -615,7 +616,8 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         })
         .expect("snapshot retains pre-snapshot removal control");
     summary.membership_proofs.remove(&removal);
-    let forged = device
+    let forged = fixture
+        .device
         .resign_snapshot_meta_for_test(forged)
         .await
         .expect("re-sign internally valid snapshot through Store authority");
@@ -630,7 +632,8 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         ),
     };
     assert_eq!(
-        device
+        fixture
+            .device
             .parse_local_snapshot_meta_for_test(&forged_bytes, &forged_reference)
             .await
             .expect("re-signed omitted summary is internally valid"),
@@ -642,7 +645,8 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
         meta: forged,
     };
     assert!(
-        device
+        fixture
+            .device
             .verify_snapshots_for_acknowledgement_for_test(std::slice::from_ref(&forged))
             .await
             .is_err(),
@@ -652,8 +656,8 @@ async fn run_signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control(
 
 #[tokio::test]
 async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_history() {
-    let (db, store, _device_id, membership, _temp, _store_dir) = published_history(4).await;
-    let retained = retained_history(&db, &store).await;
+    let fixture = PublishedHistory::publish(4).await;
+    let retained = fixture.retained_history().await;
     let historical_slots = retained
         .iter()
         .flat_map(|entry| {
@@ -663,17 +667,14 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             ]
         })
         .collect::<Vec<_>>();
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("retain checkpoint Store device");
-
-    store.home.clear_exact_reads();
-    device
-        .prepare_conflict_resolution_plan_for_test(membership.head_refs())
+    fixture.store.home.clear_exact_reads();
+    fixture
+        .device
+        .prepare_conflict_resolution_plan_for_test(fixture.membership.head_refs())
         .await
         .expect("authorize from retained conflict-resolution predecessor");
-    let reread = store
+    let reread = fixture
+        .store
         .home
         .exact_reads()
         .into_iter()

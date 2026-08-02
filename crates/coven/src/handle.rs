@@ -1377,6 +1377,8 @@ mod tests {
             id: &str,
             write_id: &crate::WriteId,
         ) -> RowBlobRef;
+
+        async fn publish_host_blob(&self, id: &str, cloud_path: &str, bytes: &[u8]) -> RowBlobRef;
     }
 
     impl HostBlobTestOps for CovenHandle {
@@ -1457,16 +1459,11 @@ mod tests {
                 .await
                 .expect("capture published host blob row")
         }
-    }
 
-    async fn publish_host_blob(
-        handle: &CovenHandle,
-        id: &str,
-        cloud_path: &str,
-        bytes: &[u8],
-    ) -> RowBlobRef {
-        let write_id = handle.queue_host_blob(id, cloud_path, bytes, true).await;
-        handle.wait_for_host_blob_publication(id, &write_id).await
+        async fn publish_host_blob(&self, id: &str, cloud_path: &str, bytes: &[u8]) -> RowBlobRef {
+            let write_id = self.queue_host_blob(id, cloud_path, bytes, true).await;
+            self.wait_for_host_blob_publication(id, &write_id).await
+        }
     }
 
     #[tokio::test]
@@ -2392,7 +2389,9 @@ mod tests {
             .await
             .expect("connect encrypted CloudKit writer");
         let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
-        let blob = publish_host_blob(&writer, "cover-1", "cover-cover-1.jpg", &plaintext).await;
+        let blob = writer
+            .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
+            .await;
 
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -2558,7 +2557,9 @@ mod tests {
         // Publish a host-provided row and exact blob under the opaque home. The
         // resulting row reference carries its uploader authority and stored slot.
         let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
-        let blob = publish_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext).await;
+        let blob = handle
+            .publish_host_blob("cover-1", "cover-cover-1.jpg", &plaintext)
+            .await;
         let cloud_key = blob
             .stored()
             .expect("published blob has exact storage")
@@ -3424,7 +3425,9 @@ mod tests {
         );
 
         let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
-        let blob = publish_host_blob(&handle, "plain-cover", "plain-cover", &plaintext).await;
+        let blob = handle
+            .publish_host_blob("plain-cover", "plain-cover", &plaintext)
+            .await;
         let cloud_key = blob
             .stored()
             .expect("published blob has exact storage")

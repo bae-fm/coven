@@ -11,98 +11,44 @@ use super::cache::BlobCacheError;
 use super::StoreBlobCache;
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::{Database, StoreDatabase};
-use crate::protocol::audience_package::PackageAudience;
-use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::SyncStorage;
 use crate::sync::session::BlobDecl;
 use crate::sync::session::SyncedTable;
 use crate::sync::test_helpers::{
-    capture_bytes, host_exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, photo_decl, plant_blob_row,
-    plant_blob_row_with_size_hash, pull_into, read_test_db, read_test_db_with_download_limit,
-    register_external_blob, remote_root_db, set_blob_remote, temp_store_dir, test_migrations,
-    TestStore,
+    open_test_db, open_test_db_schema, open_test_db_with_blob,
+    open_test_db_with_user_and_host_blobs, photo_decl, plant_blob_row, read_test_db,
+    read_test_db_with_download_limit, remote_root_db, temp_store_dir, test_migrations, TestStore,
 };
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
 
-async fn read_blob(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-    storage: Option<std::sync::Arc<dyn SyncStorage>>,
-    reference: &crate::blob::RowBlobRef,
-) -> Result<Vec<u8>, BlobCacheError> {
-    crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(db),
-        store_dir.clone(),
-    )
-    .blob_access(storage)
-    .read(reference)
-    .await
+trait BlobTestStoreDirOps {
+    async fn cache_total_bytes(&self, namespace: &str) -> u64;
+    fn set_cache_mtime(&self, namespace: &str, id: &str, secs: u64);
 }
 
-async fn open_blob_stream(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-    storage: Option<std::sync::Arc<dyn SyncStorage>>,
-    reference: &crate::blob::RowBlobRef,
-) -> Result<crate::sync::BlobStream, BlobCacheError> {
-    crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(db),
-        store_dir.clone(),
-    )
-    .blob_access(storage)
-    .open_stream(reference)
-    .await
-}
+impl BlobTestStoreDirOps for crate::store_dir::StoreDir {
+    async fn cache_total_bytes(&self, namespace: &str) -> u64 {
+        self.cached_blob_files(namespace)
+            .await
+            .expect("walk the namespace cache subtree")
+            .iter()
+            .map(|file| file.size())
+            .sum()
+    }
 
-/// Open a stream and read one range from it, for a test whose subject is which
-/// source served the bytes rather than the stream's own reuse. A test about reuse
-/// opens the stream itself and reads several ranges from it.
-async fn read_one_range(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-    storage: Option<std::sync::Arc<dyn SyncStorage>>,
-    reference: &crate::blob::RowBlobRef,
-    offset: u64,
-    len: u64,
-) -> Result<Vec<u8>, BlobCacheError> {
-    open_blob_stream(db, store_dir, storage, reference)
-        .await?
-        .read_at(offset, len)
-        .await
-}
-
-async fn materialize_row_blob(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-    storage: Option<std::sync::Arc<dyn SyncStorage>>,
-    reference: &crate::blob::RowBlobRef,
-) -> Result<(), BlobCacheError> {
-    crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(db),
-        store_dir.clone(),
-    )
-    .blob_access(storage)
-    .materialize(reference)
-    .await
-}
-
-async fn pin(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-    storage: Option<std::sync::Arc<dyn SyncStorage>>,
-    references: &[crate::blob::RowBlobRef],
-) -> Result<(), BlobCacheError> {
-    let owners = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(db),
-        store_dir.clone(),
-    );
-    let access = owners.blob_access(storage);
-    owners.cache().pin(&access, references).await
+    fn set_cache_mtime(&self, namespace: &str, id: &str, secs: u64) {
+        let path = self
+            .cache_blob_path(
+                namespace,
+                crate::sync::test_helpers::test_cache_locator_hash(id),
+            )
+            .expect("cache path");
+        set_path_mtime(&path, secs);
+    }
 }
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
@@ -356,7 +302,8 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
         .cache_blob_path("photos", locator_hash)
         .expect("exact cache path");
 
-    materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .materialize_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect("materialize exact remote row blob");
     assert_eq!(
@@ -366,7 +313,8 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
 
     let corrupt = vec![b'!'; bytes.len()];
     std::fs::write(&destination, &corrupt).expect("replace fixture with same-length corruption");
-    materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .materialize_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect_err("occupied corrupt materialization must fail");
     assert_eq!(
@@ -393,20 +341,24 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
     )
     .await;
 
-    pin(
-        &db,
-        &store_dir,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&reference),
-    )
-    .await
-    .expect("pin the exact locator");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .pin_blobs(
+            Some(storage.storage.clone()),
+            std::slice::from_ref(&reference),
+        )
+        .await
+        .expect("pin the exact locator");
     let destination = pinned_path(&store_dir, &reference);
     let corrupt = vec![b'!'; bytes.len()];
     std::fs::write(&destination, &corrupt).expect("write same-length pinned corruption");
 
     assert!(matches!(
-        materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &reference).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&db),
+            store_dir.clone()
+        )
+        .materialize_blob(Some(storage.storage.clone()), &reference)
+        .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
     assert_eq!(
@@ -452,7 +404,8 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
     .await
     .expect("replace row stamp");
 
-    materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .materialize_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect_err("stale row reference must fail");
     assert!(
@@ -468,13 +421,9 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     let external_bytes = b"external exact bytes";
     plant_blob_row(&external_db, "external-corrupt", false, external_bytes).await;
     let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
-    register_external_blob(
-        &external_db,
-        "note_photos",
-        "external-corrupt",
-        &external_path,
-    )
-    .await;
+    external_db
+        .register_external_blob_for_test("note_photos", "external-corrupt", &external_path)
+        .await;
     std::fs::write(&external_path, vec![b'!'; external_bytes.len()])
         .expect("write same-length external corruption");
     let external = external_db
@@ -482,7 +431,12 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
         .await
         .expect("load external row reference");
     assert!(matches!(
-        materialize_row_blob(&external_db, &store_dir, None, &external).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&external_db),
+            store_dir.clone()
+        )
+        .materialize_blob(None, &external)
+        .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 
@@ -502,7 +456,12 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
         .await
         .expect("load host-local row reference");
     assert!(matches!(
-        materialize_row_blob(&host_db, &store_dir, None, &host).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&host_db),
+            store_dir.clone()
+        )
+        .materialize_blob(None, &host)
+        .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 }
@@ -518,7 +477,8 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     plant_blob_row(&db, id, true, first_bytes).await;
     let first =
         install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", first_bytes).await;
-    materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &first)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .materialize_blob(Some(storage.storage.clone()), &first)
         .await
         .expect("materialize first exact locator");
     let first_path = cache_path(&store_dir, &first);
@@ -541,7 +501,8 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     .expect("replace logical row with a second exact version");
     let second =
         install_exact_remote_blob(&db, &storage, tmp.path(), id, "photos", second_bytes).await;
-    materialize_row_blob(&db, &store_dir, Some(storage.storage.clone()), &second)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .materialize_blob(Some(storage.storage.clone()), &second)
         .await
         .expect("materialize second exact locator");
     let second_cache = cache_path(&store_dir, &second);
@@ -556,14 +517,10 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
         .await
         .is_err());
 
-    pin(
-        &db,
-        &store_dir,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&second),
-    )
-    .await
-    .expect("pin only the current exact locator");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), store_dir.clone())
+        .pin_blobs(Some(storage.storage.clone()), std::slice::from_ref(&second))
+        .await
+        .expect("pin only the current exact locator");
     assert!(first_path.exists());
     assert!(pinned_path(&store_dir, &second).exists());
 
@@ -592,14 +549,12 @@ async fn install_exact_remote_blob_binding_for_row(
     bytes: &[u8],
 ) {
     let source_db = open_test_db();
-    let changeset = capture_bytes(
-        &source_db,
-        &[
+    let changeset = source_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
           VALUES ('cache-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let device = storage
         .founder_device()
         .await
@@ -631,41 +586,9 @@ async fn install_exact_remote_blob_binding_for_row_with_owner(
     owner: crate::protocol::store_commit::StoreBatchCommitRef,
 ) {
     let stored = create_exact_blob_object(storage, spool_dir, id, namespace, bytes).await;
-    bind_stored_blob_to_row(db, &stored, table, id, owner).await;
-}
-
-/// Plant a blob-bearing row whose `kind` column carries the readable cloud path
-/// a browsable blob is keyed at. The shared planter writes a fixed `kind`, which
-/// a browsable locator can never match.
-async fn plant_browsable_blob_row(db: &Database, blob_id: &str, cloud_path: &str, bytes: &[u8]) {
-    let note = format!("note-{blob_id}");
-    let blob_id = blob_id.to_string();
-    let cloud_path = cloud_path.to_string();
-    let size = bytes.len() as u64;
-    let hash = crate::blob::content_hash(bytes);
-    db.test_sql(move |conn| {
-        conn.execute(
-            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-             VALUES (?1, 'browsable-test', 1, '0000000001000-0000-dev1', '2026-01-01')",
-            [note.as_str()],
-        )
-        .map_err(crate::database::DbError::from)?;
-        conn.execute(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, '0000000001000-0000-dev1', '2026-01-01')",
-            rusqlite::params![
-                blob_id.as_str(),
-                note.as_str(),
-                cloud_path.as_str(),
-                size as i64,
-                hash
-            ],
-        )
-        .map_err(crate::database::DbError::from)?;
-        Ok(())
-    })
-    .await
-    .expect("plant the browsable blob row");
+    db.bind_stored_blob_to_row_for_test(&stored, table, id, owner)
+        .await
+        .expect("install exact remote blob binding");
 }
 
 /// Publish the owner commit a blob binding hangs off. The installers above do
@@ -675,14 +598,12 @@ async fn browsable_owner_commit(
     storage: &TestStore,
 ) -> crate::protocol::store_commit::StoreBatchCommitRef {
     let source_db = open_test_db();
-    let changeset = capture_bytes(
-        &source_db,
-        &[
+    let changeset = source_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
           VALUES ('browsable-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let device = storage
         .founder_device()
         .await
@@ -696,63 +617,6 @@ async fn browsable_owner_commit(
         .publish_changeset("founder", sequence, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish the browsable blob owner commit")
-}
-
-/// Bind an already-uploaded blob to a row, so a read resolves that row to that
-/// exact stored object. Split from the installers above so a browsable blob
-/// binds through the same path an opaque one does — the binding is about the
-/// row, not about how the object is protected.
-async fn bind_stored_blob_to_row(
-    db: &Database,
-    stored: &crate::blob::locator::StoredBlobRef,
-    table: &str,
-    id: &str,
-    owner: crate::protocol::store_commit::StoreBatchCommitRef,
-) {
-    let locator = stored.locator().clone();
-
-    let record = RemoteObjectRecord::activated_blob(stored, owner)
-        .expect("record exact activated remote blob");
-    record
-        .validate()
-        .expect("validate exact remote blob record");
-    let object_id = record.object_id().to_string();
-    let state = serde_json::to_string(&record).expect("serialize exact remote blob record");
-    let locator_hash = locator.locator_hash().to_string();
-    let authority =
-        serde_json::to_string(&PackageAudience::Store).expect("serialize exact blob audience");
-    let id_for_insert = id.to_string();
-    let table_for_insert = table.to_string();
-    let stamp_table = table.to_string();
-    let stamp_id = id.to_string();
-    let row_stamp = db
-        .test_sql(move |conn| {
-            conn.query_row(
-                &format!(
-                    "SELECT _updated_at FROM {} WHERE id = ?1",
-                    crate::database::quote_ident(&stamp_table)
-                ),
-                [stamp_id],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("load exact row stamp for blob binding");
-    db.test_sql(move |database| {
-        database.install_blob_binding(
-            &object_id,
-            &state,
-            &locator_hash,
-            &table_for_insert,
-            &id_for_insert,
-            "id",
-            &row_stamp,
-            &authority,
-        )
-    })
-    .await
-    .expect("install exact remote blob binding");
 }
 
 /// A second read is a local hit: the first read populates the exact locator cache from the
@@ -772,9 +636,11 @@ async fn second_read_is_a_local_hit() {
             .await;
 
     // First read misses, fetches from the cloud, and populates the evictable cache.
-    let first = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("first read fetches from cloud");
+    let first =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("first read fetches from cloud");
     assert_eq!(first, bytes);
     assert!(
         cache_path(&ld, &reference).exists(),
@@ -787,9 +653,11 @@ async fn second_read_is_a_local_hit() {
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
         .expect("delete exact remote blob");
-    let second = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("second read is served from the local cache");
+    let second =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("second read is served from the local cache");
     assert_eq!(
         second, bytes,
         "the second read returns the cached bytes without touching the cloud",
@@ -810,9 +678,13 @@ async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
         .await
         .expect("store invalid cache budget metadata");
 
-    let error = read_blob(&db, &store_dir, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("cache budget metadata failure must fail the read");
+    let error = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&db),
+        store_dir.clone(),
+    )
+    .read_blob(Some(storage.storage.clone()), &reference)
+    .await
+    .expect_err("cache budget metadata failure must fail the read");
     assert!(
         matches!(error, BlobCacheError::Metadata(_)),
         "invalid cache budget metadata must remain visible: {error:?}",
@@ -836,7 +708,8 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
             .await;
 
-    read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect("first read populates cache");
     let path = cache_path(&ld, &reference);
@@ -844,9 +717,11 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .await
         .expect("simulate a torn cache file");
 
-    let error = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("corrupt cache file must fail loud");
+    let error =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect_err("corrupt cache file must fail loud");
     assert!(matches!(error, BlobCacheError::LocalIntegrity { .. }));
     assert_eq!(
         tokio::fs::read(&path)
@@ -887,9 +762,11 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
         declared[..8].to_vec(),
     );
 
-    let err = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("tampered exact cloud bytes must error");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect_err("tampered exact cloud bytes must error");
     assert!(
         matches!(err, BlobCacheError::Storage(_)),
         "exact stored-byte verification remains visible: {err:?}",
@@ -899,9 +776,11 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
         "tampered stored bytes write nothing to the exact locator cache path",
     );
 
-    let again = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("subsequent reads keep rejecting the tampered bytes");
+    let again =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect_err("subsequent reads keep rejecting the tampered bytes");
     assert!(
         matches!(again, BlobCacheError::Storage(_)),
         "the second read errors the same way, not a cache hit: {again:?}",
@@ -938,13 +817,15 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let blob_models_before_reads = crate::database::from_tables_call_count();
 
     assert_eq!(
-        read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
             .await
             .expect("first read fetches from cloud"),
         bytes,
     );
     assert_eq!(
-        read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
             .await
             .expect("second read serves from cache"),
         bytes,
@@ -952,16 +833,10 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let offset = 1024;
     let len = 512;
     assert_eq!(
-        read_one_range(
-            &db,
-            &ld,
-            Some(storage.storage.clone()),
-            &reference,
-            offset,
-            len,
-        )
-        .await
-        .expect("ranged read serves through the cache path"),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len,)
+            .await
+            .expect("ranged read serves through the cache path"),
         bytes[offset as usize..(offset + len) as usize],
     );
 
@@ -996,9 +871,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
     crate::store_dir::StoreDir::store_local_blob(&source_store_dir, "photos", "ph01abcd", cover)
         .await
         .expect("store source blob");
-    host_exec(
-        &db1,
-        &format!(
+    db1.execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
@@ -1020,7 +893,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
     // store dir's evictable cache tree.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -1057,21 +930,21 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
             .await;
 
     // Read it on demand → it lands in the evictable cache.
-    read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect("read populates the cache");
     assert!(cache_path(&ld, &reference).exists());
     assert!(!pinned_path(&ld, &reference).exists());
 
     // Pin it → moves cache/ → pinned/.
-    pin(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&reference),
-    )
-    .await
-    .expect("pin promotes the cached blob");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .pin_blobs(
+            Some(storage.storage.clone()),
+            std::slice::from_ref(&reference),
+        )
+        .await
+        .expect("pin promotes the cached blob");
     assert!(
         pinned_path(&ld, &reference).exists(),
         "pin moves the blob into its exact locator pinned path",
@@ -1153,14 +1026,13 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
             .await;
 
-    pin(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&reference),
-    )
-    .await
-    .expect("pin downloads remote blob");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .pin_blobs(
+            Some(storage.storage.clone()),
+            std::slice::from_ref(&reference),
+        )
+        .await
+        .expect("pin downloads remote blob");
 
     assert_eq!(
         storage.home.exact_stream_read_count(),
@@ -1210,7 +1082,8 @@ async fn pin_at_limit_one_pins_every_blob() {
     let (tmp, ld) = temp_store_dir();
 
     let (blobs, bytes) = setup_remote_blobs(&db, &storage, tmp.path(), 4).await;
-    pin(&db, &ld, Some(storage.storage.clone()), &blobs)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .pin_blobs(Some(storage.storage.clone()), &blobs)
         .await
         .expect("pin every blob serially");
 
@@ -1241,7 +1114,8 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
 
     // Four blobs over a barrier of two: waves of two must gather to proceed.
     let (blobs, bytes) = setup_remote_blobs(&db, &storage, tmp.path(), 4).await;
-    pin(&db, &ld, Some(storage.storage.clone()), &blobs)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .pin_blobs(Some(storage.storage.clone()), &blobs)
         .await
         .expect("pin runs downloads concurrently");
 
@@ -1291,9 +1165,11 @@ async fn pin_mid_batch_failure_surfaces_the_error() {
         .expect("delete missing blob body");
     blobs.push(missing_reference);
 
-    let err = pin(&db, &ld, Some(storage.storage.clone()), &blobs)
-        .await
-        .expect_err("a missing blob fails the pin");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .pin_blobs(Some(storage.storage.clone()), &blobs)
+            .await
+            .expect_err("a missing blob fails the pin");
     assert!(
         matches!(err, BlobCacheError::Storage(_)),
         "the failure surfaces rather than being pinned around, got {err:?}",
@@ -1315,20 +1191,17 @@ async fn cache_lazy_fetches_on_first_read() {
     let (source_tmp, source_store_dir) = temp_store_dir();
     let bytes = b"AUDIO-PAYLOAD".to_vec();
     let external_path = write_external_file(source_tmp.path(), "audio.bin", &bytes);
-    host_exec(
-        &db1,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db1.execute_test_host_write(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('aud01234', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(&bytes),
-        ),
-    )
+        crate::blob::content_hash(&bytes),
+    ))
     .await;
-    register_external_blob(&db1, "note_photos", "aud01234", &external_path).await;
-    host_exec(
-        &db1,
+    db1.register_external_blob_for_test("note_photos", "aud01234", &external_path)
+        .await;
+    db1.execute_test_host_write(
         "UPDATE notes
          SET shared = 1, _updated_at = '0000000002000-0000-dev1'
          WHERE id = 'n1'",
@@ -1344,7 +1217,7 @@ async fn cache_lazy_fetches_on_first_read() {
 
     let db2 = open_test_db_with_blob(declaration);
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
@@ -1358,9 +1231,11 @@ async fn cache_lazy_fetches_on_first_read() {
         "a CacheLazy blob is not fetched on pull — neither folder holds it",
     );
 
-    let got = read_blob(&db2, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("first read fetches the CacheLazy blob");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
     assert!(
         cache_path(&ld, &reference).exists(),
@@ -1405,14 +1280,13 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
 
     // The blob is NOT in the cloud (nothing was ever put there). A pin that fetched
     // would fail; instead it must promote the staged file by renaming it.
-    pin(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&reference),
-    )
-    .await
-    .expect("pin promotes the staged file without a cloud fetch");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .pin_blobs(
+            Some(storage.storage.clone()),
+            std::slice::from_ref(&reference),
+        )
+        .await
+        .expect("pin promotes the staged file without a cloud fetch");
     assert!(
         pinned_path(&ld, &reference).exists(),
         "pin promotes the staged blob into its exact locator pinned path",
@@ -1422,9 +1296,11 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         "pin removes the staged blob from its exact locator cache path",
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("the pinned staged blob reads back");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("the pinned staged blob reads back");
     assert_eq!(got, bytes, "the staged bytes survive write_blob → pin");
 }
 
@@ -1466,7 +1342,8 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 
     // Populate the cache with the whole file, then remove the cloud copy so a
     // ranged read that tried to fetch would fail.
-    read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect("whole-file read populates the cache");
     assert!(cache_path(&ld, &reference).exists());
@@ -1477,16 +1354,11 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 
     // A window from the middle of the file.
     let (offset, len) = (1234u64, 1000u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("mid-file ranged read served from the local file");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("mid-file ranged read served from the local file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -1496,16 +1368,16 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     // A tail starting at offset > 0 running to the end of the file.
     let tail_off = 4000u64;
     let tail_len = full.len() as u64 - tail_off;
-    let tail = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        tail_off,
-        tail_len,
-    )
-    .await
-    .expect("tail ranged read served from the local file");
+    let tail =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(
+                Some(storage.storage.clone()),
+                &reference,
+                tail_off,
+                tail_len,
+            )
+            .await
+            .expect("tail ranged read served from the local file");
     assert_eq!(
         tail,
         &full[tail_off as usize..],
@@ -1550,9 +1422,11 @@ async fn ranges_off_an_uncached_stream_never_download_the_object() {
         storage.home.exact_stream_read_count(),
         storage.home.exact_full_read_count(),
     );
-    let stream = open_blob_stream(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("open a stream over a non-cached Remote blob");
+    let stream =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .open_blob_stream(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("open a stream over a non-cached Remote blob");
     assert_eq!(
         stream.plaintext_size(),
         full.len() as u64,
@@ -1621,7 +1495,9 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     let (tmp, ld) = temp_store_dir();
 
     let full = ramp(5000);
-    plant_browsable_blob_row(&db, "browsable-track", CLOUD_PATH, &full).await;
+    db.insert_browsable_blob_row_for_test("browsable-track", CLOUD_PATH, &full)
+        .await
+        .expect("plant the browsable blob row");
     let owner = browsable_owner_commit(&storage).await;
     let stored = create_browsable_blob_object(
         &storage,
@@ -1632,7 +1508,9 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
         &full,
     )
     .await;
-    bind_stored_blob_to_row(&db, &stored, "note_photos", "browsable-track", owner).await;
+    db.bind_stored_blob_to_row_for_test(&stored, "note_photos", "browsable-track", owner)
+        .await
+        .expect("install exact browsable blob binding");
     let reference = db
         .row_blob_ref("note_photos", "browsable-track")
         .await
@@ -1640,9 +1518,11 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
 
     // Untampered, the stream serves ranges — through the whole-object path, so
     // the cache is populated (unlike a sealed blob's ranged read).
-    let stream = open_blob_stream(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("open a stream over a browsable blob");
+    let stream =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .open_blob_stream(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("open a stream over a browsable blob");
     assert_eq!(
         stream.read_at(100, 50).await.expect("serve a range"),
         &full[100..150]
@@ -1660,10 +1540,12 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     storage
         .home
         .replace_exact_object(stored.object().slot(), vec![b'!'; full.len()]);
-    let refused = open_blob_stream(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .err()
-        .expect("a tampered browsable object must not open a stream");
+    let refused =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .open_blob_stream(Some(storage.storage.clone()), &reference)
+            .await
+            .err()
+            .expect("a tampered browsable object must not open a stream");
     assert!(
         matches!(
             refused,
@@ -1698,16 +1580,11 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
     assert!(!cache_path(&ld, &reference).exists());
 
     let (offset, len) = (2000u64, 1500u64);
-    let got = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("open a stream over a cache miss and read a range");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("open a stream over a cache miss and read a range");
     assert_eq!(
         got,
         &full[offset as usize..(offset + len) as usize],
@@ -1721,7 +1598,8 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
 
     // The whole read is the operation that populates, and after it a stream over
     // the same blob is served from the cache file with no cloud read at all.
-    read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &reference)
         .await
         .expect("a whole read of the same blob");
     assert!(cache_path(&ld, &reference).exists());
@@ -1730,16 +1608,11 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
         .await
         .expect("delete exact remote blob");
     let reads_before = storage.home.exact_range_reads().len();
-    let second = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("a stream over the populated cache");
+    let second =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("a stream over the populated cache");
     assert_eq!(second, &full[offset as usize..(offset + len) as usize]);
     assert_eq!(
         storage.home.exact_range_reads().len(),
@@ -1763,9 +1636,11 @@ async fn full_read_blob_still_populates_the_cache() {
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
             .await;
 
-    let first = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("first whole-file read fetches from the cloud");
+    let first =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("first whole-file read fetches from the cloud");
     assert_eq!(first, bytes);
     assert!(
         cache_path(&ld, &reference).exists(),
@@ -1777,9 +1652,11 @@ async fn full_read_blob_still_populates_the_cache() {
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
         .expect("delete exact remote blob");
-    let second = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("second whole-file read is served from the cache");
+    let second =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("second whole-file read is served from the cache");
     assert_eq!(second, bytes);
 }
 
@@ -1810,30 +1687,18 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     )
     .await;
     assert!(
-        read_one_range(
-            &db,
-            &ld,
-            Some(storage.storage.clone()),
-            &remote_reference,
-            900,
-            200
-        )
-        .await
-        .is_err(),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &remote_reference, 900, 200)
+            .await
+            .is_err(),
         "a range past the blob size must error on the cloud path",
     );
     assert!(
-        read_one_range(
-            &db,
-            &ld,
-            Some(storage.storage.clone()),
-            &remote_reference,
-            500,
-            0
-        )
-        .await
-        .expect("zero-length read is not an error")
-        .is_empty(),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &remote_reference, 500, 0)
+            .await
+            .expect("zero-length read is not an error")
+            .is_empty(),
         "a zero-length read is an empty result on the cloud path",
     );
 
@@ -1850,7 +1715,8 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
         &full,
     )
     .await;
-    read_blob(&db, &ld, Some(storage.storage.clone()), &cached_reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &cached_reference)
         .await
         .expect("populate the cache");
     storage
@@ -1862,30 +1728,18 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
         .await
         .expect("delete exact remote blob");
     assert!(
-        read_one_range(
-            &db,
-            &ld,
-            Some(storage.storage.clone()),
-            &cached_reference,
-            900,
-            200
-        )
-        .await
-        .is_err(),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &cached_reference, 900, 200)
+            .await
+            .is_err(),
         "a range past the blob size must error on the local-file path too",
     );
     assert!(
-        read_one_range(
-            &db,
-            &ld,
-            Some(storage.storage.clone()),
-            &cached_reference,
-            500,
-            0
-        )
-        .await
-        .expect("zero-length read is not an error")
-        .is_empty(),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &cached_reference, 500, 0)
+            .await
+            .expect("zero-length read is not an error")
+            .is_empty(),
         "a zero-length read is an empty result on the local-file path too",
     );
 }
@@ -1908,31 +1762,29 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     plant_blob_row(&db, &blob.id, false, &full).await;
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
-    register_external_blob(&db, "note_photos", &blob.id, &path).await;
+    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+        .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
-    let whole = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("read serves the external file (no cloud copy exists)");
+    let whole =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("read serves the external file (no cloud copy exists)");
     assert_eq!(
         whole, full,
         "the whole read returns the external file's bytes"
     );
 
     let (offset, len) = (1234u64, 1000u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged read off the external file");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("ranged read off the external file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -1978,14 +1830,20 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     let external_db = read_test_db("audio");
     plant_blob_row(&external_db, "strm-ext1", false, &full).await;
     let external_path = write_external_file(tmp.path(), "strm-ext1.flac", &full);
-    register_external_blob(&external_db, "note_photos", "strm-ext1", &external_path).await;
+    external_db
+        .register_external_blob_for_test("note_photos", "strm-ext1", &external_path)
+        .await;
     let external = external_db
         .row_blob_ref("note_photos", "strm-ext1")
         .await
         .expect("load external row reference");
-    let external_stream = open_blob_stream(&external_db, &ld, None, &external)
-        .await
-        .expect("open a stream over the external file");
+    let external_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&external_db),
+        ld.clone(),
+    )
+    .open_blob_stream(None, &external)
+    .await
+    .expect("open a stream over the external file");
 
     std::fs::remove_file(&external_path).expect("unlink the external file after open");
     assert_eq!(
@@ -2012,9 +1870,13 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .row_blob_ref("note_photos", "strm-hst1")
         .await
         .expect("load host-local row reference");
-    let host_stream = open_blob_stream(&host_db, &ld, None, &host)
-        .await
-        .expect("open a stream over the local store");
+    let host_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&host_db),
+        ld.clone(),
+    )
+    .open_blob_stream(None, &host)
+    .await
+    .expect("open a stream over the local store");
 
     crate::storage::StagedBlobFile::write_for_test(&host_path, &decoy)
         .await
@@ -2047,9 +1909,13 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         &full,
     )
     .await;
-    let remote_stream = open_blob_stream(&remote_db, &ld, Some(storage.storage.clone()), &remote)
-        .await
-        .expect("open a stream over a Remote blob");
+    let remote_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&remote_db),
+        ld.clone(),
+    )
+    .open_blob_stream(Some(storage.storage.clone()), &remote)
+    .await
+    .expect("open a stream over a Remote blob");
 
     StoreBlobCache::new(StoreDatabase::new(&remote_db), ld.clone())
         .clear_for_test()
@@ -2087,15 +1953,18 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     let db = read_test_db("audio");
     plant_blob_row(&db, "strm-ext2", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext2.flac", &full);
-    register_external_blob(&db, "note_photos", "strm-ext2", &path).await;
+    db.register_external_blob_for_test("note_photos", "strm-ext2", &path)
+        .await;
     let reference = db
         .row_blob_ref("note_photos", "strm-ext2")
         .await
         .expect("load external row reference");
 
-    let stream = open_blob_stream(&db, &ld, None, &reference)
-        .await
-        .expect("open a stream over the external file");
+    let stream =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .open_blob_stream(None, &reference)
+            .await
+            .expect("open a stream over the external file");
     assert_eq!(
         stream
             .read_at(offset, len)
@@ -2118,7 +1987,9 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
 
     // The whole read reads every byte anyway, so it still checks them.
     assert!(matches!(
-        read_blob(&db, &ld, None, &reference).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(None, &reference)
+            .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 }
@@ -2141,22 +2012,33 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     let external_db = read_test_db("audio");
     plant_blob_row(&external_db, "strm-ext3", false, &full).await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
-    register_external_blob(&external_db, "note_photos", "strm-ext3", &external_path).await;
+    external_db
+        .register_external_blob_for_test("note_photos", "strm-ext3", &external_path)
+        .await;
     std::fs::write(&external_path, &corrupt).expect("write same-length external corruption");
     let external = external_db
         .row_blob_ref("note_photos", "strm-ext3")
         .await
         .expect("load external row reference");
-    let stream = open_blob_stream(&external_db, &ld, None, &external)
-        .await
-        .expect("a local stream opens without reading the file's content");
+    let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&external_db),
+        ld.clone(),
+    )
+    .open_blob_stream(None, &external)
+    .await
+    .expect("a local stream opens without reading the file's content");
     assert_eq!(
         stream.read_at(100, 50).await.expect("serve a range"),
         &corrupt[100..150],
     );
     // The whole read still refuses: it reads every byte, so it checks them.
     assert!(matches!(
-        read_blob(&external_db, &ld, None, &external).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&external_db),
+            ld.clone()
+        )
+        .read_blob(None, &external)
+        .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 
@@ -2174,12 +2056,21 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
         .row_blob_ref("note_photos", "strm-hst3")
         .await
         .expect("load host-local row reference");
-    let stream = open_blob_stream(&host_db, &ld, None, &host)
-        .await
-        .expect("a local-store stream opens the same way");
+    let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        StoreDatabase::new(&host_db),
+        ld.clone(),
+    )
+    .open_blob_stream(None, &host)
+    .await
+    .expect("a local-store stream opens the same way");
     assert_eq!(stream.read_at(0, 4).await.expect("serve a range"), b"????");
     assert!(matches!(
-        read_blob(&host_db, &ld, None, &host).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&host_db),
+            ld.clone()
+        )
+        .read_blob(None, &host)
+        .await,
         Err(BlobCacheError::LocalIntegrity { .. })
     ));
 }
@@ -2195,7 +2086,8 @@ async fn a_relengthened_external_file_is_refused_at_open() {
     let db = read_test_db("audio");
     plant_blob_row(&db, "strm-ext4", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
-    register_external_blob(&db, "note_photos", "strm-ext4", &path).await;
+    db.register_external_blob_for_test("note_photos", "strm-ext4", &path)
+        .await;
     std::fs::write(&path, &full[..full.len() - 1]).expect("truncate the external file");
     let reference = db
         .row_blob_ref("note_photos", "strm-ext4")
@@ -2203,7 +2095,9 @@ async fn a_relengthened_external_file_is_refused_at_open() {
         .expect("load external row reference");
 
     assert!(matches!(
-        open_blob_stream(&db, &ld, None, &reference).await,
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .open_blob_stream(None, &reference)
+            .await,
         Err(BlobCacheError::ExternalSizeMismatch { .. })
     ));
 }
@@ -2225,7 +2119,8 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     // Missing file: a ref pointing at a path that does not exist.
     let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
     let missing_hash = crate::blob::content_hash(&vec![0; 1234]);
-    plant_blob_row_with_size_hash(&db, &missing.id, false, 1234, Some(&missing_hash)).await;
+    db.plant_blob_row_for_test(&missing.id, false, 1234, Some(&missing_hash))
+        .await;
     create_exact_blob_object(
         &storage,
         tmp.path(),
@@ -2235,14 +2130,17 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     )
     .await;
     let missing_path = tmp.path().join("external").join("gone.flac");
-    register_external_blob(&db, "note_photos", &missing.id, &missing_path).await;
+    db.register_external_blob_for_test("note_photos", &missing.id, &missing_path)
+        .await;
     let missing_reference = db
         .row_blob_ref("note_photos", &missing.id)
         .await
         .expect("load missing Local row blob reference");
-    let err = read_blob(&db, &ld, Some(storage.storage.clone()), &missing_reference)
-        .await
-        .expect_err("a missing external file is terminal, never a cloud fetch");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &missing_reference)
+            .await
+            .expect_err("a missing external file is terminal, never a cloud fetch");
     assert!(
         matches!(err, BlobCacheError::ExternalMissing { .. }),
         "a missing external file maps to ExternalMissing: {err:?}",
@@ -2260,23 +2158,20 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     .await;
     let actual = ramp(2000);
     let mism_hash = crate::blob::content_hash(&actual);
-    plant_blob_row_with_size_hash(
-        &db,
-        &mism.id,
-        false,
-        actual.len() as u64 + 1,
-        Some(&mism_hash),
-    )
-    .await;
+    db.plant_blob_row_for_test(&mism.id, false, actual.len() as u64 + 1, Some(&mism_hash))
+        .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
-    register_external_blob(&db, "note_photos", &mism.id, &mism_path).await;
+    db.register_external_blob_for_test("note_photos", &mism.id, &mism_path)
+        .await;
     let mism_reference = db
         .row_blob_ref("note_photos", &mism.id)
         .await
         .expect("load size-mismatched Local row blob reference");
-    let err = read_blob(&db, &ld, Some(storage.storage.clone()), &mism_reference)
-        .await
-        .expect_err("a size-mismatched external file is terminal, never a cloud fetch");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &mism_reference)
+            .await
+            .expect_err("a size-mismatched external file is terminal, never a cloud fetch");
     assert!(
         matches!(err, BlobCacheError::ExternalSizeMismatch { .. }),
         "a length != registered size maps to ExternalSizeMismatch: {err:?}",
@@ -2299,15 +2194,18 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     let ext_bytes = ramp(1500);
     plant_blob_row(&db, &blob.id, false, &ext_bytes).await;
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
-    register_external_blob(&db, "note_photos", &blob.id, &path).await;
+    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+        .await;
     let local_reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &local_reference)
-        .await
-        .expect("Local + user-provided read serves the external file");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &local_reference)
+            .await
+            .expect("Local + user-provided read serves the external file");
     assert_eq!(
         got, ext_bytes,
         "the registered ref serves the external file"
@@ -2344,9 +2242,11 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load exact Remote row blob reference");
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &remote_reference)
-        .await
-        .expect("after going Remote, the read fetches from the cloud");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &remote_reference)
+            .await
+            .expect("after going Remote, the read fetches from the cloud");
     assert_eq!(
         got, cloud_bytes,
         "once Remote the blob resolves through cache/cloud",
@@ -2392,31 +2292,29 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 
     // The real bytes: the user's external file.
     let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
-    register_external_blob(&db, "note_photos", &blob.id, &path).await;
+    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+        .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("Local + user-provided read");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("Local + user-provided read");
     assert_eq!(
         got, ext_bytes,
         "the read serves the external file, not the cache or local-store decoys",
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Local + user-provided read");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("ranged Local + user-provided read");
     assert_eq!(
         mid,
         &ext_bytes[offset as usize..(offset + len) as usize],
@@ -2462,7 +2360,8 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
-    register_external_blob(&db, "note_photos", &blob.id, &ext_path).await;
+    db.register_external_blob_for_test("note_photos", &blob.id, &ext_path)
+        .await;
 
     // The real bytes: the host-provided local store.
     crate::store_dir::StoreDir::store_local_blob(&ld, &blob.namespace, &blob.id, &store_bytes)
@@ -2473,25 +2372,22 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .await
         .expect("load Local row blob reference");
 
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("Local + host-provided read");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("Local + host-provided read");
     assert_eq!(
         got, store_bytes,
         "the read serves the local store, not the external/cache/cloud decoys",
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Local + host-provided read");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("ranged Local + host-provided read");
     assert_eq!(
         mid,
         &store_bytes[offset as usize..(offset + len) as usize],
@@ -2533,9 +2429,11 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
     )
     .await;
 
-    let whole = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("Remote read fetches from the cloud");
+    let whole =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("Remote read fetches from the cloud");
     assert_eq!(
         whole, cloud_bytes,
         "a Remote + user-provided read serves the cloud copy, not the stale local-store file",
@@ -2546,16 +2444,11 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Remote read");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("ranged Remote read");
     assert_eq!(
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
@@ -2594,17 +2487,21 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
     .await
     .expect("write a stale local-store file");
 
-    let err = read_blob(&db, &ld, None, &reference)
-        .await
-        .expect_err("Remote + user-provided read needs cache or cloud");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(None, &reference)
+            .await
+            .expect_err("Remote + user-provided read needs cache or cloud");
     assert!(
         matches!(err, BlobCacheError::NoCloudHome),
         "a stale local-store file does not satisfy a Remote + user-provided read: {err:?}",
     );
 
-    let range_err = read_one_range(&db, &ld, None, &reference, 0, 5)
-        .await
-        .expect_err("Remote + user-provided range read needs cache or cloud");
+    let range_err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(None, &reference, 0, 5)
+            .await
+            .expect_err("Remote + user-provided range read needs cache or cloud");
     assert!(
         matches!(range_err, BlobCacheError::NoCloudHome),
         "a stale local-store file does not satisfy a ranged Remote + user-provided read: {range_err:?}",
@@ -2634,9 +2531,11 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
     )
     .await;
 
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("remote-root blob reads through cache/cloud");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("remote-root blob reads through cache/cloud");
     assert_eq!(
         got, b"REMOTE-ROOT-CLOUD",
         "a remote-root blob is Remote even when the table has no gate column"
@@ -2661,16 +2560,13 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     )
     .await
     .expect("store source blob");
-    host_exec(
-        &db1,
-        &format!(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db1.execute_test_host_write(&format!(
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'RemoteRoot', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('lazy0001', 'n1', 'cover', 16, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"LAZY-REMOTE-ROOT"),
-        ),
-    )
+        crate::blob::content_hash(b"LAZY-REMOTE-ROOT"),
+    ))
     .await;
     assert!(
         storage
@@ -2682,7 +2578,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
 
     let db2 = remote_root_db(declaration);
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     let reference = db2
@@ -2696,9 +2592,11 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         "CacheLazy host-provided blobs under a remote root are not downloaded on pull"
     );
 
-    let got = read_blob(&db2, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("CacheLazy remote-root blob reads on demand");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("CacheLazy remote-root blob reads on demand");
     assert_eq!(got, b"LAZY-REMOTE-ROOT");
     assert!(
         cache_path(&ld, &reference).exists(),
@@ -2730,9 +2628,13 @@ async fn plain_blob_table_uses_the_store_audience() {
     )
     .await;
     assert_eq!(
-        read_blob(&db, &store_dir, Some(storage.storage.clone()), &reference)
-            .await
-            .expect("plain blob table reads its exact Store object"),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&db),
+            store_dir.clone()
+        )
+        .read_blob(Some(storage.storage.clone()), &reference)
+        .await
+        .expect("plain blob table reads its exact Store object"),
         cloud_bytes,
     );
 }
@@ -2750,7 +2652,8 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
     // ref is registered. A cloud copy exists as a decoy a store-probing read would serve.
     let declared_hash = crate::blob::content_hash(b"CLOUD-DECOY");
-    plant_blob_row_with_size_hash(&db, &blob.id, false, 11, Some(&declared_hash)).await;
+    db.plant_blob_row_for_test(&blob.id, false, 11, Some(&declared_hash))
+        .await;
     create_exact_blob_object(
         &storage,
         tmp.path(),
@@ -2764,16 +2667,20 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
         .await
         .expect("load Local row blob reference");
 
-    let err = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("a Local user-provided blob with no external ref is terminal");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect_err("a Local user-provided blob with no external ref is terminal");
     assert!(
         matches!(err, BlobCacheError::NoExternalRef { .. }),
         "a missing external ref maps to NoExternalRef: {err:?}",
     );
-    let range_err = read_one_range(&db, &ld, Some(storage.storage.clone()), &reference, 0, 5)
-        .await
-        .expect_err("the ranged read is fail-loud on a missing external ref too");
+    let range_err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, 0, 5)
+            .await
+            .expect_err("the ranged read is fail-loud on a missing external ref too");
     assert!(
         matches!(range_err, BlobCacheError::NoExternalRef { .. }),
         "the ranged read also maps to NoExternalRef: {range_err:?}",
@@ -2798,7 +2705,8 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
     let declared_hash = crate::blob::content_hash(b"CLOUD-DECOY");
-    plant_blob_row_with_size_hash(&db, &blob.id, false, 11, Some(&declared_hash)).await;
+    db.plant_blob_row_for_test(&blob.id, false, 11, Some(&declared_hash))
+        .await;
 
     // A cloud copy under the same id: a read that probed every store would serve these
     // bytes. No external ref, no local-store file, no cache file.
@@ -2815,17 +2723,23 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
         .await
         .expect("load Local row blob reference");
 
-    let err = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect_err("a Local blob missing from the local store is terminal, never a cloud fetch");
+    let err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect_err(
+                "a Local blob missing from the local store is terminal, never a cloud fetch",
+            );
     assert!(
         matches!(err, BlobCacheError::NoLocalCopy { .. }),
         "a missing Local copy maps to NoLocalCopy: {err:?}",
     );
 
-    let range_err = read_one_range(&db, &ld, Some(storage.storage.clone()), &reference, 0, 5)
-        .await
-        .expect_err("the ranged read is fail-loud on a missing Local copy too");
+    let range_err =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, 0, 5)
+            .await
+            .expect_err("the ranged read is fail-loud on a missing Local copy too");
     assert!(
         matches!(range_err, BlobCacheError::NoLocalCopy { .. }),
         "the ranged read also maps to NoLocalCopy: {range_err:?}",
@@ -2851,8 +2765,9 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let path = write_external_file(tmp.path(), "stale.flac", &stale_ext);
     let cloud_bytes = ramp(2048);
     plant_blob_row(&db, &blob.id, false, &cloud_bytes).await;
-    register_external_blob(&db, "note_photos", &blob.id, &path).await;
-    set_blob_remote(&db, &blob.id, true).await;
+    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+        .await;
+    db.set_blob_remote_for_test(&blob.id, true).await;
     let reference = install_exact_remote_blob(
         &db,
         &storage,
@@ -2863,25 +2778,22 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     )
     .await;
 
-    let whole = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("a Remote blob reads the cloud");
+    let whole =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("a Remote blob reads the cloud");
     assert_eq!(
         whole, cloud_bytes,
         "a Remote blob serves the cloud, ignoring the stale external ref",
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = read_one_range(
-        &db,
-        &ld,
-        Some(storage.storage.clone()),
-        &reference,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Remote read");
+    let mid =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob_range(Some(storage.storage.clone()), &reference, offset, len)
+            .await
+            .expect("ranged Remote read");
     assert_eq!(
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
@@ -2956,7 +2868,8 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
 
     // The ns_remote blob resolves note_covers' gate (Remote) → its cloud copy.
     assert_eq!(
-        read_blob(&db, &ld, Some(storage.storage.clone()), &remote_reference)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &remote_reference)
             .await
             .unwrap(),
         b"REMOTE-CLOUD-BYTES",
@@ -2965,7 +2878,8 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
 
     // The ns_local blob resolves note_photos' gate (Local) → its local store.
     assert_eq!(
-        read_blob(&db, &ld, Some(storage.storage.clone()), &local_reference)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &local_reference)
             .await
             .unwrap(),
         b"LOCAL-STORE-BYTES",
@@ -2974,31 +2888,6 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
 }
 
 // ---- Eviction (per-namespace budgets, folder-model) ----
-
-/// Sum the sizes of every file under `storage/cache/<namespace>/` — the same total
-/// cache budget enforcement measures for that namespace, recomputed through the
-/// store directory's cache inventory. An absent subtree contributes nothing.
-async fn cache_total_bytes(ld: &crate::store_dir::StoreDir, namespace: &str) -> u64 {
-    ld.cached_blob_files(namespace)
-        .await
-        .expect("walk the namespace cache subtree")
-        .iter()
-        .map(|file| file.size())
-        .sum()
-}
-
-/// Pin a cache file's modification time to a fixed instant so eviction order is
-/// deterministic (the cache evicts oldest-mtime first). `secs` is an offset from
-/// the unix epoch — smaller is older.
-fn set_cache_mtime(ld: &crate::store_dir::StoreDir, namespace: &str, id: &str, secs: u64) {
-    let path = ld
-        .cache_blob_path(
-            namespace,
-            crate::sync::test_helpers::test_cache_locator_hash(id),
-        )
-        .expect("cache path");
-    set_path_mtime(&path, secs);
-}
 
 fn set_path_mtime(path: &std::path::Path, secs: u64) {
     let file = std::fs::OpenOptions::new()
@@ -3029,7 +2918,7 @@ async fn stage_with_mtime(
         )
         .await
         .expect("stage blob into cache");
-    set_cache_mtime(ld, namespace, id, mtime_secs);
+    ld.set_cache_mtime(namespace, id, mtime_secs);
 }
 
 /// Over budget, eviction deletes the OLDEST files (by mtime) in that namespace first
@@ -3082,7 +2971,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
     )
     .await;
     assert_eq!(
-        cache_total_bytes(&ld, "release_files").await,
+        ld.cache_total_bytes("release_files").await,
         400,
         "all four files are cached"
     );
@@ -3136,7 +3025,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         "the newest file survives",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files").await <= 250,
+        ld.cache_total_bytes("release_files").await <= 250,
         "the cache is back within budget after eviction",
     );
 }
@@ -3227,7 +3116,7 @@ async fn release_files_eviction_leaves_covers_intact() {
         "the newest audio file survives within release_files' budget",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files").await <= 250,
+        ld.cache_total_bytes("release_files").await <= 250,
         "release_files is back within its budget",
     );
     assert!(
@@ -3240,7 +3129,7 @@ async fn release_files_eviction_leaves_covers_intact() {
         "the cover in another namespace is untouched by release_files eviction",
     );
     assert_eq!(
-        cache_total_bytes(&ld, "covers").await,
+        ld.cache_total_bytes("covers").await,
         500,
         "covers' cache is whole — its namespace was never walked",
     );
@@ -3289,14 +3178,16 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .expect("set covers budget");
 
     // Read the first cover into the cache, then age it so it is the oldest.
-    read_blob(&db, &ld, Some(storage.storage.clone()), &cov1_reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &cov1_reference)
         .await
         .expect("first cover read populates the cache");
     set_path_mtime(&cache_path(&ld, &cov1_reference), 1000);
 
     // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
     // read's own sweep evicts the oldest (the first cover), leaving only the second.
-    read_blob(&db, &ld, Some(storage.storage.clone()), &cov2_reference)
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+        .read_blob(Some(storage.storage.clone()), &cov2_reference)
         .await
         .expect("second cover read populates and evicts to budget");
     assert!(
@@ -3309,9 +3200,11 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     );
 
     // A read of the evicted cover re-fetches it from the cloud back into the cache.
-    let refetched = read_blob(&db, &ld, Some(storage.storage.clone()), &cov1_reference)
-        .await
-        .expect("a read of the evicted cover re-fetches it");
+    let refetched =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &cov1_reference)
+            .await
+            .expect("a read of the evicted cover re-fetches it");
     assert_eq!(refetched, vec![1u8; 200], "the re-fetch returns the bytes");
     assert!(
         cache_path(&ld, &cov1_reference).exists(),
@@ -3349,9 +3242,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     )
     .await
     .expect("store source blob");
-    host_exec(
-        &db1,
-        &format!(
+    db1.execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
@@ -3376,7 +3267,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let db2 = open_test_db_with_user_and_host_blobs(photo_decl(), lazy_decl);
     let store_database2 = StoreDatabase::new(&db2);
     let (tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
     let eager = db2
         .row_blob_ref("note_photos", "mir0aaaa")
@@ -3386,14 +3277,10 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         cache_path(&ld, &eager).exists(),
         "the CacheEager blob lands in the evictable cache on pull",
     );
-    pin(
-        &db2,
-        &ld,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&eager),
-    )
-    .await
-    .expect("pin the eager blob into pinned/");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+        .pin_blobs(Some(storage.storage.clone()), std::slice::from_ref(&eager))
+        .await
+        .expect("pin the eager blob into pinned/");
     assert!(pinned_path(&ld, &eager).exists());
 
     // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
@@ -3431,14 +3318,13 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .populate_bytes_for_test(&lazy.namespace, locator_hash(&lazy_reference), &[7u8; 500])
         .await
         .expect("write the lazy blob into the cache");
-    pin(
-        &db2,
-        &ld,
-        Some(storage.storage.clone()),
-        std::slice::from_ref(&lazy_reference),
-    )
-    .await
-    .expect("user-pin the lazy blob");
+    crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+        .pin_blobs(
+            Some(storage.storage.clone()),
+            std::slice::from_ref(&lazy_reference),
+        )
+        .await
+        .expect("user-pin the lazy blob");
     assert!(pinned_path(&ld, &lazy_reference).exists());
 
     // Flood BOTH namespaces' evictable caches, set a tiny budget on EACH, and sweep
@@ -3500,23 +3386,25 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .await
         .expect("delete lazy cloud object");
     assert_eq!(
-        read_blob(&db2, &ld, Some(storage.storage.clone()), &eager)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &eager)
             .await
             .expect("read retained eager pin"),
         vec![9u8; 500],
     );
     assert_eq!(
-        read_blob(&db2, &ld, Some(storage.storage.clone()), &lazy_reference)
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db2), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &lazy_reference)
             .await
             .expect("read retained lazy pin"),
         vec![7u8; 500],
     );
     assert!(
-        cache_total_bytes(&ld, "photos").await <= 10,
+        ld.cache_total_bytes("photos").await <= 10,
         "the photos evictable cache is trimmed to budget, ignoring pinned/",
     );
     assert!(
-        cache_total_bytes(&ld, "audio").await <= 10,
+        ld.cache_total_bytes("audio").await <= 10,
         "the audio evictable cache is trimmed to budget, ignoring pinned/",
     );
 }
@@ -3557,7 +3445,7 @@ async fn unset_namespace_budget_never_evicts() {
         3000,
     )
     .await;
-    assert_eq!(cache_total_bytes(&ld, "release_files").await, 15000);
+    assert_eq!(ld.cache_total_bytes("release_files").await, 15000);
 
     // No budget set for this namespace — an explicit sweep is a no-op.
     StoreBlobCache::new(store_database.clone(), ld.clone())
@@ -3565,7 +3453,7 @@ async fn unset_namespace_budget_never_evicts() {
         .await
         .expect("evict is a no-op with no budget");
     assert_eq!(
-        cache_total_bytes(&ld, "release_files").await,
+        ld.cache_total_bytes("release_files").await,
         15000,
         "a big cache stays whole when no budget is set",
     );
@@ -3619,9 +3507,11 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         install_exact_remote_blob(&db, &storage, tmp.path(), &blob.id, &blob.namespace, &bytes)
             .await;
 
-    let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-        .await
-        .expect("read fetches and populates, then evicts to budget");
+    let got =
+        crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+            .read_blob(Some(storage.storage.clone()), &reference)
+            .await
+            .expect("read fetches and populates, then evicts to budget");
     assert_eq!(got, bytes, "the triggering read still returns its bytes");
     assert!(
         cache_path(&ld, &reference).exists(),
@@ -3637,7 +3527,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         "the older blob is the one evicted",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files").await <= 150,
+        ld.cache_total_bytes("release_files").await <= 150,
         "the cache is back within budget after the read-triggered eviction",
     );
 }
@@ -3676,15 +3566,17 @@ async fn budget_never_drifts_over_across_repeated_populates() {
             last_path = Some(exact_cache_path);
         }
 
-        let got = read_blob(&db, &ld, Some(storage.storage.clone()), &reference)
-            .await
-            .expect("each read populates then evicts to budget");
+        let got =
+            crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
+                .read_blob(Some(storage.storage.clone()), &reference)
+                .await
+                .expect("each read populates then evicts to budget");
         assert_eq!(got, bytes, "each read returns its freshly-fetched bytes");
 
         // The cache is within budget after every populate, never drifting over as
         // new blobs arrive.
         assert!(
-            cache_total_bytes(&ld, "release_files").await <= 250,
+            ld.cache_total_bytes("release_files").await <= 250,
             "after populate {i} the cache is within the 250-byte budget",
         );
     }
@@ -3693,7 +3585,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     // budget and 100-byte blobs, at most two fit, so after six reads the earliest
     // blobs must have been evicted and the just-read last blob must still be present.
     assert!(
-        cache_total_bytes(&ld, "release_files").await <= 200,
+        ld.cache_total_bytes("release_files").await <= 200,
         "at most two 100-byte blobs remain under the 250-byte budget",
     );
     assert!(
@@ -3775,7 +3667,7 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
         "the newer, unprotected file is the one evicted instead",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files").await <= 100,
+        ld.cache_total_bytes("release_files").await <= 100,
         "the cache is within budget after the protected eviction",
     );
 }
@@ -3846,7 +3738,7 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
         "every other candidate is still evicted",
     );
     assert_eq!(
-        cache_total_bytes(&ld, "release_files").await,
+        ld.cache_total_bytes("release_files").await,
         100,
         "the cache is left over budget, holding exactly the in-use file",
     );

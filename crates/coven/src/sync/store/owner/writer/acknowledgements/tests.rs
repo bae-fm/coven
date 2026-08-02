@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use super::*;
 use crate::database::Database;
-use crate::protocol::store_commit::CommitFrontier;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::TestDevice;
@@ -49,63 +48,6 @@ async fn initialize(
         .expect("create acknowledgement test Store")
 }
 
-async fn stage(device: &TestDevice) -> StoreAck {
-    stage_at(device, "2026-07-16T00:00:00Z").await
-}
-
-async fn stage_at(device: &TestDevice, last_sync: &str) -> StoreAck {
-    let frontier = CommitFrontier::from_refs(
-        device
-            .db
-            .clone()
-            .materialized_frontier()
-            .await
-            .expect("read acknowledgement frontier"),
-    )
-    .expect("shape acknowledgement frontier");
-    device
-        .stage_acknowledgement_exact(frontier, last_sync.to_string())
-        .await
-        .expect("stage exact acknowledgement")
-}
-
-async fn drain(device: &TestDevice) -> Result<u64, StoreAckError> {
-    device.drain_acknowledgements_exact().await
-}
-
-async fn persist_candidate(
-    device: &TestDevice,
-    outbound: &crate::database::OutboundStoreAck,
-) -> crate::sync::store::operations::PreparedStoreOperationCommit {
-    let mut writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize acknowledgement writer");
-    let plan = writer
-        .prepare_plan()
-        .await
-        .expect("prepare acknowledgement activation");
-    plan.common()
-        .validate_acknowledgement(&outbound.ack.value)
-        .expect("acknowledgement matches activation predecessor");
-    let candidate = writer
-        .prepare_candidate(
-            plan,
-            crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
-                reference: outbound.reference.clone(),
-                value: outbound.ack.value.clone(),
-                circle_acknowledgements: Vec::new(),
-            },
-        )
-        .await
-        .expect("prepare acknowledgement candidate");
-    device
-        .prepare_acknowledgement_activation_for_test(outbound.reference.clone(), candidate.clone())
-        .await
-        .expect("persist acknowledgement candidate");
-    candidate
-}
-
 struct LosingAckFixture {
     home: InMemoryCloudHome,
     signer: UserKeypair,
@@ -122,13 +64,15 @@ async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
     let storage = storage(&home, &signer);
     let db = open(path, "ack-loser-device");
     let device = Box::pin(initialize(&db, &storage, &signer)).await;
-    Box::pin(stage(&device)).await;
+    Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
+        .await
+        .expect("stage exact acknowledgement");
     let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
         .expect("staged acknowledgement exists");
-    let losing = Box::pin(persist_candidate(&device, &outbound)).await;
+    let losing = Box::pin(device.prepare_acknowledgement_candidate_for_test(&outbound)).await;
     let mut writer = device
         .authorize_writer()
         .await
@@ -193,7 +137,10 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
         .await
         .expect("read founder acknowledgement")
         .expect("Store creation publishes its founder acknowledgement");
-    let ack = stage(&device).await;
+    let ack = device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     assert_eq!(ack.sequence, founder_ack.reference.sequence + 1);
     assert_eq!(
         ack.successor.predecessor,
@@ -213,7 +160,8 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
         .expect("bind reopened acknowledgement Store");
     home.fail_exact_create_after_call(1);
     assert_eq!(
-        drain(&reopened_device)
+        reopened_device
+            .drain_acknowledgements_exact()
             .await
             .expect("resolve lost exact-create response"),
         1
@@ -245,7 +193,10 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
         .await
         .expect("read founder acknowledgement")
         .expect("Store creation publishes its founder acknowledgement");
-    stage(&device).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     let pending = store_database(&db)
         .oldest_outbound_store_ack()
         .await
@@ -254,7 +205,7 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
     let slot = pending.reference.object.slot().clone();
     home.insert_exact_object(slot.logical_key(), b"competing bytes".to_vec());
 
-    assert!(drain(&device).await.is_err());
+    assert!(device.drain_acknowledgements_exact().await.is_err());
     assert_eq!(
         home.get(slot.logical_key()),
         Some(b"competing bytes".to_vec())
@@ -306,7 +257,10 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
     let winner_device = TestDevice::load(&winner_db, storage.clone(), signer.clone())
         .await
         .expect("bind winner acknowledgement Store");
-    stage_at(&winner_device, "2026-07-16T00:00:01Z").await;
+    winner_device
+        .stage_current_acknowledgement("2026-07-16T00:00:01Z")
+        .await
+        .expect("stage exact acknowledgement");
     let winner = store_database(&winner_db)
         .oldest_outbound_store_ack()
         .await
@@ -321,7 +275,10 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
     let loser_device = TestDevice::load(&loser_db, storage.clone(), signer.clone())
         .await
         .expect("bind loser acknowledgement Store");
-    stage_at(&loser_device, "2026-07-16T00:00:02Z").await;
+    loser_device
+        .stage_current_acknowledgement("2026-07-16T00:00:02Z")
+        .await
+        .expect("stage exact acknowledgement");
     let loser = store_database(&loser_db)
         .oldest_outbound_store_ack()
         .await
@@ -332,7 +289,9 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         loser.reference.object.slot()
     );
     assert_ne!(winner.reference, loser.reference);
-    let losing_candidate = persist_candidate(&loser_device, &loser).await;
+    let losing_candidate = loser_device
+        .prepare_acknowledgement_candidate_for_test(&loser)
+        .await;
     let losing_object_ids = losing_candidate
         .acknowledgement_remote_objects(&loser.ack)
         .expect("load losing acknowledgement candidate graph")
@@ -340,7 +299,7 @@ async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         .map(|remote| remote.object_id())
         .collect::<Vec<_>>();
 
-    let result = drain(&loser_device).await;
+    let result = loser_device.drain_acknowledgements_exact().await;
     assert_eq!(
         result.expect("adopt and activate acknowledgement slot winner"),
         1
@@ -385,14 +344,23 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "ack-test-device");
     let device = initialize(&db, &storage, &signer).await;
-    let first = stage(&device).await;
-    drain(&device).await.expect("publish first acknowledgement");
+    let first = device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
+    device
+        .drain_acknowledgements_exact()
+        .await
+        .expect("publish first acknowledgement");
     let first_published = store_database(&db)
         .latest_local_store_ack()
         .await
         .expect("read first acknowledgement")
         .expect("first acknowledgement exists");
-    let second = stage(&device).await;
+    let second = device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     let second_pending = store_database(&db)
         .oldest_outbound_store_ack()
         .await
@@ -408,7 +376,8 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
         &first.successor.next_slot
     );
     assert_eq!(second.sequence, first.sequence + 1);
-    drain(&device)
+    device
+        .drain_acknowledgements_exact()
         .await
         .expect("publish successor acknowledgement after an activated predecessor");
     assert_eq!(
@@ -431,7 +400,9 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     let storage = storage(&home, &signer);
     let db = open(&path, "ack-test-device");
     let device = Box::pin(initialize(&db, &storage, &signer)).await;
-    Box::pin(stage(&device)).await;
+    Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
+        .await
+        .expect("stage exact acknowledgement");
     let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
@@ -441,7 +412,9 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .create_protocol_object(&outbound.ack.prepared)
         .await
         .expect("publish acknowledgement object");
-    let candidate = persist_candidate(&device, &outbound).await;
+    let candidate = device
+        .prepare_acknowledgement_candidate_for_test(&outbound)
+        .await;
     let acknowledgement_remote = candidate
         .acknowledgement_remote_objects(&outbound.ack)
         .expect("candidate owns acknowledgement")
@@ -467,7 +440,10 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     let reopened_store = TestDevice::load(&reopened, storage.clone(), signer.clone())
         .await
         .expect("bind reopened acknowledgement Store");
-    assert_eq!(drain(&reopened_store).await.unwrap(), 1);
+    assert_eq!(
+        reopened_store.drain_acknowledgements_exact().await.unwrap(),
+        1
+    );
     assert_eq!(
         reopened_store.latest_local_store_position().await.unwrap(),
         activated_position
@@ -488,13 +464,18 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     let storage = storage(&home, &signer);
     let db = open(&path, "ack-test-device");
     let device = initialize(&db, &storage, &signer).await;
-    stage(&device).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
         .expect("staged acknowledgement exists");
-    let candidate = persist_candidate(&device, &outbound).await;
+    let candidate = device
+        .prepare_acknowledgement_candidate_for_test(&outbound)
+        .await;
     let expected = candidate.reference.clone();
     drop(device);
     drop(db);
@@ -513,7 +494,10 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
         crate::database::OutboundStoreAckActivation::Prepared(ref prepared)
             if prepared.reference == expected
     ));
-    assert_eq!(drain(&reopened_store).await.unwrap(), 1);
+    assert_eq!(
+        reopened_store.drain_acknowledgements_exact().await.unwrap(),
+        1
+    );
     assert_eq!(
         reopened_store.latest_local_store_position().await.unwrap(),
         Some(expected)
@@ -527,13 +511,18 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "ack-nonactivation-device");
     let device = initialize(&db, &storage, &signer).await;
-    stage(&device).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
         .expect("staged acknowledgement exists");
-    let candidate = persist_candidate(&device, &outbound).await;
+    let candidate = device
+        .prepare_acknowledgement_candidate_for_test(&outbound)
+        .await;
     let mut acknowledgement = candidate
         .acknowledgement_remote_objects(&outbound.ack)
         .expect("candidate owns acknowledgement")
@@ -585,7 +574,8 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
     } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
 
     assert_eq!(
-        drain(&device)
+        device
+            .drain_acknowledgements_exact()
             .await
             .expect("settle losing acknowledgement activation"),
         1
@@ -646,7 +636,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
     } = Box::pin(losing_ack_fixture(&path)).await;
     home.fail_exact_delete_on_call(1);
 
-    assert!(drain(&device).await.is_err());
+    assert!(device.drain_acknowledgements_exact().await.is_err());
     assert!(matches!(
         store_database(&db).oldest_outbound_store_ack()
             .await
@@ -668,7 +658,13 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
     let reopened_device = TestDevice::load(&reopened, storage.clone(), signer.clone())
         .await
         .expect("bind reopened losing acknowledgement Store");
-    assert_eq!(drain(&reopened_device).await.unwrap(), 1);
+    assert_eq!(
+        reopened_device
+            .drain_acknowledgements_exact()
+            .await
+            .unwrap(),
+        1
+    );
     assert!(store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
@@ -695,7 +691,9 @@ async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()
         losing,
     } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
     home.fail_exact_delete_on_call(1);
-    assert!(Box::pin(drain(&device)).await.is_err());
+    assert!(Box::pin(device.drain_acknowledgements_exact())
+        .await
+        .is_err());
 
     let head = crate::protocol::store_commit::StoreDeviceHeadRef {
         head_hash: losing.head.head_hash(),
@@ -738,7 +736,9 @@ async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()
         .await
         .expect("install mismatched durable head proof");
 
-    assert!(Box::pin(drain(&device)).await.is_err());
+    assert!(Box::pin(device.drain_acknowledgements_exact())
+        .await
+        .is_err());
     assert_eq!(
         store_database(&db)
             .oldest_outbound_store_ack()
@@ -757,13 +757,18 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "ack-alternate-head-device");
     let device = initialize(&db, &storage, &signer).await;
-    stage(&device).await;
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     let outbound = store_database(&db)
         .oldest_outbound_store_ack()
         .await
         .unwrap()
         .expect("staged acknowledgement exists");
-    let candidate = persist_candidate(&device, &outbound).await;
+    let candidate = device
+        .prepare_acknowledgement_candidate_for_test(&outbound)
+        .await;
     let expected_head = candidate.head.clone();
     let expected_prepared = candidate.prepared_head.clone();
     let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
@@ -808,7 +813,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         .await
         .expect("publish alternate head");
 
-    assert_eq!(drain(&device).await.unwrap(), 1);
+    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 1);
     assert_eq!(
         store_database(&db)
             .activated_store_ack(&outbound.reference.registration)
@@ -816,25 +821,6 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
             .unwrap(),
         Some(outbound.reference)
     );
-}
-
-async fn local_device_id(db: &Database) -> crate::protocol::store_commit::StoreDeviceId {
-    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .unwrap()
-        .expect("local Store device id")
-        .parse()
-        .expect("parse local Store device id")
-}
-
-async fn current_frontier(db: &Database) -> CommitFrontier {
-    CommitFrontier::from_refs(
-        store_database(db)
-            .materialized_frontier()
-            .await
-            .expect("read frontier"),
-    )
-    .expect("shape frontier")
 }
 
 #[tokio::test]
@@ -856,15 +842,21 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
         .await
         .expect("install active Circle");
 
-    let frontier = current_frontier(&db).await;
-    stage(&device).await;
+    let frontier = device
+        .acknowledgement_frontier()
+        .await
+        .expect("read frontier");
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     device
         .stage_circle_acknowledgements(&frontier, "2026-07-16T00:00:00Z")
         .await
         .expect("stage Circle acknowledgements");
-    assert_eq!(drain(&device).await.unwrap(), 1);
+    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 1);
 
-    let device_id = local_device_id(&db).await;
+    let device_id = device.typed_device_id();
     let reference = store_database(&db)
         .activated_circle_ack(circle_id, device_id)
         .await
@@ -897,15 +889,21 @@ async fn inactive_circle_stages_no_acknowledgement() {
         .await
         .expect("install inactive Circle");
 
-    let frontier = current_frontier(&db).await;
-    stage(&device).await;
+    let frontier = device
+        .acknowledgement_frontier()
+        .await
+        .expect("read frontier");
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     device
         .stage_circle_acknowledgements(&frontier, "2026-07-16T00:00:00Z")
         .await
         .expect("stage Circle acknowledgements");
-    assert_eq!(drain(&device).await.unwrap(), 1);
+    assert_eq!(device.drain_acknowledgements_exact().await.unwrap(), 1);
 
-    let device_id = local_device_id(&db).await;
+    let device_id = device.typed_device_id();
     assert_eq!(
         store_database(&db)
             .activated_circle_ack(circle_id, device_id)
@@ -935,15 +933,21 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
         .await
         .expect("install active Circle");
 
-    let frontier = current_frontier(&db).await;
-    stage(&device).await;
+    let frontier = device
+        .acknowledgement_frontier()
+        .await
+        .expect("read frontier");
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     device
         .stage_circle_acknowledgements(&frontier, "2026-07-16T00:00:00Z")
         .await
         .expect("stage Circle acknowledgements");
     // Crash between staging and draining: the outbound Circle acknowledgement is
     // durable and its object is not yet activated.
-    let device_id = local_device_id(&db).await;
+    let device_id = device.typed_device_id();
     assert_eq!(
         store_database(&db)
             .activated_circle_ack(circle_id, device_id)
@@ -958,8 +962,14 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let reopened_device = TestDevice::load(&reopened, storage.clone(), signer.clone())
         .await
         .expect("bind reopened Circle acknowledgement Store");
-    assert_eq!(drain(&reopened_device).await.unwrap(), 1);
-    let device_id = local_device_id(&reopened).await;
+    assert_eq!(
+        reopened_device
+            .drain_acknowledgements_exact()
+            .await
+            .unwrap(),
+        1
+    );
+    let device_id = reopened_device.typed_device_id();
     let reference = store_database(&reopened)
         .activated_circle_ack(circle_id, device_id)
         .await
@@ -968,7 +978,13 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     assert_eq!(reference.circle_id, circle_id);
     assert_eq!(reference.sequence, 1);
     // A repeat drain is a no-op: nothing remains queued.
-    assert_eq!(drain(&reopened_device).await.unwrap(), 0);
+    assert_eq!(
+        reopened_device
+            .drain_acknowledgements_exact()
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -989,8 +1005,14 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     .await
     .expect("install active Circle");
 
-    let frontier = current_frontier(&db).await;
-    stage(&device).await;
+    let frontier = device
+        .acknowledgement_frontier()
+        .await
+        .expect("read frontier");
+    device
+        .stage_current_acknowledgement("2026-07-16T00:00:00Z")
+        .await
+        .expect("stage exact acknowledgement");
     device
         .stage_circle_acknowledgements(&frontier, "2026-07-16T00:00:00Z")
         .await
@@ -1018,7 +1040,7 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
 
     // Create-once refuses the different bytes: the drain fails loud rather than
     // silently adopting a foreign object on this device's per-Circle stream.
-    let result = drain(&device).await;
+    let result = device.drain_acknowledgements_exact().await;
     assert!(
         matches!(result, Err(StoreAckError::InvalidOutbound(_))),
         "unexpected drain outcome: {result:?}"

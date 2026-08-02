@@ -12,7 +12,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
     assert!(!fixture.home.contains_exact_object(&batch.commit.object));
     fixture.publish_competing_merge_head().await;
     let observation = match fixture
-        .store
+        .device
         .observe_excluded_candidate_head_for_test(
             &batch.head.value,
             &batch.commit.value,

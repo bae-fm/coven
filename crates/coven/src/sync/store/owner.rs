@@ -1,6 +1,7 @@
 use super::*;
 use crate::database::BlockedWriteDiscard;
 use crate::protocol::store_commit::StoreRootRef;
+use std::sync::Arc;
 
 mod authorized_history;
 mod authorized_store;
@@ -730,6 +731,15 @@ impl Store {
         self.database
             .retained_merge_replay_inputs(self.root.reference().clone())
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn resolved_store_device_state_for_test(
+        &self,
+        reference: &crate::protocol::store_commit::StoreDeviceStateRef,
+    ) -> Result<crate::protocol::store_commit::ResolvedStoreDeviceState, crate::database::DbError>
+    {
+        self.database.resolved_store_device_state(reference).await
     }
 
     #[cfg(test)]

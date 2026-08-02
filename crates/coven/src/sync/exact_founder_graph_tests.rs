@@ -1,7 +1,17 @@
 use crate::keys::UserKeypair;
-use crate::sync::test_helpers::{
-    host_exec, open_test_db, pull_into, query_text, temp_store_dir, TestStore,
-};
+use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
+
+trait ExactFounderGraphDatabaseOps {
+    async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64;
+}
+
+impl ExactFounderGraphDatabaseOps for crate::database::Database {
+    async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64 {
+        self.test_sql(move |database| database.table_row_count(table))
+            .await
+            .expect("count lifecycle rows")
+    }
+}
 
 #[tokio::test]
 async fn created_merge_store_immediately_has_its_exact_founder_chain() {
@@ -45,16 +55,16 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
         .expect("open existing Store through its founder registration");
 
     assert_eq!(store.home.exact_create_count(), creates_before);
-    let local_registrations = table_count(
-        &opened_db,
-        crate::database::DatabaseTestTable::named("local_store_device_registration"),
-    )
-    .await;
-    let activations = table_count(
-        &opened_db,
-        crate::database::DatabaseTestTable::named("store_device_registration_activations"),
-    )
-    .await;
+    let local_registrations = opened_db
+        .table_count(crate::database::DatabaseTestTable::named(
+            "local_store_device_registration",
+        ))
+        .await;
+    let activations = opened_db
+        .table_count(crate::database::DatabaseTestTable::named(
+            "store_device_registration_activations",
+        ))
+        .await;
     assert_eq!(local_registrations, 1);
     assert_eq!(activations, 1);
 
@@ -65,30 +75,21 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(rebound.device_id, opened.device_id);
     assert_eq!(store.home.exact_create_count(), creates_before);
     assert_eq!(
-        table_count(
-            &opened_db,
-            crate::database::DatabaseTestTable::named("local_store_device_registration"),
-        )
-        .await,
+        opened_db
+            .table_count(crate::database::DatabaseTestTable::named(
+                "local_store_device_registration",
+            ))
+            .await,
         local_registrations,
     );
     assert_eq!(
-        table_count(
-            &opened_db,
-            crate::database::DatabaseTestTable::named("store_device_registration_activations"),
-        )
-        .await,
+        opened_db
+            .table_count(crate::database::DatabaseTestTable::named(
+                "store_device_registration_activations",
+            ))
+            .await,
         activations,
     );
-}
-
-async fn table_count(
-    db: &crate::database::Database,
-    table: crate::database::DatabaseTestTable,
-) -> i64 {
-    db.test_sql(move |database| database.table_row_count(table))
-        .await
-        .expect("count lifecycle rows")
 }
 
 #[tokio::test]
@@ -98,12 +99,12 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
     let store = TestStore::create(&source, "opened-exact-pull", founder)
         .await
         .expect("create source Store");
-    host_exec(
-        &source,
-        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+    source
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('note-1', 'exact pull', 1, '0000000001000-0000-source', '2026-07-16')",
-    )
-    .await;
+        )
+        .await;
     let (_source_temp, source_dir) = temp_store_dir();
     assert!(store
         .publish_pending(&source, &source_dir)
@@ -112,28 +113,32 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
 
     let destination = open_test_db();
     let (_destination_temp, destination_dir) = temp_store_dir();
-    let (_, result) = pull_into(&destination, &store, &destination_dir).await;
+    let (_, result) = store.pull_into(&destination, &destination_dir).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(
-        query_text(&destination, "SELECT title FROM notes WHERE id = 'note-1'").await,
+        destination
+            .query_test_text("SELECT title FROM notes WHERE id = 'note-1'")
+            .await,
         "exact pull"
     );
 
-    host_exec(
-        &source,
-        "UPDATE notes SET title = 'exact successor', \
+    source
+        .execute_test_host_write(
+            "UPDATE notes SET title = 'exact successor', \
          _updated_at = '0000000002000-0000-source' WHERE id = 'note-1'",
-    )
-    .await;
+        )
+        .await;
     assert!(store
         .publish_pending(&source, &source_dir)
         .await
         .expect("publish exact successor commit"));
-    let (_, successor) = pull_into(&destination, &store, &destination_dir).await;
+    let (_, successor) = store.pull_into(&destination, &destination_dir).await;
     assert_eq!(successor.changesets_applied, 1);
     assert_eq!(
-        query_text(&destination, "SELECT title FROM notes WHERE id = 'note-1'").await,
+        destination
+            .query_test_text("SELECT title FROM notes WHERE id = 'note-1'")
+            .await,
         "exact successor"
     );
 }

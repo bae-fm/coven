@@ -81,6 +81,21 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "prepare",
     ),
     (
+        "crates/coven/src/sync/cycle_tests.rs",
+        "SamePrincipalApprovalFixture",
+        "prepare",
+    ),
+    (
+        "crates/coven/src/sync/store/membership/tests.rs",
+        "MergeFixture",
+        "new",
+    ),
+    (
+        "crates/coven/src/sync/store_history_checkpoint_tests.rs",
+        "PublishedHistory",
+        "publish",
+    ),
+    (
         "crates/coven/src/sync/store/owner/circles/snapshots/tests.rs",
         "CircleSnapshotFixture",
         "initialize",
@@ -110,6 +125,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven/src/sync/test_helpers.rs",
         "TestDevice",
         "load_with_database",
+    ),
+    (
+        "crates/coven/src/sync/test_helpers.rs",
+        "TestDevice",
+        "open_with_database",
     ),
     (
         "crates/coven/src/sync/test_helpers.rs",

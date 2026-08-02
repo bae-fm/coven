@@ -26,8 +26,8 @@ use crate::storage::{CloudCipher, PendingRotation};
 use crate::store_dir::StoreDir;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
-    exact_tombstone_key, exec, open_test_db, open_test_db_with_blob, plaintext_cipher,
-    plant_blob_row, pubkey_hex, TestStore,
+    exact_tombstone_key, open_test_db, open_test_db_with_blob, plaintext_cipher, plant_blob_row,
+    pubkey_hex, TestStore,
 };
 
 const T0: &str = "2024-06-01T00:00:00Z";
@@ -1301,8 +1301,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     );
 
     // The peer pulls the retraction (the row is gone); past grace the blob is reclaimed.
-    exec(
-        &db,
+    db.execute_test_sql(
         "DELETE FROM note_photos WHERE id = 'bloblive'; DELETE FROM notes WHERE id = 'n1'",
     )
     .await;
@@ -1354,8 +1353,7 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
 
     // Remove the bound row's parent with foreign keys disabled. The exact child
     // binding remains, but locality resolution reaches no root row.
-    exec(
-        &db,
+    db.execute_test_sql(
         "PRAGMA foreign_keys=OFF; \
          DELETE FROM notes WHERE id = 'n1'; \
          PRAGMA foreign_keys=ON",
@@ -1410,7 +1408,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         .await
         .expect("activate exact member uploader");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    crate::sync::test_helpers::pull_into(&db, &storage, &store_dir).await;
+    storage.pull_into(&db, &store_dir).await;
 
     // One blob under the member's own prefix, one under the founder's. No live rows
     // reference either (the DB is empty), so both are ripe for reclaim — only the
@@ -1491,7 +1489,7 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         .await
         .expect("activate exact member uploader");
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    crate::sync::test_helpers::pull_into(&db, &storage, &store_dir).await;
+    storage.pull_into(&db, &store_dir).await;
 
     let foreign = create_exact_blob_as(
         &storage,
@@ -1755,9 +1753,9 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // Opening this exact Store under the established owner refuses the forged root
     // before a cycle can load membership or run GC.
     let joining_db = open_test_db();
-    let result = crate::sync::test_helpers::open_exact_test_store_as(
-        &joining_db,
-        &storage.storage,
+    let result = crate::sync::store::Store::open(
+        crate::database::StoreDatabase::new(&joining_db),
+        storage.storage.clone(),
         &storage.root,
         &real_owner,
     )
@@ -1765,7 +1763,7 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     assert!(
         result.is_err(),
         "loading a chain refounded under a non-owner key refuses the cycle before \
-         any tombstone is judged, got {result:?}",
+         any tombstone is judged",
     );
     assert!(
         storage.storage.verify_blob_object(&stored).await.is_ok(),
@@ -1812,9 +1810,9 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     plant_tombstone(storage.home.as_ref(), &tombstone).await;
 
     let joining_db = open_test_db();
-    let result = crate::sync::test_helpers::open_exact_test_store_as(
-        &joining_db,
-        &storage.storage,
+    let result = crate::sync::store::Store::open(
+        crate::database::StoreDatabase::new(&joining_db),
+        storage.storage.clone(),
         &storage.root,
         &real_owner,
     )
@@ -1822,7 +1820,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     assert!(
         result.is_err(),
         "an empty (wiped) chain under a pinned owner refuses the cycle at load, \
-         before any tombstone is judged, got {result:?}",
+         before any tombstone is judged",
     );
     assert!(
         storage.storage.verify_blob_object(&stored).await.is_ok(),

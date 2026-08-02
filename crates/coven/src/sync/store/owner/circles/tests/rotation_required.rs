@@ -61,22 +61,308 @@ fn open_circle_routing_test_db() -> Database {
 struct RotationFixture {
     db: Database,
     store: TestStore,
+    owner_device: TestDevice,
     signer: UserKeypair,
     components: SyncComponents,
     circle_id: CircleId,
     member: UserKeypair,
     member_pubkey: String,
     member_db: Database,
+    member_device: RotationMemberDevice,
     store_dir: crate::store_dir::StoreDir,
     _store_temp: tempfile::TempDir,
     security: crate::store_security::StoreSecurity,
+}
+
+struct RotationMemberDevice {
+    device: TestDevice,
+    _temp: tempfile::TempDir,
+    store_dir: crate::store_dir::StoreDir,
+}
+
+impl RotationMemberDevice {
+    async fn pull(&self) {
+        self.device
+            .pull_store(&self.store_dir)
+            .await
+            .expect("member installs the Circle bootstrap");
+    }
+
+    async fn publish_acknowledgements(&self, stamp: &str) {
+        let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+            self.device
+                .db
+                .materialized_frontier()
+                .await
+                .expect("read member frontier"),
+        )
+        .expect("shape member frontier");
+        self.device
+            .stage_acknowledgement(frontier.clone(), stamp.to_string())
+            .await
+            .expect("stage member Store acknowledgement");
+        self.device
+            .stage_circle_acknowledgements(&frontier, stamp)
+            .await
+            .expect("stage member Circle acknowledgement");
+        self.device
+            .drain_acknowledgements()
+            .await
+            .expect("publish member acknowledgements");
+    }
+}
+
+impl RotationFixture {
+    async fn remove_store_member(&self) {
+        self.components
+            .remove_member(&self.member_pubkey, &self.security)
+            .await
+            .expect("remove Store member");
+    }
+
+    async fn capture_document(
+        &self,
+        row_id: &str,
+        audience: Option<CircleId>,
+        stamp: &str,
+    ) -> crate::WriteId {
+        self.db
+            .capture_document_for_test(row_id, audience, stamp)
+            .await
+            .expect("capture document row")
+    }
+
+    async fn active_store_members(&self) -> BTreeSet<String> {
+        self.store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("load cycle Store")
+            .membership_for_test()
+            .await
+            .expect("load cycle membership")
+            .current_members()
+            .into_iter()
+            .map(|(pubkey, _)| pubkey)
+            .collect()
+    }
+
+    async fn latest_circle_snapshot(
+        &self,
+        circle_id: CircleId,
+    ) -> Option<crate::database::PublishedCircleSnapshot> {
+        StoreDatabase::new(&self.db)
+            .latest_local_circle_snapshot(circle_id)
+            .await
+            .expect("read latest local Circle snapshot")
+    }
+
+    async fn pending_circle_snapshot(
+        &self,
+        circle_id: CircleId,
+    ) -> Option<crate::database::DurableCircleSnapshotPublication> {
+        StoreDatabase::new(&self.db)
+            .outbound_circle_snapshot_publication(circle_id)
+            .await
+            .expect("read pending Circle snapshot publication")
+    }
+
+    async fn release_retained_replay_ownership(&self) {
+        self.db
+            .release_retained_replay_ownership_for_test()
+            .await
+            .expect("release retained replay ownership");
+    }
+
+    async fn capture_document_with_file(
+        &self,
+        document_id: &str,
+        file_id: &str,
+        audience: Option<CircleId>,
+        bytes: &[u8],
+        stamp: &str,
+    ) -> crate::WriteId {
+        let write_id = self
+            .db
+            .capture_document_with_file_for_test(document_id, file_id, audience, bytes, stamp)
+            .await
+            .expect("capture document and its file row");
+        crate::store_dir::StoreDir::store_local_blob(&self.store_dir, "files", file_id, bytes)
+            .await
+            .expect("stage the document file bytes");
+        write_id
+    }
+
+    async fn move_document_audience(
+        &self,
+        document_id: &str,
+        audience: Option<CircleId>,
+        stamp: &str,
+    ) {
+        let audience = audience.map(|circle_id| circle_id.to_string());
+        let document_id = document_id.to_string();
+        let stamp = stamp.to_string();
+        let staging = self
+            .components
+            .store()
+            .host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir.clone());
+        StoreDatabase::new(&self.db)
+            .run_host_store_write_for_test(
+                Some(EncryptionService::from_key([42; 32])),
+                Some(staging),
+                move |transaction| {
+                    transaction
+                        .execute(
+                            "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
+                            rusqlite::params![document_id, audience, stamp],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+            .await
+            .expect("move the document to another audience");
+    }
+
+    async fn stored_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
+        StoreDatabase::new(&self.db)
+            .stored_blob_reclaim_candidates_for_test()
+            .await
+            .expect("read stored blob candidates")
+            .into_iter()
+            .map(|(stored, _)| stored)
+            .collect()
+    }
+
+    async fn document_file_stamp(&self, file_id: &str) -> String {
+        self.db
+            .document_file_stamp_for_test(file_id)
+            .await
+            .expect("read the document file row stamp")
+    }
+
+    async fn owner_circle_snapshot_stream(
+        &self,
+    ) -> Vec<(
+        crate::protocol::store_commit::CircleSnapshotRef,
+        crate::protocol::store_commit::CircleSnapshotMeta,
+    )> {
+        let control = StoreDatabase::new(&self.db)
+            .current_circle_control(self.circle_id)
+            .await
+            .expect("read the current Circle control")
+            .expect("the Circle has an active control");
+        let device = self
+            .store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("bind Circle snapshot access Store");
+        let encryption = device
+            .circle_package_access(self.circle_id, control)
+            .await
+            .expect("resolve Circle snapshot access")
+            .expect("the Circle access is retained")
+            .into_encryption();
+        device
+            .load_circle_snapshot_refs(self.circle_id, encryption)
+            .await
+            .expect("walk the owner's Circle snapshot stream")
+    }
+
+    async fn bootstrap_image_present(&self, image: &crate::storage::ExactObjectRef) -> bool {
+        self.db
+            .remote_object_exists_for_test(image.clone())
+            .await
+            .expect("read bootstrap image ownership presence")
+    }
+
+    async fn member_seed_image(&self, circle_id: CircleId) -> crate::storage::ExactObjectRef {
+        StoreDatabase::new(&self.member_db)
+            .circle_bootstrap_coverage_ref(circle_id)
+            .await
+            .expect("read member Circle bootstrap coverage")
+            .expect("the member's projection seeded from a real bootstrap coverage row")
+            .bootstrap
+            .image
+            .object
+    }
+
+    async fn bootstrap_image_owner_count(&self, image: &crate::storage::ExactObjectRef) -> usize {
+        let record = self
+            .db
+            .remote_object_for_test(image.clone())
+            .await
+            .expect("load bootstrap image ownership");
+        let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
+        else {
+            panic!("a live bootstrap image is a shared object");
+        };
+        let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+            shared.state
+        else {
+            panic!("a live bootstrap image is verified");
+        };
+        ownership
+            .activated
+            .iter()
+            .filter(|owner| {
+                matches!(
+                    owner,
+                    crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                )
+            })
+            .count()
+    }
+
+    async fn live_bootstrap_images(&self) -> Vec<(crate::storage::ExactObjectRef, usize)> {
+        self.db
+            .remote_objects_for_test()
+            .await
+            .expect("read remote object records")
+            .into_iter()
+            .filter_map(|record| {
+                let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) =
+                    record
+                else {
+                    return None;
+                };
+                if !matches!(
+                    shared.identity.domain,
+                    crate::protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+                ) {
+                    return None;
+                }
+                let crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                    ownership,
+                } = shared.state
+                else {
+                    return None;
+                };
+                let owners = ownership
+                    .activated
+                    .iter()
+                    .filter(|owner| {
+                        matches!(
+                            owner,
+                            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                        )
+                    })
+                    .count();
+                Some((shared.identity.object.clone(), owners))
+            })
+            .collect()
+    }
 }
 
 async fn rotation_fixture(label: &str) -> RotationFixture {
     let db = open_circle_routing_test_db();
     let (store, signer, founder) = persist_merge_operation(&db, label).await;
     let circle_id = founder.circle_id();
-    resume_circle_operations(&db, &store.storage, &signer)
+    let owner_device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store");
+    owner_device
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -99,10 +385,16 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         .await
         .expect("invite Store member");
     let member_db = open_circle_routing_test_db();
-    store
+    let member_device = store
         .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
         .expect("activate Store member device");
+    let (member_temp, member_store_dir) = temp_store_dir();
+    let member_device = RotationMemberDevice {
+        device: member_device,
+        _temp: member_temp,
+        store_dir: member_store_dir,
+    };
 
     let (store_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
@@ -148,154 +440,22 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
     RotationFixture {
         db,
         store,
+        owner_device,
         signer,
         components,
         circle_id,
         member,
         member_pubkey,
         member_db,
+        member_device,
         store_dir,
         _store_temp: store_temp,
         security,
     }
 }
 
-async fn remove_store_member(fixture: &RotationFixture) {
-    fixture
-        .components
-        .remove_member(&fixture.member_pubkey, &fixture.security)
-        .await
-        .expect("remove Store member");
-}
-
-/// Cloud storage for the fixture's second member device, over the shared home.
-fn member_storage(fixture: &RotationFixture) -> Arc<crate::storage::CloudSyncStorage> {
-    Arc::new(
-        crate::storage::CloudSyncStorage::new(
-            fixture.store.home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            fixture.store.storage.store_id(),
-            fixture.member.clone(),
-        )
-        .expect("open Circle member storage"),
-    )
-}
-
-/// The member device installs the Circle bootstrap and returns to an active
-/// projection holding the current epoch key.
-async fn member_pull(
-    fixture: &RotationFixture,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    store_dir: &crate::store_dir::StoreDir,
-) {
-    crate::sync::store::Store::load(
-        StoreDatabase::new(&fixture.member_db),
-        storage.clone(),
-        fixture.member.clone(),
-    )
-    .await
-    .expect("load Circle member Store")
-    .authorize_writer()
-    .await
-    .expect("authorize Circle member Store")
-    .pull(store_dir, Some(&EncryptionService::from_key([42; 32])))
-    .await
-    .expect("member installs the Circle bootstrap");
-}
-
-/// Stage and publish the member device's Store and Circle acknowledgements at its
-/// current accepted frontier, riding one Store commit.
-async fn member_publish_acknowledgements(
-    fixture: &RotationFixture,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    stamp: &str,
-) {
-    let device = TestDevice::load(&fixture.member_db, storage.clone(), fixture.member.clone())
-        .await
-        .expect("load member Store");
-    let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
-        StoreDatabase::new(&fixture.member_db)
-            .materialized_frontier()
-            .await
-            .expect("read member frontier"),
-    )
-    .expect("shape member frontier");
-    device
-        .stage_acknowledgement(frontier.clone(), stamp.to_string())
-        .await
-        .expect("stage member Store acknowledgement");
-    device
-        .stage_circle_acknowledgements(&frontier, stamp)
-        .await
-        .expect("stage member Circle acknowledgement");
-    device
-        .drain_acknowledgements()
-        .await
-        .expect("publish member acknowledgements");
-}
-
-async fn local_device_id(db: &Database) -> crate::protocol::store_commit::StoreDeviceId {
-    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local device id")
-        .expect("local device id is installed")
-        .parse()
-        .expect("parse local device id")
-}
-
-/// Capture one host row into `documents` under `audience` (a Circle id or `NULL`
-/// for the Store audience) and return its durable write identity.
-async fn capture_document(
-    fixture: &RotationFixture,
-    row_id: &str,
-    audience: Option<CircleId>,
-    stamp: &str,
-) -> crate::WriteId {
-    let write_id = fixture.db.new_write_id();
-    let captured = write_id.clone();
-    let tables = fixture.db.synced_tables().to_vec();
-    let routing = EncryptionService::from_key([42; 32]);
-    let audience_value = audience.map(|circle_id| circle_id.to_string());
-    let row_id = row_id.to_string();
-    let stamp = stamp.to_string();
-    fixture
-        .db
-        .test_sql(move |connection| {
-            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO documents (id, audience, _updated_at)
-                             VALUES (?1, ?2, ?3)",
-                        rusqlite::params![row_id, audience_value, stamp],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            })
-        })
-        .await
-        .expect("capture document row");
-    write_id
-}
-
-async fn active_store_members(fixture: &RotationFixture) -> BTreeSet<String> {
-    let membership = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("load cycle Store")
-        .membership_for_test()
-        .await
-        .expect("load cycle membership");
-    membership
-        .current_members()
-        .into_iter()
-        .map(|(pubkey, _)| pubkey)
-        .collect()
-}
-
 async fn list_circles(fixture: &RotationFixture) -> Vec<crate::protocol::circle::CircleInfo> {
-    let members = active_store_members(fixture).await;
+    let members = fixture.active_store_members().await;
     StoreDatabase::new(&fixture.db)
         .get_circles(&keys::public_key_hex(&fixture.signer), members)
         .await
@@ -311,7 +471,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .await
         .expect("create unaffected Circle");
 
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
 
     let circles = list_circles(&fixture).await;
     let affected = circles
@@ -332,20 +492,20 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
     );
 
     // A Store-audience write and a write to an unaffected Circle both publish.
-    let store_write = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000010",
-        None,
-        "0000000003000-0000-owner",
-    )
-    .await;
-    let unaffected_write = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000011",
-        Some(unaffected),
-        "0000000003100-0000-owner",
-    )
-    .await;
+    let store_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000010",
+            None,
+            "0000000003000-0000-owner",
+        )
+        .await;
+    let unaffected_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000011",
+            Some(unaffected),
+            "0000000003100-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -368,13 +528,13 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
 
     // A host write destined to the affected Circle stays durable blocked with the
     // typed rotation-required reason.
-    let blocked_write = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000012",
-        Some(fixture.circle_id),
-        "0000000003200-0000-owner",
-    )
-    .await;
+    let blocked_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000012",
+            Some(fixture.circle_id),
+            "0000000003200-0000-owner",
+        )
+        .await;
     let _ = fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -398,7 +558,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
 #[tokio::test]
 async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
     let fixture = rotation_fixture("rotation-gates-lifecycle").await;
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
 
     let rename = fixture
         .components
@@ -445,7 +605,7 @@ async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
 #[tokio::test]
 async fn re_adding_the_store_member_clears_rotation_required() {
     let fixture = rotation_fixture("rotation-readd-clears").await;
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     assert!(list_circles(&fixture)
         .await
         .iter()
@@ -490,7 +650,7 @@ async fn re_adding_the_store_member_clears_rotation_required() {
 #[tokio::test]
 async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
     let fixture = rotation_fixture("rotation-close-clears").await;
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     assert!(list_circles(&fixture)
         .await
         .iter()
@@ -505,7 +665,12 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -538,13 +703,13 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         .expect("publication context resolves under the successor control");
 
     // New Circle content publishes again under the successor key.
-    let resumed = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000031",
-        Some(fixture.circle_id),
-        "0000000005000-0000-owner",
-    )
-    .await;
+    let resumed = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000031",
+            Some(fixture.circle_id),
+            "0000000005000-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -562,17 +727,17 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
 #[tokio::test]
 async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     let fixture = rotation_fixture("rotation-close-with-blocked-write").await;
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
 
     // A Circle write captured after the removal stays durable blocked; its rows
     // are materialized in the live database but its write never publishes.
-    let blocked = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000040",
-        Some(fixture.circle_id),
-        "0000000003000-0000-owner",
-    )
-    .await;
+    let blocked = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000040",
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
     let _ = fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -594,7 +759,12 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -720,13 +890,13 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
 
     // An accepted Circle row: captured and published under the active control.
     let published_id = "00000000-0000-4000-8000-000000000050";
-    capture_document(
-        &fixture,
-        published_id,
-        Some(fixture.circle_id),
-        "0000000003000-0000-owner",
-    )
-    .await;
+    fixture
+        .capture_document(
+            published_id,
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -735,13 +905,13 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
 
     // An unpublished Circle row: captured into the live database, never published.
     let unpublished_id = "00000000-0000-4000-8000-000000000051";
-    capture_document(
-        &fixture,
-        unpublished_id,
-        Some(fixture.circle_id),
-        "0000000004000-0000-owner",
-    )
-    .await;
+    fixture
+        .capture_document(
+            unpublished_id,
+            Some(fixture.circle_id),
+            "0000000004000-0000-owner",
+        )
+        .await;
 
     // Cut the successor bootstrap at the accepted frontier while the unpublished
     // write is present. The cut no longer refuses, and the image is the accepted
@@ -796,13 +966,13 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
 #[tokio::test]
 async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
     let fixture = rotation_fixture("store-cut-gate").await;
-    capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000060",
-        None,
-        "0000000003000-0000-owner",
-    )
-    .await;
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000060",
+            None,
+            "0000000003000-0000-owner",
+        )
+        .await;
     let loaded_store = fixture
         .store
         .bind_device(&fixture.db, &fixture.signer)
@@ -871,13 +1041,13 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         "removing a Store member in no roster leaves every Circle running"
     );
 
-    let write = capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000020",
-        Some(fixture.circle_id),
-        "0000000003000-0000-owner",
-    )
-    .await;
+    let write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000020",
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -902,7 +1072,12 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -982,46 +1157,6 @@ enum CircleFixtureMode {
     Closed,
 }
 
-async fn write_circle_document(
-    db: &Database,
-    routing: &EncryptionService,
-    circle_id: crate::protocol::circle::CircleId,
-    id: &str,
-    updated_at: &str,
-) {
-    let write_id = db.new_write_id();
-    let tables = db.synced_tables().to_vec();
-    let routing = routing.clone();
-    let audience = Some(circle_id.to_string());
-    let id = id.to_string();
-    let updated_at = updated_at.to_string();
-    db.test_sql(move |connection| {
-        connection.run_internal_store_write(&tables, Some(&routing), write_id, |transaction| {
-            transaction
-                .execute(
-                    "INSERT INTO documents (id, audience, _updated_at)
-                         VALUES (?1, ?2, ?3)",
-                    rusqlite::params![id, audience, updated_at],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-    })
-    .await
-    .expect("capture Circle content");
-}
-
-async fn publish_store_snapshot_cut(
-    authorized: &mut crate::sync::store::AuthorizedWriterOperation<'_>,
-    cut: crate::sync::store::snapshot::SnapshotCut,
-    created_at: &str,
-) {
-    authorized
-        .push_snapshot_cut(cut, created_at.to_string())
-        .await
-        .expect("publish the Store snapshot");
-}
-
 async fn setup_active_member_circle_snapshot(
     name: &str,
     mode: CircleFixtureMode,
@@ -1030,7 +1165,11 @@ async fn setup_active_member_circle_snapshot(
     let db = open_circle_routing_test_db();
     let (store, signer, founder) = persist_merge_operation(&db, name).await;
     let circle_id = founder.circle_id();
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -1089,14 +1228,13 @@ async fn setup_active_member_circle_snapshot(
         .expect("add Circle member");
 
     // Pre-close Circle content the member holds access to, under the live epoch.
-    write_circle_document(
-        &db,
-        &routing,
-        circle_id,
+    db.capture_document_for_test(
         "00000000-0000-4000-8000-000000000090",
+        Some(circle_id),
         "0000000002000-0000-owner",
     )
-    .await;
+    .await
+    .expect("capture Circle content");
     components
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
@@ -1111,7 +1249,11 @@ async fn setup_active_member_circle_snapshot(
             .remove_circle_member(circle_id, member_pubkey.clone())
             .await
             .expect("close the epoch by removing the roster member");
-        publish_circle_epoch_close_response(&store.storage, &db, &signer)
+        store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store")
+            .publish_circle_epoch_close_response()
             .await
             .expect("publish local Circle epoch-close response");
         components
@@ -1138,7 +1280,10 @@ async fn setup_active_member_circle_snapshot(
         .await
         .expect("capture the Store snapshot cut");
     let coverage = cut.coverage.clone();
-    publish_store_snapshot_cut(&mut authorized, cut, "2026-07-24T01:00:00Z").await;
+    authorized
+        .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
+        .await
+        .expect("publish the Store snapshot");
     loaded_store
         .stage_acknowledgement(coverage.clone(), "2026-07-24T01:00:01Z".to_string())
         .await
@@ -1371,7 +1516,11 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     let (store, signer, founder) =
         persist_merge_operation(&db, "snapshot-restore-after-close").await;
     let circle_id = founder.circle_id();
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -1467,7 +1616,11 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .remove_circle_member(circle_id, member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&store.storage, &db, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     components
@@ -1496,7 +1649,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage.clone();
-    publish_store_snapshot_cut(&mut authorized, cut, "2026-07-24T01:00:00Z").await;
+    authorized
+        .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
+        .await
+        .expect("publish the Store snapshot");
     loaded_store
         .stage_acknowledgement(coverage.clone(), "2026-07-24T01:00:01Z".to_string())
         .await
@@ -1653,7 +1809,11 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let (store, signer, founder) =
         persist_merge_operation(&db, "standalone-restore-dominates").await;
     let circle_id = founder.circle_id();
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -1713,14 +1873,13 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
 
     // Pre-close content, then close the epoch by removing the member. The successor
     // bootstrap and the owner's successor leaf both cover the pre-close cutoff.
-    write_circle_document(
-        &db,
-        &routing,
-        circle_id,
+    db.capture_document_for_test(
         "00000000-0000-4000-8000-000000000090",
+        Some(circle_id),
         "0000000002000-0000-owner",
     )
-    .await;
+    .await
+    .expect("capture Circle content");
     components
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
@@ -1729,7 +1888,11 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .remove_circle_member(circle_id, member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&store.storage, &db, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     components
@@ -1739,14 +1902,13 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
 
     // Post-close content under the successor epoch advances the frontier past the
     // close cutoff, so a snapshot over it dominates the close-cutoff candidates.
-    write_circle_document(
-        &db,
-        &routing,
-        circle_id,
+    db.capture_document_for_test(
         "00000000-0000-4000-8000-000000000091",
+        Some(circle_id),
         "0000000004000-0000-owner",
     )
-    .await;
+    .await
+    .expect("capture Circle content");
     components
         .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
         .await
@@ -1754,17 +1916,16 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
 
     // Author the dominating standalone Circle snapshot under the successor epoch.
     let (_standalone_temp, standalone_dir) = temp_store_dir();
-    let standalone = crate::sync::store::push_circle_snapshots_for_test(
-        &db,
-        &store.storage,
-        standalone_dir.as_ref().join("standalone"),
-        db.schema_version(),
-        &signer,
-        "2026-07-24T02:00:00Z",
-        &routing,
-    )
-    .await
-    .expect("author the dominating standalone Circle snapshot");
+    let standalone = store
+        .push_circle_snapshots(
+            &db,
+            standalone_dir.as_ref().join("standalone"),
+            db.schema_version(),
+            "2026-07-24T02:00:00Z",
+            &routing,
+        )
+        .await
+        .expect("author the dominating standalone Circle snapshot");
     let standalone_image_hash = standalone.bootstrap.image.image_hash;
 
     // A Store snapshot covering the post-close frontier, acknowledged stable.
@@ -1786,7 +1947,10 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage.clone();
-    publish_store_snapshot_cut(&mut authorized, cut, "2026-07-24T02:00:01Z").await;
+    authorized
+        .push_snapshot_cut(cut, "2026-07-24T02:00:01Z".to_string())
+        .await
+        .expect("publish the Store snapshot");
     loaded_store
         .stage_acknowledgement(coverage.clone(), "2026-07-24T02:00:02Z".to_string())
         .await
@@ -1868,14 +2032,11 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
         .first()
         .cloned()
         .expect("the owner published a Circle acknowledgement");
-    let before = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &ack_ref,
-    )
-    .await
-    .expect("read acknowledgement through its exact control");
+    let before = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .await
+        .expect("read acknowledgement through its exact control");
     assert_eq!(before.epoch_id, old_epoch);
     assert_eq!(before.control, old_control);
     // The owner authored the Circle; its projection never came from an image, so
@@ -1884,13 +2045,18 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
 
     // Remove the roster member: the old epoch closes and a successor epoch/key
     // activates.
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     fixture
         .components
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -1908,14 +2074,11 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
     // The pre-rotation acknowledgement, sealed under the rotated-away epoch key,
     // stays readable after the epoch rotates: the read resolves that epoch's key
     // from the retained activation of the control the acknowledgement names.
-    let after = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &ack_ref,
-    )
-    .await
-    .expect("read the pre-rotation acknowledgement after the epoch rotated");
+    let after = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .await
+        .expect("read the pre-rotation acknowledgement after the epoch rotated");
     assert_eq!(after.epoch_id, old_epoch);
     assert_eq!(after.control, old_control);
 }
@@ -1926,17 +2089,17 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
 
     // Author a Circle snapshot before any device has acknowledged coverage.
-    crate::sync::store::push_circle_snapshots_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        snapshot_temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        "2026-07-23T00:00:00Z",
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("author Circle snapshot");
+    fixture
+        .store
+        .push_circle_snapshots(
+            &fixture.db,
+            snapshot_temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            "2026-07-23T00:00:00Z",
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("author Circle snapshot");
     let published = StoreDatabase::new(&fixture.db)
         .latest_local_circle_snapshot(fixture.circle_id)
         .await
@@ -1952,22 +2115,19 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("owner publishes its Circle acknowledgement");
-    assert!(!crate::sync::store::circle_snapshot_is_stable_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        fixture.circle_id,
-        &published.cut,
-    )
-    .await
-    .expect("evaluate stability before the member acknowledges"));
+    assert!(!fixture
+        .store
+        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .await
+        .expect("evaluate stability before the member acknowledges"));
 
     // The member device installs the Circle bootstrap and publishes its own Circle
     // acknowledgement covering the cut; the owner pulls and activates it.
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
-    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-23T01:00:00Z").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -1975,15 +2135,11 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         .expect("owner activates the member's Circle acknowledgement");
 
     // Every access-holding device has now acknowledged coverage past the cut.
-    assert!(crate::sync::store::circle_snapshot_is_stable_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        fixture.circle_id,
-        &published.cut,
-    )
-    .await
-    .expect("evaluate stability once every access device acknowledged"));
+    assert!(fixture
+        .store
+        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .await
+        .expect("evaluate stability once every access device acknowledged"));
 }
 
 #[tokio::test]
@@ -1999,26 +2155,31 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
 
     // Author a Circle snapshot under the current (soon-rotated-away) epoch.
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
-    crate::sync::store::push_circle_snapshots_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        snapshot_temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        "2026-07-23T00:00:00Z",
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("author Circle snapshot");
+    fixture
+        .store
+        .push_circle_snapshots(
+            &fixture.db,
+            snapshot_temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            "2026-07-23T00:00:00Z",
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("author Circle snapshot");
 
     // Rotate the epoch by removing the roster member.
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     fixture
         .components
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -2040,15 +2201,11 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
         .await
         .expect("read retained Circle activation")
         .expect("the pre-rotation control's activation is retained");
-    let metas = crate::sync::store::load_circle_snapshot_metas_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        fixture.circle_id,
-        retained.into_encryption(),
-        &fixture.signer,
-    )
-    .await
-    .expect("read the pre-rotation Circle snapshot after the epoch rotated");
+    let metas = fixture
+        .store
+        .load_circle_snapshot_metas(&fixture.db, fixture.circle_id, retained.into_encryption())
+        .await
+        .expect("read the pre-rotation Circle snapshot after the epoch rotated");
     let old = metas
         .iter()
         .find(|meta| meta.epoch_id == old_epoch)
@@ -2070,13 +2227,13 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
     let owner_pk = keys::public_key_hex(&fixture.signer);
 
     // Circle content captured through the host write path, routed with the Store key.
-    capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000099",
-        Some(fixture.circle_id),
-        "0000000002000-0000-owner",
-    )
-    .await;
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000099",
+            Some(fixture.circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -2084,17 +2241,17 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .expect("publish Circle content");
 
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
-    crate::sync::store::push_circle_snapshots_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        snapshot_temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        "2026-07-24T00:00:00Z",
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("author the standalone Circle snapshot");
+    fixture
+        .store
+        .push_circle_snapshots(
+            &fixture.db,
+            snapshot_temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            "2026-07-24T00:00:00Z",
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("author the standalone Circle snapshot");
 
     // A recipient reads the image with the Circle epoch key and authenticates its
     // routing state against the true Store routing key.
@@ -2106,16 +2263,16 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
         .await
         .expect("Circle publication context");
-    crate::sync::store::verify_standalone_circle_snapshot_image_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        fixture.circle_id,
-        epoch_encryption,
-        &EncryptionService::from_key([42; 32]),
-        &fixture.signer,
-    )
-    .await
-    .expect("standalone Circle snapshot authenticates under the true Store routing key");
+    fixture
+        .store
+        .verify_standalone_circle_snapshot_image(
+            &fixture.db,
+            fixture.circle_id,
+            epoch_encryption,
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("standalone Circle snapshot authenticates under the true Store routing key");
 }
 
 /// Removing a roster member closes the Circle epoch and rotates its key away from
@@ -2129,13 +2286,13 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
 async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
     let fixture = rotation_fixture("standalone-snapshot-rotation").await;
 
-    capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-000000000099",
-        Some(fixture.circle_id),
-        "0000000002000-0000-owner",
-    )
-    .await;
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000099",
+            Some(fixture.circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -2148,7 +2305,12 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
         .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -2160,17 +2322,17 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
     // Authoring derives routing from the Store generation-one key, so the rotated
     // Circle key having no generation-one entry no longer aborts the capture.
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
-    crate::sync::store::push_circle_snapshots_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        snapshot_temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        "2026-07-24T00:00:00Z",
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("author the standalone Circle snapshot after the epoch rotated");
+    fixture
+        .store
+        .push_circle_snapshots(
+            &fixture.db,
+            snapshot_temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            "2026-07-24T00:00:00Z",
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("author the standalone Circle snapshot after the epoch rotated");
 
     assert!(
         StoreDatabase::new(&fixture.db)
@@ -2189,9 +2351,8 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
 
     // The member device installs the Circle bootstrap: its projection seeds from a
     // real coverage row the install recorded.
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
     let member_coverage = fixture
         .member_db
         .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
@@ -2201,7 +2362,9 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
 
     // The member publishes its Circle acknowledgement; the owner pulls and
     // activates it alongside its own.
-    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-23T01:00:00Z").await;
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -2210,20 +2373,21 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
 
     // The owner reads and verifies the member's acknowledgement: its seed coverage
     // is present and names the exact bootstrap coverage row the member installed.
-    let member_device_id = local_device_id(&fixture.member_db).await;
+    let member_device_id = fixture
+        .member_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
     let member_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, member_device_id)
         .await
         .expect("read activated member Circle acknowledgement")
         .expect("the owner activated the member's Circle acknowledgement");
-    let member_ack = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &member_ack_ref,
-    )
-    .await
-    .expect("owner reads the member's Circle acknowledgement");
+    let member_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .await
+        .expect("owner reads the member's Circle acknowledgement");
     assert_eq!(
         member_ack.seeded_from.as_ref(),
         Some(&member_coverage),
@@ -2232,20 +2396,21 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
 
     // The founder authored the Circle; its projection never came from an image, so
     // its own acknowledgement names no seed coverage.
-    let owner_device_id = local_device_id(&fixture.db).await;
+    let owner_device_id = fixture
+        .db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
     let owner_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, owner_device_id)
         .await
         .expect("read activated owner Circle acknowledgement")
         .expect("the owner activated its own Circle acknowledgement");
-    let owner_ack = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &owner_ack_ref,
-    )
-    .await
-    .expect("owner reads its own Circle acknowledgement");
+    let owner_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .await
+        .expect("owner reads its own Circle acknowledgement");
     assert!(
         owner_ack.seeded_from.is_none(),
         "the founder's acknowledgement names no seed coverage"
@@ -2259,9 +2424,8 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
     let owner_pk = keys::public_key_hex(&fixture.signer);
 
     // The member installs the Circle bootstrap and holds the current epoch key.
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     // Close the epoch by removing the member from the Circle; the owner drives the
     // close to successor activation. The member stays a Store member.
@@ -2270,7 +2434,12 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
         .remove_circle_member(circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the Circle member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -2305,7 +2474,7 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
     // The removed member pulls the post-close state but never received the
     // successor epoch key: it cannot resolve the key that seals a successor-epoch
     // snapshot, so any such snapshot is unreadable to it.
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    member_view.pull().await;
     let member_device = fixture
         .store
         .bind_device(&fixture.member_db, &fixture.member)
@@ -2329,17 +2498,17 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     let baseline = rotation_fixture("snapshot-resume-baseline").await;
     let baseline_temp = tempfile::tempdir().expect("baseline snapshot temp dir");
     let before = baseline.store.home.exact_create_count();
-    crate::sync::store::drive_circle_snapshot_publications_for_test(
-        &baseline.db,
-        &baseline.store.storage,
-        baseline_temp.path().to_path_buf(),
-        baseline.db.schema_version(),
-        &baseline.signer,
-        "2026-07-23T00:00:00Z",
-        Some(&EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("clean Circle snapshot publication");
+    baseline
+        .store
+        .drive_circle_snapshot_publications(
+            &baseline.db,
+            baseline_temp.path().to_path_buf(),
+            baseline.db.schema_version(),
+            "2026-07-23T00:00:00Z",
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("clean Circle snapshot publication");
     let meta_create = baseline.store.home.exact_create_count() - before;
     assert_eq!(
         meta_create, 2,
@@ -2371,11 +2540,11 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
             .await
             .expect("the cycle logs the interrupted publication and continues");
         assert!(
-            latest_circle_snapshot(&fixture, circle_id).await.is_none(),
+            fixture.latest_circle_snapshot(circle_id).await.is_none(),
             "no snapshot completes when the metadata upload is interrupted"
         );
         assert!(
-            pending_circle_snapshot(&fixture, circle_id).await.is_some(),
+            fixture.pending_circle_snapshot(circle_id).await.is_some(),
             "the interrupted publication remains durable for resume"
         );
 
@@ -2383,11 +2552,11 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
             .await
             .expect("resume completes the pending publication");
         assert!(
-            latest_circle_snapshot(&fixture, circle_id).await.is_some(),
+            fixture.latest_circle_snapshot(circle_id).await.is_some(),
             "the resumed publication completes"
         );
         assert!(
-            pending_circle_snapshot(&fixture, circle_id).await.is_none(),
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
             "no durable publication remains after resume"
         );
         assert_eq!(
@@ -2415,7 +2584,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
             "the settled publication completes exactly one generation"
         );
         assert!(
-            pending_circle_snapshot(&fixture, circle_id).await.is_none(),
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
             "no durable publication remains after the settled upload"
         );
 
@@ -2428,7 +2597,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
             "the re-run duplicates no generation"
         );
         assert!(
-            pending_circle_snapshot(&fixture, circle_id).await.is_none(),
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
             "the idempotent re-run opens no new publication"
         );
     }
@@ -2438,60 +2607,27 @@ async fn drive_circle_snapshots(
     fixture: &RotationFixture,
     temp: &tempfile::TempDir,
     stamp: &str,
-) -> Result<(), crate::sync::store::snapshot::SnapshotError> {
-    crate::sync::store::drive_circle_snapshot_publications_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        stamp,
-        Some(&EncryptionService::from_key([42; 32])),
-    )
-    .await
-}
-
-async fn latest_circle_snapshot(
-    fixture: &RotationFixture,
-    circle_id: CircleId,
-) -> Option<crate::database::PublishedCircleSnapshot> {
-    StoreDatabase::new(&fixture.db)
-        .latest_local_circle_snapshot(circle_id)
+) -> Result<(), crate::sync::store::SnapshotError> {
+    fixture
+        .store
+        .drive_circle_snapshot_publications(
+            &fixture.db,
+            temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            stamp,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
         .await
-        .expect("read latest local Circle snapshot")
 }
 
 async fn latest_circle_snapshot_generation(
     fixture: &RotationFixture,
     circle_id: CircleId,
 ) -> Option<u64> {
-    latest_circle_snapshot(fixture, circle_id)
+    fixture
+        .latest_circle_snapshot(circle_id)
         .await
         .map(|snapshot| snapshot.reference.generation)
-}
-
-async fn pending_circle_snapshot(
-    fixture: &RotationFixture,
-    circle_id: CircleId,
-) -> Option<crate::database::DurableCircleSnapshotPublication> {
-    StoreDatabase::new(&fixture.db)
-        .outbound_circle_snapshot_publication(circle_id)
-        .await
-        .expect("read pending Circle snapshot publication")
-}
-
-/// Release every retained-replay ownership record, as a superseding coverage cut
-/// would in production, so a covered package becomes reclaim-eligible.
-async fn release_retained_replay_ownership(fixture: &RotationFixture) {
-    fixture
-        .db
-        .test_sql(|database| {
-            database.transaction(|transaction| {
-                transaction.remove_retained_replay_ownership_from_snapshot()
-            })
-        })
-        .await
-        .expect("release retained replay ownership");
 }
 
 /// Publish one Circle package and drive both devices to acknowledge coverage past
@@ -2500,20 +2636,15 @@ async fn release_retained_replay_ownership(fixture: &RotationFixture) {
 /// acknowledgement dominates the snapshot cut, so the snapshot is stable.
 async fn publish_covered_circle_package(
     fixture: &RotationFixture,
-    member_storage: &Arc<crate::storage::CloudSyncStorage>,
-    member_store_dir: &crate::store_dir::StoreDir,
+    member: &RotationMemberDevice,
     row_id: &str,
 ) -> (
     crate::protocol::store_commit::CirclePackageRef,
     crate::protocol::store_commit::StoreBatchCommitRef,
 ) {
-    let write_id = capture_document(
-        fixture,
-        row_id,
-        Some(fixture.circle_id),
-        "2026-07-23T00:10:00Z",
-    )
-    .await;
+    let write_id = fixture
+        .capture_document(row_id, Some(fixture.circle_id), "2026-07-23T00:10:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -2543,19 +2674,19 @@ async fn publish_covered_circle_package(
 
     // The member pulls the package so its acknowledgement can dominate a cut that
     // covers it. Author a Circle snapshot whose cut covers the package activation.
-    member_pull(fixture, member_storage, member_store_dir).await;
+    member.pull().await;
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
-    crate::sync::store::push_circle_snapshots_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        snapshot_temp.path().to_path_buf(),
-        fixture.db.schema_version(),
-        &fixture.signer,
-        "2026-07-23T00:15:00Z",
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("author the Circle snapshot covering the package");
+    fixture
+        .store
+        .push_circle_snapshots(
+            &fixture.db,
+            snapshot_temp.path().to_path_buf(),
+            fixture.db.schema_version(),
+            "2026-07-23T00:15:00Z",
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("author the Circle snapshot covering the package");
 
     // Both active-access devices acknowledge a frontier dominating the snapshot cut,
     // so the snapshot becomes acknowledgement-stable coverage evidence.
@@ -2564,102 +2695,16 @@ async fn publish_covered_circle_package(
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("owner acknowledges the snapshot cut");
-    member_pull(fixture, member_storage, member_store_dir).await;
-    member_publish_acknowledgements(fixture, member_storage, "2026-07-23T00:20:00Z").await;
+    member.pull().await;
+    member
+        .publish_acknowledgements("2026-07-23T00:20:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("owner activates the member acknowledgement");
     (circle_package, published)
-}
-
-/// Capture a document and one blob-bearing file row under `audience`, staging the
-/// file's bytes in the local store so the next cycle uploads them.
-async fn capture_document_with_file(
-    fixture: &RotationFixture,
-    document_id: &str,
-    file_id: &str,
-    audience: Option<CircleId>,
-    bytes: &[u8],
-    stamp: &str,
-) -> crate::WriteId {
-    let write_id = fixture.db.new_write_id();
-    let captured = write_id.clone();
-    let tables = fixture.db.synced_tables().to_vec();
-    let routing = EncryptionService::from_key([42; 32]);
-    let insert = format!(
-        "INSERT INTO documents (id, audience, _updated_at)
-         VALUES ('{document_id}', {}, '{stamp}');
-         INSERT INTO document_files (id, document_id, size, hash, _updated_at)
-         VALUES ('{file_id}', '{document_id}', {}, '{}', '{stamp}');",
-        audience
-            .map(|circle_id| format!("'{circle_id}'"))
-            .unwrap_or_else(|| "NULL".to_string()),
-        bytes.len(),
-        crate::blob::content_hash(bytes),
-    );
-    fixture
-        .db
-        .test_sql(move |connection| {
-            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
-                transaction.execute_batch(&insert).map_err(DbError::from)
-            })
-        })
-        .await
-        .expect("capture document and its file row");
-    crate::store_dir::StoreDir::store_local_blob(&fixture.store_dir, "files", file_id, bytes)
-        .await
-        .expect("stage the document file bytes");
-    write_id
-}
-
-/// Move a document to another audience, republishing every blob its file rows
-/// carry under the destination audience's locator.
-async fn move_document_audience(
-    fixture: &RotationFixture,
-    document_id: &str,
-    audience: Option<CircleId>,
-    stamp: &str,
-) {
-    let audience_value = audience.map(|circle_id| circle_id.to_string());
-    let document_id = document_id.to_string();
-    let stamp = stamp.to_string();
-    // An audience move re-seals every blob the moved rows carry under the
-    // destination audience's key, so the write needs the storage and store
-    // directory that staging reads and writes.
-    let staging = fixture
-        .components
-        .store()
-        .host_write_blob_staging(tokio::runtime::Handle::current(), fixture.store_dir.clone());
-    StoreDatabase::new(&fixture.db)
-        .run_host_store_write_for_test(
-            Some(EncryptionService::from_key([42; 32])),
-            Some(staging),
-            move |transaction| {
-                transaction
-                    .execute(
-                        "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
-                        rusqlite::params![document_id, audience_value, stamp],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            },
-        )
-        .await
-        .expect("move the document to another audience");
-}
-
-/// Every stored blob this device holds an ownership record for, in whichever
-/// audience its locator addresses.
-async fn stored_blobs(fixture: &RotationFixture) -> Vec<crate::blob::locator::StoredBlobRef> {
-    StoreDatabase::new(&fixture.db)
-        .stored_blob_reclaim_candidates_for_test()
-        .await
-        .expect("read stored blob candidates")
-        .into_iter()
-        .map(|(stored, _)| stored)
-        .collect()
 }
 
 /// A user-initiated blob deletion writes a signed tombstone and the graced GC
@@ -2671,25 +2716,24 @@ async fn stored_blobs(fixture: &RotationFixture) -> Vec<crate::blob::locator::St
 #[tokio::test]
 async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row() {
     let fixture = rotation_fixture("audience-scoped-tombstone-gc").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
-    capture_document_with_file(
-        &fixture,
-        "00000000-0000-4000-8000-0000000000e3",
-        "00000000-0000-4000-8000-0000000000f3",
-        Some(fixture.circle_id),
-        b"circle attachment under a tombstone",
-        "2026-07-23T00:10:00Z",
-    )
-    .await;
+    fixture
+        .capture_document_with_file(
+            "00000000-0000-4000-8000-0000000000e3",
+            "00000000-0000-4000-8000-0000000000f3",
+            Some(fixture.circle_id),
+            b"circle attachment under a tombstone",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("publish the Circle document and its file");
-    let published = stored_blobs(&fixture).await;
+    let published = fixture.stored_blobs().await;
     let [stored] = published.as_slice() else {
         panic!("the Circle document published exactly one blob: {published:?}");
     };
@@ -2775,37 +2819,38 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
 #[tokio::test]
 async fn an_audience_move_restamps_the_blob_rows_it_drags() {
     let fixture = rotation_fixture("audience-move-restamps-blob-rows").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     let document = "00000000-0000-4000-8000-0000000000e4";
     let file = "00000000-0000-4000-8000-0000000000f4";
-    capture_document_with_file(
-        &fixture,
-        document,
-        file,
-        Some(fixture.circle_id),
-        b"attachment that moves with its document",
-        "2026-07-23T00:10:00Z",
-    )
-    .await;
+    fixture
+        .capture_document_with_file(
+            document,
+            file,
+            Some(fixture.circle_id),
+            b"attachment that moves with its document",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("publish the Circle document and its file");
     assert_eq!(
-        document_file_stamp(&fixture, file).await,
+        fixture.document_file_stamp(file).await,
         "2026-07-23T00:10:00Z",
     );
 
     // The move touches the document alone: the file row keeps the stamp its
     // published blob is already bound at.
-    move_document_audience(&fixture, document, None, "2026-07-23T00:20:00Z").await;
+    fixture
+        .move_document_audience(document, None, "2026-07-23T00:20:00Z")
+        .await;
 
     assert_eq!(
-        document_file_stamp(&fixture, file).await,
+        fixture.document_file_stamp(file).await,
         "2026-07-23T00:20:00Z",
         "the dragged blob row carries the stamp its move published it at",
     );
@@ -2814,24 +2859,6 @@ async fn an_audience_move_restamps_the_blob_rows_it_drags() {
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("republish the document and its re-sealed file under the Store audience");
-}
-
-/// The `_updated_at` a document's file row currently carries.
-async fn document_file_stamp(fixture: &RotationFixture, file_id: &str) -> String {
-    let file_id = file_id.to_string();
-    fixture
-        .db
-        .test_sql(move |connection| {
-            connection
-                .query_row(
-                    "SELECT _updated_at FROM document_files WHERE id = ?1",
-                    [file_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)
-        })
-        .await
-        .expect("read the document file row stamp")
 }
 
 /// Moving a row between audiences republishes its blob under the destination
@@ -2843,37 +2870,36 @@ async fn document_file_stamp(fixture: &RotationFixture, file_id: &str) -> String
 #[tokio::test]
 async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     let fixture = rotation_fixture("audience-blob-reclaim").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     let leaving = "00000000-0000-4000-8000-0000000000e1";
     let joining = "00000000-0000-4000-8000-0000000000e2";
-    capture_document_with_file(
-        &fixture,
-        leaving,
-        "00000000-0000-4000-8000-0000000000f1",
-        Some(fixture.circle_id),
-        b"circle attachment",
-        "2026-07-23T00:10:00Z",
-    )
-    .await;
-    capture_document_with_file(
-        &fixture,
-        joining,
-        "00000000-0000-4000-8000-0000000000f2",
-        None,
-        b"store attachment",
-        "2026-07-23T00:10:01Z",
-    )
-    .await;
+    fixture
+        .capture_document_with_file(
+            leaving,
+            "00000000-0000-4000-8000-0000000000f1",
+            Some(fixture.circle_id),
+            b"circle attachment",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .capture_document_with_file(
+            joining,
+            "00000000-0000-4000-8000-0000000000f2",
+            None,
+            b"store attachment",
+            "2026-07-23T00:10:01Z",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("publish both documents and their files");
 
-    let sources = stored_blobs(&fixture).await;
+    let sources = fixture.stored_blobs().await;
     assert_eq!(
         sources.len(),
         2,
@@ -2891,13 +2917,11 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     }
 
     // Nothing has moved yet: every ciphertext is still bound by a live row.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation while every blob is still bound");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation while every blob is still bound");
     for stored in &sources {
         assert!(
             fixture
@@ -2909,21 +2933,19 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
         );
     }
 
-    move_document_audience(&fixture, leaving, None, "2026-07-23T00:20:00Z").await;
-    move_document_audience(
-        &fixture,
-        joining,
-        Some(fixture.circle_id),
-        "2026-07-23T00:20:01Z",
-    )
-    .await;
+    fixture
+        .move_document_audience(leaving, None, "2026-07-23T00:20:00Z")
+        .await;
+    fixture
+        .move_document_audience(joining, Some(fixture.circle_id), "2026-07-23T00:20:01Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("republish both documents under their destination audiences");
 
-    let after_move = stored_blobs(&fixture).await;
+    let after_move = fixture.stored_blobs().await;
     let destinations = after_move
         .into_iter()
         .filter(|stored| !sources.contains(stored))
@@ -2950,14 +2972,12 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
 
     // A blob an accepted merge still replays is not free however its rows moved;
     // release that ownership, as a superseding coverage cut does in production.
-    release_retained_replay_ownership(&fixture).await;
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim the stranded source ciphertext");
+    fixture.release_retained_replay_ownership().await;
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the stranded source ciphertext");
 
     let mut deleted = 0;
     for stored in &sources {
@@ -3010,38 +3030,39 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
 #[tokio::test]
 async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     let fixture = rotation_fixture("audience-blob-crash-resume").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     let document = "00000000-0000-4000-8000-0000000000e5";
-    capture_document_with_file(
-        &fixture,
-        document,
-        "00000000-0000-4000-8000-0000000000f5",
-        Some(fixture.circle_id),
-        b"circle attachment for the interrupted reclaim",
-        "2026-07-23T00:10:00Z",
-    )
-    .await;
+    fixture
+        .capture_document_with_file(
+            document,
+            "00000000-0000-4000-8000-0000000000f5",
+            Some(fixture.circle_id),
+            b"circle attachment for the interrupted reclaim",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("publish the Circle document and its file");
-    let published = stored_blobs(&fixture).await;
+    let published = fixture.stored_blobs().await;
     let [source] = published.as_slice() else {
         panic!("the Circle document published exactly one blob: {published:?}");
     };
     let source = source.clone();
 
-    move_document_audience(&fixture, document, None, "2026-07-23T00:20:00Z").await;
+    fixture
+        .move_document_audience(document, None, "2026-07-23T00:20:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("republish the document under the Store audience");
-    release_retained_replay_ownership(&fixture).await;
+    fixture.release_retained_replay_ownership().await;
 
     // The stranded ciphertext is now eligible. Fail its delete: the reclaim
     // authorizes the deletion, the delete fails, and the run surfaces the failure
@@ -3050,12 +3071,7 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
         .store
         .home
         .fail_nth_exact_delete_of(&[source.object().slot()], 1);
-    let interrupted = crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await;
+    let interrupted = fixture.owner_device.reclaim_packages().await;
     assert!(
         interrupted.is_err(),
         "the delete failure fails the reclaim to its initiator: {interrupted:?}"
@@ -3070,13 +3086,11 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     );
 
     // The journal still holds the authorized reclaim, so a restart finishes it.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("restart resumes the interrupted audience blob reclaim");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("restart resumes the interrupted audience blob reclaim");
     assert!(
         !fixture
             .store
@@ -3088,13 +3102,11 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
 
     // A further run is idempotent: the target is recorded as reclaimed, so nothing
     // re-authorizes or re-deletes it.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("a further run finds nothing left to reclaim");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("a further run finds nothing left to reclaim");
     assert!(
         !fixture
             .store
@@ -3103,44 +3115,6 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
             .expect("read the exact stored blob"),
         "the reclaimed ciphertext stays absent"
     );
-}
-
-/// The owner device's Circle snapshot stream, read the way any reader reads it:
-/// from generation zero along each metadata object's create-once successor slot,
-/// stopping at the first absent slot.
-async fn owner_circle_snapshot_stream(
-    fixture: &RotationFixture,
-) -> Vec<(
-    crate::protocol::store_commit::CircleSnapshotRef,
-    crate::protocol::store_commit::CircleSnapshotMeta,
-)> {
-    let database = StoreDatabase::new(&fixture.db);
-    let control = database
-        .current_circle_control(fixture.circle_id)
-        .await
-        .expect("read the current Circle control")
-        .expect("the Circle has an active control");
-    let device = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind Circle snapshot access Store");
-    let encryption = device
-        .circle_package_access(fixture.circle_id, control)
-        .await
-        .expect("resolve Circle snapshot access")
-        .expect("the Circle access is retained")
-        .into_encryption();
-    device
-        .store
-        .authorize_writer()
-        .await
-        .expect("authorize Circle snapshot stream reader")
-        .circles()
-        .snapshots()
-        .load_circle_snapshot_refs_for_test(fixture.circle_id, encryption)
-        .await
-        .expect("walk the owner's Circle snapshot stream")
 }
 
 /// A device authors its Circle snapshots as one create-once stream of
@@ -3152,18 +3126,16 @@ async fn owner_circle_snapshot_stream(
 #[tokio::test]
 async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     let fixture = rotation_fixture("circle-snapshot-generation-reclaim").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000d1",
     )
     .await;
-    let before = owner_circle_snapshot_stream(&fixture).await;
+    let before = fixture.owner_circle_snapshot_stream().await;
     let (_, latest) = before
         .last()
         .expect("the owner authored a Circle snapshot")
@@ -3171,13 +3143,11 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
 
     // Nothing supersedes the stream's latest generation, so reclamation refuses it
     // and its image stays readable.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation with no superseding Circle snapshot generation");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation with no superseding Circle snapshot generation");
     assert!(
         fixture
             .store
@@ -3191,13 +3161,13 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     // over it. That generation strictly dominates the previous one, but no device
     // has acknowledged its cut — so it supersedes nothing and the earlier image
     // stays.
-    capture_document(
-        &fixture,
-        "00000000-0000-4000-8000-0000000000d3",
-        Some(fixture.circle_id),
-        "2026-07-23T00:30:00Z",
-    )
-    .await;
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-0000000000d3",
+            Some(fixture.circle_id),
+            "2026-07-23T00:30:00Z",
+        )
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -3207,7 +3177,7 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     drive_circle_snapshots(&fixture, &unstable_temp, "2026-07-23T00:35:00Z")
         .await
         .expect("author an unacknowledged Circle snapshot generation");
-    let unacknowledged = owner_circle_snapshot_stream(&fixture).await;
+    let unacknowledged = fixture.owner_circle_snapshot_stream().await;
     let (_, unstable) = unacknowledged
         .last()
         .expect("the owner authored a later Circle snapshot")
@@ -3221,13 +3191,11 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
             && unstable.bootstrap.coverage != latest.bootstrap.coverage,
         "the unacknowledged generation's cut strictly dominates the earlier one"
     );
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation against an unacknowledged superseding generation");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation against an unacknowledged superseding generation");
     assert!(
         fixture
             .store
@@ -3241,20 +3209,17 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     // generations, so the once-latest generation is superseded.
     publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000d2",
     )
     .await;
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim the superseded Circle snapshot image");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the superseded Circle snapshot image");
 
-    let after = owner_circle_snapshot_stream(&fixture).await;
+    let after = fixture.owner_circle_snapshot_stream().await;
     let (_, newest) = after
         .last()
         .expect("the owner authored later Circle snapshots")
@@ -3299,14 +3264,12 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
 #[tokio::test]
 async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
     let fixture = rotation_fixture("circle-package-reclaim").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     let (circle_package, published) = publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000c1",
     )
     .await;
@@ -3328,15 +3291,13 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
             .expect("read Circle package replay retention"),
         "a freshly published Circle package is retained for replay"
     );
-    release_retained_replay_ownership(&fixture).await;
+    fixture.release_retained_replay_ownership().await;
 
-    let result = crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim the covered Circle package");
+    let result = fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the covered Circle package");
     assert!(
         result.packages_deleted >= 1,
         "reclamation deleted the snapshot-covered Circle package"
@@ -3377,14 +3338,12 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
 #[tokio::test]
 async fn circle_package_reclaim_refuses_a_replay_retained_package() {
     let fixture = rotation_fixture("circle-package-replay-retained").await;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     let (circle_package, published) = publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000c2",
     )
     .await;
@@ -3410,13 +3369,11 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
     // Reclamation may still delete the member's now-superseded seed bootstrap image
     // (the member advanced past it), but the replay-retained package itself is never
     // reclaimed while its ownership survives.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation with the package still retained");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation with the package still retained");
     assert!(
         owner_device
             .circle_package_is_retained_for_replay_for_test(circle_package, published)
@@ -3430,9 +3387,8 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
 async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement() {
     let fixture = rotation_fixture("circle-package-seeded-ack").await;
     let circle_id = fixture.circle_id;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
     // The member's projection seeds from a real bootstrap coverage row the install
     // recorded — the coverage its acknowledgements will name.
@@ -3445,28 +3401,28 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
 
     let (circle_package, published) = publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000c3",
     )
     .await;
 
     // The member's activated acknowledgement names its exact seed coverage — the
     // cross-device evidence the owner reads and dominates to prove stability.
-    let member_device_id = local_device_id(&fixture.member_db).await;
+    let member_device_id = fixture
+        .member_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
     let member_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, member_device_id)
         .await
         .expect("read activated member acknowledgement")
         .expect("the owner activated the member acknowledgement");
-    let member_ack = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &member_ack_ref,
-    )
-    .await
-    .expect("owner reads the member acknowledgement");
+    let member_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .await
+        .expect("owner reads the member acknowledgement");
     assert_eq!(
         member_ack.seeded_from.as_ref(),
         Some(&member_coverage),
@@ -3475,14 +3431,12 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
 
     // Reclamation proceeds only because the owner could read and dominate that
     // seed-anchored cross-device acknowledgement.
-    release_retained_replay_ownership(&fixture).await;
-    let result = crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim after cross-device verifying the seeded acknowledgement");
+    fixture.release_retained_replay_ownership().await;
+    let result = fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim after cross-device verifying the seeded acknowledgement");
     assert!(
         result.packages_deleted >= 1,
         "reclamation proceeded on the strength of the member's seeded acknowledgement"
@@ -3501,110 +3455,6 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
     );
 }
 
-/// Whether the Circle bootstrap image at `image_object` still owns a live
-/// remote-object record. Reclamation deletes the record (and the ciphertext)
-/// once the recipient's seed is superseded.
-async fn bootstrap_image_present(
-    fixture: &RotationFixture,
-    image_object: &crate::storage::ExactObjectRef,
-) -> bool {
-    fixture
-        .db
-        .remote_object_exists_for_test(image_object.clone())
-        .await
-        .expect("read bootstrap image ownership presence")
-}
-
-/// The exact bootstrap image the Owner authored for the member, read from the
-/// member's own installed coverage row.
-async fn member_seed_image(
-    fixture: &RotationFixture,
-    circle_id: CircleId,
-) -> crate::storage::ExactObjectRef {
-    fixture
-        .member_db
-        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
-        .await
-        .expect("read member Circle bootstrap coverage")
-        .expect("the member's projection seeded from a real bootstrap coverage row")
-        .bootstrap
-        .image
-        .object
-}
-
-/// The number of Store commits that own the bootstrap image at `image_object`.
-async fn bootstrap_image_owner_count(
-    fixture: &RotationFixture,
-    image_object: &crate::storage::ExactObjectRef,
-) -> usize {
-    let record = fixture
-        .db
-        .remote_object_for_test(image_object.clone())
-        .await
-        .expect("load bootstrap image ownership");
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record else {
-        panic!("a live bootstrap image is a shared object");
-    };
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-        shared.state
-    else {
-        panic!("a live bootstrap image is verified");
-    };
-    ownership
-        .activated
-        .iter()
-        .filter(|owner| {
-            matches!(
-                owner,
-                crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
-            )
-        })
-        .count()
-}
-
-/// Every live Circle bootstrap image in the owner's ownership table, as
-/// (image object, owning Store commit count).
-async fn live_bootstrap_images(
-    fixture: &RotationFixture,
-) -> Vec<(crate::storage::ExactObjectRef, usize)> {
-    let records = fixture
-        .db
-        .remote_objects_for_test()
-        .await
-        .expect("read remote object records");
-    records
-        .into_iter()
-        .filter_map(|record| {
-            let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
-            else {
-                return None;
-            };
-            if !matches!(
-                shared.identity.domain,
-                crate::protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
-            ) {
-                return None;
-            }
-            let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
-                shared.state
-            else {
-                return None;
-            };
-            let owners = ownership
-                .activated
-                .iter()
-                .filter(|owner| {
-                    matches!(
-                        owner,
-                        crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
-                    )
-                })
-                .count();
-            Some((shared.identity.object.clone(), owners))
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn two_circle_recipients_never_share_one_bootstrap_image() {
     // A bootstrap image's storage path is keyed by the recipient's slot, so two
@@ -3616,13 +3466,12 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
     // one recipient's seed can never remove another recipient's.
     let fixture = rotation_fixture("circle-bootstrap-two-recipients").await;
     let circle_id = fixture.circle_id;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
-    let first_image = member_seed_image(&fixture, circle_id).await;
+    let first_image = fixture.member_seed_image(circle_id).await;
     assert_eq!(
-        bootstrap_image_owner_count(&fixture, &first_image).await,
+        fixture.bootstrap_image_owner_count(&first_image).await,
         1,
         "the first recipient's seed image has exactly one activating owner"
     );
@@ -3672,7 +3521,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .expect("activate the second member's access");
 
     // Two recipients, two distinct image objects, each with exactly one owner.
-    let images = live_bootstrap_images(&fixture).await;
+    let images = fixture.live_bootstrap_images().await;
     assert_eq!(
         images.len(),
         2,
@@ -3705,27 +3554,24 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
 async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed() {
     let fixture = rotation_fixture("circle-bootstrap-reclaim-advance").await;
     let circle_id = fixture.circle_id;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
-    let image_object = member_seed_image(&fixture, circle_id).await;
+    let image_object = fixture.member_seed_image(circle_id).await;
     assert!(
-        bootstrap_image_present(&fixture, &image_object).await,
+        fixture.bootstrap_image_present(&image_object).await,
         "the recipient's seed image exists before reclamation"
     );
 
     // No later Circle snapshot supersedes the recipient's seed yet, so reclamation
     // leaves the image in place.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation before a later snapshot exists");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation before a later snapshot exists");
     assert!(
-        bootstrap_image_present(&fixture, &image_object).await,
+        fixture.bootstrap_image_present(&image_object).await,
         "the seed image survives while no later sufficient snapshot supersedes it"
     );
 
@@ -3734,20 +3580,17 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed
     // recipient has moved to a later sufficient snapshot, so its seed is reclaimable.
     publish_covered_circle_package(
         &fixture,
-        &member_storage,
-        &member_store_dir,
+        member_view,
         "00000000-0000-4000-8000-0000000000b1",
     )
     .await;
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim the superseded seed image");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the superseded seed image");
     assert!(
-        !bootstrap_image_present(&fixture, &image_object).await,
+        !fixture.bootstrap_image_present(&image_object).await,
         "the seed image is reclaimed once a later sufficient snapshot supersedes it"
     );
 }
@@ -3756,25 +3599,26 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed
 async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
     let fixture = rotation_fixture("circle-bootstrap-reclaim-removed").await;
     let circle_id = fixture.circle_id;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
 
-    let image_object = member_seed_image(&fixture, circle_id).await;
+    let image_object = fixture.member_seed_image(circle_id).await;
 
     // The member acknowledges its seed (naming its seed coverage) and the Owner
     // activates that acknowledgement — the exact evidence the Owner reads after the
     // member is removed to prove which seed the member held. No later snapshot is
     // authored, so while the member still holds access its seed is not superseded
     // and the automatic reclamation in the cycle leaves the image in place.
-    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-23T01:00:00Z").await;
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
         .await
         .expect("owner activates the member acknowledgement");
     assert!(
-        bootstrap_image_present(&fixture, &image_object).await,
+        fixture.bootstrap_image_present(&image_object).await,
         "an active member's seed survives while no later snapshot supersedes it"
     );
 
@@ -3785,7 +3629,12 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
         .remove_circle_member(circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the Circle member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -3804,15 +3653,13 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
 
     // The removed member lost authority under the activated successor control: its
     // seed image is reclaimed, re-verified from its own signed acknowledgement.
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("reclaim the removed member's seed image");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the removed member's seed image");
     assert!(
-        !bootstrap_image_present(&fixture, &image_object).await,
+        !fixture.bootstrap_image_present(&image_object).await,
         "the removed member's seed image is reclaimed under the successor control"
     );
 }
@@ -3827,14 +3674,15 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
     // than a second, separate authority path.
     let fixture = rotation_fixture("circle-bootstrap-store-revocation").await;
     let circle_id = fixture.circle_id;
-    let member_storage = member_storage(&fixture);
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    member_pull(&fixture, &member_storage, &member_store_dir).await;
-    let image_object = member_seed_image(&fixture, circle_id).await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+    let image_object = fixture.member_seed_image(circle_id).await;
 
     // The recipient acknowledges its seed: the signed evidence naming the exact
     // coverage the Owner will later delete.
-    member_publish_acknowledgements(&fixture, &member_storage, "2026-07-25T03:00:00Z").await;
+    member_view
+        .publish_acknowledgements("2026-07-25T03:00:00Z")
+        .await;
     fixture
         .components
         .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
@@ -3844,7 +3692,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
     // Revoke the recipient's Store membership. The Circle becomes rotation-required
     // but its roster still names the identity, so no lost-authority evidence exists
     // yet and the seed image survives.
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     assert!(
         list_circles(&fixture)
             .await
@@ -3862,15 +3710,13 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
             .contains(&fixture.member_pubkey),
         "Store revocation alone does not yet exclude the identity from the Circle roster"
     );
-    crate::sync::store::reclaim_packages_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-    )
-    .await
-    .expect("run reclamation while the roster still names the identity");
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation while the roster still names the identity");
     assert!(
-        bootstrap_image_present(&fixture, &image_object).await,
+        fixture.bootstrap_image_present(&image_object).await,
         "Store revocation alone does not reclaim the recipient's seed image"
     );
 
@@ -3882,7 +3728,12 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         .remove_circle_member(circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the Circle member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -3899,7 +3750,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         "the cascade excludes the revoked identity from the successor roster"
     );
     assert!(
-        !bootstrap_image_present(&fixture, &image_object).await,
+        !fixture.bootstrap_image_present(&image_object).await,
         "the revoked identity's seed image is reclaimed once the cascade completes"
     );
 }
@@ -3926,7 +3777,11 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
         .expect("pre-rotation Circle authoring context");
     let old_control = old_authoring.control.coord.clone();
     let old_epoch = old_authoring.control.value.epoch_id();
-    let owner_device_id = local_device_id(&fixture.db).await;
+    let owner_device_id = fixture
+        .db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
     let owner_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, owner_device_id)
         .await
@@ -3934,13 +3789,18 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
         .expect("the owner published a Circle acknowledgement");
 
     // Rotate the epoch: remove the roster member and finalize the close.
-    remove_store_member(&fixture).await;
+    fixture.remove_store_member().await;
     fixture
         .components
         .remove_circle_member(circle_id, fixture.member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    publish_circle_epoch_close_response(&fixture.store.storage, &fixture.db, &fixture.signer)
+    fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
         .await
         .expect("publish local Circle epoch-close response");
     fixture
@@ -3959,14 +3819,11 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     // retained activation of the control it names — not from a live keyring. After
     // the epoch rotates, the old control stays retained, so the reader (the exact
     // path reclaim stability uses) still reads the pre-rotation acknowledgement.
-    let acknowledgement = crate::sync::store::load_circle_acknowledgement_for_test(
-        &fixture.db,
-        &fixture.store.storage,
-        &fixture.signer,
-        &owner_ack_ref,
-    )
-    .await
-    .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");
+    let acknowledgement = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .await
+        .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");
     assert_eq!(
         acknowledgement.epoch_id, old_epoch,
         "the acknowledgement was sealed under the rotated-away epoch"

@@ -54,16 +54,16 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         )
         .await
         .expect("activate the second owner's device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &store,
-        &owner_database,
-        &second_owner_database,
-        &owner,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote the second owner");
+    store
+        .promote_active_member_fixture(
+            &owner_database,
+            &second_owner_database,
+            &owner,
+            &second_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote the second owner");
 
     let owner_store = store
         .bind_device(&owner_database, &owner)
@@ -148,14 +148,10 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "0000000002000-0000-owner",
         )
         .await;
-        let first_pull = pull_scoped_with(
-            &member_database,
-            fixture.member_storage.clone(),
-            &fixture.member,
-            &member_store_dir,
-        )
-        .await
-        .expect("pull unavailable-package baseline");
+        let first_pull = fixture
+            .pull_member(&member_store_dir)
+            .await
+            .expect("pull unavailable-package baseline");
         assert!(
             first_pull.held_positions.is_empty(),
             "{failure:?}: {first_pull:?}"
@@ -168,7 +164,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "0000000003000-0000-owner",
         )
         .await;
-        let unavailable_commit = load_commit(&fixture, &unavailable).await;
+        let unavailable_commit = fixture.load_commit(&unavailable).await;
         let unavailable_slot = exact_circle_package_slot(&unavailable_commit);
         match failure {
             PackageFailure::Missing => fixture.store.home.remove_exact_object(&unavailable_slot),
@@ -178,14 +174,10 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
                 .replace_exact_object(&unavailable_slot, b"corrupt Circle package".to_vec()),
         }
         fixture.store.home.clear_exact_reads();
-        let pull = pull_scoped_with(
-            &member_database,
-            fixture.member_storage.clone(),
-            &fixture.member,
-            &member_store_dir,
-        )
-        .await
-        .expect("active member records unavailable private package as held");
+        let pull = fixture
+            .pull_member(&member_store_dir)
+            .await
+            .expect("active member records unavailable private package as held");
         assert!(
             pull.held_positions
                 .iter()
@@ -193,7 +185,9 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}: {pull:?}"
         );
         assert!(fixture.store.home.exact_reads().contains(&unavailable_slot));
-        let state = scoped_routing_state(&member_database, EFFECTIVE_ACCESS_ROW_ID).await;
+        let state = member_database
+            .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
+            .await;
         assert_eq!(
             state.row.as_ref().map(|row| row.1.as_str()),
             Some("active baseline"),

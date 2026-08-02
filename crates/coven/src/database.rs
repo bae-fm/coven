@@ -145,7 +145,9 @@ pub(crate) use coven_schema::DatabaseTestTable;
 #[cfg(test)]
 pub(crate) use test_sql::DatabaseTestSql;
 #[cfg(test)]
-pub(crate) use test_support::{DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper};
+pub(crate) use test_support::{
+    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
+};
 #[cfg(test)]
 pub(crate) use test_transaction::DatabaseTestTransaction;
 mod write_lifecycle;

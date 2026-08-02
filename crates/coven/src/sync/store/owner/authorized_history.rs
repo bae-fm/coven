@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
 use super::history::{abandonment, OwnerPromotionHistory, ReclaimHistory, RestoreHistory};

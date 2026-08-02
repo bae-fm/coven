@@ -6,104 +6,87 @@
 
 use crate::sync::test_helpers::*;
 
-async fn raw_changeset(db: &crate::database::Database, tables: &[&str], sql: &str) -> Vec<u8> {
-    let tables = tables
-        .iter()
-        .map(|table| table.to_string())
-        .collect::<Vec<_>>();
-    let sql = sql.to_string();
-    db.test_sql(move |database| database.capture_changeset(&tables, &[sql]))
-        .await
-        .expect("capture raw changeset")
-}
-
-async fn apply_result(
-    db: &crate::database::Database,
-    bytes: &[u8],
-) -> Result<(), crate::database::DbError> {
-    let bytes = bytes.to_vec();
-    let tables = test_synced_tables();
-    let receiver_wall_ms = db.receive_wall_ms();
-    db.test_sql(move |database| {
-        database
-            .apply_changeset(&bytes, &tables, receiver_wall_ms)
-            .map(|_| ())
-    })
-    .await
-}
-
 #[tokio::test]
 async fn undeclared_changeset_table_is_rejected() {
     let source = open_test_db();
-    exec(
-        &source,
-        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
-    )
-    .await;
-    let changeset = raw_changeset(
-        &source,
-        &["local_only"],
-        "INSERT INTO local_only (id, value) VALUES ('local-1', 'private');",
-    )
-    .await;
+    source
+        .execute_test_sql(
+            "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+        )
+        .await;
+    let changeset = source
+        .capture_test_changeset_for_tables(
+            &["local_only"],
+            "INSERT INTO local_only (id, value) VALUES ('local-1', 'private');",
+        )
+        .await;
 
     let target = open_test_db();
-    exec(
-        &target,
-        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
-    )
-    .await;
+    target
+        .execute_test_sql(
+            "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+        )
+        .await;
 
-    let error = apply_result(&target, &changeset)
+    let error = target
+        .try_apply_test_changeset(&changeset)
         .await
         .expect_err("an undeclared table must reject the changeset");
     assert!(
         error.to_string().contains("local_only"),
         "rejection must name the undeclared table: {error}"
     );
-    assert!(!row_exists(&target, "SELECT 1 FROM local_only WHERE id = 'local-1'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM local_only WHERE id = 'local-1'")
+            .await
+    );
 }
 
 #[tokio::test]
 async fn mixed_changeset_with_undeclared_table_is_rejected_atomically() {
     let source = open_test_db();
-    exec(
-        &source,
-        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    source
+        .execute_test_sql(
+            "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
          INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-premerge', 'title0', 'body0', '0000000001000-0000-base', '2026-01-01');",
-    )
-    .await;
-    let changeset = raw_changeset(
-        &source,
-        &["notes", "local_only"],
-        "UPDATE notes \
+        )
+        .await;
+    let changeset = source
+        .capture_test_changeset_for_tables(
+            &["notes", "local_only"],
+            "UPDATE notes \
          SET title = 'incoming-title', _updated_at = '0000000003000-0000-incoming' \
          WHERE id = 'n-premerge';
          INSERT INTO local_only (id, value) VALUES ('local-1', 'private');",
-    )
-    .await;
+        )
+        .await;
 
     let target = open_test_db();
-    exec(
-        &target,
-        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    target
+        .execute_test_sql(
+            "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
          INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-premerge', 'title0', 'body0', '0000000001000-0000-base', '2026-01-01');
          UPDATE notes \
          SET body = 'local-body', _updated_at = '0000000005000-0000-local' \
          WHERE id = 'n-premerge';",
-    )
-    .await;
+        )
+        .await;
 
-    let result = apply_result(&target, &changeset).await;
+    let result = target.try_apply_test_changeset(&changeset).await;
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n-premerge'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n-premerge'")
+            .await,
         "title0",
         "the losing UPDATE must not premerge before table validation finishes"
     );
     assert!(
-        !row_exists(&target, "SELECT 1 FROM local_only WHERE id = 'local-1'").await,
+        !target
+            .test_row_exists("SELECT 1 FROM local_only WHERE id = 'local-1'")
+            .await,
         "the undeclared row must not apply"
     );
     let error = result.expect_err("any undeclared table must reject the whole changeset");
@@ -116,27 +99,29 @@ async fn mixed_changeset_with_undeclared_table_is_rejected_atomically() {
 #[tokio::test]
 async fn session_captures_and_applies_inserts() {
     let src = open_test_db();
-    let cs = capture_bytes(
-        &src,
-        &[
+    let cs = src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'First', 'hello', '0000000001000-0000-dev1', '2026-01-01')",
             "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
              VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     assert!(!cs.is_empty());
 
     let target = open_test_db();
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+    target.apply_test_changeset(&cs).await;
 
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "First"
     );
     assert_eq!(
-        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        target
+            .query_test_text("SELECT tag FROM note_tags WHERE id = 't1'")
+            .await,
         "green"
     );
 }
@@ -144,42 +129,38 @@ async fn session_captures_and_applies_inserts() {
 #[tokio::test]
 async fn shared_key_inserts_with_equal_ids_converge_in_both_apply_orders() {
     let older_source = open_test_db();
-    let older = capture_bytes(
-        &older_source,
-        &[
+    let older = older_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
           VALUES ('preferences', 'older', NULL, 1, '0000000001000-0000-a', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let newer_source = open_test_db();
-    let newer = capture_bytes(
-        &newer_source,
-        &[
+    let newer = newer_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
           VALUES ('preferences', 'newer', NULL, 1, '0000000002000-0000-b', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let older_then_newer = open_test_db();
-    apply_to_db(&older_then_newer, &older, &test_synced_tables()).await;
-    apply_to_db(&older_then_newer, &newer, &test_synced_tables()).await;
+    older_then_newer.apply_test_changeset(&older).await;
+    older_then_newer.apply_test_changeset(&newer).await;
     let newer_then_older = open_test_db();
-    apply_to_db(&newer_then_older, &newer, &test_synced_tables()).await;
-    apply_to_db(&newer_then_older, &older, &test_synced_tables()).await;
+    newer_then_older.apply_test_changeset(&newer).await;
+    newer_then_older.apply_test_changeset(&older).await;
 
     for target in [&older_then_newer, &newer_then_older] {
         assert_eq!(
-            query_text(target, "SELECT title FROM notes WHERE id = 'preferences'").await,
+            target
+                .query_test_text("SELECT title FROM notes WHERE id = 'preferences'")
+                .await,
             "newer"
         );
         assert_eq!(
-            query_text(
-                target,
-                "SELECT _updated_at FROM notes WHERE id = 'preferences'"
-            )
-            .await,
+            target
+                .query_test_text("SELECT _updated_at FROM notes WHERE id = 'preferences'")
+                .await,
             "0000000002000-0000-b"
         );
     }
@@ -189,33 +170,34 @@ async fn shared_key_inserts_with_equal_ids_converge_in_both_apply_orders() {
 async fn lww_later_update_wins() {
     // Source builds an UPDATE changeset from base ts=1 to ts=9.
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
     )
     .await;
     // Drain the insert capture so the changeset is just the UPDATE.
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(
-        &src,
-        &["UPDATE notes SET title = 'B', _updated_at = '0000000009000-0000-s' WHERE id = 'n1'"],
-    )
-    .await;
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&[
+            "UPDATE notes SET title = 'B', _updated_at = '0000000009000-0000-s' WHERE id = 'n1'",
+        ])
+        .await;
 
     // Target has its own edit at ts=5 (older than the incoming ts=9).
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'A', NULL, '0000000005000-0000-t', '2026-01-01')",
-    )
-    .await;
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+        )
+        .await;
+    target.apply_test_changeset(&cs).await;
 
     // Incoming ts=9 > local ts=5, so the incoming title wins.
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "B"
     );
 }
@@ -224,42 +206,43 @@ async fn lww_later_update_wins() {
 async fn lww_earlier_update_loses() {
     // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
     )
     .await;
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(
-        &src,
-        &["UPDATE notes SET title = 'B', _updated_at = '0000000003000-0000-s' WHERE id = 'n1'"],
-    )
-    .await;
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&[
+            "UPDATE notes SET title = 'B', _updated_at = '0000000003000-0000-s' WHERE id = 'n1'",
+        ])
+        .await;
 
     // Target's edit at ts=5 is newer than the incoming ts=3.
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'LOCAL', NULL, '0000000005000-0000-t', '2026-01-01')",
-    )
-    .await;
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+        )
+        .await;
+    target.apply_test_changeset(&cs).await;
 
     // Incoming ts=3 < local ts=5, so the local title is kept.
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "LOCAL"
     );
 
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'LOCAL', NULL, '0000000005000-0000-t', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let bytes = cs.clone();
     let tables = test_synced_tables();
     let receiver_wall_ms = target.receive_wall_ms();
@@ -280,40 +263,41 @@ async fn lww_earlier_update_loses() {
 #[tokio::test]
 async fn independent_column_edits_converge() {
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01')",
     )
     .await;
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(
-        &src,
-        &["UPDATE notes \
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&["UPDATE notes \
              SET title = 'titleA', _updated_at = '0000000003000-0000-s' \
-             WHERE id = 'n1'"],
-    )
-    .await;
+             WHERE id = 'n1'"])
+        .await;
 
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01');
          UPDATE notes \
          SET body = 'bodyB', _updated_at = '0000000005000-0000-t' \
          WHERE id = 'n1';",
-    )
-    .await;
+        )
+        .await;
 
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+    target.apply_test_changeset(&cs).await;
 
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "titleA"
     );
     assert_eq!(
-        query_text(&target, "SELECT body FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT body FROM notes WHERE id = 'n1'")
+            .await,
         "bodyB"
     );
 }
@@ -321,40 +305,41 @@ async fn independent_column_edits_converge() {
 #[tokio::test]
 async fn same_column_contention_keeps_newer() {
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01')",
     )
     .await;
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(
-        &src,
-        &["UPDATE notes \
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&["UPDATE notes \
              SET title = 'titleA', _updated_at = '0000000003000-0000-s' \
-             WHERE id = 'n1'"],
-    )
-    .await;
+             WHERE id = 'n1'"])
+        .await;
 
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01');
          UPDATE notes \
          SET title = 'titleB', _updated_at = '0000000005000-0000-t' \
          WHERE id = 'n1';",
-    )
-    .await;
+        )
+        .await;
 
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+    target.apply_test_changeset(&cs).await;
 
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "titleB"
     );
     assert_eq!(
-        query_text(&target, "SELECT body FROM notes WHERE id = 'n1'").await,
+        target
+            .query_test_text("SELECT body FROM notes WHERE id = 'n1'")
+            .await,
         "body0"
     );
 }
@@ -363,9 +348,9 @@ async fn same_column_contention_keeps_newer() {
 /// single UPDATE — the changeset a writer who started from that base would push.
 async fn update_from_base(base: &str, update: &str) -> Vec<u8> {
     let src = open_test_db();
-    exec(&src, base).await;
-    let _ = capture_bytes(&src, &[]).await;
-    capture_bytes(&src, &[update]).await
+    src.execute_test_sql(base).await;
+    let _ = src.capture_test_changeset(&[]).await;
+    src.capture_test_changeset(&[update]).await
 }
 
 /// Three writers contend on one column while a fourth wins the row on a *different*
@@ -401,34 +386,40 @@ async fn raw_three_writer_same_column_contention_is_order_dependent() {
 
     // Apply order X1, M, X2.
     let a = open_test_db();
-    exec(&a, base).await;
-    apply_to_db(&a, &x1, &test_synced_tables()).await;
-    apply_to_db(&a, &m, &test_synced_tables()).await;
-    apply_to_db(&a, &x2, &test_synced_tables()).await;
+    a.execute_test_sql(base).await;
+    a.apply_test_changeset(&x1).await;
+    a.apply_test_changeset(&m).await;
+    a.apply_test_changeset(&x2).await;
 
     // Apply order X2, M, X1.
     let b = open_test_db();
-    exec(&b, base).await;
-    apply_to_db(&b, &x2, &test_synced_tables()).await;
-    apply_to_db(&b, &m, &test_synced_tables()).await;
-    apply_to_db(&b, &x1, &test_synced_tables()).await;
+    b.execute_test_sql(base).await;
+    b.apply_test_changeset(&x2).await;
+    b.apply_test_changeset(&m).await;
+    b.apply_test_changeset(&x1).await;
 
     // The row winner's column and stamp converge regardless of order.
     for db in [&a, &b] {
         assert_eq!(
-            query_text(db, "SELECT body FROM notes WHERE id = 'n1'").await,
+            db.query_test_text("SELECT body FROM notes WHERE id = 'n1'")
+                .await,
             "bM"
         );
         assert_eq!(
-            query_text(db, "SELECT _updated_at FROM notes WHERE id = 'n1'").await,
+            db.query_test_text("SELECT _updated_at FROM notes WHERE id = 'n1'")
+                .await,
             "0000000009000-0000-m"
         );
     }
 
     // The contended column does not converge: whichever same-column writer landed
     // first (before the row winner moved the row past its base) keeps its value.
-    let title_a = query_text(&a, "SELECT title FROM notes WHERE id = 'n1'").await;
-    let title_b = query_text(&b, "SELECT title FROM notes WHERE id = 'n1'").await;
+    let title_a = a
+        .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        .await;
+    let title_b = b
+        .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        .await;
     assert_eq!(title_a, "c1");
     assert_eq!(title_b, "c2");
     assert_ne!(
@@ -442,43 +433,46 @@ async fn raw_three_writer_same_column_contention_is_order_dependent() {
 async fn fk_violation_is_reported_then_resolved_on_retry() {
     // Capture a child insert (note_tags -> notes) on a source that has the parent.
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
     )
     .await;
-    let _ = capture_bytes(&src, &[]).await;
-    let child_cs = capture_bytes(
-        &src,
-        &[
+    let _ = src.capture_test_changeset(&[]).await;
+    let child_cs = src
+        .capture_test_changeset(&[
             "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
            VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let parent_src = open_test_db();
-    let parent_cs = capture_bytes(
-        &parent_src,
-        &[
+    let parent_cs = parent_src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     // Apply child first on an empty target: FK violation flagged.
     let target = open_test_db();
-    let r1 = apply_reporting(&target, &child_cs).await;
+    let r1 = target
+        .apply_test_changeset_reporting_foreign_key_violations(&child_cs)
+        .await
+        .expect("apply child changeset");
     assert!(r1, "child without parent violates FK");
 
     // Apply parent, then re-apply child: now it resolves.
-    apply_to_db(&target, &parent_cs, &test_synced_tables()).await;
-    let r2 = apply_reporting(&target, &child_cs).await;
+    target.apply_test_changeset(&parent_cs).await;
+    let r2 = target
+        .apply_test_changeset_reporting_foreign_key_violations(&child_cs)
+        .await
+        .expect("reapply child changeset");
     assert!(!r2);
     assert_eq!(
-        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        target
+            .query_test_text("SELECT tag FROM note_tags WHERE id = 't1'")
+            .await,
         "green"
     );
 }
@@ -486,31 +480,27 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 #[tokio::test]
 async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changeset() {
     let source = open_test_db();
-    exec(
-        &source,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    source
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
-    )
-    .await;
-    let _ = capture_bytes(&source, &[]).await;
-    let child = capture_bytes(
-        &source,
-        &[
+        )
+        .await;
+    let _ = source.capture_test_changeset(&[]).await;
+    let child = source
+        .capture_test_changeset(&[
             "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
            VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let parent_source = open_test_db();
-    let parent = capture_bytes(
-        &parent_source,
-        &[
+    let parent = parent_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let target = open_test_db();
     let tables = test_synced_tables();
@@ -531,76 +521,73 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
         .expect("apply dependent changesets atomically");
 
     assert_eq!(
-        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        target
+            .query_test_text("SELECT tag FROM note_tags WHERE id = 't1'")
+            .await,
         "green"
     );
-}
-
-/// Apply a changeset and report whether it had FK violations, through the same
-/// plain-`call` apply path as [`apply_to_db`].
-async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
-    let bytes = bytes.to_vec();
-    let tables = test_synced_tables();
-    let receiver_wall_ms = db.receive_wall_ms();
-    db.test_sql(move |database| {
-        database
-            .apply_changeset(&bytes, &tables, receiver_wall_ms)
-            .map(|r| r.had_fk_violations)
-    })
-    .await
-    .expect("apply")
 }
 
 #[tokio::test]
 async fn delete_applies() {
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
 
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
     )
     .await;
     // Drain the insert capture so the changeset is just the DELETE (an INSERT +
     // DELETE of the same row in one session nets to no change).
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(&src, &["DELETE FROM notes WHERE id = 'n1'"]).await;
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&["DELETE FROM notes WHERE id = 'n1'"])
+        .await;
 
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    target.apply_test_changeset(&cs).await;
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
 }
 
 #[tokio::test]
 async fn concurrent_delete_and_update_converge_to_deleted() {
     let src = open_test_db();
-    exec(
-        &src,
+    src.execute_test_sql(
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000005000-0000-d', '2026-01-01')",
     )
     .await;
-    let _ = capture_bytes(&src, &[]).await;
-    let cs = capture_bytes(&src, &["DELETE FROM notes WHERE id = 'n1'"]).await;
+    let _ = src.capture_test_changeset(&[]).await;
+    let cs = src
+        .capture_test_changeset(&["DELETE FROM notes WHERE id = 'n1'"])
+        .await;
 
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'title0', 'body0', '0000000005000-0000-d', '2026-01-01');
          UPDATE notes \
          SET title = 'local update', _updated_at = '0000000020000-0000-u' \
          WHERE id = 'n1';",
-    )
-    .await;
+        )
+        .await;
 
-    apply_to_db(&target, &cs, &test_synced_tables()).await;
+    target.apply_test_changeset(&cs).await;
 
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
 }

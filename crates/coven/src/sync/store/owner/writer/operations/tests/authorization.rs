@@ -27,11 +27,12 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .await
         .expect("invite operation author");
     let writer_db = open_test_db();
-    store
+    let writer_device = store
         .activate_joined_device(&owner_db, &writer_db, &writer, "2026-07-21T00:00:00Z")
         .await
         .expect("activate operation author device");
-    promote_active_member_fixture(&store, &owner_db, &writer_db, &owner, &writer, &encryption)
+    store
+        .promote_active_member_fixture(&owner_db, &writer_db, &owner, &writer, &encryption)
         .await
         .expect("promote operation author to Owner");
     let owner_device = store
@@ -72,7 +73,8 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .expect("load candidate membership after removal");
     assert!(!candidate.can_write_now(&writer_pubkey));
 
-    let plan = prepare_plan(&writer_db, &store.storage, &writer)
+    let plan = writer_device
+        .prepare_store_operation_plan_for_test()
         .await
         .expect("authorize operation at its predecessor cut");
     let state = &plan.membership_state;
@@ -162,19 +164,18 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .expect("load membership after direct removal");
     assert!(!after_removal.can_write_now(&writer_pubkey));
 
-    host_exec(
-        &owner_db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    owner_db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('direct-removal-witness', 'witness', NULL, 1, \
                  '0000000001000-0000-owner', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(
-        prepare_merge_store_write(&owner_db, &store.storage, &owner, &store_dir,)
-            .await
-            .expect("prepare removal-witnessing predecessor commit")
-    );
+    assert!(owner_device
+        .prepare_pending_store_write(&store_dir)
+        .await
+        .expect("prepare removal-witnessing predecessor commit"));
     let prepared = crate::database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
@@ -183,12 +184,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     let predecessor_membership = &prepared.commit.value.membership_state;
     assert_eq!(predecessor_membership.heads, after_removal.head_refs());
     let predecessor = prepared.head.value.commit.clone();
-    assert_eq!(
-        drain_store_writes(&owner_db, &store.storage, &owner)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
     let writer_device = store
         .bind_device(&writer_db, &writer)
@@ -226,19 +222,18 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .bind_device(&owner_db, &owner)
         .await
         .expect("load predecessor membership");
-    host_exec(
-        &owner_db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    owner_db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('new-direct-witness', 'witness', NULL, 1, \
                  '0000000001000-0000-owner', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let (_temp, store_dir) = temp_store_dir();
-    assert!(
-        prepare_merge_store_write(&owner_db, &store.storage, &owner, &store_dir,)
-            .await
-            .expect("prepare predecessor commit")
-    );
+    assert!(owner_device
+        .prepare_pending_store_write(&store_dir)
+        .await
+        .expect("prepare predecessor commit"));
     let predecessor = crate::database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
@@ -247,12 +242,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .head
         .value
         .commit;
-    assert_eq!(
-        drain_store_writes(&owner_db, &store.storage, &owner)
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
     let new_member = UserKeypair::generate();
     let new_member_pubkey = pubkey_hex(&new_member);
@@ -312,15 +302,13 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .membership_for_test()
         .await
         .expect("load exact founder membership");
-    let changeset = crate::sync::test_helpers::capture_bytes(
-        &open_test_db(),
-        &[
+    let changeset = open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('remote-device-authority', 'authority', NULL, 1, \
                      '0000000001000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     store
         .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
         .await
@@ -338,13 +326,9 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .await
         .expect("tamper local Store device projection");
 
-    let error = match prepare_merge_conflict_resolution_commit(
-        &owner_db,
-        &store.storage,
-        &owner,
-        chain.head_refs(),
-    )
-    .await
+    let error = match device
+        .prepare_conflict_resolution_plan_for_test(chain.head_refs())
+        .await
     {
         Ok(_) => panic!("tampered retained Store device state must fail"),
         Err(error) => error,

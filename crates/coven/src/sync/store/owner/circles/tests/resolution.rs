@@ -102,14 +102,69 @@ impl ConflictFixture {
             .await
             .expect("list device 2 Circles")
     }
+
+    /// Author a control successor on each device from the shared founder
+    /// control without either device seeing the other's, then pull both onto
+    /// device 1 so its current state retains the conflict.
+    async fn fork(&self) -> (CircleControlCoord, CircleControlCoord) {
+        self.store1()
+            .await
+            .circles()
+            .rename_circle("0000000001200-0000-device1", self.circle_id, "Alpha")
+            .await
+            .expect("device 1 authors a control successor");
+        self.store2()
+            .await
+            .circles()
+            .rename_circle("0000000001200-0000-device2", self.circle_id, "Beta")
+            .await
+            .expect("device 2 authors a concurrent control successor");
+        self.pull_device1().await;
+        let branches = self.conflict_branches_device1().await;
+        assert_eq!(branches.len(), 2, "two concurrent successors are retained");
+        let chosen = branches
+            .iter()
+            .find(|branch| branch.device_id == self.device1)
+            .expect("device 1 authored one branch")
+            .clone();
+        let losing = branches
+            .into_iter()
+            .find(|branch| *branch != chosen)
+            .expect("the other device authored the losing branch");
+        (chosen, losing)
+    }
+
+    async fn assert_resolution_activated(&self, journal: &CircleOperationJournal) {
+        assert!(
+            StoreDatabase::new(&self.db1)
+                .circle_operation(&journal.operation_id)
+                .await
+                .expect("read resolution journal")
+                .is_none(),
+            "the durable resolution clears on completion"
+        );
+        let circles = self.circles_device1().await;
+        assert!(
+            matches!(circles.as_slice(), [CircleInfo::Active { id, .. }] if *id == self.circle_id),
+            "the resolution collapses the conflict: {circles:?}"
+        );
+    }
 }
 
 async fn conflict_fixture(label: &str) -> ConflictFixture {
     let db1 = open_test_db();
     let (store, founder, journal) = persist_merge_operation(&db1, label).await;
     let circle_id = journal.circle_id();
-    let device1 = local_device_id(&db1).await;
-    resume_circle_operations(&db1, &store.storage, &founder)
+    let device1 = db1
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read local Store device id")
+        .expect("local Store device is active");
+    store
+        .bind_device(&db1, &founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -141,44 +196,10 @@ async fn conflict_fixture(label: &str) -> ConflictFixture {
     fixture
 }
 
-/// Author a control successor on each device from the shared founder control
-/// without either device seeing the other's, then pull both onto device 1 so
-/// its current state retains the conflict. Returns the canonical branch set.
-async fn fork(fixture: &ConflictFixture) -> (CircleControlCoord, CircleControlCoord) {
-    fixture
-        .store1()
-        .await
-        .circles()
-        .rename_circle("0000000001200-0000-device1", fixture.circle_id, "Alpha")
-        .await
-        .expect("device 1 authors a control successor");
-    fixture
-        .store2()
-        .await
-        .circles()
-        .rename_circle("0000000001200-0000-device2", fixture.circle_id, "Beta")
-        .await
-        .expect("device 2 authors a concurrent control successor");
-    fixture.pull_device1().await;
-    let branches = fixture.conflict_branches_device1().await;
-    assert_eq!(branches.len(), 2, "two concurrent successors are retained");
-    // The resolver chooses its own device's branch; `chosen` is device 1's.
-    let chosen = branches
-        .iter()
-        .find(|branch| branch.device_id == fixture.device1)
-        .expect("device 1 authored one branch")
-        .clone();
-    let losing = branches
-        .into_iter()
-        .find(|branch| *branch != chosen)
-        .expect("the other device authored the losing branch");
-    (chosen, losing)
-}
-
 #[tokio::test]
 async fn concurrent_successors_retain_and_surface_as_a_conflict() {
     let fixture = conflict_fixture("resolve-surface").await;
-    let _ = fork(&fixture).await;
+    let _ = fixture.fork().await;
 
     assert_eq!(
         fixture.circles_device1().await,
@@ -214,7 +235,7 @@ async fn concurrent_successors_retain_and_surface_as_a_conflict() {
 #[tokio::test]
 async fn resolution_collapses_the_conflict_on_every_device() {
     let fixture = conflict_fixture("resolve-collapse").await;
-    let (chosen, _losing) = fork(&fixture).await;
+    let (chosen, _losing) = fixture.fork().await;
 
     fixture
         .store1()
@@ -254,7 +275,7 @@ async fn resolving_to_another_devices_branch_merges_head_frontiers() {
     let fixture = conflict_fixture("resolve-frontier-merge").await;
     // `fork` renames on each device; device 2's stamp sorts after device 1's, so
     // device 2's metadata ("Beta") is the deterministic canonical selection.
-    let (device1_branch, device2_branch) = fork(&fixture).await;
+    let (device1_branch, device2_branch) = fixture.fork().await;
 
     // Device 1 resolves the conflict to the branch device 2 authored. The
     // resolution inherits the chosen branch's state — its name stays "Beta" — but
@@ -304,7 +325,7 @@ async fn resolving_to_another_devices_branch_merges_head_frontiers() {
 #[tokio::test]
 async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
     let fixture = conflict_fixture("delete-conflicted").await;
-    let (chosen, _losing) = fork(&fixture).await;
+    let (chosen, _losing) = fixture.fork().await;
 
     // A conflicted Circle refuses deletion: the conflicting set may carry
     // membership intent the deletion would otherwise bury.
@@ -366,31 +387,29 @@ async fn resolve_request(
     chosen: &CircleControlCoord,
     conflicting_branches: Vec<CircleControlCoord>,
 ) -> CircleOperationRequest {
-    let chosen_activation = verified_circle_activation(
-        &fixture.store,
-        &fixture.db1,
-        &fixture.founder,
-        fixture.circle_id,
-        chosen.clone(),
-    )
-    .await
-    .expect("read chosen branch activation")
-    .expect("chosen branch is retained");
+    let chosen_activation = fixture
+        .store
+        .bind_device(&fixture.db1, &fixture.founder)
+        .await
+        .expect("bind chosen branch Store")
+        .verified_circle_activation_for_test(fixture.circle_id, chosen.clone())
+        .await
+        .expect("read chosen branch activation")
+        .expect("chosen branch is retained");
     let mut losing_branches = Vec::new();
     for branch in fixture.conflict_branches_device1().await {
         if branch == *chosen {
             continue;
         }
-        let activation = verified_circle_activation(
-            &fixture.store,
-            &fixture.db1,
-            &fixture.founder,
-            fixture.circle_id,
-            branch,
-        )
-        .await
-        .expect("read losing branch activation")
-        .expect("losing branch is retained");
+        let activation = fixture
+            .store
+            .bind_device(&fixture.db1, &fixture.founder)
+            .await
+            .expect("bind losing branch Store")
+            .verified_circle_activation_for_test(fixture.circle_id, branch)
+            .await
+            .expect("read losing branch activation")
+            .expect("losing branch is retained");
         let selected_metadata = activation
             .local_access
             .as_ref()
@@ -426,7 +445,7 @@ async fn resolve_request(
 #[tokio::test]
 async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict() {
     let fixture = conflict_fixture("resolve-stale").await;
-    let (chosen, _losing) = fork(&fixture).await;
+    let (chosen, _losing) = fixture.fork().await;
     let stale_request = resolve_request(&fixture, &chosen, vec![chosen.clone()]).await;
     let store = fixture
         .store
@@ -442,7 +461,10 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
     // branch no longer equals the retained set inside the journal transaction,
     // so preparation fails loud rather than silently dropping the omitted
     // branch. Here the captured set names only the chosen branch.
-    let stale = prepare_circle_operation_request(&mut authority, stale_request)
+    let stale = authority
+        .circles()
+        .preparer()
+        .prepare_request(stale_request)
         .await
         .expect_err("a stale conflicting set is refused");
     assert!(
@@ -524,7 +546,11 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let db1 = open_routing_db();
     let (store, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
     let circle_id = journal.circle_id();
-    resume_circle_operations(&db1, &store.storage, &founder)
+    store
+        .bind_device(&db1, &founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("activate founder transition");
 
@@ -659,11 +685,14 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 
     let mut closing = Vec::new();
     for branch in &branches {
-        let activation =
-            verified_circle_activation(&store, &db1, &founder, circle_id, branch.clone())
-                .await
-                .expect("read branch activation")
-                .expect("branch is retained");
+        let activation = store
+            .bind_device(&db1, &founder)
+            .await
+            .expect("bind branch Store")
+            .verified_circle_activation_for_test(circle_id, branch.clone())
+            .await
+            .expect("read branch activation")
+            .expect("branch is retained");
         if matches!(
             activation.control.value.state(),
             crate::protocol::circle::CircleControlState::EpochClose(_)
@@ -717,11 +746,14 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let mut reopened = None;
     let mut closing_count = 0;
     for branch in &after_cancel {
-        let activation =
-            verified_circle_activation(&store, &db1, &founder, circle_id, branch.clone())
-                .await
-                .expect("read post-cancellation branch activation")
-                .expect("post-cancellation branch is retained");
+        let activation = store
+            .bind_device(&db1, &founder)
+            .await
+            .expect("bind post-cancellation branch Store")
+            .verified_circle_activation_for_test(circle_id, branch.clone())
+            .await
+            .expect("read post-cancellation branch activation")
+            .expect("post-cancellation branch is retained");
         match activation.control.value.state() {
             crate::protocol::circle::CircleControlState::ActiveEpoch(_) => {
                 assert!(
@@ -823,7 +855,7 @@ async fn non_owner_resolution_is_refused() {
         .await
         .expect("register the non-owner device");
 
-    let (chosen, _losing) = fork(&fixture).await;
+    let (chosen, _losing) = fixture.fork().await;
 
     let (_outsider_dir_temp, outsider_dir) = temp_store_dir();
     Store::load(
@@ -882,7 +914,10 @@ async fn journal_resolution(
         .authorize_writer()
         .await
         .expect("authorize Circle writer");
-    let journal = prepare_circle_operation_request(&mut authority, request)
+    let journal = authority
+        .circles()
+        .preparer()
+        .prepare_request(request)
         .await
         .expect("prepare resolution operation");
     StoreDatabase::new(&fixture.db1)
@@ -892,45 +927,33 @@ async fn journal_resolution(
     journal
 }
 
-async fn assert_resolution_activated(fixture: &ConflictFixture, journal: &CircleOperationJournal) {
-    assert!(
-        StoreDatabase::new(&fixture.db1)
-            .circle_operation(&journal.operation_id)
-            .await
-            .expect("read resolution journal")
-            .is_none(),
-        "the durable resolution clears on completion"
-    );
-    let circles = fixture.circles_device1().await;
-    assert!(
-        matches!(circles.as_slice(), [CircleInfo::Active { id, .. }] if *id == fixture.circle_id),
-        "the resolution collapses the conflict: {circles:?}"
-    );
-}
-
 #[tokio::test]
 async fn resolution_resumes_idempotently_after_a_restart() {
     // A crash between journaling the command and publishing it: the durable
     // operation resumes and completes exactly once.
     let before_publication = conflict_fixture("resolve-restart-before").await;
-    let (chosen, _losing) = fork(&before_publication).await;
+    let (chosen, _losing) = before_publication.fork().await;
     let journal = journal_resolution(&before_publication, &chosen).await;
-    resume_circle_operations(
-        &before_publication.db1,
-        &before_publication.store.storage,
-        &before_publication.founder,
-    )
-    .await
-    .expect("resume completes the resolution");
+    before_publication
+        .store
+        .bind_device(&before_publication.db1, &before_publication.founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
+        .await
+        .expect("resume completes the resolution");
     // A second resume is idempotent — the operation has already cleared.
-    resume_circle_operations(
-        &before_publication.db1,
-        &before_publication.store.storage,
-        &before_publication.founder,
-    )
-    .await
-    .expect("second resume is idempotent");
-    assert_resolution_activated(&before_publication, &journal).await;
+    before_publication
+        .store
+        .bind_device(&before_publication.db1, &before_publication.founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
+        .await
+        .expect("second resume is idempotent");
+    before_publication
+        .assert_resolution_activated(&journal)
+        .await;
 
     // A crash between publication and activation: the resolution control commit
     // reaches durable storage, but the operation is interrupted before it claims
@@ -940,31 +963,37 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     // envelopes, then the commit and the head); failing before the final head
     // create leaves the commit published and activation not yet recorded.
     let after_publication = conflict_fixture("resolve-restart-after").await;
-    let (chosen, _losing) = fork(&after_publication).await;
+    let (chosen, _losing) = after_publication.fork().await;
     let journal = journal_resolution(&after_publication, &chosen).await;
     // The founder control and both conflicting branches are already activated;
     // the resolution must not add its activation while it is interrupted.
-    let activations_before =
-        activation_count(&after_publication.db1, after_publication.circle_id).await;
+    let activations_before = StoreDatabase::new(&after_publication.db1)
+        .circle_control_activation_count_for_test(after_publication.circle_id)
+        .await
+        .expect("count circle activations");
     let head_create_call = 2 * journal.operation().creation.access.len() + 4;
     after_publication
         .store
         .home
         .fail_exact_create_before_call(head_create_call);
 
-    let interrupted = resume_circle_operations(
-        &after_publication.db1,
-        &after_publication.store.storage,
-        &after_publication.founder,
-    )
-    .await
-    .expect_err("the head create fails after the commit is published");
+    let interrupted = after_publication
+        .store
+        .bind_device(&after_publication.db1, &after_publication.founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
+        .await
+        .expect_err("the head create fails after the commit is published");
     assert!(
         matches!(interrupted, CircleOperationError::Object(_)),
         "{interrupted}"
     );
     assert_eq!(
-        activation_count(&after_publication.db1, after_publication.circle_id).await,
+        StoreDatabase::new(&after_publication.db1)
+            .circle_control_activation_count_for_test(after_publication.circle_id)
+            .await
+            .expect("count circle activations"),
         activations_before,
         "the interrupted resolution has not activated"
     );
@@ -975,12 +1004,15 @@ async fn resolution_resumes_idempotently_after_a_restart() {
         .expect("the interrupted resolution remains durable");
     assert_eq!(persisted.state(), CircleOperationState::Pending);
 
-    resume_circle_operations(
-        &after_publication.db1,
-        &after_publication.store.storage,
-        &after_publication.founder,
-    )
-    .await
-    .expect("resume completes the published-but-unactivated resolution");
-    assert_resolution_activated(&after_publication, &journal).await;
+    after_publication
+        .store
+        .bind_device(&after_publication.db1, &after_publication.founder)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
+        .await
+        .expect("resume completes the published-but-unactivated resolution");
+    after_publication
+        .assert_resolution_activated(&journal)
+        .await;
 }

@@ -2,18 +2,13 @@ use std::sync::Arc;
 
 use super::*;
 use crate::database::{Database, StoreDatabase};
-use crate::keys::UserKeypair;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::test_helpers::TestStore;
 
 struct CircleSnapshotFixture {
     directory: tempfile::TempDir,
     database: Database,
     store_database: StoreDatabase,
-    storage: Arc<CloudSyncStorage>,
-    signer: UserKeypair,
-    root: StoreRootRef,
-    device_id: String,
+    store: TestStore,
 }
 
 impl CircleSnapshotFixture {
@@ -31,44 +26,18 @@ impl CircleSnapshotFixture {
         .expect("open Circle snapshot test database")
         .0;
         let store_database = StoreDatabase::new(&database);
-        let home = InMemoryCloudHome::new();
-        let signer = UserKeypair::generate();
-        let storage = Arc::new(
-            CloudSyncStorage::new(
-                Arc::new(home),
-                CloudCipher::Plaintext,
-                BlobPathScheme::Plain,
-                "circle-snapshot-store",
-                signer.clone(),
-            )
-            .expect("construct Circle snapshot test storage"),
-        );
-        let initialized = crate::sync::store::Store::create(
-            store_database.clone(),
-            storage.clone(),
+        let store = TestStore::create_browsable(
+            &database,
             "circle-snapshot-store",
-            &signer,
+            crate::keys::UserKeypair::generate(),
         )
         .await
         .expect("create Circle snapshot test Store");
-        let root = initialized.store.store_root().clone();
-        let origin = crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: initialized
-                .store
-                .protocol_root_for_test()
-                .descriptor
-                .creation_id,
-        };
-        let device_id =
-            crate::protocol::store_commit::StoreDeviceId::derive(&root, &origin).to_string();
         Self {
             directory,
             database,
             store_database,
-            storage,
-            signer,
-            root,
-            device_id,
+            store,
         }
     }
 
@@ -96,17 +65,16 @@ impl CircleSnapshotFixture {
     }
 
     async fn push_snapshots(&self) {
-        crate::sync::store::push_circle_snapshots_for_test(
-            &self.database,
-            &self.storage,
-            self.directory.path().join("snap-temp"),
-            self.database.schema_version(),
-            &self.signer,
-            "2026-07-16T00:00:00Z",
-            &crate::encryption::EncryptionService::from_key([42; 32]),
-        )
-        .await
-        .expect("author Circle snapshots");
+        self.store
+            .push_circle_snapshots(
+                &self.database,
+                self.directory.path().join("snap-temp"),
+                self.database.schema_version(),
+                "2026-07-16T00:00:00Z",
+                &crate::encryption::EncryptionService::from_key([42; 32]),
+            )
+            .await
+            .expect("author Circle snapshots");
     }
 
     async fn publication_context(
@@ -125,15 +93,10 @@ impl CircleSnapshotFixture {
         circle_id: crate::protocol::circle::CircleId,
         encryption: crate::encryption::EncryptionService,
     ) -> Vec<CircleSnapshotMeta> {
-        crate::sync::store::load_circle_snapshot_metas_for_test(
-            &self.database,
-            &self.storage,
-            circle_id,
-            encryption,
-            &self.signer,
-        )
-        .await
-        .expect("load Circle snapshot stream")
+        self.store
+            .load_circle_snapshot_metas(&self.database, circle_id, encryption)
+            .await
+            .expect("load Circle snapshot stream")
     }
 
     async fn read_snapshot_image(
@@ -141,21 +104,8 @@ impl CircleSnapshotFixture {
         selected: &CircleSnapshotMeta,
         encryption: crate::encryption::EncryptionService,
     ) -> Vec<u8> {
-        let context = ProtocolObjectContext::circle(
-            self.root.store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotImage,
-            encryption,
-        );
-        self.storage
-            .read_protocol_object(
-                &context,
-                &selected.bootstrap.image.object,
-                &circle_snapshot_image_semantic_prefix(
-                    selected.circle_id,
-                    &selected.author_registration.device_id.to_string(),
-                    selected.bootstrap.image.image_hash,
-                ),
-            )
+        self.store
+            .read_circle_snapshot_image(selected, encryption)
             .await
             .expect("read Circle snapshot image")
     }
@@ -165,26 +115,13 @@ impl CircleSnapshotFixture {
         circle_id: crate::protocol::circle::CircleId,
         encryption: crate::encryption::EncryptionService,
     ) -> bool {
-        let context = ProtocolObjectContext::circle(
-            self.root.store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotMeta,
-            encryption,
-        );
-        let prefix = crate::protocol::store_commit::circle_snapshot_slot_prefix(
-            circle_id,
-            &self.device_id,
-            0,
-        );
-        let slot = crate::storage::cloud::ObjectSlot::logical(format!("{prefix}.json"))
-            .expect("gen-0 slot");
-        self.storage
-            .read_protocol_slot(&context, &slot, &prefix)
+        self.store
+            .circle_snapshot_meta_is_unreadable(circle_id, encryption)
             .await
-            .is_err()
     }
 
     fn store_root_hash(&self) -> crate::protocol::store_commit::ObjectHash {
-        self.root.store_root_hash
+        self.store.store_root_hash()
     }
 }
 

@@ -10,6 +10,8 @@ use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobC
 
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
+    database: StoreDatabase,
+    store_dir: StoreDir,
     cache: StoreBlobCache,
     local_access: LocalStoreBlobAccess,
     local_transitions: LocalBlobTransitions,
@@ -39,14 +41,12 @@ impl TestOwnerGraph {
             store_dir.clone(),
         );
         Self {
+            database,
+            store_dir,
             cache,
             local_access,
             local_transitions,
         }
-    }
-
-    pub(crate) fn cache(&self) -> StoreBlobCache {
-        self.cache.clone()
     }
 
     pub(crate) fn local_access(&self) -> LocalStoreBlobAccess {
@@ -99,6 +99,44 @@ impl TestOwnerGraph {
         self.blob_access(storage).read(reference).await
     }
 
+    pub(crate) async fn open_blob_stream(
+        &self,
+        storage: Option<Arc<dyn SyncStorage>>,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<crate::sync::BlobStream, crate::sync::BlobCacheError> {
+        self.blob_access(storage).open_stream(reference).await
+    }
+
+    pub(crate) async fn read_blob_range(
+        &self,
+        storage: Option<Arc<dyn SyncStorage>>,
+        reference: &crate::blob::RowBlobRef,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
+        self.open_blob_stream(storage, reference)
+            .await?
+            .read_at(offset, len)
+            .await
+    }
+
+    pub(crate) async fn materialize_blob(
+        &self,
+        storage: Option<Arc<dyn SyncStorage>>,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<(), crate::sync::BlobCacheError> {
+        self.blob_access(storage).materialize(reference).await
+    }
+
+    pub(crate) async fn pin_blobs(
+        &self,
+        storage: Option<Arc<dyn SyncStorage>>,
+        references: &[crate::blob::RowBlobRef],
+    ) -> Result<(), crate::sync::BlobCacheError> {
+        let access = self.blob_access(storage);
+        self.cache.pin(&access, references).await
+    }
+
     pub(crate) fn connected_blob_transitions(
         &self,
         storage: Arc<dyn SyncStorage>,
@@ -111,5 +149,35 @@ impl TestOwnerGraph {
             routing_encryption,
             observer,
         )
+    }
+
+    pub(crate) async fn run_cycle(
+        &self,
+        storage: crate::storage::CloudSyncStorage,
+    ) -> Result<crate::sync::cycle::SyncComponents, String> {
+        let expected_store_root = self
+            .database
+            .local_store_root_ref()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
+        let components = Box::pin(crate::sync::cycle::PreparedSyncComponents::prepare(
+            self.database.clone(),
+            self.local_access.clone(),
+            storage,
+            crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_store_root,
+            },
+            None,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+        let components = Box::pin(components.initialize())
+            .await
+            .map_err(|error| error.to_string())?;
+        Box::pin(components.run_cycle(&crate::clock::SystemClock, None, &self.store_dir, None))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(components)
     }
 }

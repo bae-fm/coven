@@ -225,9 +225,16 @@ mod tests {
         (endpoint, requests, shutdown_tx)
     }
 
-    fn session(label: &str) -> OAuthSession {
+    async fn revoke_against_fake(
+        label: &str,
+        target_on_second_page: bool,
+        second_page_end: SecondPageEnd,
+        delete_status: StatusCode,
+    ) -> Result<(Arc<Mutex<Vec<String>>>, tokio::sync::oneshot::Sender<()>), CloudHomeError> {
+        let (endpoint, requests, shutdown) =
+            spawn_permissions_endpoint(target_on_second_page, second_page_end, delete_status).await;
         crate::keys::test_keyring::install();
-        OAuthSession::new(
+        let session = OAuthSession::new(
             OAuthTokens {
                 access_token: "access-token".to_string(),
                 refresh_token: None,
@@ -237,18 +244,7 @@ mod tests {
             Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_000, 0).unwrap())),
             oauth_config("http://127.0.0.1/token".to_string()),
             "Provider",
-        )
-    }
-
-    async fn revoke_against_fake(
-        label: &str,
-        target_on_second_page: bool,
-        second_page_end: SecondPageEnd,
-        delete_status: StatusCode,
-    ) -> Result<(Arc<Mutex<Vec<String>>>, tokio::sync::oneshot::Sender<()>), CloudHomeError> {
-        let (endpoint, requests, shutdown) =
-            spawn_permissions_endpoint(target_on_second_page, second_page_end, delete_status).await;
-        let session = session(label);
+        );
         let list_url = format!("{endpoint}/permissions");
         let next_base = endpoint.clone();
         ensure_absent_by_email(

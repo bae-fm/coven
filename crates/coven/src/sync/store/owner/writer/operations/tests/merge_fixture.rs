@@ -8,7 +8,7 @@ pub(super) struct PreparedWriteFixture {
     pub(super) storage: Arc<CloudSyncStorage>,
     pub(super) db: Database,
     pub(super) database: StoreDatabase,
-    pub(super) store: Arc<Store>,
+    pub(super) device: crate::sync::test_helpers::TestDevice,
     pub(super) keypair: UserKeypair,
     pub(super) root: StoreRootRef,
     pub(super) device_id: String,
@@ -19,25 +19,26 @@ pub(super) struct PreparedWriteFixture {
 }
 
 impl PreparedWriteFixture {
+    pub(super) async fn drain_store_writes(&self) -> Result<u64, StoreError> {
+        self.device.drain_store_writes().await
+    }
+
     pub(super) async fn abandon_merge_candidate(
         &self,
     ) -> Result<MergeCandidateAbandonment, StoreError> {
-        self.store
+        self.device
             .abandon_merge_candidate(self.write_id.clone())
             .await
     }
 
     pub(super) async fn prepare_merge_candidate_abandonment(&self) -> Result<bool, StoreError> {
-        self.store
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+        self.device
             .prepare_merge_candidate_abandonment(self.write_id.clone())
             .await
     }
 
     pub(super) async fn publish_prepared_remote_objects(&self) -> Result<(), StoreError> {
-        self.store
+        self.device
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
@@ -60,26 +61,27 @@ impl PreparedWriteFixture {
                 .expect("in-memory home supports immutable copies"),
             );
             let db = open_test_db();
-            let (root, device_id) =
-                initialize_exact_store(&db, &storage, "outbound-crash-test", &keypair).await;
-            let database = crate::database::StoreDatabase::new(&db);
-            let store = Arc::new(
-                Store::load(database.clone(), storage.clone(), keypair.clone())
-                    .await
-                    .expect("bind prepared-write Store"),
-            );
-            host_exec(
+            let device = crate::sync::test_helpers::TestDevice::create(
                 &db,
+                storage.clone(),
+                "outbound-crash-test",
+                keypair.clone(),
+            )
+            .await
+            .expect("create outbound crash test Store");
+            let root = device.store_root().clone();
+            let device_id = device.device_id.clone();
+            let database = crate::database::StoreDatabase::new(&db);
+            db.execute_test_host_write(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'outbound', NULL, 1, '0000000001000-0000-writer', '2026-01-01')",
             )
             .await;
             let (_temp, store_dir) = temp_store_dir();
-            assert!(
-                prepare_merge_store_write(&db, &storage, &keypair, &store_dir,)
-                    .await
-                    .expect("prepare outbound write")
-            );
+            assert!(device
+                .prepare_pending_store_write(&store_dir)
+                .await
+                .expect("prepare outbound write"));
             let batch = database
                 .oldest_prepared_store_write()
                 .await
@@ -99,7 +101,7 @@ impl PreparedWriteFixture {
                 storage,
                 db,
                 database,
-                store,
+                device,
                 keypair,
                 root,
                 device_id,
@@ -172,7 +174,7 @@ impl PreparedWriteFixture {
             .await
             .expect("publish competing package");
         let membership = self
-            .store
+            .device
             .membership_for_test()
             .await
             .expect("load competing commit membership");

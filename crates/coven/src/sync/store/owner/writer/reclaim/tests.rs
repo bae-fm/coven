@@ -48,11 +48,9 @@ impl ReclaimJourneyFixture {
                      '0000000002000-0000-reclaim-journey', '2026-01-01')",
             ),
         ] {
-            let changeset = crate::sync::test_helpers::capture_bytes(
-                &crate::sync::test_helpers::open_test_db(),
-                &[row],
-            )
-            .await;
+            let changeset = crate::sync::test_helpers::open_test_db()
+                .capture_test_changeset(&[row])
+                .await;
             let activation = store
                 .publish_changeset("founder", sequence, &changeset, db.schema_version())
                 .await
@@ -165,15 +163,13 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .bind_device(&db, &signer)
         .await
         .expect("bind reclaim Store");
-    let first_changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let first_changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('stable-snapshot-row', 'stable', NULL, \
                  '0000000001000-0000-stable-snapshot', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let first_commit = store
         .publish_changeset("founder", 1, &first_changeset, db.schema_version())
         .await
@@ -194,15 +190,13 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .expect("load stable snapshot")
         .expect("stable snapshot exists");
 
-    let second_changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let second_changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('unstable-snapshot-row', 'unstable', NULL, \
                  '0000000002000-0000-unstable-snapshot', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let second_commit = store
         .publish_changeset("founder", 3, &second_changeset, db.schema_version())
         .await
@@ -242,15 +236,13 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     )
     .await
     .expect("create Store");
-    let changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('reclaim-row', 'reclaim', NULL, \
                  '0000000001000-0000-reclaim', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let activation = store
         .publish_changeset("founder", 1, &changeset, db.schema_version())
         .await
@@ -479,15 +471,13 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     )
     .await
     .expect("create Store");
-    let changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('reclaim-head-row', 'reclaim', NULL, \
                  '0000000001000-0000-reclaim-head', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let target_activation = store
         .publish_changeset("founder", 1, &changeset, db.schema_version())
         .await

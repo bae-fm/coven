@@ -855,6 +855,36 @@ mod tests {
         membership: crate::protocol::membership::MembershipChain,
     }
 
+    impl PublishedScopedSnapshot {
+        async fn open<'storage>(
+            &'storage self,
+            database_path: &Path,
+        ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
+            let restorer_identity = crate::keys::UserKeypair::generate();
+            let bootstrap = self
+                .store
+                .prepare_snapshot_bootstrap(
+                    &crate::joining::MembershipFloor(self.membership.head_refs().to_vec()),
+                    1,
+                    database_path,
+                    &restorer_identity,
+                )
+                .await?;
+            let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+            bootstrap
+                .install(
+                    self.source.synced_tables().to_vec(),
+                    crate::blob::BLOB_TOMBSTONE_GRACE,
+                    crate::blob::TransferLimits::one_at_a_time(),
+                    "joining-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                    &crate::sync::test_helpers::test_migrations(),
+                    Some(&routing),
+                )
+                .await
+        }
+    }
+
     fn edit_snapshot_image(
         _image_dir: &Path,
         image: Vec<u8>,
@@ -966,34 +996,6 @@ mod tests {
             store,
             membership,
         }
-    }
-
-    async fn open_published_scoped_snapshot<'storage>(
-        fixture: &'storage PublishedScopedSnapshot,
-        database_path: &Path,
-    ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
-        let restorer_identity = crate::keys::UserKeypair::generate();
-        let bootstrap = fixture
-            .store
-            .prepare_snapshot_bootstrap(
-                &crate::joining::MembershipFloor(fixture.membership.head_refs().to_vec()),
-                1,
-                database_path,
-                &restorer_identity,
-            )
-            .await?;
-        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-        bootstrap
-            .install(
-                fixture.source.synced_tables().to_vec(),
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
-                "joining-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-                &crate::sync::test_helpers::test_migrations(),
-                Some(&routing),
-            )
-            .await
     }
 
     #[tokio::test]
@@ -1308,7 +1310,8 @@ mod tests {
         let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::Valid).await;
         let destination = tempfile::tempdir().expect("valid-route bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let database = open_published_scoped_snapshot(&fixture, &database_path)
+        let database = fixture
+            .open(&database_path)
             .await
             .expect("open valid scoped snapshot");
         let counts = database
@@ -1440,7 +1443,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::UnauthenticatedRoute).await;
         let destination = tempfile::tempdir().expect("route-tamper bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
+        let result = fixture.open(&database_path).await;
         let error = match result {
             Ok(_) => panic!("unauthenticated private route must block bootstrap"),
             Err(error) => error,
@@ -1463,7 +1466,7 @@ mod tests {
         let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::CircleRow).await;
         let destination = tempfile::tempdir().expect("Circle-row bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
+        let result = fixture.open(&database_path).await;
         let error = match result {
             Ok(_) => panic!("Store snapshot containing a Circle row must block bootstrap"),
             Err(error) => error,
@@ -1487,7 +1490,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::InvalidCircleMirror).await;
         let destination = tempfile::tempdir().expect("invalid-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
+        let result = fixture.open(&database_path).await;
         let error = match result {
             Ok(_) => panic!("invalid opaque Circle mirror must block bootstrap"),
             Err(error) => error,
@@ -1511,7 +1514,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::OrphanStoreMirror).await;
         let destination = tempfile::tempdir().expect("orphan-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
+        let result = fixture.open(&database_path).await;
         let error = match result {
             Ok(_) => panic!("orphan Store mirror must block bootstrap"),
             Err(error) => error,
@@ -1549,15 +1552,13 @@ mod tests {
             .expect("authorize device-state snapshot writer");
         let (_store_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         for sequence in 1..=3 {
-            crate::sync::test_helpers::host_exec(
-                &source,
-                &format!(
+            source
+                .execute_test_host_write(&format!(
                     "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                      VALUES ('snapshot-state-{sequence}', 'state', NULL, 1, \
                              '000000000100{sequence}-0000-state', '2026-07-21')"
-                ),
-            )
-            .await;
+                ))
+                .await;
             assert!(writer
                 .prepare_pending_store_write(&store_dir)
                 .await
@@ -1596,117 +1597,119 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_installs_the_verified_exact_store_root() {
-        Box::pin(run_bootstrap_installs_the_verified_exact_store_root()).await;
-    }
-
-    async fn run_bootstrap_installs_the_verified_exact_store_root() {
-        let source = crate::sync::test_helpers::open_test_db();
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &source,
-            "snapshot-bootstrap-exact-root",
-            signer.clone(),
-        )
-        .await
-        .expect("create exact bootstrap Store");
-        let device = store
-            .open_into(&source)
-            .await
-            .expect("open bootstrap Store membership");
-        let membership = device
-            .membership_for_test()
-            .await
-            .expect("project bootstrap Store membership");
-        let image_dir = tempfile::tempdir().expect("snapshot image directory");
-        let image_path = image_dir.path().to_path_buf();
-        let tables = crate::sync::test_helpers::test_synced_tables();
-        let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
-            .capture_snapshot_image_for_test(root, image_path, None)
-            .await
-            .expect("create bootstrap database image");
-        let published_snapshot = device
-            .publish_snapshot(image, CommitFrontier(BTreeMap::new()))
-            .await
-            .expect("publish bootstrap database image");
-        device
-            .stage_acknowledgement(
-                CommitFrontier(BTreeMap::new()),
-                "2026-07-16T00:00:01Z".to_string(),
+        Box::pin(async {
+            let source = crate::sync::test_helpers::open_test_db();
+            let signer = UserKeypair::generate();
+            let store = crate::sync::test_helpers::TestStore::create(
+                &source,
+                "snapshot-bootstrap-exact-root",
+                signer.clone(),
             )
             .await
-            .expect("stage snapshot stability acknowledgement");
-        device
-            .drain_acknowledgements()
-            .await
-            .expect("activate snapshot stability acknowledgement");
-
-        let destination = tempfile::tempdir().expect("bootstrap destination");
-        let database_path = destination.path().join("store.db");
-        let bootstrap = store
-            .prepare_snapshot_bootstrap(
-                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-                1,
-                &database_path,
-                &signer,
-            )
-            .await
-            .expect("verify bootstrap authority");
-        let installed = bootstrap
-            .install(
-                tables,
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
-                "joining-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-                &crate::sync::test_helpers::test_migrations(),
-                None,
-            )
-            .await
-            .expect("install bootstrap authority");
-
-        assert_eq!(
-            installed
-                .installed_store_root_for_test()
+            .expect("create exact bootstrap Store");
+            let device = store
+                .open_into(&source)
                 .await
-                .expect("read installed Store root"),
-            Some(store.root.clone()),
-        );
-        let baseline = installed
-            .generation_zero_replay_baseline_for_test()
-            .await
-            .expect("load installed snapshot replay baseline");
-        assert_eq!(baseline.exact_cut, published_snapshot.coverage);
-        match &baseline.authority {
-            crate::database::RetainedReplayAuthority::StableSnapshot(authority) => {
-                assert_eq!(authority.store_root, store.root);
-                assert_eq!(authority.metadata, published_snapshot);
+                .expect("open bootstrap Store membership");
+            let membership = device
+                .membership_for_test()
+                .await
+                .expect("project bootstrap Store membership");
+            let image_dir = tempfile::tempdir().expect("snapshot image directory");
+            let image_path = image_dir.path().to_path_buf();
+            let tables = crate::sync::test_helpers::test_synced_tables();
+            let root = store.root.clone();
+            let image = StoreDatabase::new(&source)
+                .capture_snapshot_image_for_test(root, image_path, None)
+                .await
+                .expect("create bootstrap database image");
+            let published_snapshot = device
+                .publish_snapshot(image, CommitFrontier(BTreeMap::new()))
+                .await
+                .expect("publish bootstrap database image");
+            device
+                .stage_acknowledgement(
+                    CommitFrontier(BTreeMap::new()),
+                    "2026-07-16T00:00:01Z".to_string(),
+                )
+                .await
+                .expect("stage snapshot stability acknowledgement");
+            device
+                .drain_acknowledgements()
+                .await
+                .expect("activate snapshot stability acknowledgement");
+
+            let destination = tempfile::tempdir().expect("bootstrap destination");
+            let database_path = destination.path().join("store.db");
+            let bootstrap = store
+                .prepare_snapshot_bootstrap(
+                    &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                    1,
+                    &database_path,
+                    &signer,
+                )
+                .await
+                .expect("verify bootstrap authority");
+            let installed = bootstrap
+                .install(
+                    tables,
+                    crate::blob::BLOB_TOMBSTONE_GRACE,
+                    crate::blob::TransferLimits::one_at_a_time(),
+                    "joining-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                    &crate::sync::test_helpers::test_migrations(),
+                    None,
+                )
+                .await
+                .expect("install bootstrap authority");
+
+            assert_eq!(
+                installed
+                    .installed_store_root_for_test()
+                    .await
+                    .expect("read installed Store root"),
+                Some(store.root.clone()),
+            );
+            let baseline = installed
+                .generation_zero_replay_baseline_for_test()
+                .await
+                .expect("load installed snapshot replay baseline");
+            assert_eq!(baseline.exact_cut, published_snapshot.coverage);
+            match &baseline.authority {
+                crate::database::RetainedReplayAuthority::StableSnapshot(authority) => {
+                    assert_eq!(authority.store_root, store.root);
+                    assert_eq!(authority.metadata, published_snapshot);
+                }
+                crate::database::RetainedReplayAuthority::Genesis(_) => {
+                    panic!("snapshot bootstrap installed a genesis replay baseline")
+                }
             }
-            crate::database::RetainedReplayAuthority::Genesis(_) => {
+            baseline
+                .validate_image()
+                .expect("validate snapshot replay baseline");
+            let mut tampered = baseline.authority.clone();
+            let crate::database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
+            else {
                 panic!("snapshot bootstrap installed a genesis replay baseline")
-            }
-        }
-        baseline
-            .validate_image()
-            .expect("validate snapshot replay baseline");
-        let mut tampered = baseline.authority.clone();
-        let crate::database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
-        else {
-            panic!("snapshot bootstrap installed a genesis replay baseline")
-        };
-        authority.metadata.signature = "00".repeat(64);
-        authority
-            .validate()
-            .expect_err("retained snapshot authority must re-open its signed metadata");
-        let authority_bytes = serde_json::to_vec(&tampered).expect("serialize tampered authority");
-        installed
-            .replace_generation_zero_replay_authority_for_test(authority_bytes)
-            .await
-            .expect("tamper retained snapshot metadata");
-        installed
-            .generation_zero_replay_baseline_for_test()
-            .await
-            .expect_err("restart must reject retained snapshot metadata with another signature");
+            };
+            authority.metadata.signature = "00".repeat(64);
+            authority
+                .validate()
+                .expect_err("retained snapshot authority must re-open its signed metadata");
+            let authority_bytes =
+                serde_json::to_vec(&tampered).expect("serialize tampered authority");
+            installed
+                .replace_generation_zero_replay_authority_for_test(authority_bytes)
+                .await
+                .expect("tamper retained snapshot metadata");
+            installed
+                .generation_zero_replay_baseline_for_test()
+                .await
+                .expect_err(
+                    "restart must reject retained snapshot metadata with another signature",
+                );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1765,15 +1768,13 @@ mod tests {
         )
         .await
         .expect("create snapshot materialization Store");
-        let changeset = crate::sync::test_helpers::capture_bytes(
-            &source,
-            &[
+        let changeset = source
+            .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('snapshot-row', 'Snapshot', 1, \
                          '0000000001000-0000-snapshot', '2026-01-01')",
-            ],
-        )
-        .await;
+            ])
+            .await;
         store
             .publish_changeset("snapshot", 1, &changeset, 1)
             .await
@@ -1841,23 +1842,21 @@ mod tests {
         )
         .await
         .expect("create exact blob Store");
-        crate::sync::test_helpers::host_exec(
-            &source,
-            "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+        source
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
              VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
-        )
-        .await;
-        crate::sync::test_helpers::host_exec(
-            &source,
-            &format!(
+            )
+            .await;
+        source
+            .execute_test_host_write(&format!(
                 "INSERT INTO note_photos
                  (id, note_id, kind, size, hash, _updated_at, created_at)
                  VALUES ('photo1', 'n1', 'cover', 11, '{}',
                          '0000000001000-0000-owner', '2026-01-01')",
                 crate::blob::content_hash(b"cover-bytes"),
-            ),
-        )
-        .await;
+            ))
+            .await;
         let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
         crate::store_dir::StoreDir::store_local_blob(
             &source_dir,
@@ -1877,9 +1876,13 @@ mod tests {
             signer,
         )
         .expect("construct blob writer");
-        crate::sync::test_helpers::run_cycle_fixture(&source, writer, &source_dir)
-            .await
-            .expect("publish source blob");
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&source),
+            source_dir.clone(),
+        )
+        .run_cycle(writer)
+        .await
+        .expect("publish source blob");
 
         let image_dir = tempfile::tempdir().expect("snapshot image directory");
         let image_path = image_dir.path().to_path_buf();

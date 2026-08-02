@@ -7,80 +7,15 @@ use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::owner::history::abandonment::{
     ExcludedCandidateHeadObservation, MergeCandidateAbandonment,
 };
-use crate::sync::test_helpers::{
-    create_exact_test_store, host_exec, open_test_db, promote_active_member_fixture, pubkey_hex,
-    temp_store_dir, TestCustody, TestStore,
-};
+use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 
-async fn prepare_plan(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    keypair: &UserKeypair,
-) -> Result<StoreOperationCommitPlan, StoreError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), keypair.clone())
-            .await?;
-    store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-        .prepare_plan()
-        .await
+#[test]
+fn store_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
+    assert!(matches!(
+        successor_store_sequence(u64::MAX),
+        Err(StoreError::SequenceExhausted { current: u64::MAX })
+    ));
 }
-
-#[allow(clippy::too_many_arguments)]
-async fn prepare_merge_store_write(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    keypair: &UserKeypair,
-    store_dir: &StoreDir,
-) -> Result<bool, StoreError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), keypair.clone())
-            .await?;
-    let mut writer = store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    writer.prepare_pending_store_write(store_dir).await
-}
-
-async fn drain_store_writes(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    keypair: &UserKeypair,
-) -> Result<u64, StoreError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), keypair.clone())
-            .await?;
-    let mut writer = store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    writer.drain_store_writes().await
-}
-
-async fn prepare_merge_conflict_resolution_commit(
-    db: &Database,
-    storage: &Arc<CloudSyncStorage>,
-    keypair: &UserKeypair,
-    candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
-) -> Result<super::super::operation::MergeConflictResolutionCommitPlan, StoreError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), keypair.clone())
-            .await?;
-    let mut writer = store
-        .authorize_writer()
-        .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-    writer
-        .prepare_conflict_resolution_plan(candidate_membership_heads)
-        .await
-}
-
-#[path = "tests/common.rs"]
-mod common;
-use common::*;
 
 #[path = "tests/merge_fixture.rs"]
 mod merge_fixture;

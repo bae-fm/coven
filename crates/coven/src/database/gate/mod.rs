@@ -333,14 +333,30 @@ mod tests {
         c
     }
 
-    fn exec(c: &Connection, sql: &str) {
-        c.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("exec failed for {sql}: {e}"));
+    trait ConnectionTestSql {
+        fn execute_test_sql(&self, sql: &str);
+        fn query_test_text(&self, sql: &str) -> String;
+        fn test_row_exists(&self, sql: &str) -> bool;
     }
 
-    fn query_text(c: &Connection, sql: &str) -> String {
-        c.query_row(sql, [], |r| r.get::<_, String>(0))
-            .unwrap_or_else(|e| panic!("query_text failed for {sql}: {e}"))
+    impl ConnectionTestSql for Connection {
+        fn execute_test_sql(&self, sql: &str) {
+            self.execute_batch(sql)
+                .unwrap_or_else(|error| panic!("exec failed for {sql}: {error}"));
+        }
+
+        fn query_test_text(&self, sql: &str) -> String {
+            self.query_row(sql, [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|error| panic!("query_text failed for {sql}: {error}"))
+        }
+
+        fn test_row_exists(&self, sql: &str) -> bool {
+            use rusqlite::OptionalExtension;
+            self.query_row(sql, [], |_| Ok(()))
+                .optional()
+                .unwrap_or_else(|error| panic!("row_exists failed for {sql}: {error}"))
+                .is_some()
+        }
     }
 
     fn query_int(c: &Connection, sql: &str) -> i64 {
@@ -351,8 +367,7 @@ mod tests {
     #[test]
     fn scoped_descendant_requires_a_declared_audience_parent() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE notes (
                 id TEXT PRIMARY KEY,
                 audience TEXT,
@@ -399,8 +414,7 @@ mod tests {
     #[test]
     fn child_gate_follows_the_foreign_keys_named_parent_column() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE parents (
                 id TEXT PRIMARY KEY,
                 code TEXT NOT NULL UNIQUE,
@@ -434,14 +448,6 @@ mod tests {
         );
     }
 
-    fn row_exists(c: &Connection, sql: &str) -> bool {
-        use rusqlite::OptionalExtension;
-        c.query_row(sql, [], |_| Ok(()))
-            .optional()
-            .unwrap_or_else(|e| panic!("row_exists failed for {sql}: {e}"))
-            .is_some()
-    }
-
     /// Capture a changeset over `tables` while running `stmts`. Returns the
     /// recorded changeset bytes.
     fn capture(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
@@ -450,7 +456,7 @@ mod tests {
             session.attach(Some(t.name())).expect("attach");
         }
         for s in stmts {
-            exec(c, s);
+            c.execute_test_sql(s);
         }
         let mut buf = Vec::new();
         session.changeset_strm(&mut buf).expect("changeset");
@@ -475,8 +481,7 @@ mod tests {
 
     /// The synthetic notes/note_tags/note_photos schema, built directly on `c`.
     fn create_synced_schema(c: &Connection) {
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE notes (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -505,8 +510,7 @@ mod tests {
     }
 
     fn create_remote_root_schema(c: &Connection) {
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE notes (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -618,14 +622,11 @@ mod tests {
     #[test]
     fn ungated_table_always_passes() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE notes (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
              _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            &c,
-            "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL) STRICT",
+        c.execute_test_sql("CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
             SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
@@ -672,13 +673,11 @@ mod tests {
     fn remote_root_child_resolves_as_remote_and_belongs_to_root_subtree() {
         let c = conn();
         create_remote_root_schema(&c);
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO notes (id, title, _updated_at) \
              VALUES ('n1', 'Remote Root', '0000000001000-0000-dev1')",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO note_photos (id, note_id, _updated_at) \
              VALUES ('p1', 'n1', '0000000001000-0000-dev1')",
         );
@@ -713,8 +712,7 @@ mod tests {
         let c = Connection::open(&path).expect("open gate db");
         c.busy_timeout(std::time::Duration::from_millis(1))
             .expect("busy timeout");
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE albums (
                 id TEXT PRIMARY KEY,
                 _updated_at TEXT NOT NULL
@@ -758,8 +756,7 @@ mod tests {
     #[test]
     fn empty_clone_surfaces_detach_failure() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE notes (
                 id TEXT PRIMARY KEY,
                 _updated_at TEXT NOT NULL
@@ -845,19 +842,19 @@ mod tests {
         )
         .expect("apply to peer");
         assert!(
-            row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
+            peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer has the note"
         );
         assert_eq!(
-            query_text(&peer, "SELECT title FROM notes WHERE id = 'n1'"),
+            peer.query_test_text("SELECT title FROM notes WHERE id = 'n1'"),
             "Private"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"),
+            peer.test_row_exists("SELECT 1 FROM note_tags WHERE id = 't1'"),
             "peer has the tag"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM note_photos WHERE id = 'p1'"),
+            peer.test_row_exists("SELECT 1 FROM note_photos WHERE id = 'p1'"),
             "peer has the photo"
         );
     }
@@ -865,8 +862,7 @@ mod tests {
     #[test]
     fn self_referencing_table_reemits_from_empty_clone() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE nodes (
                 id TEXT PRIMARY KEY,
                 parent_id TEXT,
@@ -938,19 +934,16 @@ mod tests {
     fn multi_hop_fk_inheritance() {
         // grandchild -> child -> root(gated). The gate must flow two hops.
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
              _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE) STRICT",
@@ -998,25 +991,21 @@ mod tests {
     #[test]
     fn delete_gated_false_strips_private_subtrees_in_place() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
              _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
@@ -1027,30 +1016,26 @@ mod tests {
             SyncedTable::new("settings", crate::sync::session::RowIdentity::SharedKey),
         ];
 
-        exec(&c, "INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('priv_p', 'priv', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('priv_c', 'priv_p', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, shared, _updated_at) VALUES ('pub', 1, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('pub_p', 'pub', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('pub_c', 'pub_p', '0000000001000-0000-dev1')");
-        exec(
-            &c,
+        c.execute_test_sql("INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO photos (id, album_id, _updated_at) VALUES ('priv_p', 'priv', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO comments (id, photo_id, _updated_at) VALUES ('priv_c', 'priv_p', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, shared, _updated_at) VALUES ('pub', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO photos (id, album_id, _updated_at) VALUES ('pub_p', 'pub', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO comments (id, photo_id, _updated_at) VALUES ('pub_c', 'pub_p', '0000000001000-0000-dev1')");
+        c.execute_test_sql(
             "INSERT INTO settings (id, _updated_at) VALUES ('s1', '0000000001000-0000-dev1')",
         );
 
         let gates = Gates::from_tables(&c, &tables).expect("gates");
         gates.delete_gated_false(&c).expect("delete gated-false");
 
-        assert!(!row_exists(&c, "SELECT 1 FROM albums WHERE id = 'priv'"));
-        assert!(!row_exists(&c, "SELECT 1 FROM photos WHERE id = 'priv_p'"));
-        assert!(!row_exists(
-            &c,
-            "SELECT 1 FROM comments WHERE id = 'priv_c'"
-        ));
-        assert!(row_exists(&c, "SELECT 1 FROM albums WHERE id = 'pub'"));
-        assert!(row_exists(&c, "SELECT 1 FROM photos WHERE id = 'pub_p'"));
-        assert!(row_exists(&c, "SELECT 1 FROM comments WHERE id = 'pub_c'"));
-        assert!(row_exists(&c, "SELECT 1 FROM settings WHERE id = 's1'"));
+        assert!(!c.test_row_exists("SELECT 1 FROM albums WHERE id = 'priv'"));
+        assert!(!c.test_row_exists("SELECT 1 FROM photos WHERE id = 'priv_p'"));
+        assert!(!c.test_row_exists("SELECT 1 FROM comments WHERE id = 'priv_c'"));
+        assert!(c.test_row_exists("SELECT 1 FROM albums WHERE id = 'pub'"));
+        assert!(c.test_row_exists("SELECT 1 FROM photos WHERE id = 'pub_p'"));
+        assert!(c.test_row_exists("SELECT 1 FROM comments WHERE id = 'pub_c'"));
+        assert!(c.test_row_exists("SELECT 1 FROM settings WHERE id = 's1'"));
     }
 
     // ---- upward gate (gated_by_descendants) ----------------------------------
@@ -1072,31 +1057,25 @@ mod tests {
     }
 
     fn create_album_schema(c: &Connection) {
-        exec(
-            c,
-            "CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, _updated_at TEXT NOT NULL) STRICT",
+        c.execute_test_sql("CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id)) STRICT",
         );
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE album_artists (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              artist_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE, \
              FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE tracks (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE) STRICT",
@@ -1171,26 +1150,22 @@ mod tests {
     fn downward_parent_tie_uses_complete_foreign_key_shape() {
         fn selected_child_column(foreign_keys: &str) -> String {
             let c = conn();
-            exec(
-                &c,
+            c.execute_test_sql(
                 "CREATE TABLE roots (
                     id TEXT PRIMARY KEY,
                     shared INTEGER NOT NULL,
                     _updated_at TEXT NOT NULL
                 ) STRICT;",
             );
-            exec(
-                &c,
-                &format!(
-                    "CREATE TABLE children (
+            c.execute_test_sql(&format!(
+                "CREATE TABLE children (
                         id TEXT PRIMARY KEY,
                         a_root_id TEXT NOT NULL,
                         z_root_id TEXT NOT NULL,
                         _updated_at TEXT NOT NULL,
                         {foreign_keys}
                     ) STRICT;"
-                ),
-            );
+            ));
             let tables = vec![
                 SyncedTable::new("roots", crate::sync::session::RowIdentity::SharedKey)
                     .gated_by("shared"),
@@ -1215,24 +1190,20 @@ mod tests {
     #[test]
     fn downward_parent_is_most_specific_not_lexicographic() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE zinner (id TEXT PRIMARY KEY, aouter_id TEXT, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (aouter_id) REFERENCES aouter (id)) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE zgated (id TEXT PRIMARY KEY, zinner_id TEXT NOT NULL, \
              shared INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE joiner (id TEXT PRIMARY KEY, aouter_id TEXT NOT NULL, \
              zinner_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (aouter_id) REFERENCES aouter (id), \
@@ -1281,69 +1252,67 @@ mod tests {
         let c = conn();
         create_album_schema(&c);
 
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO artists (id, _updated_at) VALUES ('A1', '0000000001000-0000-dev1')",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO artists (id, _updated_at) VALUES ('A2', '0000000001000-0000-dev1')",
         );
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_MIXED', 'A2', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_EMPTY', 'AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_MIXED', 'AL_MIXED', 'A2', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN', 'AL_EMPTY', 0, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_MAN', 'AL_MIXED', 1, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN2', 'AL_MIXED', 0, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_UNMAN', 'R_UNMAN', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_MAN', 'R_MAN', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_MIXED', 'A2', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_EMPTY', 'AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_MIXED', 'AL_MIXED', 'A2', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN', 'AL_EMPTY', 0, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_MAN', 'AL_MIXED', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN2', 'AL_MIXED', 0, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_UNMAN', 'R_UNMAN', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_MAN', 'R_MAN', '0000000001000-0000-dev1')");
 
         let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
         gates.delete_gated_false(&c).expect("delete gated-false");
 
         assert!(
-            !row_exists(&c, "SELECT 1 FROM albums WHERE id = 'AL_EMPTY'"),
+            !c.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL_EMPTY'"),
             "empty album pruned"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_UNMAN'"),
+            !c.test_row_exists("SELECT 1 FROM releases WHERE id = 'R_UNMAN'"),
             "unmanaged release gone"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM tracks WHERE id = 'T_UNMAN'"),
+            !c.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T_UNMAN'"),
             "track of unmanaged release gone"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM album_artists WHERE id = 'AA_EMPTY'"),
+            !c.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA_EMPTY'"),
             "album_artists of pruned album gone"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM artists WHERE id = 'A1'"),
+            !c.test_row_exists("SELECT 1 FROM artists WHERE id = 'A1'"),
             "artist with no kept album pruned"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM albums WHERE id = 'AL_MIXED'"),
+            c.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL_MIXED'"),
             "mixed album survives"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_MAN'"),
+            c.test_row_exists("SELECT 1 FROM releases WHERE id = 'R_MAN'"),
             "managed release survives"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM tracks WHERE id = 'T_MAN'"),
+            c.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T_MAN'"),
             "track of managed release survives"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_UNMAN2'"),
+            !c.test_row_exists("SELECT 1 FROM releases WHERE id = 'R_UNMAN2'"),
             "the unmanaged sibling release is still cut"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM album_artists WHERE id = 'AA_MIXED'"),
+            c.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA_MIXED'"),
             "album_artists of surviving album kept"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM artists WHERE id = 'A2'"),
+            c.test_row_exists("SELECT 1 FROM artists WHERE id = 'A2'"),
             "artist kept via a surviving album"
         );
     }
@@ -1379,10 +1348,10 @@ mod tests {
         create_album_schema(&c);
 
         // A shared album: a managed release under it makes the album sync to peers.
-        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('tr1', 're1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO tracks (id, release_id, _updated_at) VALUES ('tr1', 're1', '0000000001000-0000-dev1')");
 
         // Deleting the album cascades the release and track; the capture records the
         // album DELETE plus the cascaded child DELETEs.
@@ -1415,12 +1384,11 @@ mod tests {
         create_album_schema(&c);
 
         // An album with two managed releases; deleting one leaves the album shared.
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO albums (id, _updated_at) VALUES ('al1', '0000000001000-0000-dev1')",
         );
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re2', 'al1', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re2', 'al1', 1, '0000000001000-0000-dev1')");
 
         let out = capture_and_gate(
             &c,
@@ -1446,11 +1414,10 @@ mod tests {
         create_album_schema(&c);
 
         // A private album: only an unmanaged release, so it never synced to peers.
-        exec(
-            &c,
+        c.execute_test_sql(
             "INSERT INTO albums (id, _updated_at) VALUES ('al1', '0000000001000-0000-dev1')",
         );
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 0, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 0, '0000000001000-0000-dev1')");
 
         let out = capture_and_gate(
             &c,
@@ -1475,10 +1442,10 @@ mod tests {
         let c = conn();
         create_album_schema(&c);
 
-        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('aa1', 'al1', 'ar1', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('aa1', 'al1', 'ar1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
 
         // album.artist_id has no ON DELETE CASCADE, so an artist is removed by
         // deleting its albums (cascading releases/album_artists) then the artist.
@@ -1558,23 +1525,23 @@ mod tests {
         create_album_schema(&peer);
         apply_album(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "peer has artist"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "peer has album"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"),
             "peer has album_artists"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R'"),
             "peer has release"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T'"),
+            peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T'"),
             "peer has track"
         );
     }
@@ -1587,9 +1554,9 @@ mod tests {
 
         // A private graph: artist, album, and an unmanaged release. Nothing has
         // ever reached a peer.
-        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')");
 
         // The journal batch captures the release flipping managed false→true.
         let bytes = capture(
@@ -1601,7 +1568,7 @@ mod tests {
         // A host write lands between the batch load and the gate run, flipping the
         // gate back false. The live db now reads managed=0 for R, so nothing in its
         // component is currently kept.
-        exec(&c, "UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R'");
+        c.execute_test_sql("UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R'");
 
         let gates = Gates::from_tables(&c, &tables).expect("build gates");
         let out = gate_outbound(&c, &bytes, &gates).expect("gate outbound");
@@ -1645,11 +1612,11 @@ mod tests {
         create_album_schema(&peer);
         apply_album(&peer, &out1);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL1'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL1'"),
             "peer has the shared album AL1"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL2'"),
+            !peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL2'"),
             "AL2 was cut (no managed release) — the peer never received it"
         );
 
@@ -1669,17 +1636,16 @@ mod tests {
 
         apply_album(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL2'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL2'"),
             "peer now has AL2"
         );
         assert_eq!(
-            query_text(&peer, "SELECT album_id FROM releases WHERE id = 'R1'"),
+            peer.query_test_text("SELECT album_id FROM releases WHERE id = 'R1'"),
             "AL2",
             "R1 now points at AL2 on the peer"
         );
         assert!(
-            !row_exists(
-                &peer,
+            !peer.test_row_exists(
                 "SELECT 1 FROM releases r WHERE NOT EXISTS \
                  (SELECT 1 FROM albums a WHERE a.id = r.album_id)"
             ),
@@ -1730,11 +1696,11 @@ mod tests {
         create_album_schema(&peer);
         apply_album(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"),
             "peer has join row"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR2'"),
+            peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR2'"),
             "peer has featured artist"
         );
     }
@@ -1760,7 +1726,7 @@ mod tests {
         create_album_schema(&peer);
         apply_album(&peer, &out1);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "peer has the album after cycle 1"
         );
 
@@ -1790,15 +1756,15 @@ mod tests {
         // Applying the duplicate album INSERT must not error; peer consistent.
         apply_album(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "album still present"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "first release still present"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R2'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R2'"),
             "second release now present"
         );
         assert_eq!(
@@ -1868,9 +1834,9 @@ mod tests {
         );
 
         // The local rows stay — retract is peer-only, never a local DELETE FROM.
-        assert!(row_exists(&c, "SELECT 1 FROM notes WHERE id = 'n1'"));
-        assert!(row_exists(&c, "SELECT 1 FROM note_tags WHERE id = 't1'"));
-        assert!(row_exists(&c, "SELECT 1 FROM note_photos WHERE id = 'p1'"));
+        assert!(c.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"));
+        assert!(c.test_row_exists("SELECT 1 FROM note_tags WHERE id = 't1'"));
+        assert!(c.test_row_exists("SELECT 1 FROM note_photos WHERE id = 'p1'"));
     }
 
     #[test]
@@ -1901,12 +1867,9 @@ mod tests {
             crate::sync::hlc::now_wall_ms(&crate::clock::SystemClock),
         )
         .expect("apply share");
-        assert!(row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"));
-        assert!(row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"));
-        assert!(row_exists(
-            &peer,
-            "SELECT 1 FROM note_photos WHERE id = 'p1'"
-        ));
+        assert!(peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"));
+        assert!(peer.test_row_exists("SELECT 1 FROM note_tags WHERE id = 't1'"));
+        assert!(peer.test_row_exists("SELECT 1 FROM note_photos WHERE id = 'p1'"));
 
         // Retract and apply: the whole subtree is gone on the peer.
         let out2 = capture_and_gate(
@@ -1922,15 +1885,15 @@ mod tests {
         )
         .expect("apply retract");
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
+            !peer.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer drops the retracted root"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"),
+            !peer.test_row_exists("SELECT 1 FROM note_tags WHERE id = 't1'"),
             "peer drops the tag child"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM note_photos WHERE id = 'p1'"),
+            !peer.test_row_exists("SELECT 1 FROM note_photos WHERE id = 'p1'"),
             "peer drops the photo child"
         );
     }
@@ -1994,31 +1957,31 @@ mod tests {
 
         apply_album(&peer, &out2);
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            !peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "R1 gone on peer"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            !peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"),
             "T1 gone on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R2'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R2'"),
             "R2 kept on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T2'"),
+            peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T2'"),
             "T2 kept on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "album kept on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "artist kept on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"),
             "join row kept on peer"
         );
     }
@@ -2067,20 +2030,17 @@ mod tests {
         }
 
         apply_album(&peer, &out2);
-        assert!(!row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"));
-        assert!(!row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"));
+        assert!(!peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"));
+        assert!(!peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"));
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            !peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "the now-childless album is deleted on the peer"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            !peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "the now-childless artist is deleted on the peer"
         );
-        assert!(!row_exists(
-            &peer,
-            "SELECT 1 FROM album_artists WHERE id = 'AA'"
-        ));
+        assert!(!peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"));
     }
 
     #[test]
@@ -2145,7 +2105,7 @@ mod tests {
         );
         apply_album(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "shared to peer"
         );
 
@@ -2157,11 +2117,11 @@ mod tests {
         );
         apply_album(&peer, &out3);
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            !peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "retracted from peer"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            !peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "album retracted"
         );
 
@@ -2186,23 +2146,23 @@ mod tests {
         }
         apply_album(&peer, &out4);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            peer.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "re-shared to peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            peer.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"),
             "track back on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            peer.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "album back on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            peer.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "artist back on peer"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            peer.test_row_exists("SELECT 1 FROM album_artists WHERE id = 'AA'"),
             "join row back"
         );
     }
@@ -2235,15 +2195,15 @@ mod tests {
         );
         apply_album(&b, &share);
         assert!(
-            row_exists(&b, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "B has the release"
         );
         assert!(
-            row_exists(&b, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            b.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"),
             "B has the track"
         );
         assert!(
-            row_exists(&b, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            b.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "B has the album"
         );
 
@@ -2255,29 +2215,29 @@ mod tests {
         );
         apply_album(&b, &retract);
         assert!(
-            !row_exists(&b, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            !b.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "B drops the release"
         );
         assert!(
-            !row_exists(&b, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            !b.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"),
             "B drops the track"
         );
         assert!(
-            !row_exists(&b, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            !b.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "B drops the album"
         );
 
         // A keeps the rows locally — retract is peer-only.
         assert!(
-            row_exists(&a, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            a.test_row_exists("SELECT 1 FROM releases WHERE id = 'R1'"),
             "A keeps the release"
         );
         assert!(
-            row_exists(&a, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            a.test_row_exists("SELECT 1 FROM tracks WHERE id = 'T1'"),
             "A keeps the track"
         );
         assert!(
-            row_exists(&a, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            a.test_row_exists("SELECT 1 FROM albums WHERE id = 'AL'"),
             "A keeps the album"
         );
     }
@@ -2311,14 +2271,12 @@ mod tests {
 
     fn create_album_asset_schema(c: &Connection) {
         create_album_schema(c);
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE covers (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE) STRICT",
         );
-        exec(
-            c,
+        c.execute_test_sql(
             "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE) STRICT",
@@ -2377,11 +2335,8 @@ mod tests {
         let peer = conn();
         create_album_asset_schema(&peer);
         apply_album_asset(&peer, &out);
-        assert!(row_exists(
-            &peer,
-            "SELECT 1 FROM artist_images WHERE id = 'AI'"
-        ));
-        assert!(row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"));
+        assert!(peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"));
+        assert!(peer.test_row_exists("SELECT 1 FROM covers WHERE id = 'CV'"));
     }
 
     /// An artist whose only release is local (gated-false) is NOT kept — its image
@@ -2458,11 +2413,11 @@ mod tests {
         );
         apply_album_asset(&peer, &out2);
         assert!(
-            row_exists(&peer, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"),
             "peer has the image"
         );
         assert!(
-            row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"),
+            peer.test_row_exists("SELECT 1 FROM covers WHERE id = 'CV'"),
             "peer has the cover"
         );
 
@@ -2487,11 +2442,11 @@ mod tests {
         );
         apply_album_asset(&peer, &out3);
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            !peer.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"),
             "peer drops the image"
         );
         assert!(
-            !row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"),
+            !peer.test_row_exists("SELECT 1 FROM covers WHERE id = 'CV'"),
             "peer drops the cover"
         );
     }
@@ -2518,37 +2473,35 @@ mod tests {
         // A kept artist (one remote release + image) and an unkept one (image
         // only). `delete_gated_false` builds and evaluates every gated table's
         // keep-clause; that it returns proves keep resolution terminates.
-        exec(
-            &c,
-            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+        c.execute_test_sql("INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
         );
-        exec(&c, "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')");
         // A second artist kept by nothing but an image.
-        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Other Artist', '0000000001000-0000-dev1')");
-        exec(&c, "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI2', 'AR2', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Other Artist', '0000000001000-0000-dev1')");
+        c.execute_test_sql("INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI2', 'AR2', '0000000001000-0000-dev1')");
 
         gates
             .delete_gated_false(&c)
             .expect("keep resolution terminates with an asset child");
 
         assert!(
-            row_exists(&c, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            c.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR'"),
             "the artist with a remote release survives the prune"
         );
         assert!(
-            row_exists(&c, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            c.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI'"),
             "its image survives with it"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM artists WHERE id = 'AR2'"),
+            !c.test_row_exists("SELECT 1 FROM artists WHERE id = 'AR2'"),
             "the image-only artist is pruned — the image did not keep it"
         );
         assert!(
-            !row_exists(&c, "SELECT 1 FROM artist_images WHERE id = 'AI2'"),
+            !c.test_row_exists("SELECT 1 FROM artist_images WHERE id = 'AI2'"),
             "the image-only artist's image is pruned with it"
         );
     }
@@ -2560,18 +2513,15 @@ mod tests {
     #[test]
     fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
         let c = conn();
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE artists (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id)) STRICT",
         );
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id)) STRICT",
@@ -2579,8 +2529,7 @@ mod tests {
         // An asset that references BOTH ancestors; its chosen downward parent is
         // the deeper one (albums), so the back-edge only excludes it from albums,
         // never from artists.
-        exec(
-            &c,
+        c.execute_test_sql(
             "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              album_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id), \

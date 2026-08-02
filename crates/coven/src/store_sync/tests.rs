@@ -453,11 +453,11 @@ async fn foreign_founder_installs_no_connection() {
         .expect("build attacker storage"),
     );
     let attacker_db = crate::sync::test_helpers::open_test_db();
-    crate::sync::test_helpers::create_exact_test_store(
+    let _attacker_device = crate::sync::test_helpers::TestDevice::create(
         &attacker_db,
-        &attacker_storage,
+        attacker_storage.clone(),
         store_id,
-        &attacker,
+        attacker,
     )
     .await
     .expect("publish attacker Store root");

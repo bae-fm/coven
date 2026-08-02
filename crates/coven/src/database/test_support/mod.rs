@@ -14,6 +14,13 @@ pub(crate) enum RetainedRegistrationTamper {
 
 pub(crate) type OutboxAttempt = (i64, Option<String>, Option<String>);
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ScopedRoutingStateForTest {
+    pub(crate) row: Option<(Option<String>, String, String)>,
+    pub(crate) route: Option<(String, String)>,
+    pub(crate) mirror: Option<(Option<String>, String)>,
+}
+
 pub(super) fn table_row_count(
     connection: &Connection,
     table: DatabaseTestTable,

@@ -27,89 +27,119 @@ use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{
-    capture_bytes, open_test_db, pubkey_hex, temp_store_dir, test_store_security, TestCustody,
-    TestStore,
+    open_test_db, pubkey_hex, temp_store_dir, test_store_security, TestCustody, TestStore,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
 
-#[allow(clippy::too_many_arguments)]
-async fn remove_member(
-    storage: &TestStore,
-    user_keypair: &UserKeypair,
-    hlc: &Hlc,
-    public_key_hex: &str,
-    current_encryption: &EncryptionService,
-    security: &crate::store_security::StoreSecurity,
-    cipher: &dyn crate::storage::CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    db: &crate::database::Database,
-) -> Result<String, MembershipOpsError> {
-    storage
-        .bind_device(db, user_keypair)
-        .await
-        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
-        .store
-        .remove_member(
-            hlc,
-            public_key_hex,
-            current_encryption,
-            security,
-            cipher,
-            pending_rotation,
-        )
-        .await
+trait RefreshTestStoreOps {
+    #[allow(clippy::too_many_arguments)]
+    async fn remove_member_with_local_state_for_test(
+        &self,
+        user_keypair: &UserKeypair,
+        hlc: &Hlc,
+        public_key_hex: &str,
+        current_encryption: &EncryptionService,
+        security: &crate::store_security::StoreSecurity,
+        cipher: &dyn crate::storage::CloudCipherAccess,
+        pending_rotation: &PendingRotation,
+        db: &crate::database::Database,
+    ) -> Result<String, MembershipOpsError>;
+
+    async fn revoke_member_durable(
+        &self,
+        db: &crate::database::Database,
+        owner_keypair: &UserKeypair,
+        revokee_pubkey: &str,
+        timestamp: &str,
+        current_encryption: &EncryptionService,
+        pending_rotation: &PendingRotation,
+    ) -> Result<EncryptionService, MembershipOpsError>;
+
+    async fn invite_exact_member(
+        &self,
+        owner_db: &crate::database::Database,
+        owner: &UserKeypair,
+        member: &UserKeypair,
+        role: MemberRole,
+        encryption: &EncryptionService,
+    ) -> MembershipChain;
+
+    async fn load_exact_chain(&self, db: &crate::database::Database) -> MembershipChain;
+
+    async fn create_unreferenced_wrapped_key(
+        &self,
+        owner_db: &crate::database::Database,
+        recipient: &UserKeypair,
+        encryption: &EncryptionService,
+        signer: &UserKeypair,
+    ) -> WrappedStoreKeyRef;
 }
 
-async fn revoke_member_durable(
-    storage: &TestStore,
-    db: &crate::database::Database,
-    owner_keypair: &UserKeypair,
-    revokee_pubkey: &str,
-    timestamp: &str,
-    current_encryption: &EncryptionService,
-    pending_rotation: &PendingRotation,
-) -> Result<EncryptionService, MembershipOpsError> {
-    let device = storage
-        .bind_device(db, owner_keypair)
-        .await
-        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    let mut writer = device
-        .store
-        .authorize_writer()
-        .await
-        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
-    writer
-        .revoke_member_without_local_adoption_for_test(
-            revokee_pubkey,
-            timestamp,
-            current_encryption,
-            pending_rotation,
-        )
-        .await
-}
+impl RefreshTestStoreOps for TestStore {
+    async fn remove_member_with_local_state_for_test(
+        &self,
+        user_keypair: &UserKeypair,
+        hlc: &Hlc,
+        public_key_hex: &str,
+        current_encryption: &EncryptionService,
+        security: &crate::store_security::StoreSecurity,
+        cipher: &dyn crate::storage::CloudCipherAccess,
+        pending_rotation: &PendingRotation,
+        db: &crate::database::Database,
+    ) -> Result<String, MembershipOpsError> {
+        self.bind_device(db, user_keypair)
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+            .store
+            .remove_member(
+                hlc,
+                public_key_hex,
+                current_encryption,
+                security,
+                cipher,
+                pending_rotation,
+            )
+            .await
+    }
 
-async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
-    let owner_db = open_test_db();
-    let storage = Box::pin(TestStore::create(&owner_db, LIB_ID, owner.clone()))
-        .await
-        .expect("create exact refresh Store");
-    Box::pin(storage.open_into(&owner_db))
-        .await
-        .expect("open exact refresh Store on owner device");
-    (storage, owner_db)
-}
+    async fn revoke_member_durable(
+        &self,
+        db: &crate::database::Database,
+        owner_keypair: &UserKeypair,
+        revokee_pubkey: &str,
+        timestamp: &str,
+        current_encryption: &EncryptionService,
+        pending_rotation: &PendingRotation,
+    ) -> Result<EncryptionService, MembershipOpsError> {
+        let device = self
+            .bind_device(db, owner_keypair)
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+        let mut writer = device
+            .store
+            .authorize_writer()
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+        writer
+            .revoke_member_without_local_adoption_for_test(
+                revokee_pubkey,
+                timestamp,
+                current_encryption,
+                pending_rotation,
+            )
+            .await
+    }
 
-async fn invite_exact_member(
-    storage: &TestStore,
-    owner_db: &crate::database::Database,
-    owner: &UserKeypair,
-    member: &UserKeypair,
-    role: MemberRole,
-    encryption: &EncryptionService,
-) -> MembershipChain {
-    storage
-        .invite_member(
+    async fn invite_exact_member(
+        &self,
+        owner_db: &crate::database::Database,
+        owner: &UserKeypair,
+        member: &UserKeypair,
+        role: MemberRole,
+        encryption: &EncryptionService,
+    ) -> MembershipChain {
+        self.invite_member(
             owner_db,
             owner,
             &Hlc::new(
@@ -124,56 +154,67 @@ async fn invite_exact_member(
         )
         .await
         .expect("publish exact membership invitation");
-    let device = storage
-        .open_into(owner_db)
-        .await
-        .expect("reload exact membership after invitation");
-    device
-        .membership_for_test()
-        .await
-        .expect("read exact membership after invitation")
+        let device = self
+            .open_into(owner_db)
+            .await
+            .expect("reload exact membership after invitation");
+        device
+            .membership_for_test()
+            .await
+            .expect("read exact membership after invitation")
+    }
+
+    async fn load_exact_chain(&self, db: &crate::database::Database) -> MembershipChain {
+        let device = self
+            .open_into(db)
+            .await
+            .expect("load exact refresh membership chain");
+        device
+            .membership_for_test()
+            .await
+            .expect("read exact refresh membership chain")
+    }
+
+    async fn create_unreferenced_wrapped_key(
+        &self,
+        owner_db: &crate::database::Database,
+        recipient: &UserKeypair,
+        encryption: &EncryptionService,
+        signer: &UserKeypair,
+    ) -> WrappedStoreKeyRef {
+        let recipient_pubkey = pubkey_hex(recipient);
+        let wrapped = WrappedStoreKey::seal_keyring(
+            &self.root.store_root_id.to_string(),
+            &recipient_pubkey,
+            &recipient.to_x25519_public_key(),
+            encryption,
+            signer,
+        )
+        .expect("seal wrapped Store key");
+        let prepared = self
+            .bind_device(owner_db, &self.signer)
+            .await
+            .expect("bind wrapped-key publication Store")
+            .prepare_wrapped_key(&recipient_pubkey, wrapped)
+            .await
+            .expect("prepare exact wrapped Store key");
+        self.storage
+            .create_protocol_object(&prepared.object)
+            .await
+            .expect("create exact wrapped Store key");
+        prepared.reference
+    }
 }
 
-async fn load_exact_chain(storage: &TestStore, db: &crate::database::Database) -> MembershipChain {
-    let device = storage
-        .open_into(db)
+async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
+    let owner_db = open_test_db();
+    let storage = Box::pin(TestStore::create(&owner_db, LIB_ID, owner.clone()))
         .await
-        .expect("load exact refresh membership chain");
-    device
-        .membership_for_test()
+        .expect("create exact refresh Store");
+    Box::pin(storage.open_into(&owner_db))
         .await
-        .expect("read exact refresh membership chain")
-}
-
-async fn create_unreferenced_wrapped_key(
-    storage: &TestStore,
-    owner_db: &crate::database::Database,
-    recipient: &UserKeypair,
-    encryption: &EncryptionService,
-    signer: &UserKeypair,
-) -> WrappedStoreKeyRef {
-    let recipient_pubkey = pubkey_hex(recipient);
-    let wrapped = WrappedStoreKey::seal_keyring(
-        &storage.root.store_root_id.to_string(),
-        &recipient_pubkey,
-        &recipient.to_x25519_public_key(),
-        encryption,
-        signer,
-    )
-    .expect("seal wrapped Store key");
-    let prepared = storage
-        .bind_device(owner_db, &storage.signer)
-        .await
-        .expect("bind wrapped-key publication Store")
-        .prepare_wrapped_key(&recipient_pubkey, wrapped)
-        .await
-        .expect("prepare exact wrapped Store key");
-    storage
-        .storage
-        .create_protocol_object(&prepared.object)
-        .await
-        .expect("create exact wrapped Store key");
-    prepared.reference
+        .expect("open exact refresh Store on owner device");
+    (storage, owner_db)
 }
 
 /// Run one real sync cycle for `device_id` over the test Store's encrypted home,
@@ -293,24 +334,18 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     let encryption = EncryptionService::from_key(old_key);
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &victim,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    storage
+        .invite_exact_member(&owner_db, &owner, &victim, MemberRole::Member, &encryption)
+        .await;
 
     // B's local state: pinned owner + its keyring holds the OLD key + its live
     // cipher is the OLD key. This is the just-joined steady state.
@@ -346,17 +381,17 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     );
 
     // Device A removes the victim, rotates the key, and activates B's new exact wrap.
-    let new_key = revoke_member_durable(
-        &storage,
-        &owner_db,
-        &owner,
-        &pubkey_hex(&victim),
-        "0000000004000-0000-A",
-        &encryption,
-        &PendingRotation::none(),
-    )
-    .await
-    .expect("revoke rotates the key");
+    let new_key = storage
+        .revoke_member_durable(
+            &owner_db,
+            &owner,
+            &pubkey_hex(&victim),
+            "0000000004000-0000-A",
+            &encryption,
+            &PendingRotation::none(),
+        )
+        .await
+        .expect("revoke rotates the key");
     assert_ne!(
         new_key.key_bytes(),
         old_key,
@@ -410,30 +445,30 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     let invited_member = UserKeypair::generate();
     let initial = EncryptionService::from_key([52u8; 32]);
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &removed_member,
-        MemberRole::Member,
-        &initial,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &removed_member,
+            MemberRole::Member,
+            &initial,
+        )
+        .await;
     let custody = TestCustody::default();
     custody.set_initial_key(initial.key_bytes());
     let cipher = RwLock::new(CloudCipher::Encrypted(initial.clone()));
     let pending_rotation = PendingRotation::none();
-    let rotated = revoke_member_durable(
-        &storage,
-        &owner_db,
-        &owner,
-        &pubkey_hex(&removed_member),
-        "0000000004000-0000-owner",
-        &initial,
-        &pending_rotation,
-    )
-    .await
-    .expect("remove member and rotate the Store key");
+    let rotated = storage
+        .revoke_member_durable(
+            &owner_db,
+            &owner,
+            &pubkey_hex(&removed_member),
+            "0000000004000-0000-owner",
+            &initial,
+            &pending_rotation,
+        )
+        .await
+        .expect("remove member and rotate the Store key");
     cipher
         .adopt_key_rotation(&rotated, &custody)
         .expect("owner adopts the activated rotation");
@@ -488,22 +523,22 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     // the pull will authorize against the chain.
     let encryption = EncryptionService::from_key(old_key);
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    let chain = load_exact_chain(&storage, &owner_db).await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    let chain = storage.load_exact_chain(&owner_db).await;
     let pending_keyring = EncryptionService::from_key(old_key)
         .with_appended_generation(2, rotated_key)
         .unwrap();
-    let unreferenced =
-        create_unreferenced_wrapped_key(&storage, &owner_db, &device_b, &pending_keyring, &owner)
-            .await;
+    let unreferenced = storage
+        .create_unreferenced_wrapped_key(&owner_db, &device_b, &pending_keyring, &owner)
+        .await;
     assert!(
         !chain
             .active_wrapped_keys_for(&pubkey_hex(&device_b))
@@ -521,14 +556,12 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     // A peer changeset waiting to be pulled, so the cycle proving it "completes"
     // also proves the pull ran and applied it while sealing was paused.
     let peer_src = open_test_db();
-    let peer_cs = capture_bytes(
-        &peer_src,
-        &[
+    let peer_cs = peer_src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     storage
         .publish_changeset("owner-device", 4, &peer_cs, db_b.schema_version())
         .await
@@ -580,24 +613,18 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 
     let encryption = EncryptionService::from_key(old_key);
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    let chain = invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &victim,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    let chain = storage
+        .invite_exact_member(&owner_db, &owner, &victim, MemberRole::Member, &encryption)
+        .await;
     let old_reference = chain
         .active_wrapped_keys_for(&pubkey_hex(&device_b))
         .into_iter()
@@ -615,17 +642,17 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
 
-    let new_key = revoke_member_durable(
-        &storage,
-        &owner_db,
-        &owner,
-        &pubkey_hex(&victim),
-        "0000000004000-0000-A",
-        &encryption,
-        &PendingRotation::none(),
-    )
-    .await
-    .expect("revoke rotates key");
+    let new_key = storage
+        .revoke_member_durable(
+            &owner_db,
+            &owner,
+            &pubkey_hex(&victim),
+            "0000000004000-0000-A",
+            &encryption,
+            &PendingRotation::none(),
+        )
+        .await
+        .expect("revoke rotates key");
 
     run_cycle(
         &storage,
@@ -687,24 +714,18 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         .merged_with(&replacement)
         .expect("same-generation keyrings merge");
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &current,
-    )
-    .await;
-    let chain = invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &replacement,
-    )
-    .await;
+    storage
+        .invite_exact_member(&owner_db, &owner, &device_b, MemberRole::Member, &current)
+        .await;
+    let chain = storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &replacement,
+        )
+        .await;
     assert_eq!(
         chain.active_wrapped_keys_for(&pubkey_hex(&device_b)).len(),
         1,
@@ -765,33 +786,33 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
 
     let encryption = EncryptionService::from_key(old_key);
     let (storage, owner_db) = exact_store(&founder).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &founder,
-        &second_owner,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &founder,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &founder,
-        &victim,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &founder,
+            &second_owner,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &founder,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &founder,
+            &victim,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
     storage
@@ -807,24 +828,23 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
         .await
         .expect("activate exact joined test device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &storage,
-        &owner_db,
-        &second_owner_db,
-        &founder,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote active second Owner");
+    storage
+        .promote_active_member_fixture(
+            &owner_db,
+            &second_owner_db,
+            &founder,
+            &second_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote active second Owner");
     let (_tmp_b, ld_b) = temp_store_dir();
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
 
-    let new_key = Box::pin(revoke_member_durable(
-        &storage,
+    let new_key = Box::pin(storage.revoke_member_durable(
         &second_owner_db,
         &second_owner,
         &pubkey_hex(&victim),
@@ -861,15 +881,15 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     let initial = EncryptionService::from_key([41u8; 32]);
 
     let (storage, founder_db) = exact_store(&founder).await;
-    invite_exact_member(
-        &storage,
-        &founder_db,
-        &founder,
-        &second_owner,
-        MemberRole::Member,
-        &initial,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &founder_db,
+            &founder,
+            &second_owner,
+            MemberRole::Member,
+            &initial,
+        )
+        .await;
     let second_owner_db = open_test_db();
     storage
         .activate_joined_device(
@@ -880,43 +900,43 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         )
         .await
         .expect("activate exact joined test device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &storage,
-        &founder_db,
-        &second_owner_db,
-        &founder,
-        &second_owner,
-        &initial,
-    )
-    .await
-    .expect("promote active second Owner");
-    invite_exact_member(
-        &storage,
-        &founder_db,
-        &founder,
-        &remaining_member,
-        MemberRole::Member,
-        &initial,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &founder_db,
-        &founder,
-        &first_victim,
-        MemberRole::Member,
-        &initial,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &founder_db,
-        &founder,
-        &second_victim,
-        MemberRole::Member,
-        &initial,
-    )
-    .await;
+    storage
+        .promote_active_member_fixture(
+            &founder_db,
+            &second_owner_db,
+            &founder,
+            &second_owner,
+            &initial,
+        )
+        .await
+        .expect("promote active second Owner");
+    storage
+        .invite_exact_member(
+            &founder_db,
+            &founder,
+            &remaining_member,
+            MemberRole::Member,
+            &initial,
+        )
+        .await;
+    storage
+        .invite_exact_member(
+            &founder_db,
+            &founder,
+            &first_victim,
+            MemberRole::Member,
+            &initial,
+        )
+        .await;
+    storage
+        .invite_exact_member(
+            &founder_db,
+            &founder,
+            &second_victim,
+            MemberRole::Member,
+            &initial,
+        )
+        .await;
 
     let founder_device = storage
         .bind_device(&founder_db, &founder)
@@ -979,8 +999,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         .expect("founder unwraps both concurrent rotation forks");
     assert_eq!(authority_keyring.key_count(), 3);
 
-    let next_rotation = Box::pin(revoke_member_durable(
-        &storage,
+    let next_rotation = Box::pin(storage.revoke_member_durable(
         &founder_db,
         &founder,
         &pubkey_hex(&remaining_member),
@@ -1008,24 +1027,24 @@ async fn removed_owner_key_is_not_adopted() {
 
     let encryption = EncryptionService::from_key(current_key);
     let (storage, owner_db) = exact_store(&founder).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &founder,
-        &second_owner,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &founder,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &founder,
+            &second_owner,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &founder,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
     let second_owner_db = open_test_db();
     let db_b = open_test_db();
     storage
@@ -1041,28 +1060,28 @@ async fn removed_owner_key_is_not_adopted() {
         .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
         .await
         .expect("activate exact joined test device");
-    crate::sync::test_helpers::promote_active_member_fixture(
-        &storage,
-        &owner_db,
-        &second_owner_db,
-        &founder,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote active second Owner");
+    storage
+        .promote_active_member_fixture(
+            &owner_db,
+            &second_owner_db,
+            &founder,
+            &second_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote active second Owner");
     let (_tmp_b, ld_b) = temp_store_dir();
-    let rotated = revoke_member_durable(
-        &storage,
-        &second_owner_db,
-        &second_owner,
-        &founder_pk,
-        "0000000004000-0000-B",
-        &encryption,
-        &PendingRotation::none(),
-    )
-    .await
-    .expect("second owner removes founder through exact membership graph");
+    let rotated = storage
+        .revoke_member_durable(
+            &second_owner_db,
+            &second_owner,
+            &founder_pk,
+            "0000000004000-0000-B",
+            &encryption,
+            &PendingRotation::none(),
+        )
+        .await
+        .expect("second owner removes founder through exact membership graph");
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
@@ -1100,25 +1119,25 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
 
     let encryption = EncryptionService::from_key(real_key);
     let (storage, owner_db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
 
     let forged_key: [u8; 32] = [0xCDu8; 32];
-    let forged = create_unreferenced_wrapped_key(
-        &storage,
-        &owner_db,
-        &device_b,
-        &EncryptionService::from_key(forged_key),
-        &attacker,
-    )
-    .await;
+    let forged = storage
+        .create_unreferenced_wrapped_key(
+            &owner_db,
+            &device_b,
+            &EncryptionService::from_key(forged_key),
+            &attacker,
+        )
+        .await;
 
     // B holds its real key (live + keyring) and pins the owner.
     let db_b = open_test_db();
@@ -1175,15 +1194,15 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 
     let encryption = EncryptionService::from_key(key);
     let (storage, owner_db) = exact_store(&owner).await;
-    let chain = invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    let chain = storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -1246,15 +1265,15 @@ async fn one_cycle_loads_exact_membership_once() {
 
     let encryption = EncryptionService::from_key(key);
     let (storage, owner_db) = exact_store(&owner).await;
-    let chain = invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &device_b,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    let chain = storage
+        .invite_exact_member(
+            &owner_db,
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &encryption,
+        )
+        .await;
 
     // B's steady state: owner pinned + an encrypted cipher on the shared key, so the
     // cycle's refresh and pull both run against the anchored chain rather than
@@ -1338,15 +1357,9 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
 
     let encryption = EncryptionService::from_key(old_key);
     let (storage, db) = exact_store(&owner).await;
-    invite_exact_member(
-        &storage,
-        &db,
-        &owner,
-        &member,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
+    storage
+        .invite_exact_member(&db, &owner, &member, MemberRole::Member, &encryption)
+        .await;
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
     let ks = TestCustody::default();
@@ -1362,17 +1375,19 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     // The keyring is momentarily unwritable, so local adoption fails after the
     // cloud rotation commits.
     ks.fail_writes();
-    let err = Box::pin(remove_member(
-        &storage,
-        &owner,
-        &hlc,
-        &pubkey_hex(&member),
-        &encryption,
-        &security,
-        &cipher,
-        &pending_rotation,
-        &db,
-    ))
+    let err = Box::pin(
+        RefreshTestStoreOps::remove_member_with_local_state_for_test(
+            &storage,
+            &owner,
+            &hlc,
+            &pubkey_hex(&member),
+            &encryption,
+            &security,
+            &cipher,
+            &pending_rotation,
+            &db,
+        ),
+    )
     .await
     .expect_err("local adoption fails while the keyring is unwritable");
     assert!(
@@ -1385,7 +1400,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
 
     // The cloud rotation committed: the member is durably removed from the
     // committed chain even though this device could not adopt the new key.
-    let committed = load_exact_chain(&storage, &db).await;
+    let committed = storage.load_exact_chain(&db).await;
     assert!(
         !committed
             .current_members()
@@ -1456,17 +1471,19 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     // Retrying the exact removal closes its journal and durable gate now that
     // custody is writable.
     ks.allow_writes();
-    let fingerprint = Box::pin(remove_member(
-        &storage,
-        &owner,
-        &hlc,
-        &pubkey_hex(&member),
-        &encryption,
-        &security,
-        &cipher,
-        &pending_rotation,
-        &db,
-    ))
+    let fingerprint = Box::pin(
+        RefreshTestStoreOps::remove_member_with_local_state_for_test(
+            &storage,
+            &owner,
+            &hlc,
+            &pubkey_hex(&member),
+            &encryption,
+            &security,
+            &cipher,
+            &pending_rotation,
+            &db,
+        ),
+    )
     .await
     .expect("retrying the removal converges");
     assert!(

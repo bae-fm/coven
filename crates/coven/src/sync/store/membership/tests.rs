@@ -11,9 +11,7 @@ use crate::storage::cloud::ObjectSlot;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{
-    open_test_db, promote_active_member_fixture, pubkey_hex, TestCustody, TestStore,
-};
+use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestCustody, TestStore};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -25,89 +23,89 @@ struct MergeFixture {
     owner_pubkey: String,
 }
 
-async fn merge_fixture(store_id: &str) -> MergeFixture {
-    let db = open_test_db();
-    let owner = UserKeypair::generate();
-    let owner_pubkey = pubkey_hex(&owner);
-    let store = TestStore::create(&db, store_id, owner.clone())
-        .await
-        .expect("create exact Store");
-    let device = store
-        .bind_device(&db, &owner)
-        .await
-        .expect("bind exact Store");
-    let database = crate::database::StoreDatabase::new(&db);
-    MergeFixture {
-        store,
-        device,
-        db,
-        database,
-        owner,
-        owner_pubkey,
+impl MergeFixture {
+    async fn new(store_id: &str) -> Self {
+        let db = open_test_db();
+        let owner = UserKeypair::generate();
+        let owner_pubkey = pubkey_hex(&owner);
+        let store = TestStore::create(&db, store_id, owner.clone())
+            .await
+            .expect("create exact Store");
+        let device = store
+            .bind_device(&db, &owner)
+            .await
+            .expect("bind exact Store");
+        let database = crate::database::StoreDatabase::new(&db);
+        Self {
+            store,
+            device,
+            db,
+            database,
+            owner,
+            owner_pubkey,
+        }
     }
-}
 
-async fn load_fixture(fixture: &MergeFixture) -> MembershipChain {
-    fixture
-        .device
-        .membership_for_test()
-        .await
-        .expect("load exact membership chain")
-}
+    async fn load(&self) -> MembershipChain {
+        self.device
+            .membership_for_test()
+            .await
+            .expect("load exact membership chain")
+    }
 
-async fn invite_fixture_member(
-    fixture: &MergeFixture,
-    member: &UserKeypair,
-    role: MemberRole,
-) -> crate::joining::InviteCode {
-    fixture
-        .store
-        .invite_member(
-            &fixture.db,
-            &fixture.owner,
-            &Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &pubkey_hex(member),
-            None,
-            role,
-            &EncryptionService::from_key([42; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact member")
-}
+    async fn load_result(&self) -> Result<MembershipChain, crate::sync::store::StoreError> {
+        self.device.membership_for_test().await
+    }
 
-async fn try_remove_fixture_member(
-    fixture: &MergeFixture,
-    member: &UserKeypair,
-) -> Result<String, MembershipOpsError> {
-    let custody = TestCustody::default();
-    let security = crate::sync::test_helpers::test_store_security(
-        "membership-removal-test",
-        std::sync::Arc::new(custody),
-    );
-    fixture
-        .store
-        .remove_member(
-            &fixture.db,
-            &fixture.owner,
-            &Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &pubkey_hex(member),
-            &EncryptionService::from_key([42; 32]),
-            &security,
-        )
-        .await
-}
+    async fn invite_member(
+        &self,
+        member: &UserKeypair,
+        role: MemberRole,
+    ) -> crate::joining::InviteCode {
+        self.store
+            .invite_member(
+                &self.db,
+                &self.owner,
+                &Hlc::new(
+                    "owner-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &pubkey_hex(member),
+                None,
+                role,
+                &EncryptionService::from_key([42; 32]),
+                "Test Store",
+            )
+            .await
+            .expect("invite exact member")
+    }
 
-async fn remove_fixture_member(fixture: &MergeFixture, member: &UserKeypair) {
-    try_remove_fixture_member(fixture, member)
-        .await
-        .expect("remove exact member");
+    async fn try_remove_member(&self, member: &UserKeypair) -> Result<String, MembershipOpsError> {
+        let custody = TestCustody::default();
+        let security = crate::sync::test_helpers::test_store_security(
+            "membership-removal-test",
+            std::sync::Arc::new(custody),
+        );
+        self.store
+            .remove_member(
+                &self.db,
+                &self.owner,
+                &Hlc::new(
+                    "owner-device".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &pubkey_hex(member),
+                &EncryptionService::from_key([42; 32]),
+                &security,
+            )
+            .await
+    }
+
+    async fn remove_member(&self, member: &UserKeypair) {
+        self.try_remove_member(member)
+            .await
+            .expect("remove exact member");
+    }
 }
 
 fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
@@ -120,14 +118,14 @@ fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
 
 #[tokio::test]
 async fn anchored_chain_loads_the_root_named_by_its_authoritative_hash() {
-    let fixture = merge_fixture("pinned-root").await;
-    let unrelated = merge_fixture("unrelated-root").await;
+    let fixture = MergeFixture::new("pinned-root").await;
+    let unrelated = MergeFixture::new("unrelated-root").await;
     assert_ne!(
         fixture.store.root.store_root_hash,
         unrelated.store.root.store_root_hash
     );
 
-    let loaded = load_fixture(&fixture).await;
+    let loaded = fixture.load().await;
     let expected_store_id = fixture.store.root.store_root_id.to_string();
     assert_eq!(loaded.store_id(), Some(expected_store_id.as_str()));
     assert_eq!(loaded.founder_pubkey(), Some(fixture.owner_pubkey.as_str()));
@@ -135,11 +133,11 @@ async fn anchored_chain_loads_the_root_named_by_its_authoritative_hash() {
 
 #[tokio::test]
 async fn current_floor_is_the_exact_signed_head_cut() {
-    let fixture = merge_fixture("exact-floor").await;
+    let fixture = MergeFixture::new("exact-floor").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
 
-    let chain = load_fixture(&fixture).await;
+    let chain = fixture.load().await;
     let floor = fixture
         .device
         .restore_membership()
@@ -154,10 +152,10 @@ async fn current_floor_is_the_exact_signed_head_cut() {
 
 #[tokio::test]
 async fn current_floor_requires_every_exact_entry() {
-    let fixture = merge_fixture("missing-entry").await;
+    let fixture = MergeFixture::new("missing-entry").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let chain = fixture.load().await;
     let head = chain.head_refs().last().expect("current head").clone();
     let loaded_head = fixture
         .device
@@ -179,10 +177,10 @@ async fn current_floor_requires_every_exact_entry() {
 
 #[tokio::test]
 async fn persisted_author_floor_requires_readable_head() {
-    let fixture = merge_fixture("missing-head").await;
+    let fixture = MergeFixture::new("missing-head").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let chain = fixture.load().await;
     let head = chain.head_refs().last().expect("current head").clone();
     fixture
         .store
@@ -191,23 +189,18 @@ async fn persisted_author_floor_requires_readable_head() {
         .await
         .expect("remove exact head");
 
-    load_fixture_result(&fixture)
+    fixture
+        .load_result()
         .await
         .expect_err("a durable exact cursor requires its head");
 }
 
-async fn load_fixture_result(
-    fixture: &MergeFixture,
-) -> Result<MembershipChain, crate::sync::store::StoreError> {
-    fixture.device.membership_for_test().await
-}
-
 #[tokio::test]
 async fn membership_head_must_match_its_exact_author_coordinate() {
-    let fixture = merge_fixture("head-author").await;
+    let fixture = MergeFixture::new("head-author").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let chain = fixture.load().await;
     let reference = chain.head_refs().last().expect("current head").clone();
     let mut head = fixture
         .device
@@ -220,17 +213,18 @@ async fn membership_head_must_match_its_exact_author_coordinate() {
         .overwrite_membership_head(&reference, &head)
         .await;
 
-    load_fixture_result(&fixture)
+    fixture
+        .load_result()
         .await
         .expect_err("a head selecting another author coordinate must fail");
 }
 
 #[tokio::test]
 async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
-    let fixture = merge_fixture("bad-head-signature").await;
+    let fixture = MergeFixture::new("bad-head-signature").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let chain = fixture.load().await;
     let before_owner = fixture
         .db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
@@ -254,7 +248,8 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
         .overwrite_membership_head(&reference, &head)
         .await;
 
-    load_fixture_result(&fixture)
+    fixture
+        .load_result()
         .await
         .expect_err("an invalid exact head signature must fail");
     assert_eq!(
@@ -278,8 +273,9 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
 
 #[tokio::test]
 async fn forked_membership_cursor_preserves_the_accepted_reference() {
-    let fixture = merge_fixture("forked-cursor").await;
-    let current = load_fixture(&fixture)
+    let fixture = MergeFixture::new("forked-cursor").await;
+    let current = fixture
+        .load()
         .await
         .head_refs()
         .first()
@@ -312,8 +308,8 @@ async fn forked_membership_cursor_preserves_the_accepted_reference() {
 
 #[tokio::test]
 async fn missing_membership_head_is_rejected() {
-    let fixture = merge_fixture("missing-founder-head").await;
-    let chain = load_fixture(&fixture).await;
+    let fixture = MergeFixture::new("missing-founder-head").await;
+    let chain = fixture.load().await;
     let head = chain.head_refs().first().expect("founder head");
     fixture
         .store
@@ -331,9 +327,9 @@ async fn missing_membership_head_is_rejected() {
 
 #[tokio::test]
 async fn entry_beyond_membership_head_is_not_committed() {
-    let fixture = merge_fixture("unheaded-entry").await;
+    let fixture = MergeFixture::new("unheaded-entry").await;
     let member = UserKeypair::generate();
-    let chain = load_fixture(&fixture).await;
+    let chain = fixture.load().await;
     let founder = chain.entries().first().expect("founder");
     let entry = chain
         .signed_set_member_in_stream(
@@ -359,24 +355,22 @@ async fn entry_beyond_membership_head_is_not_committed() {
         .await
         .expect("publish unheaded entry");
 
-    let loaded = load_fixture(&fixture).await;
+    let loaded = fixture.load().await;
     assert!(!loaded.can_write_now(&pubkey_hex(&member)));
 }
 
 #[tokio::test]
 async fn complete_chain_still_validates() {
-    let fixture = merge_fixture("complete-chain").await;
+    let fixture = MergeFixture::new("complete-chain").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
 
-    assert!(load_fixture(&fixture)
-        .await
-        .can_write_now(&pubkey_hex(&member)));
+    assert!(fixture.load().await.can_write_now(&pubkey_hex(&member)));
 }
 
 #[tokio::test]
 async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomically() {
-    let fixture = merge_fixture("store-membership-conflict-boundary").await;
+    let fixture = MergeFixture::new("store-membership-conflict-boundary").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
             fixture.store.home.clone(),
@@ -397,7 +391,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         .expect("read membership conflict")
         .is_none());
 
-    let chain = load_fixture(&fixture).await;
+    let chain = fixture.load().await;
     let choice = crate::protocol::membership::MembershipConflictChoice::new(
         "foreign-choice".to_string(),
         Vec::new(),
@@ -433,7 +427,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
 
 #[tokio::test]
 async fn store_membership_reads_require_the_installed_owner_anchor() {
-    let fixture = merge_fixture("store-membership-owner-anchor").await;
+    let fixture = MergeFixture::new("store-membership-owner-anchor").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
             fixture.store.home.clone(),
@@ -470,7 +464,7 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
 
 #[tokio::test]
 async fn store_membership_reads_reject_tampered_founder_state() {
-    let fixture = merge_fixture("store-membership-founder-state").await;
+    let fixture = MergeFixture::new("store-membership-founder-state").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
             fixture.store.home.clone(),
@@ -507,10 +501,10 @@ async fn store_membership_reads_reject_tampered_founder_state() {
 
 #[tokio::test]
 async fn store_prefix_projection_retains_direct_membership_heads() {
-    let fixture = merge_fixture("project-direct-membership").await;
+    let fixture = MergeFixture::new("project-direct-membership").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    let current = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let current = fixture.load().await;
     let projected = fixture
         .device
         .project_membership_for_test(current.head_refs())
@@ -523,31 +517,34 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
 
 #[tokio::test]
 async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_suffix() {
-    let fixture = merge_fixture("project-store-bound-membership").await;
+    let fixture = MergeFixture::new("project-store-bound-membership").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
     let member_db = open_test_db();
     fixture
         .store
         .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
         .await
         .expect("activate member device");
-    let before_promotion = load_fixture(&fixture).await;
-    promote_active_member_fixture(
-        &fixture.store,
-        &fixture.db,
-        &member_db,
-        &fixture.owner,
-        &member,
-        &EncryptionService::from_key([42; 32]),
-    )
-    .await
-    .expect("promote member to Owner");
-    let after_promotion = load_fixture(&fixture).await;
+    let before_promotion = fixture.load().await;
+    fixture
+        .store
+        .promote_active_member_fixture(
+            &fixture.db,
+            &member_db,
+            &fixture.owner,
+            &member,
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("promote member to Owner");
+    let after_promotion = fixture.load().await;
     assert_ne!(after_promotion.head_refs(), before_promotion.head_refs());
     let later_member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &later_member, MemberRole::Member).await;
-    let candidate = load_fixture(&fixture).await;
+    fixture
+        .invite_member(&later_member, MemberRole::Member)
+        .await;
+    let candidate = fixture.load().await;
     assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
     let projected = fixture
         .device
@@ -563,8 +560,8 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
 
 #[tokio::test]
 async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
-    let fixture = merge_fixture("relocated-exact-membership-head").await;
-    let current = load_fixture(&fixture).await;
+    let fixture = MergeFixture::new("relocated-exact-membership-head").await;
+    let current = fixture.load().await;
     let founder_ref = current
         .head_refs()
         .first()
@@ -635,9 +632,9 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
 
 #[tokio::test]
 async fn invite_carries_the_founder_and_exact_root() {
-    let fixture = merge_fixture("invite-authority").await;
+    let fixture = MergeFixture::new("invite-authority").await;
     let invitee = UserKeypair::generate();
-    let invite = invite_fixture_member(&fixture, &invitee, MemberRole::Member).await;
+    let invite = fixture.invite_member(&invitee, MemberRole::Member).await;
 
     assert_eq!(invite.owner_pubkey, fixture.owner_pubkey);
     assert_eq!(invite.store_root, fixture.store.root);
@@ -649,7 +646,7 @@ async fn invite_carries_the_founder_and_exact_root() {
 
 #[tokio::test]
 async fn inviting_yourself_is_a_typed_self_invite_error() {
-    let fixture = merge_fixture("self-invite").await;
+    let fixture = MergeFixture::new("self-invite").await;
     let result = fixture
         .store
         .invite_member(
@@ -672,23 +669,21 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
 
 #[tokio::test]
 async fn remove_member_completes_when_the_home_reports_no_per_member_revocation() {
-    let fixture = merge_fixture("unsupported-revocation").await;
+    let fixture = MergeFixture::new("unsupported-revocation").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    remove_fixture_member(&fixture, &member).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.remove_member(&member).await;
 
-    assert!(!load_fixture(&fixture)
-        .await
-        .can_write_now(&pubkey_hex(&member)));
+    assert!(!fixture.load().await.can_write_now(&pubkey_hex(&member)));
 }
 
 #[tokio::test]
 async fn suppressed_remove_is_detected_by_the_exact_cursor() {
-    let fixture = merge_fixture("suppressed-remove").await;
+    let fixture = MergeFixture::new("suppressed-remove").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    remove_fixture_member(&fixture, &member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.remove_member(&member).await;
+    let chain = fixture.load().await;
     let remove_head = chain.head_refs().last().expect("remove head").clone();
     fixture
         .store
@@ -697,7 +692,8 @@ async fn suppressed_remove_is_detected_by_the_exact_cursor() {
         .await
         .expect("suppress exact remove head");
 
-    load_fixture_result(&fixture)
+    fixture
+        .load_result()
         .await
         .expect_err("the accepted exact remove cursor cannot be suppressed");
 }
@@ -724,8 +720,9 @@ fn apply_key_rotation_replays_an_already_adopted_keyring() {
 
 #[tokio::test]
 async fn head_cursor_persist_never_regresses() {
-    let fixture = merge_fixture("cursor-monotonic").await;
-    let current = load_fixture(&fixture)
+    let fixture = MergeFixture::new("cursor-monotonic").await;
+    let current = fixture
+        .load()
         .await
         .head_refs()
         .first()
@@ -766,8 +763,9 @@ async fn head_cursor_persist_never_regresses() {
 
 #[tokio::test]
 async fn head_cursor_rejects_a_reference_from_another_author_stream() {
-    let fixture = merge_fixture("cursor-stream").await;
-    let current = load_fixture(&fixture)
+    let fixture = MergeFixture::new("cursor-stream").await;
+    let current = fixture
+        .load()
         .await
         .head_refs()
         .first()
@@ -842,9 +840,10 @@ fn membership_floor_rejects_unsorted_author_streams() {
 
 #[tokio::test]
 async fn seeding_a_complete_head_floor_is_atomic() {
-    let fixture = merge_fixture("atomic-floor").await;
+    let fixture = MergeFixture::new("atomic-floor").await;
     let db = open_test_db();
-    let first = load_fixture(&fixture)
+    let first = fixture
+        .load()
         .await
         .head_refs()
         .first()
@@ -888,9 +887,10 @@ async fn seeding_a_complete_head_floor_is_atomic() {
 
 #[tokio::test]
 async fn owner_pin_and_complete_head_floor_commit_atomically() {
-    let fixture = merge_fixture("atomic-owner-pin").await;
+    let fixture = MergeFixture::new("atomic-owner-pin").await;
     let db = open_test_db();
-    let head = load_fixture(&fixture)
+    let head = fixture
+        .load()
         .await
         .head_refs()
         .first()
@@ -932,11 +932,11 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
 
 #[tokio::test]
 async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
-    let fixture = merge_fixture("cursor-regression").await;
+    let fixture = MergeFixture::new("cursor-regression").await;
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
-    remove_fixture_member(&fixture, &member).await;
-    let chain = load_fixture(&fixture).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.remove_member(&member).await;
+    let chain = fixture.load().await;
     let latest = chain.head_refs().last().expect("latest head").clone();
     let latest_head = fixture
         .device
@@ -951,7 +951,8 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
         .await
         .expect("remove latest exact head");
 
-    let error = load_fixture_result(&fixture)
+    let error = fixture
+        .load_result()
         .await
         .expect_err("the accepted cursor cannot regress to its predecessor");
     assert!(error.to_string().contains("regressed"));
@@ -960,8 +961,8 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
 
 #[tokio::test]
 async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively() {
-    let fixture = merge_fixture("deep-membership-projection").await;
-    let chain = load_fixture(&fixture).await;
+    let fixture = MergeFixture::new("deep-membership-projection").await;
+    let chain = fixture.load().await;
     fixture
         .device
         .assert_deep_membership_projection_for_test(chain.head_refs())
@@ -979,18 +980,17 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
 /// gone, and the initiator's next removal composes at the position that follows.
 #[tokio::test]
 async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
-    let fixture = merge_fixture("removal-loses-its-position").await;
+    let fixture = MergeFixture::new("removal-loses-its-position").await;
     let encryption = EncryptionService::from_key([42; 32]);
     let member = UserKeypair::generate();
-    invite_fixture_member(&fixture, &member, MemberRole::Member).await;
+    fixture.invite_member(&member, MemberRole::Member).await;
     let member_db = open_test_db();
     fixture
         .store
         .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
         .await
         .expect("activate the member's device");
-    Box::pin(promote_active_member_fixture(
-        &fixture.store,
+    Box::pin(fixture.store.promote_active_member_fixture(
         &fixture.db,
         &member_db,
         &fixture.owner,
@@ -1002,13 +1002,14 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
 
     // A queued host write composes against the same next position the removal
     // will, and takes it the moment it drains.
-    crate::sync::test_helpers::host_exec(
-        &fixture.db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    fixture
+        .db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \
                  '0000000001000-0000-owner', '2026-07-21')",
-    )
-    .await;
+        )
+        .await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let loaded_store = fixture
         .store
@@ -1026,7 +1027,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     // Stop the removal before it publishes anything, leaving its candidate
     // durable and bound to the position it composed against.
     fixture.store.home.fail_exact_create_before_call(1);
-    Box::pin(try_remove_fixture_member(&fixture, &member))
+    Box::pin(fixture.try_remove_member(&member))
         .await
         .expect_err("the interrupted removal cannot publish its membership authority");
     assert!(
@@ -1046,7 +1047,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
         1,
     );
 
-    let lost = Box::pin(try_remove_fixture_member(&fixture, &member))
+    let lost = Box::pin(fixture.try_remove_member(&member))
         .await
         .expect_err("a candidate whose position was taken can never activate");
     assert!(
@@ -1063,10 +1064,8 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
         "the lost removal is cleared rather than left staged against a position that is gone",
     );
 
-    Box::pin(try_remove_fixture_member(&fixture, &member))
+    Box::pin(fixture.try_remove_member(&member))
         .await
         .expect("the re-issued removal publishes at the position that follows");
-    assert!(!load_fixture(&fixture)
-        .await
-        .can_write_now(&pubkey_hex(&member)));
+    assert!(!fixture.load().await.can_write_now(&pubkey_hex(&member)));
 }

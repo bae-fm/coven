@@ -35,9 +35,9 @@ use crate::sync::cycle::{run_single_sync_cycle, DeferredLocalBlobDisposition, Sy
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::test_helpers::{
-    exact_tombstone_key, host_exec as exec, open_test_db, open_test_db_schema,
-    open_test_db_with_blob, open_test_db_with_user_and_host_blobs, plaintext_cipher, query_text,
-    register_external_blob, remote_root_db, row_exists, temp_store_dir, TestStore,
+    exact_tombstone_key, open_test_db, open_test_db_schema, open_test_db_with_blob,
+    open_test_db_with_user_and_host_blobs, plaintext_cipher, remote_root_db, temp_store_dir,
+    TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use crate::Migration;
@@ -254,17 +254,12 @@ async fn seed_release_rows(
     shared: u8,
     bytes: &[u8],
 ) {
-    crate::sync::test_helpers::exec(
-        db,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('{note_id}', 'Release', NULL, {shared}, '0000000001000-0000-A', '2026-01-01')"
-        ),
-    )
+    ))
     .await;
-    crate::sync::test_helpers::exec(
-        db,
-        &format!(
+    db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
             bytes.len(),
@@ -288,7 +283,8 @@ async fn seed_local_release(
     std::fs::create_dir_all(user_dir).unwrap();
     let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
-    register_external_blob(db, "note_photos", photo_id, &src).await;
+    db.register_external_blob_for_test("note_photos", photo_id, &src)
+        .await;
     src
 }
 
@@ -303,9 +299,7 @@ async fn add_local_photo(
     cloud_path: &str,
     bytes: &[u8],
 ) -> PathBuf {
-    exec(
-        db,
-        &format!(
+    db.execute_test_host_write(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
             bytes.len(),
@@ -315,7 +309,8 @@ async fn add_local_photo(
     .await;
     let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
-    register_external_blob(db, "note_photos", photo_id, &src).await;
+    db.register_external_blob_for_test("note_photos", photo_id, &src)
+        .await;
     src
 }
 
@@ -340,7 +335,8 @@ async fn seed_remote_release(
     let source = store_dir
         .local_blob_path("fixture_sources", photo_id)
         .expect("build exact remote fixture source path");
-    register_external_blob(db, "note_photos", photo_id, &source).await;
+    db.register_external_blob_for_test("note_photos", photo_id, &source)
+        .await;
     storage.open_into(db).await.expect("open exact test Store");
     owners
         .make_remote("notes", note_id, false)
@@ -362,21 +358,20 @@ async fn seed_remote_release(
 }
 
 async fn shared_flag(db: &Database, note_id: &str) -> i64 {
-    let v = query_text(
-        db,
-        &format!("SELECT CAST(shared AS TEXT) FROM notes WHERE id = '{note_id}'"),
-    )
-    .await;
+    let v = db
+        .query_test_text(&format!(
+            "SELECT CAST(shared AS TEXT) FROM notes WHERE id = '{note_id}'"
+        ))
+        .await;
     v.parse().unwrap()
 }
 
 /// The note's gate stamp (`_updated_at`), to prove a refused transition leaves the
 /// gate row — value and causal stamp — untouched.
 async fn gate_stamp(db: &Database, note_id: &str) -> String {
-    query_text(
-        db,
-        &format!("SELECT _updated_at FROM notes WHERE id = '{note_id}'"),
-    )
+    db.query_test_text(&format!(
+        "SELECT _updated_at FROM notes WHERE id = '{note_id}'"
+    ))
     .await
 }
 
@@ -518,13 +513,10 @@ async fn publish_fixture_position(
     store_dir: &StoreDir,
     note_id: &str,
 ) -> u64 {
-    exec(
-        db,
-        &format!(
-            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+    db.execute_test_host_write(&format!(
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('{note_id}', 'fixture position', 1, '0000000001000-0000-A', '2026-01-01')"
-        ),
-    )
+    ))
     .await;
     assert!(storage
         .publish_pending(db, store_dir)
@@ -586,7 +578,9 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         .expect("invite and activate peer Store device");
     peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
-        !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db_b
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "a gated-off (Local) release does not reach a peer",
     );
 
@@ -652,7 +646,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
-        row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "B receives the release once its blobs are up and the gate flips",
     );
     let fetched = owners_b
@@ -784,7 +779,8 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     // The user moves the file: re-register it at a new path and remove the old one.
     let src2 = user_dir.join("relocated.jpg");
     std::fs::write(&src2, &bytes).unwrap();
-    register_external_blob(&db, "note_photos", "photoaaa", &src2).await;
+    db.register_external_blob_for_test("note_photos", "photoaaa", &src2)
+        .await;
     std::fs::remove_file(&src1).unwrap();
 
     owners
@@ -931,7 +927,8 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         .await;
         peer.pull_store(&lib_b).await.expect("pull peer Store");
         assert!(
-            row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+            db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+                .await,
             "B has the Remote release",
         );
         let remote_blob = photo_ref(&db_a, "photoaaa")
@@ -1016,7 +1013,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         ))
         .await;
         assert!(
-            !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+            !db_b
+                .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+                .await,
             "B's subtree is removed by the gate retract",
         );
 
@@ -1191,26 +1190,24 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-user-photo";
     let routing_encryption = crate::encryption::EncryptionService::from_key([7; 32]);
-    crate::sync::test_helpers::exec(
-        &db,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n-user-scoped', 'Scoped user fixture', NULL, 0, \
                      '0000000001000-0000-A', '2026-01-01'); \
              INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('photo-user-scoped', 'n-user-scoped', 'image', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/photo-user-scoped.jpg');",
-            bytes.len(),
-            crate::blob::content_hash(bytes),
-        ),
-    )
+        bytes.len(),
+        crate::blob::content_hash(bytes),
+    ))
     .await;
     let user_dir = tmp.path().join("user");
     std::fs::create_dir_all(&user_dir).unwrap();
     let source = user_dir.join("photo-user-scoped.jpg");
     std::fs::write(&source, bytes).unwrap();
-    register_external_blob(&db, "note_photos", "photo-user-scoped", &source).await;
+    db.register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
+        .await;
     owners
         .make_remote("notes", "n-user-scoped", false)
         .await
@@ -1334,24 +1331,20 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let owners = TestOwnerGraph::new(store_database, lib.clone());
     let bytes = b"scoped-host-cover";
     let routing_encryption = crate::encryption::EncryptionService::from_key([9; 32]);
-    crate::sync::test_helpers::exec(
-        &db,
+    db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host-scoped', 'Scoped host fixture', NULL, 0, \
                  '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    crate::sync::test_helpers::exec(
-        &db,
-        &format!(
-            "INSERT INTO note_covers \
+    db.execute_test_sql(&format!(
+        "INSERT INTO note_covers \
              (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('cover-host-scoped', 'n-host-scoped', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/cover-host-scoped.jpg')",
-            bytes.len(),
-            crate::blob::content_hash(bytes),
-        ),
-    )
+        bytes.len(),
+        crate::blob::content_hash(bytes),
+    ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&lib, "covers", "cover-host-scoped", bytes)
         .await
@@ -1499,9 +1492,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         &photo,
     )
     .await;
-    exec(
-        &db_a,
-        &format!(
+    db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             crate::blob::content_hash(&cover),
@@ -1654,15 +1645,12 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let owners_a = TestOwnerGraph::new(store_database_a, lib_a.clone());
     let cover = b"HOST-ONLY-COVER".to_vec();
 
-    exec(
-        &db_a,
+    db_a.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host', 'Host Only', NULL, 0, '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db_a,
-        &format!(
+    db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
             crate::blob::content_hash(&cover),
@@ -1775,17 +1763,12 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         ("n-pin", "cover-pin", "cv/cover-pin.jpg", &pin_bytes),
         ("n-drop", "cover-drop", "cv/cover-drop.jpg", &drop_bytes),
     ] {
-        exec(
-            &db,
-            &format!(
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        db.execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                  VALUES ('{note}', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01')"
-            ),
-        )
+        ))
         .await;
-        exec(
-            &db,
-            &format!(
+        db.execute_test_sql(&format!(
                 "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
                  VALUES ('{cover}', '{note}', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{path}')",
                 bytes.len(),
@@ -1833,8 +1816,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the drop release flipped"
     );
     assert!(
-        row_exists(
-            &db,
+        db.test_row_exists(
             "SELECT 1 FROM blob_make_remote_intents AS intent \
              JOIN store_writes AS write ON write.write_id = intent.write_id \
              WHERE intent.root_id = 'n-pin' AND intent.state = 'publishing' \
@@ -2066,15 +2048,12 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
 
-    exec(
-        &db_a,
+    db_a.execute_test_host_write(
         "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db_a,
-        &format!(
+    db_a.execute_test_host_write(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             crate::blob::content_hash(&cover),
@@ -2108,7 +2087,8 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 
     peer.pull_store(&lib_b).await.expect("pull peer Store");
     assert!(
-        row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n-remote-root'").await,
+        db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n-remote-root'")
+            .await,
         "the peer receives the remote-root row"
     );
     assert!(
@@ -2140,15 +2120,12 @@ async fn make_remote_rejects_remote_root() {
     let db = remote_root_db(cover_decl());
     let (_tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
-    exec(
-        &db,
+    db.execute_test_sql(
         "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db,
-        &format!(
+    db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             crate::blob::content_hash(b"REMOTE-ROOT"),
@@ -2175,15 +2152,12 @@ async fn make_local_rejects_remote_root() {
     let storage = create_store(&db, UserKeypair::generate()).await;
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
-    exec(
-        &db,
+    db.execute_test_sql(
         "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db,
-        &format!(
+    db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             crate::blob::content_hash(b"REMOTE-ROOT"),
@@ -2238,15 +2212,12 @@ async fn make_remote_rejects_already_remote_root() {
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
 
     // A host-provided-only root already Remote (gate on): a note plus a cover row.
-    exec(
-        &db,
+    db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host', 'Host Only', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db,
-        &format!(
+    db.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
             crate::blob::content_hash(&[0; 15]),
@@ -2525,10 +2496,8 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let bytes = b"same-locator-created-journals";
     let hash = crate::blob::content_hash(bytes);
 
-    exec(
-        &db,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01'); \
              INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path, blob_id) \
@@ -2536,10 +2505,9 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
                      '0000000001000-0000-A', '2026-01-01', 'cv/shared.bin', 'sharedblob'), \
                     ('photo-b', 'n1', 'image', {}, '{hash}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/shared.bin', 'sharedblob')",
-            bytes.len(),
-            bytes.len(),
-        ),
-    )
+        bytes.len(),
+        bytes.len(),
+    ))
     .await;
     let user_dir = tmp.path().join("user");
     std::fs::create_dir_all(&user_dir).unwrap();
@@ -2547,8 +2515,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let cover_source = user_dir.join("cover.bin");
     std::fs::write(&photo_source, bytes).unwrap();
     std::fs::write(&cover_source, bytes).unwrap();
-    register_external_blob(&db, "note_photos", "photo-a", &photo_source).await;
-    register_external_blob(&db, "note_photos", "photo-b", &cover_source).await;
+    db.register_external_blob_for_test("note_photos", "photo-a", &photo_source)
+        .await;
+    db.register_external_blob_for_test("note_photos", "photo-b", &cover_source)
+        .await;
 
     owners
         .make_remote("notes", "n1", false)

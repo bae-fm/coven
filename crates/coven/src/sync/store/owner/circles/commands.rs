@@ -315,7 +315,7 @@ pub(super) struct CircleAddMemberRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) role: CircleRole,
-    pub(super) bootstrap: crate::sync::store::snapshot::SnapshotCut,
+    pub(super) bootstrap: crate::sync::store::SnapshotCut,
     pub(super) current: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
     pub(super) roster_chain: CircleRosterChain,
@@ -371,7 +371,7 @@ pub(super) struct CircleFinalizeEpochCloseRequest {
     pub(super) roster_chain: CircleRosterChain,
     pub(super) intent: crate::protocol::circle::CircleEpochCloseIntent,
     pub(super) responses: Vec<crate::protocol::circle::CircleEpochCloseSettlement>,
-    pub(super) bootstrap: crate::sync::store::snapshot::SnapshotCut,
+    pub(super) bootstrap: crate::sync::store::SnapshotCut,
 }
 
 pub(super) struct CircleCancelEpochCloseRequest {

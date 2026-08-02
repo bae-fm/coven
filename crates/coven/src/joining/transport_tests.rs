@@ -215,14 +215,12 @@ impl TransportFixture {
         &self,
         id: &str,
     ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-        host_exec(
-            &self.owner_db,
-            &format!(
+        self.owner_db
+            .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('{id}', '{id}', 1, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z')"
-            ),
-        )
-        .await;
+            ))
+            .await;
         assert!(
             self.owner_test_store
                 .publish_pending(&self.owner_db, &self.owner_store_dir)
@@ -711,14 +709,15 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     // bootstrap never covered.
     let intervening = fixture.publish_owner_row("owner-writes-mid-join").await;
     let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
-    let (_, activation_commit) = load_exact_materialized_commit(
-        &fixture.owner_store,
-        &activation.outcome_activation.coord.stream_id.to_string(),
-        activation.outcome_activation.coord.sequence(),
-    )
-    .await
-    .expect("load the outcome activation commit")
-    .expect("the owner materialized its outcome activation");
+    let (_, activation_commit) = fixture
+        .owner_store
+        .load_exact_materialized_commit(
+            &activation.outcome_activation.coord.stream_id.to_string(),
+            activation.outcome_activation.coord.sequence(),
+        )
+        .await
+        .expect("load the outcome activation commit")
+        .expect("the owner materialized its outcome activation");
     assert!(
         activation_commit
             .order

@@ -31,17 +31,6 @@ pub(crate) struct JoiningStore<'storage> {
     identity: UserKeypair,
 }
 
-#[cfg(test)]
-pub(crate) async fn begin_joining_store_from_pending<'storage>(
-    pending: PendingDeviceJoinAuthority<'storage>,
-    database: StoreDatabase,
-) -> Result<JoiningStore<'storage>, DeviceJoinError> {
-    pending
-        .observation
-        .into_joining_store(database, pending.identity)
-        .await
-}
-
 #[derive(Clone)]
 pub(super) struct PendingJoinJournal {
     database: DeviceJoinJournalDatabase,
@@ -493,7 +482,17 @@ impl PendingDeviceJoinObservation<'_> {
     }
 }
 
-impl PendingDeviceJoinAuthority<'_> {
+impl<'a> PendingDeviceJoinAuthority<'a> {
+    #[cfg(test)]
+    pub(crate) async fn begin_joining_store(
+        self,
+        database: StoreDatabase,
+    ) -> Result<JoiningStore<'a>, DeviceJoinError> {
+        self.observation
+            .into_joining_store(database, self.identity)
+            .await
+    }
+
     pub(crate) async fn prepare_provider_access_request(
         &self,
     ) -> Result<DeviceProviderAccessRequest, DeviceJoinError> {

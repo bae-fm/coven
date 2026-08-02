@@ -60,15 +60,13 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
         .expect("operation author has one active Store grant");
     // The member device is the one that authors and publishes; drive everything
     // through its database so its local membership view governs authority.
-    let journal = prepare_circle_operation(
-        &successor_db,
-        &store.storage,
-        "0000000001003-0000-successor",
-        "Revoked Circle",
-        &successor,
-    )
-    .await
-    .expect("prepare operation while authorized");
+    let journal = store
+        .bind_device(&successor_db, &successor)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
+        .await
+        .expect("prepare operation while authorized");
     let operation_id = journal.operation_id.clone();
     StoreDatabase::new(&successor_db)
         .insert_circle_operation(journal)
@@ -114,7 +112,12 @@ async fn prepare_and_revoke_operation(name: &str) -> RevokedOperation {
 #[tokio::test]
 async fn operation_inspection_surface_reports_the_typed_block() {
     let revoked = prepare_and_revoke_operation("recovery-inspection-surface").await;
-    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation without failing");
 
@@ -145,21 +148,23 @@ async fn operation_inspection_surface_reports_the_typed_block() {
     let founder = UserKeypair::generate();
     let store =
         create_test_store_in_its_own_task(&db, "recovery-inspection-notblocked", &founder).await;
-    let journal = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000001000-0000-founder",
-        "Ready Circle",
-        &founder,
-    )
-    .await
-    .expect("prepare a ready operation");
+    let journal = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-founder", "Ready Circle")
+        .await
+        .expect("prepare a ready operation");
     let ready_id = journal.operation_id.clone();
     crate::database::StoreDatabase::new(&db)
         .insert_circle_operation(journal)
         .await
         .expect("persist the ready operation");
-    let refusal = retry_circle_operation(&db, &store.storage, &ready_id, &founder)
+    let refusal = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle test Store")
+        .retry_circle_operation(&ready_id)
         .await
         .expect_err("a non-blocked operation is not retriable");
     assert!(
@@ -171,7 +176,12 @@ async fn operation_inspection_surface_reports_the_typed_block() {
 #[tokio::test]
 async fn a_blocked_operation_reports_typed_authority_lost() {
     let revoked = prepare_and_revoke_operation("recovery-typed-block").await;
-    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation without failing");
     let blocked = StoreDatabase::new(&revoked.db)
@@ -206,15 +216,13 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(&db, "recovery-retry-republish", &founder).await;
-    let journal = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000001000-0000-founder",
-        "Household",
-        &founder,
-    )
-    .await
-    .expect("prepare authorized founder operation");
+    let journal = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-founder", "Household")
+        .await
+        .expect("prepare authorized founder operation");
     let operation_id = journal.operation_id.clone();
     let circle_id = journal.circle_id();
     let expected_control = journal.operation().creation.control.coord.clone();
@@ -250,7 +258,11 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         )
         .await
         .expect("block the authorized operation");
-    retry_circle_operation(&db, &store.storage, &operation_id, &founder)
+    store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle test Store")
+        .retry_circle_operation(&operation_id)
         .await
         .expect("retry publishes the still-authorized operation");
 
@@ -283,7 +295,12 @@ async fn discard_without_nonactivation_proof_is_refused() {
     let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-refusal").await;
     let operation_id = journal.operation_id.clone();
 
-    let refusal = discard_circle_operation(&db, &store.storage, &operation_id, &signer)
+    let refusal = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle discard Store")
+        .circles()
+        .discard_circle_operation(&operation_id)
         .await
         .expect_err("discard without a nonactivation proof is refused");
     assert!(
@@ -311,19 +328,23 @@ async fn discard_without_nonactivation_proof_is_refused() {
 #[tokio::test]
 async fn discard_after_membership_revocation_witness_cleans_the_operation() {
     let revoked = prepare_and_revoke_operation("recovery-discard-revocation").await;
-    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation");
 
-    let changeset = crate::sync::test_helpers::capture_bytes(
-        &revoked.owner_db,
-        &[
+    let changeset = revoked
+        .owner_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
                      '0000000001004-0000-founder', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     StoreDatabase::new(&revoked.owner_db)
         .enqueue_store_changeset_for_test(changeset)
         .await
@@ -373,14 +394,15 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         pull.held_positions
     );
 
-    discard_circle_operation(
-        &revoked.db,
-        &revoked.store.storage,
-        &revoked.operation_id,
-        &revoked.successor,
-    )
-    .await
-    .expect("the accepted membership revocation permits discard");
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind revoked Circle discard Store")
+        .circles()
+        .discard_circle_operation(&revoked.operation_id)
+        .await
+        .expect("the accepted membership revocation permits discard");
 
     assert!(
         StoreDatabase::new(&revoked.db)
@@ -403,12 +425,15 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
-    let (winner_commit, winner_head) =
-        publish_competing_store_head(&db, &store.storage, &signer, &journal).await;
+    let (winner_commit, winner_head) = store.publish_competing_store_head(&journal).await;
 
     // Publishing the operation uploads its candidate graph, then loses the head
     // slot to the winner already occupying it.
-    publish_circle_operation(&db, &store.storage, &operation_id, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_operation(&operation_id)
         .await
         .expect_err("publication loses the successor slot to the winner");
     assert!(
@@ -416,7 +441,12 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         "the candidate commit reached cloud storage before the slot was lost"
     );
 
-    discard_circle_operation(&db, &store.storage, &operation_id, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle discard Store")
+        .circles()
+        .discard_circle_operation(&operation_id)
         .await
         .expect("the verified winner permits discard");
 
@@ -430,7 +460,9 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     );
     assert!(!store.home.contains_exact_object(&candidate_commit));
     assert!(
-        !remote_object_exists(&db, &candidate_commit).await,
+        !db.remote_object_exists_for_test(candidate_commit.clone())
+            .await
+            .expect("check stored remote object"),
         "the candidate commit's remote-object row is deleted"
     );
     assert!(
@@ -453,15 +485,24 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
-    publish_competing_store_head(&db, &store.storage, &signer, &journal).await;
-    publish_circle_operation(&db, &store.storage, &operation_id, &signer)
+    store.publish_competing_store_head(&journal).await;
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_operation(&operation_id)
         .await
         .expect_err("publication loses the successor slot to the winner");
 
     // Fail the first candidate-exclusive deletion, after the transaction that
     // recorded the proof and moved the row into `Discarding` has committed.
     store.home.fail_exact_delete_on_call(1);
-    discard_circle_operation(&db, &store.storage, &operation_id, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle discard Store")
+        .circles()
+        .discard_circle_operation(&operation_id)
         .await
         .expect_err("the injected delete failure interrupts cleanup");
     assert_eq!(
@@ -475,7 +516,11 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         "the interrupted discard is durably resumable"
     );
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("resume completes the interrupted discard");
     assert!(
@@ -494,21 +539,23 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(&db, "recovery-retry-refusal", &founder).await;
-    let ready = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000001000-0000-founder",
-        "Household",
-        &founder,
-    )
-    .await
-    .expect("prepare an authorized operation");
+    let ready = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-founder", "Household")
+        .await
+        .expect("prepare an authorized operation");
     let ready_id = ready.operation_id.clone();
     crate::database::StoreDatabase::new(&db)
         .insert_circle_operation(ready)
         .await
         .expect("persist the ready operation");
-    let refusal = retry_circle_operation(&db, &store.storage, &ready_id, &founder)
+    let refusal = store
+        .bind_device(&db, &founder)
+        .await
+        .expect("bind Circle test Store")
+        .retry_circle_operation(&ready_id)
         .await
         .expect_err("retrying an operation that is not blocked is refused");
     assert!(
@@ -519,17 +566,22 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     // A permanently-blocked operation re-blocks on retry; retrying twice leaves it
     // durably blocked with no corruption.
     let revoked = prepare_and_revoke_operation("recovery-retry-reblock").await;
-    resume_circle_operations(&revoked.db, &revoked.store.storage, &revoked.successor)
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation");
     for _ in 0..2 {
-        match retry_circle_operation(
-            &revoked.db,
-            &revoked.store.storage,
-            &revoked.operation_id,
-            &revoked.successor,
-        )
-        .await
+        match revoked
+            .store
+            .bind_device(&revoked.db, &revoked.successor)
+            .await
+            .expect("bind Circle test Store")
+            .retry_circle_operation(&revoked.operation_id)
+            .await
         {
             Err(CircleOperationError::Blocked { .. }) => {}
             other => panic!("retry of a permanently-blocked operation must re-block: {other:?}"),
@@ -555,24 +607,26 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
 async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it() {
     let db = open_test_db();
     let (store, signer, first) = persist_merge_operation(&db, "recovery-position-lost").await;
-    let second = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000002000-0000-creator",
-        "Second household",
-        &signer,
-    )
-    .await
-    .expect("prepare the operation queued behind the loser");
+    let second = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000002000-0000-creator", "Second household")
+        .await
+        .expect("prepare the operation queued behind the loser");
     let second_id = second.operation_id.clone();
     crate::database::StoreDatabase::new(&db)
         .insert_circle_operation(second.clone())
         .await
         .expect("persist the operation queued behind the loser");
 
-    publish_competing_store_head(&db, &store.storage, &signer, &first).await;
+    store.publish_competing_store_head(&first).await;
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("the resume queue drains past an operation that lost its position");
 
@@ -639,7 +693,11 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 
     // Retrying a permanently lost position must not re-wedge the queue: it
     // unblocks, re-observes the same winner, and re-blocks typed.
-    let retried = retry_circle_operation(&db, &store.storage, &first.operation_id, &signer)
+    let retried = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .retry_circle_operation(&first.operation_id)
         .await
         .expect_err("a position that is gone cannot be retried into");
     assert!(

@@ -753,25 +753,15 @@ mod tests {
         db: &Database,
         storage: &Arc<CloudSyncStorage>,
         signer: &UserKeypair,
-    ) -> (StoreRootRef, String) {
-        let initialized = crate::sync::store::Store::create(
-            store_database(db),
+    ) -> crate::sync::test_helpers::TestDevice {
+        crate::sync::test_helpers::TestDevice::create(
+            db,
             storage.clone(),
             "snapshot-exact-store",
-            signer,
+            signer.clone(),
         )
         .await
-        .expect("create snapshot test Store");
-        let root_ref = initialized.store.store_root().clone();
-        let origin = crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: initialized
-                .store
-                .protocol_root_for_test()
-                .descriptor
-                .creation_id,
-        };
-        let device_id = crate::protocol::store_commit::StoreDeviceId::derive(&root_ref, &origin);
-        (root_ref, device_id.to_string())
+        .expect("create snapshot test Store")
     }
 
     fn snapshot(bytes: &[u8]) -> CreatedSnapshot {
@@ -781,126 +771,78 @@ mod tests {
         }
     }
 
-    async fn publish(
-        storage: &Arc<CloudSyncStorage>,
-        db: &Database,
-        signer: &UserKeypair,
-        bytes: &[u8],
-        created_at: &str,
-    ) -> Result<SnapshotMeta, SnapshotError> {
-        let store = crate::sync::store::Store::load(
-            StoreDatabase::new(db),
-            storage.clone(),
-            signer.clone(),
-        )
-        .await
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-        store
-            .authorize_writer()
-            .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
-            .push_store_snapshot(
-                snapshot(bytes),
-                CommitFrontier(BTreeMap::new()),
-                1,
-                created_at.to_string(),
-            )
-            .await
-    }
-
-    async fn resume(
-        storage: &Arc<CloudSyncStorage>,
-        db: &Database,
-        signer: &UserKeypair,
-    ) -> Result<Option<SnapshotMeta>, SnapshotError> {
-        let store = crate::sync::store::Store::load(
-            StoreDatabase::new(db),
-            storage.clone(),
-            signer.clone(),
-        )
-        .await
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-        store
-            .authorize_writer()
-            .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
-            .resume_snapshot_publication()
-            .await
-    }
-
     #[tokio::test]
     async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
-        Box::pin(run_selector_keeps_snapshot_hash_domains_distinct()).await;
-    }
-
-    async fn run_selector_keeps_snapshot_hash_domains_distinct() {
-        let db = crate::sync::test_helpers::open_test_db();
-        let signer = UserKeypair::generate();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            "snapshot-selector-hash-domains",
-            signer.clone(),
-        )
-        .await
-        .expect("create exact snapshot selector Store");
-        let device = store
-            .open_into(&db)
-            .await
-            .expect("open exact snapshot selector Store");
-        let membership = device
-            .membership_for_test()
-            .await
-            .expect("load exact snapshot selector membership");
-        let published = device
-            .authorize_writer()
-            .await
-            .expect("authorize exact snapshot selector writer")
-            .push_store_snapshot(
-                snapshot(b"snapshot selector image"),
-                CommitFrontier(BTreeMap::new()),
-                1,
-                "2026-07-16T00:00:00Z".to_string(),
+        Box::pin(async {
+            let db = crate::sync::test_helpers::open_test_db();
+            let signer = UserKeypair::generate();
+            let store = crate::sync::test_helpers::TestStore::create(
+                &db,
+                "snapshot-selector-hash-domains",
+                signer.clone(),
             )
             .await
-            .expect("publish exact snapshot selector fixture");
-        device
-            .stage_acknowledgement(
-                CommitFrontier(BTreeMap::new()),
-                "2026-07-16T00:00:01Z".to_string(),
-            )
-            .await
-            .expect("stage exact snapshot selector acknowledgement");
-        device
-            .drain_acknowledgements()
-            .await
-            .expect("activate exact snapshot selector acknowledgement");
+            .expect("create exact snapshot selector Store");
+            let device = store
+                .open_into(&db)
+                .await
+                .expect("open exact snapshot selector Store");
+            let membership = device
+                .membership_for_test()
+                .await
+                .expect("load exact snapshot selector membership");
+            let published = device
+                .authorize_writer()
+                .await
+                .expect("authorize exact snapshot selector writer")
+                .push_store_snapshot(
+                    snapshot(b"snapshot selector image"),
+                    CommitFrontier(BTreeMap::new()),
+                    1,
+                    "2026-07-16T00:00:00Z".to_string(),
+                )
+                .await
+                .expect("publish exact snapshot selector fixture");
+            device
+                .stage_acknowledgement(
+                    CommitFrontier(BTreeMap::new()),
+                    "2026-07-16T00:00:01Z".to_string(),
+                )
+                .await
+                .expect("stage exact snapshot selector acknowledgement");
+            device
+                .drain_acknowledgements()
+                .await
+                .expect("activate exact snapshot selector acknowledgement");
 
-        let destination = tempfile::tempdir().expect("snapshot selector destination");
-        let database_path = destination.path().join("store.db");
-        let selected = store
-            .prepare_snapshot_bootstrap(
-                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-                1,
-                &database_path,
-                &signer,
-            )
-            .await
-            .expect("select verified exact snapshot");
+            let destination = tempfile::tempdir().expect("snapshot selector destination");
+            let database_path = destination.path().join("store.db");
+            let selected = store
+                .prepare_snapshot_bootstrap(
+                    &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                    1,
+                    &database_path,
+                    &signer,
+                )
+                .await
+                .expect("select verified exact snapshot");
 
-        assert_eq!(
-            selected.selected_snapshot_hash_for_test(),
-            published.snapshot_hash()
-        );
-        assert_ne!(
-            selected.selected_snapshot_hash_for_test(),
-            selected.selected_snapshot_object_hash_for_test(),
-        );
-        assert_eq!(
-            selected
-                .staged_database_bytes_for_test()
-                .expect("read selected snapshot image"),
-            b"snapshot selector image"
-        );
+            assert_eq!(
+                selected.selected_snapshot_hash_for_test(),
+                published.snapshot_hash()
+            );
+            assert_ne!(
+                selected.selected_snapshot_hash_for_test(),
+                selected.selected_snapshot_object_hash_for_test(),
+            );
+            assert_eq!(
+                selected
+                    .staged_database_bytes_for_test()
+                    .expect("read selected snapshot image"),
+                b"snapshot selector image"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -911,26 +853,31 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(&path, "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
+        let device = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(1);
-        assert!(publish(
-            &storage,
-            &db,
-            &signer,
-            b"restart image",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .is_err());
+        assert!(device
+            .publish_snapshot_at(
+                b"restart image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .is_err());
         let staged = store_database(&db)
             .outbound_snapshot_publication()
             .await
             .expect("read snapshot outbox")
             .expect("staged snapshot exists");
+        drop(device);
         drop(db);
 
         let reopened = open(&path, "snapshot-test-device");
-        let published = resume(&storage, &reopened, &signer)
+        let reopened_device =
+            crate::sync::test_helpers::TestDevice::load(&reopened, storage.clone(), signer.clone())
+                .await
+                .expect("reopen snapshot test Store");
+        let published = reopened_device
+            .resume_snapshot_publication()
             .await
             .expect("resume snapshot publication")
             .expect("snapshot was pending");
@@ -949,22 +896,21 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
+        let device = initialize(&db, &storage, &signer).await;
         assert!(crate::database::StoreDatabase::new(&db)
             .export_activated_device_continuation(&signer)
             .await
             .expect("export continuation before any snapshot")
             .latest_snapshot
             .is_none());
-        publish(
-            &storage,
-            &db,
-            &signer,
-            b"continued snapshot",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .expect("publish continued snapshot");
+        device
+            .publish_snapshot_at(
+                b"continued snapshot".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .expect("publish continued snapshot");
         let published = store_database(&db)
             .latest_local_store_snapshot()
             .await
@@ -978,14 +924,7 @@ mod tests {
                 .latest_snapshot,
             Some(published.reference.clone()),
         );
-        let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(&db),
-            storage.clone(),
-            signer.clone(),
-        )
-        .await
-        .expect("load continued snapshot Store");
-        let mut writer = store
+        let mut writer = device
             .authorize_writer()
             .await
             .expect("authorize continued snapshot writer");
@@ -1029,18 +968,17 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
+        let device = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_after_call(1);
 
-        let published = publish(
-            &storage,
-            &db,
-            &signer,
-            b"lost response image",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .expect("resolve exact image-create response loss");
+        let published = device
+            .publish_snapshot_at(
+                b"lost response image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .expect("resolve exact image-create response loss");
         assert_eq!(home.exact_create_count(), 2);
         assert_eq!(
             published.image.image_hash,
@@ -1059,18 +997,17 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
+        let device = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(2);
 
-        assert!(publish(
-            &storage,
-            &db,
-            &signer,
-            b"ordered image",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .is_err());
+        assert!(device
+            .publish_snapshot_at(
+                b"ordered image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .is_err());
         let pending = store_database(&db)
             .outbound_snapshot_publication()
             .await
@@ -1083,7 +1020,8 @@ mod tests {
             .get(pending.reference.object.slot().logical_key())
             .is_none());
 
-        let completed = resume(&storage, &db, &signer)
+        let completed = device
+            .resume_snapshot_publication()
             .await
             .expect("retry ordered snapshot publication")
             .expect("snapshot remained pending");
@@ -1096,17 +1034,16 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
+        let device = initialize(&db, &storage, &signer).await;
         home.fail_exact_create_before_call(1);
-        assert!(publish(
-            &storage,
-            &db,
-            &signer,
-            b"collision image",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .is_err());
+        assert!(device
+            .publish_snapshot_at(
+                b"collision image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .is_err());
         let pending = store_database(&db)
             .outbound_snapshot_publication()
             .await
@@ -1115,7 +1052,7 @@ mod tests {
         let image_slot = pending.image.object.slot().clone();
         home.insert_exact_object(image_slot.logical_key(), b"competing image".to_vec());
 
-        assert!(resume(&storage, &db, &signer).await.is_err());
+        assert!(device.resume_snapshot_publication().await.is_err());
         assert_eq!(
             home.get(image_slot.logical_key()),
             Some(b"competing image".to_vec())
@@ -1141,16 +1078,15 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
         let db = open(Path::new(":memory:"), "snapshot-test-device");
-        let (_root, _) = initialize(&db, &storage, &signer).await;
-        let first = publish(
-            &storage,
-            &db,
-            &signer,
-            b"first image",
-            "2026-07-16T00:00:00Z",
-        )
-        .await
-        .expect("publish first snapshot");
+        let device = initialize(&db, &storage, &signer).await;
+        let first = device
+            .publish_snapshot_at(
+                b"first image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .expect("publish first snapshot");
         assert_eq!(first.generation, 0);
         let image_ownership = db
             .remote_object_for_test(first.image.object.clone())
@@ -1172,15 +1108,14 @@ mod tests {
             .expect("read first snapshot")
             .expect("first snapshot exists");
         home.fail_exact_create_before_call(1);
-        assert!(publish(
-            &storage,
-            &db,
-            &signer,
-            b"second image",
-            "2026-07-16T00:00:01Z",
-        )
-        .await
-        .is_err());
+        assert!(device
+            .publish_snapshot_at(
+                b"second image".to_vec(),
+                CommitFrontier(BTreeMap::new()),
+                "2026-07-16T00:00:01Z",
+            )
+            .await
+            .is_err());
         let second = store_database(&db)
             .outbound_snapshot_publication()
             .await
@@ -1197,7 +1132,8 @@ mod tests {
         );
         assert_eq!(second.reference.object.slot(), &first.successor.next_slot);
         assert_eq!(second.reference.generation, first.generation + 1);
-        resume(&storage, &db, &signer)
+        device
+            .resume_snapshot_publication()
             .await
             .expect("resume second snapshot publication")
             .expect("publish staged second snapshot");

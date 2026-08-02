@@ -22,9 +22,7 @@ use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreDir;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
-use crate::sync::test_helpers::{
-    create_exact_test_store, test_migrations, test_synced_tables_with_blob,
-};
+use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -355,9 +353,10 @@ async fn upload_fixture_with_home(uploads: usize, home: Arc<InstrumentedHome>) -
         )
         .expect("construct exact sync storage"),
     );
-    create_exact_test_store(&db, &storage, "upload-store", &owner)
-        .await
-        .expect("initialize exact local blob authority");
+    let _device =
+        crate::sync::test_helpers::TestDevice::create(&db, storage.clone(), "upload-store", owner)
+            .await
+            .expect("initialize exact local blob authority");
     home.reset_observations();
     let database = crate::database::StoreDatabase::new(&db);
     UploadFixture {

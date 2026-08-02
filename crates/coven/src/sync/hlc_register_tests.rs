@@ -60,13 +60,10 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .open_into(&db_a)
         .await
         .expect("open exact test Store");
-    host_exec(
-        &db_a,
-        &format!(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at, shared) \
+    db_a.execute_test_host_write(&format!(
+        "INSERT INTO notes (id, title, body, _updated_at, created_at, shared) \
              VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01', 1)"
-        ),
-    )
+    ))
     .await;
     assert_eq!(
         store_database_a.pending_writes().await.unwrap().len(),
@@ -103,7 +100,8 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .expect("count A's activated devices");
     assert_eq!(active_device_count, 2, "A must activate B's registration");
     assert_eq!(
-        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "A wrote this",
         "A's row must be present when B's registration activates",
     );
@@ -118,13 +116,10 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     );
 
     // And LWW agrees: applying B's edit replaces A's row.
-    host_exec(
-        &db_b,
-        &format!(
-            "UPDATE notes SET title = 'B wrote this', _updated_at = '{b_stamp}' \
+    db_b.execute_test_host_write(&format!(
+        "UPDATE notes SET title = 'B wrote this', _updated_at = '{b_stamp}' \
              WHERE id = 'n1'"
-        ),
-    )
+    ))
     .await;
     assert!(
         storage
@@ -135,20 +130,21 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     );
 
     // A pulls B's edit; B wins on LWW because b_stamp > a_stamp.
-    let (_, first_pull) = pull_into(&db_a, &storage, &temp_store_dir().1).await;
+    let (_, first_pull) = storage.pull_into(&db_a, &temp_store_dir().1).await;
     assert!(
         first_pull.held_positions.is_empty(),
         "A held B's post-pull edit: {:?}",
         first_pull.held_positions
     );
-    let (_, second_pull) = pull_into(&db_a, &storage, &temp_store_dir().1).await;
+    let (_, second_pull) = storage.pull_into(&db_a, &temp_store_dir().1).await;
     assert!(
         second_pull.held_positions.is_empty(),
         "A held B's post-activation stream: {:?}",
         second_pull.held_positions
     );
     assert_eq!(
-        query_text(&db_a, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db_a.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "B wrote this",
         "B's causally-later edit must win the merge on A; pulls: {first_pull:?}, {second_pull:?}",
     );
@@ -180,14 +176,12 @@ async fn pull_advances_register_as_each_changeset_applies() {
     let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
         .await
         .expect("create exact test Store for the test database");
-    let cs_a = capture_bytes(
-        &db_a,
-        &[&format!(
+    let cs_a = db_a
+        .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01')"
-        )],
-    )
-    .await;
+        )])
+        .await;
     storage
         .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
         .await
@@ -196,7 +190,7 @@ async fn pull_advances_register_as_each_changeset_applies() {
     // B pulls A's Store commit directly — no cycle wraps it, so
     // the only advance that can fire is the per-changeset one.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    let (_positions, result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
+    let (_positions, result) = storage.pull_into(&db_b, &temp_store_dir().1).await;
     assert_eq!(result.changesets_applied, 1, "B must apply A's changeset");
 
     // A host write on B now mints off the shared clock the pull advanced. It must
@@ -220,14 +214,12 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
             .await
             .expect("create exact test Store for the test database"),
     );
-    let changeset = capture_bytes(
-        &source,
-        &[&format!(
+    let changeset = source
+        .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('remote-boundary', 'Remote', NULL, '{remote_stamp}', '2026-01-01')"
-        )],
-    )
-    .await;
+        )])
+        .await;
     let expected_commit = storage
         .publish_changeset("dev-a", 1, &changeset, SCHEMA_VERSION)
         .await
@@ -248,10 +240,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
-    let pull =
-        tokio::spawn(
-            async move { pull_into(&pull_db, pull_storage.as_ref(), &pull_store_dir).await },
-        );
+    let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     commit_reached.notified().await;
     let tables = target.synced_tables().to_vec();
@@ -280,7 +269,11 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
         "host stamp {host_stamp} must sort after the already-committed remote row \
          {remote_stamp}",
     );
-    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'remote-boundary'").await);
+    assert!(
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'remote-boundary'")
+            .await
+    );
     assert_eq!(
         crate::database::StoreDatabase::new(&target)
             .materialized_frontier()
@@ -367,12 +360,12 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("read member device id")
         .expect("member device registration is active");
 
-    host_exec(
-        &member_db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    member_db
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&member_db),
@@ -418,9 +411,13 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("remove exact member identity");
 
-    let (updated, _result) = pull_into(&receiver_db, &storage, &temp_store_dir().1).await;
+    let (updated, _result) = storage.pull_into(&receiver_db, &temp_store_dir().1).await;
 
-    assert!(!row_exists(&receiver_db, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !receiver_db
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&member_device_id), None);
 }
 
@@ -642,13 +639,10 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     // B already holds an honest local edit of n1, stamped at its own wall time.
     let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    exec(
-        &db_b,
-        &format!(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db_b.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
-        ),
-    )
+    ))
     .await;
 
     // A publishes a competing edit of n1 stamped ten years in the future — far
@@ -659,25 +653,24 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
         .await
         .expect("create exact test Store for the test database");
-    let cs_a = capture_bytes(
-        &db_a,
-        &[&format!(
+    let cs_a = db_a
+        .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A far future', NULL, '{a_future_stamp}', '2026-01-01')"
-        )],
-    )
-    .await;
+        )])
+        .await;
     storage
         .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
         .await
         .expect("publish grossly-future changeset");
 
     // B pulls A's changeset.
-    let (_positions, _result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
+    let (_positions, _result) = storage.pull_into(&db_b, &temp_store_dir().1).await;
 
     // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
     assert_eq!(
-        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "B honest",
         "a grossly-future incoming _updated_at won LWW over an honest local stamp",
     );
@@ -709,13 +702,10 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     // B holds an honest local edit at its own wall time.
     let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    exec(
-        &db_b,
-        &format!(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db_b.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
-        ),
-    )
+    ))
     .await;
 
     // A's edit is stamped three days ahead — a plausible cross-device clock spread,
@@ -726,24 +716,23 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
         .await
         .expect("create exact test Store for the test database");
-    let cs_a = capture_bytes(
-        &db_a,
-        &[&format!(
+    let cs_a = db_a
+        .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A skewed', NULL, '{a_stamp}', '2026-01-01')"
-        )],
-    )
-    .await;
+        )])
+        .await;
     storage
         .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
         .await
         .expect("publish within-bound changeset");
 
-    let (_positions, _result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
+    let (_positions, _result) = storage.pull_into(&db_b, &temp_store_dir().1).await;
 
     // A's causally-later (within-allowance) edit wins.
     assert_eq!(
-        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "A skewed",
         "a legitimately-skewed incoming edit failed to win LWW",
     );
@@ -801,8 +790,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // A local insert gives the cycle a pending Store write. The trigger also blocks
     // the unconditional HLC high-water persist, so the cycle fails after the write
     // commits to the ledger.
-    host_exec(
-        &db,
+    db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-dev-self', '2026-01-01')",
     )
@@ -839,14 +827,12 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // journals and is drained into the next changeset (alongside n1, which the
     // failed cycle never pushed). If a failure could leave capture off, this drain
     // would not carry n2.
-    let next = capture_bytes(
-        &db,
-        &[
+    let next = db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n2', 'After failure', NULL, 1, '0000000002000-0000-dev-self', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let changes = crate::database::walk_changeset(&next).expect("walk next changeset");
     assert!(

@@ -1,6 +1,4 @@
 use super::*;
-use crate::sync::test_helpers::TestDevice;
-
 #[tokio::test]
 async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
     let db = open_test_db();
@@ -30,10 +28,20 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .update_circle_operation(journal.clone())
         .await
         .expect("persist substituted journal plaintext");
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("local activation must reject substituted journal plaintext");
-    assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
+        0
+    );
 }
 
 #[tokio::test]
@@ -69,11 +77,21 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .await
         .expect("persist substituted journal object");
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("local publication must reject objects outside the signed graph");
 
-    assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
+        0
+    );
 }
 
 #[tokio::test]
@@ -81,7 +99,7 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
     let db = open_test_db();
     let (store, signer, mut journal) =
         persist_merge_operation(&db, "circle-substituted-signed-edges").await;
-    resign_merge_journal_with_objects(&db, &store.storage, &signer, &mut journal, |objects| {
+    resign_merge_journal_with_objects(&db, &store, &signer, &mut journal, |objects| {
         let roster_coord = objects
             .roster_entries
             .keys()
@@ -119,11 +137,21 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .await
         .expect("persist substituted signed Circle graph");
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("local activation must verify every signed exact Circle edge");
 
-    assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
+        0
+    );
     assert!(!store.home.contains_exact_object(&store_commit));
     assert!(!store.home.contains_exact_object(&store_head));
 }
@@ -144,7 +172,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
         };
         resign_merge_journal_with_reference(
             &db,
-            &store.storage,
+            &store,
             &signer,
             &mut journal,
             reference.clone(),
@@ -204,10 +232,20 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .await
             .expect("persist Circle journal with substituted stream authority");
 
-        resume_circle_operations(&db, &store.storage, &signer)
+        store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store")
+            .resume_circle_operations()
             .await
             .expect_err("Circle stream activation must name its signed Circle and grant");
-        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+        assert_eq!(
+            StoreDatabase::new(&db)
+                .circle_control_activation_count_for_test(journal.circle_id())
+                .await
+                .expect("count circle activations"),
+            0
+        );
         assert!(crate::database::StoreDatabase::new(&db)
             .exact_materialized_ref(&stream_id.to_string(), sequence)
             .await
@@ -223,7 +261,8 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     let db = open_test_db();
     let (store, signer, mut journal) =
         persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
-    let device = TestDevice::load(&db, store.storage.clone(), signer.clone())
+    let device = store
+        .bind_device(&db, &signer)
         .await
         .expect("load acknowledgement Store");
     device
@@ -251,7 +290,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     };
     resign_merge_journal_with_reference(
         &db,
-        &store.storage,
+        &store,
         &signer,
         &mut journal,
         reference.clone(),
@@ -282,11 +321,21 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .await
         .expect("persist Circle journal with unexpected acknowledgement");
 
-    let error = resume_circle_operations(&db, &store.storage, &signer)
+    let error = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("Circle journal must contain no operation besides its control");
     assert!(error.to_string().contains("control-only batch"), "{error}");
-    assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
+        0
+    );
     assert!(crate::database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), sequence)
         .await
@@ -302,20 +351,21 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
     let (store, signer, founder) =
         persist_merge_operation(&db, "circle-unreserved-predecessor").await;
     let circle_id = founder.circle_id();
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect("publish founder Circle");
     store.home.fail_exact_create_before_call(1);
-    rename_circle(
-        &db,
-        &store.storage,
-        "0000000002000-0000-creator",
-        circle_id,
-        "Renamed household",
-        &signer,
-    )
-    .await
-    .expect_err("interrupt rename before its first exact upload");
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle rename Store")
+        .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
+        .await
+        .expect_err("interrupt rename before its first exact upload");
     let operation_id = crate::database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
@@ -360,20 +410,21 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         circle_id,
         control: &control_head.control,
     });
-    let prepared_head = prepare_test_circle_object_at(
-        &db,
-        &store.storage,
-        &signer,
-        &ProtocolObjectContext::store_encrypted(
-            commit.store_root_hash,
-            ProtocolObjectDomain::CircleControl,
-        ),
-        original_slot,
-        &head_prefix,
-        serde_json::to_vec(&control_head).expect("serialize forged control head"),
-    )
-    .await
-    .expect("prepare forged control head");
+    let prepared_head = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind forged Circle object Store")
+        .prepare_circle_object_at(
+            &ProtocolObjectContext::store_encrypted(
+                commit.store_root_hash,
+                ProtocolObjectDomain::CircleControl,
+            ),
+            original_slot,
+            &head_prefix,
+            serde_json::to_vec(&control_head).expect("serialize forged control head"),
+        )
+        .await
+        .expect("prepare forged control head");
     journal
         .operation_mut()
         .prepared_objects
@@ -385,15 +436,8 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         old_reference.objects().clone(),
         Some(prepared_head.reference().clone()),
     );
-    resign_merge_journal_with_reference(
-        &db,
-        &store.storage,
-        &signer,
-        &mut journal,
-        reference,
-        |_| {},
-    )
-    .await;
+    resign_merge_journal_with_reference(&db, &store, &signer, &mut journal, reference, |_| {})
+        .await;
     let store_commit = journal.operation().commit_ref.object.clone();
     let store_head = journal
         .operation()
@@ -407,10 +451,20 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .await
         .expect("persist forged successor journal");
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("common verifier must reject an unreserved Circle predecessor");
-    assert_eq!(activation_count(&db, circle_id).await, 1);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(circle_id)
+            .await
+            .expect("count circle activations"),
+        1
+    );
     assert!(!store.home.contains_exact_object(&store_commit));
     assert!(!store.home.contains_exact_object(&store_head));
 }
@@ -448,11 +502,21 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .await
         .expect("persist substituted Store head slot");
 
-    resume_circle_operations(&db, &store.storage, &signer)
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
         .await
         .expect_err("local publication must reject an unreserved Store head slot");
 
-    assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    assert_eq!(
+        StoreDatabase::new(&db)
+            .circle_control_activation_count_for_test(journal.circle_id())
+            .await
+            .expect("count circle activations"),
+        0
+    );
 }
 
 /// A roster conflict resolution lives at `circles/…/roster/resolutions/…`, a path

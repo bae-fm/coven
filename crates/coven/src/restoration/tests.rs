@@ -38,7 +38,7 @@ use crate::store_dir::StoreLayout;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
-    host_exec, open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
+    open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
 };
 
@@ -1198,12 +1198,12 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
         .membership()
         .await
         .expect("load owner membership");
-    host_exec(
-        &db_owner,
-        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+    db_owner
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let store_database = crate::database::StoreDatabase::new(&db_owner);
@@ -1331,9 +1331,13 @@ async fn run_restore_first_cycle_extends_snapshot_stream() {
         joiner_keypair.clone(),
     )
     .expect("build joiner cloud storage");
-    let components = crate::sync::test_helpers::run_cycle_fixture(&db_b, joiner_storage, &lib_b)
-        .await
-        .expect("B sync cycle");
+    let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        crate::database::StoreDatabase::new(&db_b),
+        lib_b.clone(),
+    )
+    .run_cycle(joiner_storage)
+    .await
+    .expect("B sync cycle");
     let snapshot_after = components
         .list_storage_objects_for_test("store-v1/snapshots/")
         .await
@@ -1526,21 +1530,19 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     .await
     .expect("initialize owner Store");
     let store_root = owner_device.store_root().clone();
-    host_exec(
-        &db_owner,
-        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+    db_owner
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
-    )
-    .await;
-    host_exec(
-        &db_owner,
-        &format!(
+        )
+        .await;
+    db_owner
+        .execute_test_host_write(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
             crate::blob::content_hash(b"cover-bytes"),
-        ),
-    )
-    .await;
+        ))
+        .await;
     let (owner_tmp, owner_dir) = temp_store_dir();
     crate::store_dir::StoreDir::store_local_blob(&owner_dir, "photos", "photo1", b"cover-bytes")
         .await
@@ -1553,11 +1555,13 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         owner_keypair.clone(),
     )
     .expect("build owner cycle storage");
-    Box::pin(crate::sync::test_helpers::run_cycle_fixture(
-        &db_owner,
-        cycle_storage,
-        &owner_dir,
-    ))
+    Box::pin(
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            crate::database::StoreDatabase::new(&db_owner),
+            owner_dir.clone(),
+        )
+        .run_cycle(cycle_storage),
+    )
     .await
     .expect("publish owner row and blob");
     let membership = owner_device
@@ -1726,13 +1730,13 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(restored_device_snapshots, expected_device_snapshots);
-    host_exec(
-        &restored,
-        "UPDATE note_photos
+    restored
+        .execute_test_host_write(
+            "UPDATE note_photos
          SET _updated_at = '0000000002000-0000-restored'
          WHERE id = 'photo1'",
-    )
-    .await;
+        )
+        .await;
     let restored_storage = CloudSyncStorage::new(
         cloud,
         cipher,
@@ -1741,11 +1745,13 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         joiner_keypair,
     )
     .expect("build restored cloud storage");
-    Box::pin(crate::sync::test_helpers::run_cycle_fixture(
-        &restored,
-        restored_storage,
-        &lib_b,
-    ))
+    Box::pin(
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            crate::database::StoreDatabase::new(&restored),
+            lib_b.clone(),
+        )
+        .run_cycle(restored_storage),
+    )
     .await
     .expect("publish restored row by reusing its exact remote blob");
 }

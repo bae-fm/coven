@@ -55,15 +55,13 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
 async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
     let db = open_test_db();
     let (store, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
-    let second = prepare_circle_operation(
-        &db,
-        &store.storage,
-        "0000000002000-0000-creator",
-        "Second household",
-        &signer,
-    )
-    .await
-    .expect("prepare second Circle operation");
+    let second = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000002000-0000-creator", "Second household")
+        .await
+        .expect("prepare second Circle operation");
     crate::database::StoreDatabase::new(&db)
         .insert_circle_operation(second.clone())
         .await
@@ -106,7 +104,11 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
         "absent-circle-operation".to_string(),
     ));
 
-    let error = publish_circle_operation(&db, &store.storage, &absent_operation_id, &signer)
+    let error = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_operation(&absent_operation_id)
         .await
         .expect_err("publication requires the exact durable operation id");
 

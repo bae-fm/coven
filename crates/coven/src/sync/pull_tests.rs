@@ -57,62 +57,188 @@ fn exact_pinned_path(
         .expect("build exact locator pinned path")
 }
 
-async fn row_blob_ref(
-    db: &crate::database::Database,
-    table: &str,
-    row_id: &str,
-) -> crate::blob::RowBlobRef {
-    db.row_blob_ref(table, row_id)
-        .await
-        .expect("load exact row blob reference")
+trait PullTestDatabaseOps {
+    async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef;
+    async fn pull_with_bound_storage(
+        &self,
+        storage: Arc<dyn SyncStorage>,
+        identity: UserKeypair,
+        store_dir: &crate::store_dir::StoreDir,
+        routing_encryption: Option<&EncryptionService>,
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
+    async fn stored_remote_object(
+        &self,
+        object: &crate::storage::ExactObjectRef,
+    ) -> crate::protocol::remote_object::RemoteObjectRecord;
+    async fn stored_remote_objects(
+        &self,
+    ) -> Vec<crate::protocol::remote_object::RemoteObjectRecord>;
+    async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>);
+    async fn replace_stored_remote_object(
+        &self,
+        object: &crate::storage::ExactObjectRef,
+        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+    );
+    async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId;
+    async fn pull_exact_store_into(
+        &self,
+        source: &crate::database::Database,
+        storage: &Arc<CloudSyncStorage>,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> (
+        std::collections::BTreeMap<String, u64>,
+        crate::sync::store::StorePullResult,
+    );
+    async fn materialized_sequences(&self) -> HashMap<String, u64>;
+    async fn row_blob_object_key(&self, table: &str, row_id: &str) -> String;
 }
 
-async fn pull_with_bound_storage(
-    db: &crate::database::Database,
-    storage: Arc<dyn SyncStorage>,
-    identity: UserKeypair,
-    store_dir: &crate::store_dir::StoreDir,
-    routing_encryption: Option<&EncryptionService>,
-) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
-    let store =
-        crate::sync::store::Store::load(crate::database::StoreDatabase::new(db), storage, identity)
+impl PullTestDatabaseOps for crate::database::Database {
+    async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef {
+        self.row_blob_ref(table, row_id)
             .await
-            .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?;
-    store
-        .authorize_writer()
+            .expect("load exact row blob reference")
+    }
+
+    async fn pull_with_bound_storage(
+        &self,
+        storage: Arc<dyn SyncStorage>,
+        identity: UserKeypair,
+        store_dir: &crate::store_dir::StoreDir,
+        routing_encryption: Option<&EncryptionService>,
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
+        let store = crate::sync::store::Store::load(
+            crate::database::StoreDatabase::new(self),
+            storage,
+            identity,
+        )
         .await
-        .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?
-        .pull(store_dir, routing_encryption)
+        .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?;
+        store
+            .authorize_writer()
+            .await
+            .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?
+            .pull(store_dir, routing_encryption)
+            .await
+    }
+
+    async fn stored_remote_object(
+        &self,
+        object: &crate::storage::ExactObjectRef,
+    ) -> crate::protocol::remote_object::RemoteObjectRecord {
+        self.remote_object_for_test(object.clone())
+            .await
+            .expect("load exact remote object")
+    }
+
+    async fn stored_remote_objects(
+        &self,
+    ) -> Vec<crate::protocol::remote_object::RemoteObjectRecord> {
+        self.remote_objects_for_test()
+            .await
+            .expect("load remote objects")
+    }
+
+    async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>) {
+        self.test_sql(move |database| {
+            database.replace_retained_merge_input(&stream_id, &canonical_input)
+        })
         .await
+        .expect("replace retained Merge input and its exact ownership closure");
+    }
+
+    async fn replace_stored_remote_object(
+        &self,
+        object: &crate::storage::ExactObjectRef,
+        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+    ) {
+        self.replace_remote_object_for_test(object.clone(), remote.clone())
+            .await
+            .expect("replace test remote object");
+    }
+
+    async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId {
+        let (registration_ref, registration) = store_database(self)
+            .local_blob_write_authority()
+            .await
+            .expect("read active local Store registration");
+        registration
+            .store_announcement_activation(&registration_ref)
+            .expect("derive local Store announcement activation")
+            .author_stream_id()
+    }
+
+    async fn pull_exact_store_into(
+        &self,
+        source: &crate::database::Database,
+        storage: &Arc<CloudSyncStorage>,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> (
+        std::collections::BTreeMap<String, u64>,
+        crate::sync::store::StorePullResult,
+    ) {
+        let root = crate::database::StoreDatabase::new(source)
+            .local_store_root_ref()
+            .await
+            .expect("read source Store root")
+            .expect("source Store has exact root authority");
+        let initialized = crate::sync::store::Store::open(
+            crate::database::StoreDatabase::new(self),
+            storage.clone(),
+            &root,
+            storage.user_keypair(),
+        )
+        .await
+        .expect("open exact Store on destination");
+        let routing_encryption = EncryptionService::from_key([42; 32]);
+        let result = initialized
+            .store
+            .authorize_writer()
+            .await
+            .expect("authorize exact destination Store")
+            .pull(store_dir, Some(&routing_encryption))
+            .await
+            .expect("pull exact Store commits");
+        let positions = result
+            .frontier
+            .iter()
+            .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
+            .collect();
+        (positions, result)
+    }
+
+    async fn materialized_sequences(&self) -> HashMap<String, u64> {
+        store_database(self)
+            .materialized_frontier()
+            .await
+            .expect("read materialized Store frontier")
+            .into_iter()
+            .map(|(device_id, position)| (device_id, position.coord.sequence()))
+            .collect()
+    }
+
+    async fn row_blob_object_key(&self, table: &str, row_id: &str) -> String {
+        self.exact_row_blob_ref(table, row_id)
+            .await
+            .stored()
+            .expect("Remote row has exact blob object authority")
+            .object()
+            .slot()
+            .logical_key()
+            .to_string()
+    }
 }
 
-async fn stored_remote_object(
-    db: &crate::database::Database,
-    object: &crate::storage::ExactObjectRef,
-) -> crate::protocol::remote_object::RemoteObjectRecord {
-    db.remote_object_for_test(object.clone())
-        .await
-        .expect("load exact remote object")
+trait PullTestStoreDirOps {
+    async fn store_local(&self, id: &str, bytes: &[u8]);
 }
 
-async fn stored_remote_objects(
-    db: &crate::database::Database,
-) -> Vec<crate::protocol::remote_object::RemoteObjectRecord> {
-    db.remote_objects_for_test()
-        .await
-        .expect("load remote objects")
-}
-
-async fn replace_retained_merge_input(
-    db: &crate::database::Database,
-    stream_id: String,
-    canonical_input: Vec<u8>,
-) {
-    db.test_sql(move |database| {
-        database.replace_retained_merge_input(&stream_id, &canonical_input)
-    })
-    .await
-    .expect("replace retained Merge input and its exact ownership closure");
+impl PullTestStoreDirOps for crate::store_dir::StoreDir {
+    async fn store_local(&self, id: &str, bytes: &[u8]) {
+        self.store_local_blob("photos", id, bytes)
+            .await
+            .expect("store host-provided blob in the local store");
+    }
 }
 
 fn is_external_circle_package(
@@ -174,39 +300,16 @@ async fn retained_store_package_pin(
         commit: commit.clone(),
         input_hash,
     };
-    let remote = stored_remote_object(db, &reference.object).await;
+    let remote = db.stored_remote_object(&reference.object).await;
     (owner, reference, remote)
-}
-
-async fn replace_stored_remote_object(
-    db: &crate::database::Database,
-    object: &crate::storage::ExactObjectRef,
-    remote: &crate::protocol::remote_object::RemoteObjectRecord,
-) {
-    db.replace_remote_object_for_test(object.clone(), remote.clone())
-        .await
-        .expect("replace test remote object");
 }
 
 fn commit_stream_id(reference: &crate::protocol::store_commit::StoreBatchCommitRef) -> String {
     reference.coord.stream_id.to_string()
 }
 
-async fn local_announcement_stream(
-    db: &crate::database::Database,
-) -> crate::protocol::membership::AuthorStreamId {
-    let (registration_ref, registration) = store_database(db)
-        .local_blob_write_authority()
-        .await
-        .expect("read active local Store registration");
-    registration
-        .store_announcement_activation(&registration_ref)
-        .expect("derive local Store announcement activation")
-        .author_stream_id()
-}
-
 #[async_trait]
-trait TestStoreStorage {
+trait TestStoreStorage: Sync {
     fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage>;
 
     async fn bind_for_test_publish(
@@ -214,6 +317,66 @@ trait TestStoreStorage {
         db: &crate::database::Database,
         keypair: &UserKeypair,
     ) -> Result<(), String>;
+
+    async fn sync_for_test(
+        &self,
+        db: &crate::database::Database,
+        tables: &[SyncedTable],
+        outgoing: Vec<u8>,
+        local_seq: u64,
+        message: &str,
+        keypair: &UserKeypair,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, String> {
+        let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
+        let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
+        assert_eq!(configured_tables, supplied_tables);
+        assert!(
+            message.is_empty(),
+            "Store commits carry no arbitrary message"
+        );
+        self.bind_for_test_publish(db, keypair).await?;
+        let store = crate::sync::store::Store::load(
+            crate::database::StoreDatabase::new(db),
+            self.cloud_storage(),
+            keypair.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let before = store
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            before
+                .as_ref()
+                .map_or(0, |position| position.coord.sequence()),
+            local_seq
+        );
+        crate::database::StoreDatabase::new(db)
+            .enqueue_store_changeset_for_test(outgoing)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut writer = store
+            .authorize_writer()
+            .await
+            .map_err(|error| error.to_string())?;
+        let prepared = writer
+            .prepare_pending_store_write(store_dir)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !prepared {
+            return Ok(None);
+        }
+        writer
+            .drain_store_writes()
+            .await
+            .map_err(|error| error.to_string())?;
+        writer
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[async_trait]
@@ -264,6 +427,138 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
     }
 }
 
+trait PullTestStoreOps {
+    async fn make_root_remote(
+        &self,
+        db: &crate::database::Database,
+        store_dir: &crate::store_dir::StoreDir,
+        root_id: &str,
+    );
+
+    async fn read_exact_blob(&self, blob: &crate::blob::locator::StoredBlobRef) -> Vec<u8>;
+
+    async fn author_scoped_write(&self, db: &crate::database::Database, sql: String);
+
+    async fn pull_scoped(
+        &self,
+        db: &crate::database::Database,
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError>;
+}
+
+impl PullTestStoreOps for TestStore {
+    async fn make_root_remote(
+        &self,
+        db: &crate::database::Database,
+        store_dir: &crate::store_dir::StoreDir,
+        root_id: &str,
+    ) {
+        self.open_into(db).await.expect("open exact test Store");
+        self.bind_device(db, &self.signer)
+            .await
+            .expect("load exact fixture Store")
+            .authorize_writer()
+            .await
+            .expect("activate exact fixture writer");
+        let hlc = crate::sync::hlc::Hlc::new(
+            "blob-fixture".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
+        crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
+            .local_transitions()
+            .make_remote("notes", root_id, false)
+            .await
+            .expect("queue exact blob fixture upload");
+        let (registration_ref, registration) = store_database(db)
+            .local_blob_write_authority()
+            .await
+            .expect("load exact blob fixture write authority");
+        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
+            .expect("validate exact blob fixture write authority");
+        let database = store_database(db);
+        let outcome = crate::blob::upload::BlobUploadQueue::new(
+            &database,
+            &self.storage,
+            authority,
+            store_dir,
+            &crate::clock::SystemClock,
+            &hlc,
+            None,
+            None,
+        )
+        .drain()
+        .await
+        .expect("upload exact blob fixture");
+        assert!(outcome.uploaded() > 0);
+        assert!(outcome.yielded_for_publish());
+        assert!(self
+            .publish_pending(db, store_dir)
+            .await
+            .expect("publish exact blob fixture"));
+    }
+
+    async fn read_exact_blob(&self, blob: &crate::blob::locator::StoredBlobRef) -> Vec<u8> {
+        let temp = tempfile::tempdir().expect("create exact blob read directory");
+        let staged = self
+            .stage_verified_blob_plaintext(
+                blob,
+                match blob.locator() {
+                    crate::blob::locator::BlobLocator::Opaque { .. } => {
+                        crate::storage::BlobSpoolProtection::Opaque(EncryptionService::from_key(
+                            [42; 32],
+                        ))
+                    }
+                    crate::blob::locator::BlobLocator::Browsable { .. } => {
+                        crate::storage::BlobSpoolProtection::Browsable
+                    }
+                },
+                &temp.path().join("plaintext"),
+            )
+            .await
+            .expect("read exact blob object");
+        tokio::fs::read(staged.path())
+            .await
+            .expect("read staged exact blob plaintext")
+    }
+
+    async fn author_scoped_write(&self, db: &crate::database::Database, sql: String) {
+        crate::database::StoreDatabase::new(db)
+            .run_host_store_write_for_test(
+                Some(EncryptionService::from_key([42; 32])),
+                None,
+                move |tx| {
+                    tx.execute_batch(&sql)
+                        .map_err(crate::database::DbError::from)
+                },
+            )
+            .await
+            .expect("commit scoped host transaction");
+        let (_temp, dir) = temp_store_dir();
+        self.publish_pending(db, &dir)
+            .await
+            .expect("publish scoped write");
+    }
+
+    async fn pull_scoped(
+        &self,
+        db: &crate::database::Database,
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError> {
+        let device = self.open_into(db).await.map_err(|error| {
+            crate::sync::store::StorePullError::Membership(
+                crate::sync::store::StorePullMembershipError::Message(error),
+            )
+        })?;
+        let (_temp, dir) = temp_store_dir();
+        let routing_encryption = EncryptionService::from_key([42; 32]);
+        device
+            .authorize_writer()
+            .await
+            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?
+            .pull(&dir, Some(&routing_encryption))
+            .await
+            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))
+    }
+}
+
 fn cloud_test_storage(
     home: std::sync::Arc<dyn CloudHome>,
     cipher: CloudCipher,
@@ -275,106 +570,6 @@ fn cloud_test_storage(
         CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
             .expect("test cloud storage supports immutable copies"),
     )
-}
-
-/// Publish exact package bytes through the durable Store write ledger.
-async fn sync_for_test<S: TestStoreStorage>(
-    db: &crate::database::Database,
-    tables: &[SyncedTable],
-    outgoing: Vec<u8>,
-    local_seq: u64,
-    storage: &S,
-    message: &str,
-    keypair: &UserKeypair,
-    store_dir: &crate::store_dir::StoreDir,
-) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, String> {
-    let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
-    let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
-    assert_eq!(configured_tables, supplied_tables);
-    assert!(
-        message.is_empty(),
-        "Store commits carry no arbitrary message"
-    );
-    storage.bind_for_test_publish(db, keypair).await?;
-    let store = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(db),
-        storage.cloud_storage(),
-        keypair.clone(),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let before = store
-        .latest_local_store_position()
-        .await
-        .map_err(|error| error.to_string())?;
-    assert_eq!(
-        before
-            .as_ref()
-            .map_or(0, |position| position.coord.sequence()),
-        local_seq
-    );
-    crate::database::StoreDatabase::new(db)
-        .enqueue_store_changeset_for_test(outgoing)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut writer = store
-        .authorize_writer()
-        .await
-        .map_err(|error| error.to_string())?;
-    let prepared = writer
-        .prepare_pending_store_write(store_dir)
-        .await
-        .map_err(|error| error.to_string())?;
-    if !prepared {
-        return Ok(None);
-    }
-    writer
-        .drain_store_writes()
-        .await
-        .map_err(|error| error.to_string())?;
-    writer
-        .latest_local_store_position()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn pull_exact_store_into(
-    destination: &crate::database::Database,
-    source: &crate::database::Database,
-    storage: &Arc<CloudSyncStorage>,
-    store_dir: &crate::store_dir::StoreDir,
-) -> (
-    std::collections::BTreeMap<String, u64>,
-    crate::sync::store::StorePullResult,
-) {
-    let root = crate::database::StoreDatabase::new(source)
-        .local_store_root_ref()
-        .await
-        .expect("read source Store root")
-        .expect("source Store has exact root authority");
-    let initialized = crate::sync::store::Store::open(
-        crate::database::StoreDatabase::new(destination),
-        storage.clone(),
-        &root,
-        storage.user_keypair(),
-    )
-    .await
-    .expect("open exact Store on destination");
-    let routing_encryption = EncryptionService::from_key([42; 32]);
-    let result = initialized
-        .store
-        .authorize_writer()
-        .await
-        .expect("authorize exact destination Store")
-        .pull(store_dir, Some(&routing_encryption))
-        .await
-        .expect("pull exact Store commits");
-    let positions = result
-        .frontier
-        .iter()
-        .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
-        .collect();
-    (positions, result)
 }
 
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
@@ -476,14 +671,6 @@ async fn create_store(db: &crate::database::Database, signer: UserKeypair) -> Te
         .expect("create exact test Store for the test database")
 }
 
-/// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
-/// host-provided cover (its Local home) before the inline push reads it to upload.
-async fn store_local(ld: &crate::store_dir::StoreDir, id: &str, bytes: &[u8]) {
-    crate::store_dir::StoreDir::store_local_blob(ld, "photos", id, bytes)
-        .await
-        .expect("store host-provided blob in the local store");
-}
-
 async fn publish_blob_changeset(
     db: &crate::database::Database,
     storage: &TestStore,
@@ -491,80 +678,19 @@ async fn publish_blob_changeset(
     changeset: Vec<u8>,
     local_sequence: u64,
 ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    sync_for_test(
-        db,
-        db.synced_tables(),
-        changeset,
-        local_sequence,
-        storage,
-        "",
-        &storage.protocol_founder_keypair(),
-        store_dir,
-    )
-    .await
-    .expect("publish exact blob-bearing Store changeset")
-    .expect("blob-bearing changeset produces a Store commit")
-}
-
-async fn make_test_root_remote(
-    db: &crate::database::Database,
-    storage: &TestStore,
-    store_dir: &crate::store_dir::StoreDir,
-    root_id: &str,
-) {
-    storage.open_into(db).await.expect("open exact test Store");
     storage
-        .bind_device(db, &storage.signer)
+        .sync_for_test(
+            db,
+            db.synced_tables(),
+            changeset,
+            local_sequence,
+            "",
+            &storage.protocol_founder_keypair(),
+            store_dir,
+        )
         .await
-        .expect("load exact fixture Store")
-        .authorize_writer()
-        .await
-        .expect("activate exact fixture writer");
-    let hlc = crate::sync::hlc::Hlc::new(
-        "blob-fixture".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
-    crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
-        .local_transitions()
-        .make_remote("notes", root_id, false)
-        .await
-        .expect("queue exact blob fixture upload");
-    let (registration_ref, registration) = store_database(db)
-        .local_blob_write_authority()
-        .await
-        .expect("load exact blob fixture write authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-        .expect("validate exact blob fixture write authority");
-    let database = store_database(db);
-    let outcome = crate::blob::upload::BlobUploadQueue::new(
-        &database,
-        &storage.storage,
-        authority,
-        store_dir,
-        &crate::clock::SystemClock,
-        &hlc,
-        None,
-        None,
-    )
-    .drain()
-    .await
-    .expect("upload exact blob fixture");
-    assert!(outcome.uploaded() > 0);
-    assert!(outcome.yielded_for_publish());
-    assert!(storage
-        .publish_pending(db, store_dir)
-        .await
-        .expect("publish exact blob fixture"));
-}
-
-async fn materialized_sequences(db: &crate::database::Database) -> HashMap<String, u64> {
-    store_database(db)
-        .materialized_frontier()
-        .await
-        .expect("read materialized Store frontier")
-        .into_iter()
-        .map(|(device_id, position)| (device_id, position.coord.sequence()))
-        .collect()
+        .expect("publish exact blob-bearing Store changeset")
+        .expect("blob-bearing changeset produces a Store commit")
 }
 
 fn constraint_conflicts(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
@@ -647,147 +773,6 @@ async fn exact_membership_chain(storage: &TestStore) -> MembershipChain {
         .expect("authorize exact test Store membership")
 }
 
-async fn exact_membership_registration(
-    storage: &TestStore,
-    authority: &crate::sync::store::Store,
-    chain: &MembershipChain,
-    entry: &crate::protocol::membership::MembershipEntry,
-    signer: &UserKeypair,
-) -> (
-    crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    crate::protocol::store_commit::StoreDeviceRegistration,
-    UserKeypair,
-) {
-    if let Some(predecessor) = chain.head_ref_for_stream(
-        &entry.author_pubkey,
-        &entry.author_owner_grant,
-        entry.stream_id,
-    ) {
-        let head = authority
-            .load_membership_head_for_test(predecessor)
-            .await
-            .expect("load exact predecessor membership head");
-        let registration = authority
-            .load_registration_for_test(&head.body.author_registration)
-            .await
-            .expect("load exact membership author registration");
-        let device_signer = registration
-            .device_signer(signer)
-            .expect("membership signer owns exact device registration");
-        return (head.body.author_registration, registration, device_signer);
-    }
-
-    use crate::protocol::store_commit::{
-        DeviceRecoveryId, DeviceStreamAnchor, StoreDeviceRegistration,
-        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
-    };
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-
-    let recovery_id = DeviceRecoveryId::from_hash(
-        crate::protocol::store_commit::ObjectHash::digest(entry.author_pubkey.as_bytes()),
-    );
-    let recovery_prefix = crate::protocol::store_commit::owner_recovery_semantic_prefix(
-        &entry.author_pubkey,
-        entry.author_owner_grant.clone(),
-        1,
-    );
-    let recovery_slot = storage
-        .allocate_protocol_slot(
-            &ProtocolObjectContext::signed_plaintext(
-                storage.root.store_root_hash,
-                ProtocolObjectDomain::OwnerRecoveryNode,
-            ),
-            &recovery_prefix,
-            ".json",
-        )
-        .await
-        .expect("allocate exact recovery registration slot");
-    let origin = StoreDeviceRegistrationOrigin::Recovery {
-        recovery_id,
-        recovery_slot,
-        owner_grant: entry.author_owner_grant.clone(),
-    };
-    let device_id = crate::protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
-    let announcement_slot = storage
-        .allocate_protocol_slot(
-            &ProtocolObjectContext::signed_plaintext(
-                storage.root.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            ),
-            &crate::protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
-            ".json",
-        )
-        .await
-        .expect("allocate exact announcement slot");
-    let acknowledgement_slot = storage
-        .allocate_protocol_slot(
-            &ProtocolObjectContext::signed_plaintext(
-                storage.root.store_root_hash,
-                ProtocolObjectDomain::StoreAck,
-            ),
-            &crate::protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
-            ".json",
-        )
-        .await
-        .expect("allocate exact acknowledgement slot");
-    let snapshot_slot = storage
-        .allocate_protocol_slot(
-            &ProtocolObjectContext::signed_plaintext(
-                storage.root.store_root_hash,
-                ProtocolObjectDomain::StoreSnapshotMeta,
-            ),
-            &crate::protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
-            ".json",
-        )
-        .await
-        .expect("allocate exact snapshot slot");
-    let (_, founder_registration, _) = storage
-        .founder_device_authority()
-        .await
-        .expect("load exact founder device registration");
-    let registration = StoreDeviceRegistration::signed(
-        storage.root.clone(),
-        origin,
-        founder_registration.provider,
-        DeviceStreamAnchor::StoreAnnouncements {
-            first_slot: announcement_slot,
-        },
-        DeviceStreamAnchor::StoreAcknowledgements {
-            first_slot: acknowledgement_slot,
-        },
-        DeviceStreamAnchor::StoreSnapshots {
-            first_slot: snapshot_slot,
-        },
-        signer,
-    )
-    .expect("sign exact membership author registration");
-    let semantic_prefix = crate::protocol::store_commit::registration_semantic_prefix(
-        &registration.device_id.to_string(),
-    );
-    let context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreDeviceRegistration,
-    );
-    let slot = storage
-        .allocate_protocol_slot(&context, &semantic_prefix, ".json")
-        .await
-        .expect("allocate exact membership registration object");
-    let prepared = storage
-        .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
-        .expect("prepare exact membership registration object");
-    storage
-        .storage
-        .create_protocol_object(&prepared)
-        .await
-        .expect("publish exact membership registration object");
-    let object = prepared.reference().clone();
-    let reference = StoreDeviceRegistrationRef::from_registration(&registration, object);
-    let device_signer = registration
-        .device_signer(signer)
-        .expect("derive exact membership device signer");
-    (reference, registration, device_signer)
-}
-
 async fn publish_exact_membership_entry(
     storage: &TestStore,
     chain: &mut MembershipChain,
@@ -805,8 +790,135 @@ async fn publish_exact_membership_entry(
         .await
         .expect("authenticate exact membership publication");
     let coord = entry.coord();
-    let (registration_ref, registration, device_signer) =
-        exact_membership_registration(storage, &authority, chain, &entry, signer).await;
+    let (registration_ref, registration, device_signer) = if let Some(predecessor) = chain
+        .head_ref_for_stream(
+            &entry.author_pubkey,
+            &entry.author_owner_grant,
+            entry.stream_id,
+        ) {
+        let head = authority
+            .load_membership_head_for_test(predecessor)
+            .await
+            .expect("load exact predecessor membership head");
+        let registration = authority
+            .load_registration_for_test(&head.body.author_registration)
+            .await
+            .expect("load exact membership author registration");
+        let device_signer = registration
+            .device_signer(signer)
+            .expect("membership signer owns exact device registration");
+        (head.body.author_registration, registration, device_signer)
+    } else {
+        use crate::protocol::store_commit::{
+            DeviceRecoveryId, DeviceStreamAnchor, StoreDeviceRegistration,
+            StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+        };
+
+        let recovery_id = DeviceRecoveryId::from_hash(
+            crate::protocol::store_commit::ObjectHash::digest(entry.author_pubkey.as_bytes()),
+        );
+        let recovery_prefix = crate::protocol::store_commit::owner_recovery_semantic_prefix(
+            &entry.author_pubkey,
+            entry.author_owner_grant.clone(),
+            1,
+        );
+        let recovery_slot = storage
+            .allocate_protocol_slot(
+                &ProtocolObjectContext::signed_plaintext(
+                    storage.root.store_root_hash,
+                    ProtocolObjectDomain::OwnerRecoveryNode,
+                ),
+                &recovery_prefix,
+                ".json",
+            )
+            .await
+            .expect("allocate exact recovery registration slot");
+        let origin = StoreDeviceRegistrationOrigin::Recovery {
+            recovery_id,
+            recovery_slot,
+            owner_grant: entry.author_owner_grant.clone(),
+        };
+        let device_id =
+            crate::protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
+        let announcement_slot = storage
+            .allocate_protocol_slot(
+                &ProtocolObjectContext::signed_plaintext(
+                    storage.root.store_root_hash,
+                    ProtocolObjectDomain::StoreHead,
+                ),
+                &crate::protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
+                ".json",
+            )
+            .await
+            .expect("allocate exact announcement slot");
+        let acknowledgement_slot = storage
+            .allocate_protocol_slot(
+                &ProtocolObjectContext::signed_plaintext(
+                    storage.root.store_root_hash,
+                    ProtocolObjectDomain::StoreAck,
+                ),
+                &crate::protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
+                ".json",
+            )
+            .await
+            .expect("allocate exact acknowledgement slot");
+        let snapshot_slot = storage
+            .allocate_protocol_slot(
+                &ProtocolObjectContext::signed_plaintext(
+                    storage.root.store_root_hash,
+                    ProtocolObjectDomain::StoreSnapshotMeta,
+                ),
+                &crate::protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
+                ".json",
+            )
+            .await
+            .expect("allocate exact snapshot slot");
+        let (_, founder_registration, _) = storage
+            .founder_device_authority()
+            .await
+            .expect("load exact founder device registration");
+        let registration = StoreDeviceRegistration::signed(
+            storage.root.clone(),
+            origin,
+            founder_registration.provider,
+            DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: announcement_slot,
+            },
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: acknowledgement_slot,
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: snapshot_slot,
+            },
+            signer,
+        )
+        .expect("sign exact membership author registration");
+        let semantic_prefix = crate::protocol::store_commit::registration_semantic_prefix(
+            &registration.device_id.to_string(),
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
+            storage.root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
+        let slot = storage
+            .allocate_protocol_slot(&context, &semantic_prefix, ".json")
+            .await
+            .expect("allocate exact membership registration object");
+        let prepared = storage
+            .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
+            .expect("prepare exact membership registration object");
+        storage
+            .storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("publish exact membership registration object");
+        let object = prepared.reference().clone();
+        let reference = StoreDeviceRegistrationRef::from_registration(&registration, object);
+        let device_signer = registration
+            .device_signer(signer)
+            .expect("derive exact membership device signer");
+        (reference, registration, device_signer)
+    };
     let predecessor = chain
         .head_ref_for_stream(
             &coord.author_pubkey,
@@ -929,7 +1041,8 @@ async fn publish_exact_membership_entry(
         .expect("activate exact membership test head");
 }
 
-struct ExactPublishedCommit {
+struct ExactPublishedCommit<'storage> {
+    storage: &'storage TestStore,
     reference: crate::protocol::store_commit::StoreBatchCommitRef,
     commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
     registration: crate::protocol::store_commit::StoreDeviceRegistration,
@@ -938,7 +1051,7 @@ struct ExactPublishedCommit {
     head_object: crate::storage::ExactObjectRef,
 }
 
-impl ExactPublishedCommit {
+impl ExactPublishedCommit<'_> {
     fn sign_commit_with_package(
         &self,
         schema_version: u32,
@@ -983,359 +1096,356 @@ impl ExactPublishedCommit {
     }
 }
 
-async fn load_exact_published_commit(
-    storage: &TestStore,
-    reference: crate::protocol::store_commit::StoreBatchCommitRef,
-) -> ExactPublishedCommit {
-    load_exact_published_commit_as(storage, reference, &storage.signer).await
-}
+impl<'storage> ExactPublishedCommit<'storage> {
+    async fn load(
+        storage: &'storage TestStore,
+        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Self {
+        Self::load_as(storage, reference, &storage.signer).await
+    }
 
-async fn load_exact_published_commit_as(
-    storage: &TestStore,
-    reference: crate::protocol::store_commit::StoreBatchCommitRef,
-    identity: &UserKeypair,
-) -> ExactPublishedCommit {
-    use crate::protocol::store_commit::{
-        head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration,
-    };
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+    async fn load_as(
+        storage: &'storage TestStore,
+        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        identity: &UserKeypair,
+    ) -> Self {
+        use crate::protocol::store_commit::{
+            head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration,
+        };
+        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
-    let commit = storage
-        .founder_device()
-        .await
-        .expect("open Store authority")
-        .load_commit_for_test(&reference)
-        .await
-        .expect("verify exact published Store commit");
-    let registration = commit.author().clone();
-    let device_signer = registration
-        .device_signer(identity)
-        .expect("derive exact published Store device signer");
-    let crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
-        &registration.store_commits
-    else {
-        panic!("pull test registration has a Store announcement anchor")
-    };
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let mut slot = first_slot.clone();
-    let mut sequence = 1_u64;
-    let (head, head_object) = loop {
-        let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
-        let (bytes, object) = storage
-            .read_protocol_slot(&head_context, &slot, &prefix)
+        let commit = storage
+            .founder_device()
             .await
-            .expect("read exact published Store head");
-        let head: StoreDeviceHead =
-            serde_json::from_slice(&bytes).expect("parse exact published Store head");
-        if sequence == reference.coord.sequence() {
-            assert_eq!(head.commit, reference);
-            break (head, object);
+            .expect("open Store authority")
+            .load_commit_for_test(&reference)
+            .await
+            .expect("verify exact published Store commit");
+        let registration = commit.author().clone();
+        let device_signer = registration
+            .device_signer(identity)
+            .expect("derive exact published Store device signer");
+        let crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
+            &registration.store_commits
+        else {
+            panic!("pull test registration has a Store announcement anchor")
+        };
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            storage.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let mut slot = first_slot.clone();
+        let mut sequence = 1_u64;
+        let (head, head_object) = loop {
+            let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
+            let (bytes, object) = storage
+                .read_protocol_slot(&head_context, &slot, &prefix)
+                .await
+                .expect("read exact published Store head");
+            let head: StoreDeviceHead =
+                serde_json::from_slice(&bytes).expect("parse exact published Store head");
+            if sequence == reference.coord.sequence() {
+                assert_eq!(head.commit, reference);
+                break (head, object);
+            }
+            slot = head.successor.next_slot.clone();
+            sequence = sequence
+                .checked_add(1)
+                .expect("Store head sequence overflow");
+        };
+        assert!(head
+            .author_registration
+            .verify_registration(&registration)
+            .is_ok());
+        let _: StoreDeviceRegistration = registration.clone();
+        Self {
+            storage,
+            reference,
+            commit,
+            registration,
+            device_signer,
+            head,
+            head_object,
         }
-        slot = head.successor.next_slot.clone();
-        sequence = sequence
-            .checked_add(1)
-            .expect("Store head sequence overflow");
-    };
-    assert!(head
-        .author_registration
-        .verify_registration(&registration)
-        .is_ok());
-    let _: StoreDeviceRegistration = registration.clone();
-    ExactPublishedCommit {
-        reference,
-        commit,
-        registration,
-        device_signer,
-        head,
-        head_object,
     }
-}
-
-async fn replace_exact_commit_bytes(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    commit_bytes: Vec<u8>,
-    commit_hash: crate::protocol::store_commit::ObjectHash,
-    head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    head_signer: &UserKeypair,
-) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    let replacement_commit: crate::protocol::store_commit::StoreBatchCommit =
-        serde_json::from_slice(&commit_bytes).expect("parse replacement exact Store commit");
-    let candidate_summary = storage
-        .retained_merge_history_summary(&graph.registration.device_id, graph.reference.clone())
-        .await
-        .expect("load replacement candidate history summary");
-    let reference =
-        publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
-    let candidate = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
-        &graph.commit.to_bytes(),
-        graph.commit.store_root_hash,
-        &graph.reference,
-        &graph.registration,
-    )
-    .expect("authenticate replacement candidate");
-    let replacement_commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
-        &replacement_commit.to_bytes(),
-        replacement_commit.store_root_hash,
-        &reference,
-        &graph.registration,
-    )
-    .expect("authenticate replacement commit");
-    let history_summary = crate::sync::store::prepare_merge_abandonment_history_summary(
-        &candidate_summary,
-        &candidate,
-        &replacement_commit,
-    )
-    .expect("prepare replacement exact Store history summary");
-    replace_exact_commit_head(
-        storage,
-        graph,
-        reference.clone(),
-        history_summary.digest(),
-        head_registration,
-        head_signer,
-    )
-    .await;
-    reference
-}
-
-async fn publish_replacement_exact_commit(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    commit_bytes: Vec<u8>,
-    commit_hash: crate::protocol::store_commit::ObjectHash,
-) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-
-    let stream_id = commit_stream_id(&graph.reference);
-    let commit_context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let semantic_prefix = crate::protocol::store_commit::commit_semantic_prefix(
-        graph.commit.candidate_family(),
-        &stream_id,
-        graph.reference.coord.sequence(),
-        commit_hash,
-    );
-    let slot = storage
-        .allocate_protocol_slot(&commit_context, &semantic_prefix, ".json")
-        .await
-        .expect("allocate replacement exact Store commit slot");
-    let commit_prepared = storage
-        .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
-        .expect("prepare replacement exact Store commit");
-    storage
-        .storage
-        .create_protocol_object(&commit_prepared)
-        .await
-        .expect("publish replacement exact Store commit");
-    let commit_object = commit_prepared.reference().clone();
-    crate::protocol::store_commit::StoreBatchCommitRef {
-        coord: graph.reference.coord.clone(),
-        commit_hash,
-        object: commit_object,
+    async fn replace_commit_bytes(
+        &self,
+        commit_bytes: Vec<u8>,
+        commit_hash: crate::protocol::store_commit::ObjectHash,
+        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        head_signer: &UserKeypair,
+    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+        let replacement_commit: crate::protocol::store_commit::StoreBatchCommit =
+            serde_json::from_slice(&commit_bytes).expect("parse replacement exact Store commit");
+        let candidate_summary = self
+            .storage
+            .retained_merge_history_summary(&self.registration.device_id, self.reference.clone())
+            .await
+            .expect("load replacement candidate history summary");
+        let reference = self
+            .publish_replacement_commit(commit_bytes, commit_hash)
+            .await;
+        let candidate = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+            &self.commit.to_bytes(),
+            self.commit.store_root_hash,
+            &self.reference,
+            &self.registration,
+        )
+        .expect("authenticate replacement candidate");
+        let replacement_commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+            &replacement_commit.to_bytes(),
+            replacement_commit.store_root_hash,
+            &reference,
+            &self.registration,
+        )
+        .expect("authenticate replacement commit");
+        let history_summary = crate::sync::store::prepare_merge_abandonment_history_summary(
+            &candidate_summary,
+            &candidate,
+            &replacement_commit,
+        )
+        .expect("prepare replacement exact Store history summary");
+        self.replace_commit_head(
+            reference.clone(),
+            history_summary.digest(),
+            head_registration,
+            head_signer,
+        )
+        .await;
+        reference
     }
-}
 
-async fn replace_exact_commit_head(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    reference: crate::protocol::store_commit::StoreBatchCommitRef,
-    history_summary: crate::protocol::store_commit::ObjectHash,
-    head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    head_signer: &UserKeypair,
-) {
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+    async fn publish_replacement_commit(
+        &self,
+        commit_bytes: Vec<u8>,
+        commit_hash: crate::protocol::store_commit::ObjectHash,
+    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    storage
-        .delete_protocol_object(&graph.head_object)
-        .await
-        .expect("delete replaced exact Store head");
-    let head = StoreDeviceHead::signed(
-        storage.root.store_root_hash,
-        head_registration,
-        reference.clone(),
-        history_summary,
-        graph.head.successor.clone(),
-        head_signer,
-    )
-    .expect("sign replacement exact Store head");
-    let prefix = crate::protocol::store_commit::head_slot_prefix(
-        &graph.registration.device_id.to_string(),
-        reference.coord.sequence(),
-    );
-    let head_prepared = storage
-        .prepare_protocol_object(
-            &head_context,
-            graph.head_object.slot().clone(),
-            &prefix,
-            head.to_bytes(),
+        let stream_id = commit_stream_id(&self.reference);
+        let commit_context = ProtocolObjectContext::signed_plaintext(
+            self.storage.root.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let semantic_prefix = crate::protocol::store_commit::commit_semantic_prefix(
+            self.commit.candidate_family(),
+            &stream_id,
+            self.reference.coord.sequence(),
+            commit_hash,
+        );
+        let slot = self
+            .storage
+            .allocate_protocol_slot(&commit_context, &semantic_prefix, ".json")
+            .await
+            .expect("allocate replacement exact Store commit slot");
+        let commit_prepared = self
+            .storage
+            .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
+            .expect("prepare replacement exact Store commit");
+        self.storage
+            .storage
+            .create_protocol_object(&commit_prepared)
+            .await
+            .expect("publish replacement exact Store commit");
+        let commit_object = commit_prepared.reference().clone();
+        crate::protocol::store_commit::StoreBatchCommitRef {
+            coord: self.reference.coord.clone(),
+            commit_hash,
+            object: commit_object,
+        }
+    }
+
+    async fn replace_commit_head(
+        &self,
+        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        history_summary: crate::protocol::store_commit::ObjectHash,
+        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        head_signer: &UserKeypair,
+    ) {
+        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            self.storage.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        self.storage
+            .delete_protocol_object(&self.head_object)
+            .await
+            .expect("delete replaced exact Store head");
+        let head = StoreDeviceHead::signed(
+            self.storage.root.store_root_hash,
+            head_registration,
+            reference.clone(),
+            history_summary,
+            self.head.successor.clone(),
+            head_signer,
         )
-        .expect("prepare replacement exact Store head");
-    storage
-        .storage
-        .create_protocol_object(&head_prepared)
-        .await
-        .expect("publish replacement exact Store head");
-}
+        .expect("sign replacement exact Store head");
+        let prefix = crate::protocol::store_commit::head_slot_prefix(
+            &self.registration.device_id.to_string(),
+            reference.coord.sequence(),
+        );
+        let head_prepared = self
+            .storage
+            .prepare_protocol_object(
+                &head_context,
+                self.head_object.slot().clone(),
+                &prefix,
+                head.to_bytes(),
+            )
+            .expect("prepare replacement exact Store head");
+        self.storage
+            .storage
+            .create_protocol_object(&head_prepared)
+            .await
+            .expect("publish replacement exact Store head");
+    }
 
-async fn replace_exact_commit_bytes_before_commit_validation(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    commit_bytes: Vec<u8>,
-    commit_hash: crate::protocol::store_commit::ObjectHash,
-    head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    head_signer: &UserKeypair,
-) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    let reference =
-        publish_replacement_exact_commit(storage, graph, commit_bytes, commit_hash).await;
-    replace_exact_commit_head(
-        storage,
-        graph,
-        reference.clone(),
-        graph.head.history_summary,
-        head_registration,
-        head_signer,
-    )
-    .await;
-    reference
-}
-
-async fn replace_exact_head(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    commit: crate::protocol::store_commit::StoreBatchCommitRef,
-    author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    signer: &UserKeypair,
-) {
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-
-    let context = ProtocolObjectContext::signed_plaintext(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    storage
-        .delete_protocol_object(&graph.head_object)
-        .await
-        .expect("delete replaced exact Store head");
-    let head = StoreDeviceHead::signed(
-        storage.root.store_root_hash,
-        author_registration,
-        commit,
-        graph.head.history_summary,
-        graph.head.successor.clone(),
-        signer,
-    )
-    .expect("sign replacement exact Store head");
-    let prefix = crate::protocol::store_commit::head_slot_prefix(
-        &graph.registration.device_id.to_string(),
-        graph.reference.coord.sequence(),
-    );
-    let prepared = storage
-        .prepare_protocol_object(
-            &context,
-            graph.head_object.slot().clone(),
-            &prefix,
-            head.to_bytes(),
+    async fn replace_commit_bytes_before_validation(
+        &self,
+        commit_bytes: Vec<u8>,
+        commit_hash: crate::protocol::store_commit::ObjectHash,
+        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        head_signer: &UserKeypair,
+    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+        let reference = self
+            .publish_replacement_commit(commit_bytes, commit_hash)
+            .await;
+        self.replace_commit_head(
+            reference.clone(),
+            self.head.history_summary,
+            head_registration,
+            head_signer,
         )
-        .expect("prepare replacement exact Store head");
-    storage
-        .storage
-        .create_protocol_object(&prepared)
-        .await
-        .expect("publish replacement exact Store head");
-}
+        .await;
+        reference
+    }
 
-async fn resign_exact_commit(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    schema_version: u32,
-    membership_authority: Option<crate::protocol::membership::MembershipGrantCreationAuthority>,
-) -> crate::protocol::store_commit::StoreBatchCommit {
-    let package = graph
-        .commit
-        .store_package()
-        .expect("test Store commit carries a Store package");
-    let package_bytes = storage
-        .founder_device()
-        .await
-        .expect("load Store package authority")
-        .load_store_package_for_test(&graph.reference)
-        .await
-        .expect("load exact Store package")
-        .expect("exact Store package exists")
-        .value;
-    let predecessor = match &membership_authority {
-        Some(authority) => authority.clone(),
-        None => graph
+    async fn replace_head(
+        &self,
+        commit: crate::protocol::store_commit::StoreBatchCommitRef,
+        author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        signer: &UserKeypair,
+    ) {
+        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.storage.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        self.storage
+            .delete_protocol_object(&self.head_object)
+            .await
+            .expect("delete replaced exact Store head");
+        let head = StoreDeviceHead::signed(
+            self.storage.root.store_root_hash,
+            author_registration,
+            commit,
+            self.head.history_summary,
+            self.head.successor.clone(),
+            signer,
+        )
+        .expect("sign replacement exact Store head");
+        let prefix = crate::protocol::store_commit::head_slot_prefix(
+            &self.registration.device_id.to_string(),
+            self.reference.coord.sequence(),
+        );
+        let prepared = self
+            .storage
+            .prepare_protocol_object(
+                &context,
+                self.head_object.slot().clone(),
+                &prefix,
+                head.to_bytes(),
+            )
+            .expect("prepare replacement exact Store head");
+        self.storage
+            .storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("publish replacement exact Store head");
+    }
+
+    async fn resign_commit(
+        &self,
+        schema_version: u32,
+        membership_authority: Option<crate::protocol::membership::MembershipGrantCreationAuthority>,
+    ) -> crate::protocol::store_commit::StoreBatchCommit {
+        let package = self
             .commit
-            .membership_authority
-            .clone()
-            .expect("published Merge operations commit carries membership authority"),
-    };
-    let mut commit = graph.sign_commit_with_package(
-        schema_version,
-        crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
-        &package_bytes,
-        package.object.clone(),
-    );
-    if membership_authority.is_none() {
-        commit.membership_authority = None;
-        commit.signature =
-            crate::keys::sign_hex(&graph.device_signer, &commit.canonical_signed_bytes()).1;
+            .store_package()
+            .expect("test Store commit carries a Store package");
+        let package_bytes = self
+            .storage
+            .founder_device()
+            .await
+            .expect("load Store package authority")
+            .load_store_package_for_test(&self.reference)
+            .await
+            .expect("load exact Store package")
+            .expect("exact Store package exists")
+            .value;
+        let predecessor = match &membership_authority {
+            Some(authority) => authority.clone(),
+            None => self
+                .commit
+                .membership_authority
+                .clone()
+                .expect("published Merge operations commit carries membership authority"),
+        };
+        let mut commit = self.sign_commit_with_package(
+            schema_version,
+            crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+            &package_bytes,
+            package.object.clone(),
+        );
+        if membership_authority.is_none() {
+            commit.membership_authority = None;
+            commit.signature =
+                crate::keys::sign_hex(&self.device_signer, &commit.canonical_signed_bytes()).1;
+        }
+        commit
     }
-    commit
-}
 
-async fn replace_exact_package_bytes(
-    storage: &TestStore,
-    graph: &ExactPublishedCommit,
-    bytes: Vec<u8>,
-) {
-    use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+    async fn replace_package_bytes(&self, bytes: Vec<u8>) {
+        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
-    let package = graph
-        .commit
-        .store_package()
-        .expect("test Store commit carries a Store package");
-    let stream_id = commit_stream_id(&graph.reference);
-    let prefix = crate::protocol::store_commit::package_semantic_prefix(
-        graph.commit.candidate_family(),
-        &stream_id,
-        graph.reference.coord.sequence(),
-        package.content_hash,
-    );
-    let context = ProtocolObjectContext::store_encrypted(
-        storage.root.store_root_hash,
-        ProtocolObjectDomain::StorePackage,
-    );
-    storage
-        .delete_protocol_object(&package.object)
-        .await
-        .expect("delete replaced exact Store package");
-    let prepared = storage
-        .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
-        .expect("prepare replacement exact Store package");
-    storage
-        .storage
-        .create_protocol_object(&prepared)
-        .await
-        .expect("publish replacement exact Store package");
+        let package = self
+            .commit
+            .store_package()
+            .expect("test Store commit carries a Store package");
+        let stream_id = commit_stream_id(&self.reference);
+        let prefix = crate::protocol::store_commit::package_semantic_prefix(
+            self.commit.candidate_family(),
+            &stream_id,
+            self.reference.coord.sequence(),
+            package.content_hash,
+        );
+        let context = ProtocolObjectContext::store_encrypted(
+            self.storage.root.store_root_hash,
+            ProtocolObjectDomain::StorePackage,
+        );
+        self.storage
+            .delete_protocol_object(&package.object)
+            .await
+            .expect("delete replaced exact Store package");
+        let prepared = self
+            .storage
+            .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
+            .expect("prepare replacement exact Store package");
+        self.storage
+            .storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("publish replacement exact Store package");
+    }
 }
 
 async fn replace_store_package_with_malformed_bytes(
     storage: &TestStore,
     reference: crate::protocol::store_commit::StoreBatchCommitRef,
 ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-    let graph = load_exact_published_commit(storage, reference).await;
+    let graph = ExactPublishedCommit::load(storage, reference).await;
     let malformed = b"not a SQLite changeset";
     let stream_id = commit_stream_id(&graph.reference);
     let package_object = storage
@@ -1364,15 +1474,14 @@ async fn replace_store_package_with_malformed_bytes(
         malformed,
         package_object,
     );
-    replace_exact_commit_bytes(
-        storage,
-        &graph,
-        malformed_commit.to_bytes(),
-        malformed_commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await
+    graph
+        .replace_commit_bytes(
+            malformed_commit.to_bytes(),
+            malformed_commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await
 }
 
 async fn publish_exact_changeset_with_authority(
@@ -1386,62 +1495,21 @@ async fn publish_exact_changeset_with_authority(
         .publish_changeset(name, sequence, changeset, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(storage, reference).await;
-    let commit = resign_exact_commit(
-        storage,
-        &graph,
-        SCHEMA_VERSION,
-        authority.map(crate::protocol::membership::MembershipGrantCreationAuthority::Entry),
-    )
-    .await;
-    replace_exact_commit_bytes(
-        storage,
-        &graph,
-        commit.to_bytes(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await
-}
-
-async fn read_exact_blob(
-    storage: &TestStore,
-    blob: &crate::blob::locator::StoredBlobRef,
-) -> Vec<u8> {
-    let temp = tempfile::tempdir().expect("create exact blob read directory");
-    let staged = storage
-        .stage_verified_blob_plaintext(
-            blob,
-            match blob.locator() {
-                crate::blob::locator::BlobLocator::Opaque { .. } => {
-                    crate::storage::BlobSpoolProtection::Opaque(EncryptionService::from_key(
-                        [42; 32],
-                    ))
-                }
-                crate::blob::locator::BlobLocator::Browsable { .. } => {
-                    crate::storage::BlobSpoolProtection::Browsable
-                }
-            },
-            &temp.path().join("plaintext"),
+    let graph = ExactPublishedCommit::load(storage, reference).await;
+    let commit = graph
+        .resign_commit(
+            SCHEMA_VERSION,
+            authority.map(crate::protocol::membership::MembershipGrantCreationAuthority::Entry),
+        )
+        .await;
+    graph
+        .replace_commit_bytes(
+            commit.to_bytes(),
+            commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
         )
         .await
-        .expect("read exact blob object");
-    tokio::fs::read(staged.path())
-        .await
-        .expect("read staged exact blob plaintext")
-}
-
-async fn row_blob_object_key(db: &crate::database::Database, table: &str, row_id: &str) -> String {
-    db.row_blob_ref(table, row_id)
-        .await
-        .expect("load exact row blob reference")
-        .stored()
-        .expect("Remote row has exact blob object authority")
-        .object()
-        .slot()
-        .logical_key()
-        .to_string()
 }
 
 struct FaultingStorage {
@@ -1540,14 +1608,12 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
     // Source device records a note as changeset seq 1.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("founder", 1, &cs, SCHEMA_VERSION)
         .await
@@ -1557,17 +1623,18 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     // Second device pulls.
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get(&stream_id), Some(&1));
     assert_eq!(
-        materialized_sequences(&db2).await.get(&stream_id),
+        db2.materialized_sequences().await.get(&stream_id),
         Some(&1),
         "the row and its durable position commit in the pull that applies it",
     );
     assert_eq!(
-        query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "First"
     );
     assert!(result
@@ -1580,28 +1647,27 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
 async fn position_write_failure_rolls_back_the_remote_rows() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     storage
         .publish_changeset("founder", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish founder changeset");
 
     let target = open_test_db();
-    exec(
-        &target,
-        "CREATE TEMP TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
+    target
+        .execute_test_sql(
+            "CREATE TEMP TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
          BEGIN SELECT RAISE(ABORT, 'injected materialized-position write failure'); END;",
-    )
-    .await;
+        )
+        .await;
     let (_tmp, store_dir) = temp_store_dir();
-    let error = pull_into_result(&target, &storage, &store_dir)
+    let error = storage
+        .pull_into_result(&target, &store_dir)
         .await
         .expect_err("materialized-position failure aborts the pull");
     assert!(
@@ -1609,25 +1675,25 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
         "unexpected pull error: {error:?}"
     );
     assert!(
-        !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "the row cannot commit when its position write fails",
     );
-    assert!(materialized_sequences(&target).await.is_empty());
+    assert!(target.materialized_sequences().await.is_empty());
 }
 
 #[tokio::test]
 async fn ordinary_pull_starts_from_its_durable_position() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('stale-row', 'Remote', NULL, \
                      '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("founder", 1, &changeset, SCHEMA_VERSION)
         .await
@@ -1636,17 +1702,19 @@ async fn ordinary_pull_starts_from_its_durable_position() {
 
     let target = open_test_db();
     let (_tmp, store_dir) = temp_store_dir();
-    let (updated, result) = pull_into(&target, &storage, &store_dir).await;
+    let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
     assert_eq!(updated.get(&stream_id), Some(&1));
     assert_eq!(result.changesets_applied, 1);
     assert!(result.held_positions.is_empty());
     assert_eq!(
-        materialized_sequences(&target).await.get(&stream_id),
+        target.materialized_sequences().await.get(&stream_id),
         Some(&1),
     );
     assert!(
-        row_exists(&target, "SELECT 1 FROM notes WHERE id = 'stale-row'").await,
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'stale-row'")
+            .await,
         "ordinary pull derives coverage from durable rows, not caller input",
     );
 }
@@ -1655,21 +1723,17 @@ async fn ordinary_pull_starts_from_its_durable_position() {
 async fn ordinary_pull_uses_its_durable_position_on_every_call() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let first = capture_bytes(
-        &source,
-        &[
+    let first = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('position-row', 'One', NULL, \
                      '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
-    let second = capture_bytes(
-        &source,
-        &["UPDATE notes SET title = 'Two', \
-             _updated_at = '0000000002000-0000-dev1' WHERE id = 'position-row'"],
-    )
-    .await;
+        ])
+        .await;
+    let second = source
+        .capture_test_changeset(&["UPDATE notes SET title = 'Two', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'position-row'"])
+        .await;
     let first_commit = storage
         .publish_changeset("dev1", 1, &first, SCHEMA_VERSION)
         .await
@@ -1678,19 +1742,21 @@ async fn ordinary_pull_uses_its_durable_position_on_every_call() {
 
     let target = open_test_db();
     let (_tmp, store_dir) = temp_store_dir();
-    pull_into(&target, &storage, &store_dir).await;
+    storage.pull_into(&target, &store_dir).await;
     storage
         .publish_changeset("dev1", 2, &second, SCHEMA_VERSION)
         .await
         .expect("publish second exact Store changeset");
 
-    let (updated, result) = pull_into(&target, &storage, &store_dir).await;
+    let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(result.held_positions.is_empty());
     assert_eq!(updated.get(&stream_id), Some(&2));
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'position-row'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'position-row'")
+            .await,
         "Two",
     );
 }
@@ -1699,21 +1765,17 @@ async fn ordinary_pull_uses_its_durable_position_on_every_call() {
 async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let first = capture_bytes(
-        &source,
-        &[
+    let first = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('next-row', 'One', NULL, \
                      '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
-    let second = capture_bytes(
-        &source,
-        &["UPDATE notes SET title = 'Two', \
-             _updated_at = '0000000002000-0000-dev1' WHERE id = 'next-row'"],
-    )
-    .await;
+        ])
+        .await;
+    let second = source
+        .capture_test_changeset(&["UPDATE notes SET title = 'Two', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'next-row'"])
+        .await;
     let first_commit = storage
         .publish_changeset("dev1", 1, &first, SCHEMA_VERSION)
         .await
@@ -1722,18 +1784,18 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position
 
     let target = open_test_db();
     let (_tmp, store_dir) = temp_store_dir();
-    pull_into(&target, &storage, &store_dir).await;
+    storage.pull_into(&target, &store_dir).await;
     storage
         .publish_changeset("dev1", 2, &second, SCHEMA_VERSION)
         .await
         .expect("publish second exact Store changeset");
 
-    let (updated, result) = pull_into(&target, &storage, &store_dir).await;
+    let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get(&stream_id), Some(&2));
     assert_eq!(
-        materialized_sequences(&target).await.get(&stream_id),
+        target.materialized_sequences().await.get(&stream_id),
         Some(&2),
     );
 }
@@ -1763,15 +1825,13 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
 async fn merge_materialization_retains_closed_input_and_rejects_corruption_after_reopen() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('retained-row', 'Retained', NULL, \
                      '0000000001000-0000-retained', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("retained", 1, &changeset, SCHEMA_VERSION)
         .await
@@ -1793,7 +1853,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     };
     let target = open_target().expect("open retained-input target");
 
-    pull_into(&target, &storage, &temp_store_dir().1).await;
+    storage.pull_into(&target, &temp_store_dir().1).await;
 
     let queried_stream = stream_id.clone();
     let (canonical_input, input_hash, retained_ref) = target
@@ -1837,7 +1897,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let package_ref: crate::protocol::store_commit::StorePackageRef =
         serde_json::from_value(retained_store["reference"].clone())
             .expect("parse retained Store package ref");
-    let package_remote = stored_remote_object(&target, &package_ref.object).await;
+    let package_remote = target.stored_remote_object(&package_ref.object).await;
     let parsed_input_hash = input_hash.parse().expect("parse retained input hash");
     assert!(matches!(
         package_remote,
@@ -1898,7 +1958,9 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     );
     assert!(encoded.contains(&package_application));
     let missing_receiver = encoded.replacen(&package_application, "", 1).into_bytes();
-    replace_retained_merge_input(&target, stream_id.clone(), missing_receiver).await;
+    target
+        .replace_retained_merge_input(stream_id.clone(), missing_receiver)
+        .await;
     let target_store = storage
         .bind_device(&target, &storage.signer)
         .await
@@ -1914,7 +1976,9 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .to_string()
         .contains("package application does not match its applied packages"));
 
-    replace_retained_merge_input(&target, stream_id.clone(), canonical_input.clone()).await;
+    target
+        .replace_retained_merge_input(stream_id.clone(), canonical_input.clone())
+        .await;
 
     let verified_before_corruption = target_store
         .retained_merge_replay_inputs_for_test()
@@ -1971,34 +2035,30 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
 async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let first_changeset = capture_bytes(
-        &source,
-        &[
+    let first_changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('pin-first', 'First', NULL, \
                      '0000000001000-0000-pins', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let first = storage
         .publish_changeset("pins", 1, &first_changeset, SCHEMA_VERSION)
         .await
         .expect("publish first replay-pin fixture");
-    let second_changeset = capture_bytes(
-        &source,
-        &[
+    let second_changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('pin-second', 'Second', NULL, \
                      '0000000002000-0000-pins', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let second = storage
         .publish_changeset("pins", 2, &second_changeset, SCHEMA_VERSION)
         .await
         .expect("publish second replay-pin fixture");
     let target = open_test_db();
-    pull_into(&target, &storage, &temp_store_dir().1).await;
+    storage.pull_into(&target, &temp_store_dir().1).await;
 
     let (_first_owner, first_package, first_remote) =
         retained_store_package_pin(&target, &first).await;
@@ -2018,7 +2078,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     assert!(ownership.activated.remove(
         &crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
     ));
-    replace_stored_remote_object(&target, &second_package.object, &missing).await;
+    target
+        .replace_stored_remote_object(&second_package.object, &missing)
+        .await;
     let root = storage.root.clone();
     assert!(target
         .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
@@ -2026,7 +2088,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
         .contains("retained-replay ownership index"));
-    replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
+    target
+        .replace_stored_remote_object(&second_package.object, &second_remote)
+        .await;
 
     let mut tampered = missing;
     let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut tampered
@@ -2047,7 +2111,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
             },
         ),
     );
-    replace_stored_remote_object(&target, &second_package.object, &tampered).await;
+    target
+        .replace_stored_remote_object(&second_package.object, &tampered)
+        .await;
     let root = storage.root.clone();
     assert!(target
         .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
@@ -2055,7 +2121,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
         .contains("retained-replay ownership index"));
-    replace_stored_remote_object(&target, &second_package.object, &second_remote).await;
+    target
+        .replace_stored_remote_object(&second_package.object, &second_remote)
+        .await;
 
     let mut invented = first_remote;
     let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut invented
@@ -2070,7 +2138,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     ownership.activated.insert(
         crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
     );
-    replace_stored_remote_object(&target, &first_package.object, &invented).await;
+    target
+        .replace_stored_remote_object(&first_package.object, &invented)
+        .await;
     let second_owner_for_insert = second_owner.clone();
     let first_object = first_package.object.clone();
     target
@@ -2098,15 +2168,13 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
 async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('rollback-row', 'Must roll back', NULL, \
                      '0000000001000-0000-rollback', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("rollback", 1, &changeset, SCHEMA_VERSION)
         .await
@@ -2147,7 +2215,8 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .await
         .expect("remove the locally materialized outcome while retaining its exact input");
 
-    let error = pull_into_result(&target, &storage, &temp_store_dir().1)
+    let error = storage
+        .pull_into_result(&target, &temp_store_dir().1)
         .await
         .expect_err("retained input collision must fail the pull transaction");
     assert!(
@@ -2156,7 +2225,11 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
             .contains("already contains different exact input"),
         "unexpected pull error: {error:?}"
     );
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'rollback-row'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'rollback-row'")
+            .await
+    );
     let checked_stream = stream_id.clone();
     let materialized = target
         .test_sql(move |database| database.materialized_commit_exists(&checked_stream, 1))
@@ -2177,12 +2250,12 @@ async fn empty_package_materializes_its_exact_commit_position() {
     let stream_id = commit_stream_id(&commit);
     let (_tmp, store_dir) = temp_store_dir();
 
-    let (updated, result) = pull_into(&target, &storage, &store_dir).await;
+    let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get(&stream_id), Some(&1));
     assert_eq!(
-        materialized_sequences(&target).await.get(&stream_id),
+        target.materialized_sequences().await.get(&stream_id),
         Some(&1),
     );
 }
@@ -2191,14 +2264,12 @@ async fn empty_package_materializes_its_exact_commit_position() {
 async fn host_write_after_remote_apply_observes_the_matching_position() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('remote', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("dev1", 1, &changeset, SCHEMA_VERSION)
         .await
@@ -2207,7 +2278,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
 
     let target = open_test_db();
     let (_tmp, store_dir) = temp_store_dir();
-    pull_into(&target, &storage, &store_dir).await;
+    storage.pull_into(&target, &store_dir).await;
 
     let tables = target.synced_tables().to_vec();
     let write_id = target.new_write_id();
@@ -2242,7 +2313,11 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
         .await
         .expect("host write after remote apply");
 
-    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'local'").await);
+    assert!(
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'local'")
+            .await
+    );
 }
 
 /// A changeset whose object was reclaimed (deleted as superseded) past this
@@ -2258,20 +2333,18 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     // gone: reclamation deleted it as superseded. `store_changeset` both writes
     // the object and advances the head to seq 1; deleting the object leaves the
     // head pointing past a hole.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
     let stream_id = commit_stream_id(&commit);
-    let graph = load_exact_published_commit(&storage, commit).await;
+    let graph = ExactPublishedCommit::load(&storage, commit).await;
     let package = graph
         .commit
         .store_package()
@@ -2284,7 +2357,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.held_positions.len(), 1);
@@ -2314,12 +2387,10 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
 async fn pull_holds_a_non_canonical_uuid_row_identity() {
     let db1 = uuid_note_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
-    let cs = capture_bytes(
-        &db1,
-        &["INSERT INTO uuid_notes (id, title, _updated_at) \
-             VALUES ('NOT-A-CANONICAL-UUID', 'Forged', '0000000001000-0000-dev1')"],
-    )
-    .await;
+    let cs = db1
+        .capture_test_changeset(&["INSERT INTO uuid_notes (id, title, _updated_at) \
+             VALUES ('NOT-A-CANONICAL-UUID', 'Forged', '0000000001000-0000-dev1')"])
+        .await;
     let commit = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
@@ -2328,7 +2399,7 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
 
     let db2 = uuid_note_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.held_positions.len(), 1);
@@ -2337,11 +2408,8 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
         HeldStorePositionReason::InvalidRowIdentity { table, .. } if table == "uuid_notes"
     ));
     assert!(
-        !row_exists(
-            &db2,
-            "SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'"
-        )
-        .await
+        !db2.test_row_exists("SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'")
+            .await
     );
     assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
 }
@@ -2356,14 +2424,12 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
 
-    let insert = capture_bytes(
-        &source,
-        &[
+    let insert = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     storage
         .publish_changeset("founder", 1, &insert, SCHEMA_VERSION)
         .await
@@ -2372,31 +2438,31 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
     // The founder's own delete (captured from a private db so its old image is the
     // shared row) and a concurrent second device's later edit.
     let deleter = open_test_db();
-    exec(
-        &deleter,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    deleter
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
-    )
-    .await;
-    let delete = capture_bytes(&deleter, &["DELETE FROM notes WHERE id = 'n1'"]).await;
+        )
+        .await;
+    let delete = deleter
+        .capture_test_changeset(&["DELETE FROM notes WHERE id = 'n1'"])
+        .await;
 
     let editor = open_test_db();
-    exec(
-        &editor,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    editor
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
-    )
-    .await;
-    let edit = capture_bytes(
-        &editor,
-        &["UPDATE notes SET title = 'edited', \
-           _updated_at = '0000000009000-0000-editor' WHERE id = 'n1'"],
-    )
-    .await;
+        )
+        .await;
+    let edit = editor
+        .capture_test_changeset(&["UPDATE notes SET title = 'edited', \
+           _updated_at = '0000000009000-0000-editor' WHERE id = 'n1'"])
+        .await;
 
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    pull_into(&target, &storage, &ld).await;
+    storage.pull_into(&target, &ld).await;
 
     // Deliver the two concurrent commits one at a time, in the chosen arrival order.
     // The founder stream advances through Store setup and the editor's device join,
@@ -2410,7 +2476,7 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
             .publish_changeset("founder", delete_seq, &delete, SCHEMA_VERSION)
             .await
             .expect("publish founder delete");
-        pull_into(&target, &storage, &ld).await;
+        storage.pull_into(&target, &ld).await;
         storage
             .publish_changeset("editor", 1, &edit, SCHEMA_VERSION)
             .await
@@ -2420,7 +2486,7 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
             .publish_changeset("editor", 1, &edit, SCHEMA_VERSION)
             .await
             .expect("publish concurrent editor edit");
-        pull_into(&target, &storage, &ld).await;
+        storage.pull_into(&target, &ld).await;
         let delete_seq = storage
             .next_commit_sequence("founder")
             .await
@@ -2430,15 +2496,22 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
             .await
             .expect("publish founder delete");
     }
-    let (_updated, result) = pull_into(&target, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&target, &ld).await;
     assert!(
         result.held_positions.is_empty(),
         "neither concurrent commit is held: {:?}",
         result.held_positions,
     );
 
-    if row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await {
-        Some(query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await)
+    if target
+        .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        .await
+    {
+        Some(
+            target
+                .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+                .await,
+        )
     } else {
         None
     }
@@ -2462,17 +2535,15 @@ async fn delete_and_edit_conflict_converges_across_arrival_orders() {
 async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let db1 = unique_note_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
              VALUES ('would-partially-land', 'free-slug', 'First row', \
                      '0000000000900-0000-dev1', '2026-01-01')",
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
              VALUES ('remote', 'same-slug', 'Remote', '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let commit = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
@@ -2480,14 +2551,13 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let stream_id = commit_stream_id(&commit);
 
     let db2 = unique_note_db();
-    exec(
-        &db2,
+    db2.execute_test_sql(
         "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
          VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
     )
     .await;
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     let conflicts = constraint_conflicts(&result);
     assert_eq!(conflicts.len(), 1);
@@ -2504,18 +2574,21 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     );
     assert_eq!(updated.get(&stream_id), None);
     assert_eq!(
-        materialized_sequences(&db2).await.get(&stream_id),
+        db2.materialized_sequences().await.get(&stream_id),
         None,
         "a rejected changeset has no durable position",
     );
-    assert!(row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'local'").await);
-    assert!(!row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'remote'").await);
     assert!(
-        !row_exists(
-            &db2,
-            "SELECT 1 FROM unique_notes WHERE id = 'would-partially-land'",
-        )
-        .await,
+        db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'local'")
+            .await
+    );
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'remote'")
+            .await
+    );
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'would-partially-land'",)
+            .await,
         "rows before the constraint conflict roll back with the rejected changeset",
     );
 }
@@ -2525,44 +2598,42 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
 {
     let source = mixed_constraint_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
-    exec(
-        &source,
-        "INSERT INTO constraint_parents (id, _updated_at) \
+    source
+        .execute_test_sql(
+            "INSERT INTO constraint_parents (id, _updated_at) \
          VALUES ('missing-on-target', '0000000001000-0000-dev1'); \
          INSERT INTO constraint_parents (id, _updated_at) \
          VALUES ('present-on-target', '0000000001000-0000-dev1')",
-    )
-    .await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+        )
+        .await;
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
              VALUES ('fk-row', 'missing-on-target', 'free-slug', \
                      '0000000002000-0000-dev1')",
             "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
              VALUES ('unique-row', 'present-on-target', 'duplicate-slug', \
                      '0000000002001-0000-dev1')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     storage
         .publish_changeset("dev1", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
 
     let target = mixed_constraint_db();
-    exec(
-        &target,
-        "INSERT INTO constraint_parents (id, _updated_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO constraint_parents (id, _updated_at) \
          VALUES ('present-on-target', '0000000001000-0000-dev2'); \
          INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
          VALUES ('local-row', 'present-on-target', 'duplicate-slug', \
                  '0000000003000-0000-dev2')",
-    )
-    .await;
+        )
+        .await;
     let (_tmp, store_dir) = temp_store_dir();
 
-    let (updated, result) = pull_into(&target, &storage, &store_dir).await;
+    let (updated, result) = storage.pull_into(&target, &store_dir).await;
 
     assert_eq!(result.changesets_applied, 0);
     let conflicts = constraint_conflicts(&result);
@@ -2572,27 +2643,21 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
         HeldStorePositionReason::ConstraintConflict(vec!["constraint_items".to_string()])
     );
     assert_eq!(updated.get("dev1"), None);
-    assert_eq!(materialized_sequences(&target).await.get("dev1"), None);
+    assert_eq!(target.materialized_sequences().await.get("dev1"), None);
     assert!(
-        !row_exists(
-            &target,
-            "SELECT 1 FROM constraint_items WHERE id = 'fk-row'"
-        )
-        .await
+        !target
+            .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'fk-row'")
+            .await
     );
     assert!(
-        !row_exists(
-            &target,
-            "SELECT 1 FROM constraint_items WHERE id = 'unique-row'"
-        )
-        .await
+        !target
+            .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'unique-row'")
+            .await
     );
     assert!(
-        row_exists(
-            &target,
-            "SELECT 1 FROM constraint_items WHERE id = 'local-row'"
-        )
-        .await
+        target
+            .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'local-row'")
+            .await
     );
 }
 
@@ -2621,34 +2686,30 @@ async fn fk_violation_still_retries_and_resolves() {
     // through raw `exec` (not the journal), so it never enters the captured child
     // changeset — the child ships the tag alone, FK-violating until the parent
     // arrives.
-    exec(
-        &child_source,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    child_source
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
-    )
-    .await;
-    let child_cs = capture_bytes(
-        &child_source,
-        &[
+        )
+        .await;
+    let child_cs = child_source
+        .capture_test_changeset(&[
             "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
              VALUES ('t1', 'n1', 'green', '0000000001001-0000-child', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let child_commit = storage
         .publish_changeset("dev-child", child_sequence, &child_cs, SCHEMA_VERSION)
         .await
         .expect("publish child exact Store changeset");
 
     let parent_source = open_test_db();
-    let parent_cs = capture_bytes(
-        &parent_source,
-        &[
+    let parent_cs = parent_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let parent_commit = storage
         .publish_changeset("dev-parent", parent_sequence, &parent_cs, SCHEMA_VERSION)
         .await
@@ -2656,12 +2717,12 @@ async fn fk_violation_still_retries_and_resolves() {
 
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (_, first) = pull_into(&target, &storage, &ld).await;
+    let (_, first) = storage.pull_into(&target, &ld).await;
     assert!(first
         .held_positions
         .iter()
         .any(|held| held.reason == HeldStorePositionReason::ForeignKeyDependency));
-    let (updated, result) = pull_into(&target, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&target, &ld).await;
 
     assert_eq!(
         updated.get(&commit_stream_id(&child_commit)),
@@ -2677,7 +2738,9 @@ async fn fk_violation_still_retries_and_resolves() {
     );
     assert!(constraint_conflicts(&result).is_empty());
     assert_eq!(
-        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        target
+            .query_test_text("SELECT tag FROM note_tags WHERE id = 't1'")
+            .await,
         "green"
     );
 }
@@ -2695,41 +2758,38 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     // A changeset stamped one schema version above the local db, signed at its own
     // position so the position check passes and the loop reaches the signature and
     // schema checks.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'ForgedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
-    let commit = resign_exact_commit(
-        &storage,
-        &graph,
-        SCHEMA_VERSION + 1,
-        graph.commit.membership_authority.clone(),
-    )
-    .await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let commit = graph
+        .resign_commit(
+            SCHEMA_VERSION + 1,
+            graph.commit.membership_authority.clone(),
+        )
+        .await;
     let mut forged: serde_json::Value = serde_json::from_slice(&commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
-    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
-        &storage,
-        &graph,
-        serde_json::to_vec(&forged).unwrap(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let commit_ref = graph
+        .replace_commit_bytes_before_validation(
+            serde_json::to_vec(&forged).unwrap(),
+            commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let expected_stream_id = commit_stream_id(&graph.reference);
 
     let db2 = open_test_db();
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a forged Store commit is held before schema classification");
     assert_eq!(result.held_positions.len(), 1);
@@ -2744,9 +2804,12 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
         }
     );
     assert!(newer_schema_positions(&result).is_empty());
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None,
     );
 }
@@ -2759,45 +2822,44 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
 async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     let db1 = open_test_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'SignedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
-    let commit = resign_exact_commit(
-        &storage,
-        &graph,
-        SCHEMA_VERSION + 1,
-        graph.commit.membership_authority.clone(),
-    )
-    .await;
-    replace_exact_commit_bytes(
-        &storage,
-        &graph,
-        commit.to_bytes(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let commit = graph
+        .resign_commit(
+            SCHEMA_VERSION + 1,
+            graph.commit.membership_authority.clone(),
+        )
+        .await;
+    graph
+        .replace_commit_bytes(
+            commit.to_bytes(),
+            commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(newer_schema_positions(&result).len(), 1);
     assert!(invalid_changeset_positions(&result).is_empty());
     assert_eq!(result.changesets_applied, 0);
     // Held, not advanced: it becomes applicable once this app upgrades.
     assert_eq!(updated.get("dev1"), None);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
 }
 
 /// The pull gate compares an incoming changeset's `schema_version` against the
@@ -2815,14 +2877,12 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
     let n = db1.schema_version();
 
     // seq 1 stamped at exactly the peer's schema version: applies.
-    let cs1 = capture_bytes(
-        &db1,
-        &[
+    let cs1 = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'At N', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let first_reference = storage
         .publish_changeset("dev1", 1, &cs1, n)
         .await
@@ -2830,35 +2890,28 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
     let stream_id = commit_stream_id(&first_reference);
 
     // seq 2 stamped one above the peer's schema version: skipped, position held.
-    let cs2 = capture_bytes(
-        &db1,
-        &[
+    let cs2 = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n2', 'Above N', NULL, '0000000002000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev1", 2, &cs2, n)
         .await
         .expect("publish second exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
-    let commit = resign_exact_commit(
-        &storage,
-        &graph,
-        n + 1,
-        graph.commit.membership_authority.clone(),
-    )
-    .await;
-    replace_exact_commit_bytes(
-        &storage,
-        &graph,
-        commit.to_bytes(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let commit = graph
+        .resign_commit(n + 1, graph.commit.membership_authority.clone())
+        .await;
+    graph
+        .replace_commit_bytes(
+            commit.to_bytes(),
+            commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
 
     let db2 = open_test_db();
     assert_eq!(
@@ -2866,7 +2919,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         n,
         "both peers open the same migration ladder, so they share the wire version"
     );
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(
         result.changesets_applied, 1,
@@ -2882,8 +2935,14 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         Some(&1),
         "position stops at the applied seq, never past the skipped one"
     );
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n2'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
+            .await
+    );
 }
 
 /// The push side stamps an outgoing changeset with the db's
@@ -2900,17 +2959,16 @@ async fn push_stamps_the_dbs_schema_version() {
 
     // `shared = 1` so the gated `notes` root survives the push gate and there is an
     // outgoing changeset to inspect.
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let keypair = storage.protocol_founder_keypair();
-    let result = sync_for_test(&db1, &tables, outgoing, 0, &storage, "", &keypair, &ld1)
+    let result = storage
+        .sync_for_test(&db1, &tables, outgoing, 0, "", &keypair, &ld1)
         .await
         .expect("sync push");
 
@@ -2920,11 +2978,11 @@ async fn push_stamps_the_dbs_schema_version() {
         .bind_device(&db1, &keypair)
         .await
         .expect("load exact materialized Store");
-    let (_commit_ref, commit) =
-        load_exact_materialized_commit(&device, &stream_id, position.coord.sequence())
-            .await
-            .expect("load exact Store commit")
-            .expect("Store commit slot");
+    let (_commit_ref, commit) = device
+        .load_exact_materialized_commit(&stream_id, position.coord.sequence())
+        .await
+        .expect("load exact Store commit")
+        .expect("Store commit slot");
     assert_eq!(
         commit
             .store_package()
@@ -2945,29 +3003,27 @@ async fn sync_reuses_opened_schema_models() {
     assert_eq!(crate::database::gate_from_tables_call_count(), 1);
     assert_eq!(crate::database::gate_from_tables_call_count(), 1);
 
-    let outgoing = capture_bytes(
-        &db,
-        &[
+    let outgoing = db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let keypair = storage.protocol_founder_keypair();
     let (_tmp, store_dir) = temp_store_dir();
-    sync_for_test(
-        &db,
-        db.synced_tables(),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &keypair,
-        &store_dir,
-    )
-    .await
-    .expect("sync");
+    storage
+        .sync_for_test(
+            &db,
+            db.synced_tables(),
+            outgoing,
+            0,
+            "",
+            &keypair,
+            &store_dir,
+        )
+        .await
+        .expect("sync");
 
     assert_eq!(crate::database::from_tables_call_count(), 1);
     assert_eq!(crate::database::from_tables_call_count(), 1);
@@ -2983,22 +3039,21 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .expect("retain source Store device");
 
     // Source dev1: seq 1 references a photo blob; seq 2 is a plain note.
-    capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db1.capture_test_changeset(&[
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'One', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'attach', 11, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"PHOTO-BYTES"),
-            ),
-        ],
-    )
+            crate::blob::content_hash(b"PHOTO-BYTES"),
+        ),
+    ])
     .await;
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    store_local(&source_store_dir, "ph1", b"PHOTO-BYTES").await;
-    make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+    source_store_dir.store_local("ph1", b"PHOTO-BYTES").await;
+    storage
+        .make_root_remote(&db1, &source_store_dir, "n1")
+        .await;
     let first_commit = source_device
         .latest_local_store_position()
         .await
@@ -3017,20 +3072,18 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .delete_blob_object(&stored)
         .await
         .expect("remove exact remote blob fixture");
-    let cs2 = capture_bytes(
-        &db1,
-        &[
+    let cs2 = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n2', 'Two', NULL, '0000000002000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     publish_blob_changeset(&db1, &storage, &source_store_dir, cs2, 1).await;
 
     // The puller declares note_photos blob-bearing, so seq 1's missing blob fails
     // while seq 2 (no blob) would succeed.
     let db2 = open_test_db_with_blob(photo_decl());
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert!(
         result.asset_downloads_failed,
@@ -3054,12 +3107,14 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     // blob missing" never exists. (Before #111 the row was applied and only the
     // position held back, so n1 was visible with no photo file on disk.)
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "seq 1's row must not be applied when its blob download fails",
     );
     // seq 2 is never reached -- the pull stops this device at the failed seq 1.
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n2'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
+            .await,
         "seq 2 is not processed past the blob-failed seq 1",
     );
     assert_eq!(result.changesets_applied, 0);
@@ -3074,29 +3129,30 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let db1 = open_test_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Corrupt', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let package = graph
         .commit
         .store_package()
         .expect("Store commit carries a Store package");
     let expected_package_hash = package.content_hash;
     let expected_stream_id = commit_stream_id(&graph.reference);
-    replace_exact_package_bytes(&storage, &graph, cs[..cs.len() - 1].to_vec()).await;
+    graph
+        .replace_package_bytes(cs[..cs.len() - 1].to_vec())
+        .await;
 
     let db2 = open_test_db();
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a Store package that differs from its descriptor is held");
     assert_eq!(result.held_positions.len(), 1);
@@ -3119,11 +3175,12 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         result.held_positions[0]
     );
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "a size-mismatched changeset must not be applied",
     );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None,
     );
 }
@@ -3135,19 +3192,17 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let src = open_test_db();
     let storage = create_store(&src, UserKeypair::generate()).await;
 
-    let cs = capture_bytes(
-        &src,
-        &[
+    let cs = src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Replayed', NULL, '0000000005000-0000-dev', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
     let relocated_coord = crate::protocol::store_commit::StoreCommitCoord {
         stream_id: *stream_id,
@@ -3176,16 +3231,16 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         commit_hash: graph.commit.commit_hash(),
         object: relocated_object,
     };
-    replace_exact_head(
-        &storage,
-        &graph,
-        relocated_ref,
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    graph
+        .replace_head(
+            relocated_ref,
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let db2 = open_test_db();
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a relocated Store commit is held");
     assert_eq!(result.held_positions.len(), 1);
@@ -3201,11 +3256,12 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         result.held_positions[0]
     );
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "a Store commit relocated to another sequence must not be applied",
     );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None
     );
 }
@@ -3216,19 +3272,17 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let src = open_test_db();
     let storage = create_store(&src, UserKeypair::generate()).await;
 
-    let cs = capture_bytes(
-        &src,
-        &[
+    let cs = src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Relocated', NULL, '0000000001000-0000-devVictim', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("devVictim", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let relocated_stream = crate::protocol::membership::AuthorStreamId::from_bytes([99; 32]);
     let relocated_object = storage
         .create_exact_protocol_object(
@@ -3255,18 +3309,18 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         commit_hash: graph.commit.commit_hash(),
         object: relocated_object,
     };
-    replace_exact_head(
-        &storage,
-        &graph,
-        relocated_ref,
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    graph
+        .replace_head(
+            relocated_ref,
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let expected_stream_id = commit_stream_id(&graph.reference);
 
     let db2 = open_test_db();
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a relocated Store commit is held");
     assert_eq!(result.held_positions.len(), 1);
@@ -3282,11 +3336,12 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         result.held_positions[0]
     );
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "a Store commit relocated to another device must not be applied",
     );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None
     );
 }
@@ -3298,14 +3353,12 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
 async fn a_changeset_at_its_own_position_still_applies() {
     let src = open_test_db();
     let storage = create_store(&src, UserKeypair::generate()).await;
-    let cs = capture_bytes(
-        &src,
-        &[
+    let cs = src
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'InPlace', NULL, '0000000001000-0000-dev', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("dev", 1, &cs, SCHEMA_VERSION)
         .await
@@ -3313,10 +3366,13 @@ async fn a_changeset_at_its_own_position_still_applies() {
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), Some(&1));
     assert!(result.held_positions.is_empty());
 }
@@ -3342,14 +3398,12 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
         .await
         .expect("load invalid producer position");
 
-    let good_cs = capture_bytes(
-        &good_source,
-        &[
+    let good_cs = good_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let good_commit = storage
         .publish_changeset("devA", good_sequence, &good_cs, SCHEMA_VERSION)
         .await
@@ -3358,58 +3412,61 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
     let bad_source = open_test_db();
     // The base row exists (so the UPDATE below is an UPDATE, not an insert), but
     // through raw `exec`, so only the UPDATE enters the captured changeset.
-    exec(
-        &bad_source,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    bad_source
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-bad', 'Base', NULL, '0000000001000-0000-devB', '2026-01-01')",
-    )
-    .await;
-    let bad_cs = capture_bytes(
-        &bad_source,
-        &[
+        )
+        .await;
+    let bad_cs = bad_source
+        .capture_test_changeset(&[
             "UPDATE notes SET title = 'Bad', _updated_at = '0000000002000-0000-devB' \
              WHERE id = 'n-bad'",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let bad_commit = storage
         .publish_changeset("devB", bad_sequence, &bad_cs, SCHEMA_VERSION)
         .await
         .expect("publish invalid exact Store changeset bytes");
 
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-bad', 'Local', NULL, 'not-a-stamp', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let (_tmp, ld) = temp_store_dir();
-    let (_, first) = pull_into(&target, &storage, &ld).await;
+    let (_, first) = storage.pull_into(&target, &ld).await;
     assert!(first.held_positions.is_empty());
-    let error = pull_into_result(&target, &storage, &ld)
+    let error = storage
+        .pull_into_result(&target, &ld)
         .await
         .expect_err("an invalid local register must fail loudly");
 
     assert!(matches!(error, StorePullError::Database(_)));
     assert!(
-        row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await,
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
+            .await,
         "independent commit did not apply",
     );
     let good_stream_id = commit_stream_id(&good_commit);
     let bad_stream_id = commit_stream_id(&bad_commit);
     assert_eq!(
-        materialized_sequences(&target).await.get(&good_stream_id),
+        target.materialized_sequences().await.get(&good_stream_id),
         Some(&good_commit.coord.sequence()),
         "the independent commit completed before the corrupt local register was read",
     );
     assert_eq!(
-        materialized_sequences(&target).await.get(&bad_stream_id),
+        target.materialized_sequences().await.get(&bad_stream_id),
         None,
         "the failing commit never materializes",
     );
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'n-bad'").await,
+        target
+            .query_test_text("SELECT title FROM notes WHERE id = 'n-bad'")
+            .await,
         "Local",
         "the failing commit rolls back its row mutation",
     );
@@ -3431,33 +3488,30 @@ async fn malformed_store_package_isolates_to_one_device() {
         .expect("activate malformed-package producer");
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (_, activation_result) = pull_into_result(&target, &storage, &ld)
+    let (_, activation_result) = storage
+        .pull_into_result(&target, &ld)
         .await
         .expect("materialize device activations before publishing device commits");
     assert!(activation_result.held_positions.is_empty());
 
-    let bad_seed = capture_bytes(
-        &bad_source,
-        &[
+    let bad_seed = bad_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-bad', 'Bad', NULL, '0000000001000-0000-devB', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let bad_reference = storage
         .publish_changeset("devB", 1, &bad_seed, SCHEMA_VERSION)
         .await
         .expect("publish valid seed Store package");
 
     let good_source = open_test_db();
-    let good_cs = capture_bytes(
-        &good_source,
-        &[
+    let good_cs = good_source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let good_sequence = storage
         .next_commit_sequence("founder")
         .await
@@ -3470,11 +3524,16 @@ async fn malformed_store_package_isolates_to_one_device() {
     let bad_reference = replace_store_package_with_malformed_bytes(&storage, bad_reference).await;
     let bad_stream_id = commit_stream_id(&bad_reference);
 
-    let (updated, result) = pull_into_result(&target, &storage, &ld)
+    let (updated, result) = storage
+        .pull_into_result(&target, &ld)
         .await
         .expect("a malformed Store package must not fail the whole pull");
 
-    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await);
+    assert!(
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
+            .await
+    );
     assert_eq!(
         updated.get(&good_stream_id),
         Some(&good_reference.coord.sequence()),
@@ -3511,23 +3570,22 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // Source: a note + a cover photo. The blob id is ≥4 chars so it forms the
     // `{ab}/{cd}` cache shard.
-    capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db1.capture_test_changeset(&[
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1ab', 'n1', 'cover', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"PHOTOBYTES"),
-            ),
-        ],
-    )
+            crate::blob::content_hash(b"PHOTOBYTES"),
+        ),
+    ])
     .await;
 
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    store_local(&source_store_dir, "p1ab", b"PHOTOBYTES").await;
-    make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+    source_store_dir.store_local("p1ab", b"PHOTOBYTES").await;
+    storage
+        .make_root_remote(&db1, &source_store_dir, "n1")
+        .await;
     let commit = source_device
         .latest_local_store_position()
         .await
@@ -3538,18 +3596,18 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     // locator-keyed cache on pull.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let blob_row = row_blob_ref(&db2, "note_photos", "p1ab").await;
+    let blob_row = db2.exact_row_blob_ref("note_photos", "p1ab").await;
     let downloaded = std::fs::read(exact_cache_path(&ld, &blob_row)).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
     let stored = blob_row
         .stored()
         .expect("pulled blob row carries exact storage")
         .clone();
-    let remote = stored_remote_object(&db2, stored.object()).await;
+    let remote = db2.stored_remote_object(stored.object()).await;
     let stream_id = commit_stream_id(&commit);
     let sequence = commit.coord.sequence();
     let input_hash = db2
@@ -3593,9 +3651,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
     // Source: a shared note + an audio row, declared user-provided · CacheLazy.
-    capture_bytes(
-        &db1,
-        &[
+    db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -3616,7 +3672,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     db1.test_sql(move |database| database.register_external_blob(&reference, &source))
         .await
         .expect("register exact external audio fixture");
-    make_test_root_remote(&db1, &storage, &ld1, "n1").await;
+    storage.make_root_remote(&db1, &ld1, "n1").await;
     let audio_blob = db1
         .row_blob_ref("note_photos", "audio1")
         .await
@@ -3626,7 +3682,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("published audio row carries exact blob authority");
 
     assert_eq!(
-        read_exact_blob(&storage, &audio_blob).await,
+        storage.read_exact_blob(&audio_blob).await,
         b"AUDIO-PAYLOAD",
         "the transition publishes the exact user-provided bytes",
     );
@@ -3647,7 +3703,8 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
             storage.storage.clone(),
             FaultingStorage::blob(),
         ));
-    let error = pull_with_bound_storage(&db2, failing, storage.signer.clone(), &ld, None)
+    let error = db2
+        .pull_with_bound_storage(failing, storage.signer.clone(), &ld, None)
         .await
         .expect_err("lazy blob verification failure rejects the Store commit");
     assert!(
@@ -3655,22 +3712,26 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         "unexpected lazy verification error: {error:?}"
     );
     assert!(error.is_offline());
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
 
     // The same commit applies once the exact blob can be opened and verified.
-    let (updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
-        query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "WithAudio",
         "the row carrying the CacheLazy blob still reaches the peer",
     );
     // Verification used an unpublished temporary file, so the plaintext remains
     // absent from both cache locations until an application read requests it.
-    let reference = row_blob_ref(&db2, "note_photos", "audio1").await;
+    let reference = db2.exact_row_blob_ref("note_photos", "audio1").await;
     assert!(
         !exact_pinned_path(&ld, &reference).exists()
             && !exact_cache_path(&ld, &reference).exists(),
@@ -3764,20 +3825,16 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
 
     assert!(result.changesets_applied >= 1);
     assert!(
-        row_exists(
-            &target,
-            &format!("SELECT 1 FROM notes WHERE id = '{note_id}'")
-        )
-        .await,
+        target
+            .test_row_exists(&format!("SELECT 1 FROM notes WHERE id = '{note_id}'"))
+            .await,
         "Circle root was not applied: {:?}",
         result.held_positions
     );
     assert!(
-        row_exists(
-            &target,
-            &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
-        )
-        .await
+        target
+            .test_row_exists(&format!("SELECT 1 FROM comments WHERE id = '{comment_id}'"))
+            .await
     );
     let (routes, mirrors): (i64, i64) = target
         .test_sql(move |database| database.scoped_routing_counts(circle_id))
@@ -3792,7 +3849,8 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         "host-visible row changes must not expose Coven routing tables"
     );
     assert!(
-        stored_remote_objects(&target)
+        target
+            .stored_remote_objects()
             .await
             .iter()
             .any(|remote| is_external_circle_package(remote, true)),
@@ -3820,17 +3878,17 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     }
     for participant in [&first, &second, &receiver] {
         let (_temp, store_dir) = temp_store_dir();
-        pull_into(participant, &storage, &store_dir).await;
+        storage.pull_into(participant, &store_dir).await;
     }
-    let first_stream = local_announcement_stream(&first).await;
-    let second_stream = local_announcement_stream(&second).await;
+    let first_stream = first.local_announcement_stream().await;
+    let second_stream = second.local_announcement_stream().await;
     let (activator, successor) = if first_stream > second_stream {
         (&first, &second)
     } else {
         (&second, &first)
     };
     assert!(
-        local_announcement_stream(successor).await < local_announcement_stream(activator).await
+        successor.local_announcement_stream().await < activator.local_announcement_stream().await
     );
     let circle_id = storage
         .bind_device(activator, &owner)
@@ -3932,45 +3990,6 @@ fn scoped_fk_circle_db() -> crate::database::Database {
     )
 }
 
-async fn author_scoped_write(store: &TestStore, db: &crate::database::Database, sql: String) {
-    crate::database::StoreDatabase::new(db)
-        .run_host_store_write_for_test(
-            Some(EncryptionService::from_key([42; 32])),
-            None,
-            move |tx| {
-                tx.execute_batch(&sql)
-                    .map_err(crate::database::DbError::from)
-            },
-        )
-        .await
-        .expect("commit scoped host transaction");
-    let (_temp, dir) = temp_store_dir();
-    store
-        .publish_pending(db, &dir)
-        .await
-        .expect("publish scoped write");
-}
-
-async fn pull_scoped(
-    store: &TestStore,
-    db: &crate::database::Database,
-) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError> {
-    let device = store.open_into(db).await.map_err(|error| {
-        crate::sync::store::StorePullError::Membership(
-            crate::sync::store::StorePullMembershipError::Message(error),
-        )
-    })?;
-    let (_temp, dir) = temp_store_dir();
-    let routing_encryption = EncryptionService::from_key([42; 32]);
-    device
-        .authorize_writer()
-        .await
-        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?
-        .pull(&dir, Some(&routing_encryption))
-        .await
-        .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))
-}
-
 /// A receiver holds a category only because a comment it owns references it as an
 /// unchanged foreign-key ancestor. A concurrent device — which never saw the
 /// comment — moves that category into another Circle. When the receiver applies
@@ -4011,9 +4030,7 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
 
     // Founder publishes a note and a category, both in the first Circle. It never
     // authors the comment.
-    author_scoped_write(
-        &storage,
-        &founder,
+    storage.author_scoped_write(&founder,
         format!(
             "INSERT INTO notes VALUES ('{note_id}', '{circle_a}', 'body', '0000000002000-0000-owner');
              INSERT INTO categories VALUES ('{category_id}', '{circle_a}', '0000000002001-0000-owner');"
@@ -4023,42 +4040,43 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
 
     // Receiver pulls the note and category, then authors a comment that references
     // both — the only place the category is held as a foreign-key ancestor.
-    pull_scoped(&storage, &receiver)
+    storage
+        .pull_scoped(&receiver)
         .await
         .expect("receiver pulls the valid relationship");
     assert!(
-        row_exists(
-            &receiver,
-            &format!("SELECT 1 FROM categories WHERE id = '{category_id}'")
-        )
-        .await,
+        receiver
+            .test_row_exists(&format!(
+                "SELECT 1 FROM categories WHERE id = '{category_id}'"
+            ))
+            .await,
         "receiver holds the category before the concurrent move",
     );
-    author_scoped_write(
-        &storage,
-        &receiver,
-        format!(
-            "INSERT INTO comments VALUES \
+    storage
+        .author_scoped_write(
+            &receiver,
+            format!(
+                "INSERT INTO comments VALUES \
              ('{comment_id}', '{note_id}', '{category_id}', 'child', '0000000003000-0000-owner');"
-        ),
-    )
-    .await;
+            ),
+        )
+        .await;
 
     // Founder — which never saw the comment — moves the category into the second
     // Circle. Its own component stays valid, so the move publishes.
-    author_scoped_write(
-        &storage,
-        &founder,
-        format!(
-            "UPDATE categories SET audience = '{circle_b}', \
+    storage
+        .author_scoped_write(
+            &founder,
+            format!(
+                "UPDATE categories SET audience = '{circle_b}', \
              _updated_at = '0000000004000-0000-owner' WHERE id = '{category_id}';"
-        ),
-    )
-    .await;
+            ),
+        )
+        .await;
 
     // The receiver applies the move against its comment: the resulting component
     // crosses Circles, so the final-component validation refuses it.
-    let outcome = pull_scoped(&storage, &receiver).await;
+    let outcome = storage.pull_scoped(&receiver).await;
     let refusal = match &outcome {
         Err(error) => error.to_string(),
         Ok(result) => panic!("the cross-Circle move must be refused, not applied: {result:?}"),
@@ -4067,11 +4085,11 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
         refusal.contains("relationship through category_id"),
         "the receiver refuses the move by its final-component FK validation: {refusal}",
     );
-    let category_audience = query_text(
-        &receiver,
-        &format!("SELECT audience FROM categories WHERE id = '{category_id}'"),
-    )
-    .await;
+    let category_audience = receiver
+        .query_test_text(&format!(
+            "SELECT audience FROM categories WHERE id = '{category_id}'"
+        ))
+        .await;
     assert_eq!(
         category_audience,
         circle_a.to_string(),
@@ -4094,16 +4112,13 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
     let (tmp, ld) = temp_store_dir();
     let external = tmp.path().join("audio.flac");
     std::fs::write(&external, b"local audio").expect("write external file");
-    exec(
-        &db,
-        &format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
          INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"local audio"),
-        ),
-    )
+        crate::blob::content_hash(b"local audio"),
+    ))
     .await;
     let reference = db
         .row_blob_ref("note_photos", "audio1")
@@ -4113,29 +4128,27 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
     db.test_sql(move |database| database.register_external_blob(&reference, &external))
         .await
         .expect("register exact external blob reference");
-    let outgoing = capture_bytes(
-        &db,
-        &["UPDATE notes SET title = 'Changed', \
-           _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
-    )
-    .await;
+    let outgoing = db
+        .capture_test_changeset(&["UPDATE notes SET title = 'Changed', \
+           _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"])
+        .await;
 
-    let result = sync_for_test(
-        &db,
-        &test_synced_tables_with_blob(BlobDecl::new(
-            "audio",
-            Provenance::UserProvided,
-            CacheFill::CacheLazy,
-        )),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &storage.protocol_founder_keypair(),
-        &ld,
-    )
-    .await
-    .expect("a Local blob does not require remote object authority");
+    let result = storage
+        .sync_for_test(
+            &db,
+            &test_synced_tables_with_blob(BlobDecl::new(
+                "audio",
+                Provenance::UserProvided,
+                CacheFill::CacheLazy,
+            )),
+            outgoing,
+            0,
+            "",
+            &storage.protocol_founder_keypair(),
+            &ld,
+        )
+        .await
+        .expect("a Local blob does not require remote object authority");
     assert!(result.is_some(), "the changeset publishes a Store commit");
     assert!(
         device
@@ -4159,9 +4172,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         .founder_device()
         .await
         .expect("retain local Store device");
-    let outgoing = capture_bytes(
-        &db,
-        &[
+    let outgoing = db.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4174,21 +4185,21 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
     .await;
     let (_tmp, ld) = temp_store_dir();
 
-    let result = sync_for_test(
-        &db,
-        &test_synced_tables_with_blob(BlobDecl::new(
-            "audio",
-            Provenance::UserProvided,
-            CacheFill::CacheLazy,
-        )),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &storage.protocol_founder_keypair(),
-        &ld,
-    )
-    .await;
+    let result = storage
+        .sync_for_test(
+            &db,
+            &test_synced_tables_with_blob(BlobDecl::new(
+                "audio",
+                Provenance::UserProvided,
+                CacheFill::CacheLazy,
+            )),
+            outgoing,
+            0,
+            "",
+            &storage.protocol_founder_keypair(),
+            &ld,
+        )
+        .await;
     let err = match result {
         Err(err) => err,
         Ok(_) => panic!("missing remote user-provided blob must abort publish"),
@@ -4220,9 +4231,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         .founder_device()
         .await
         .expect("retain local Store device");
-    capture_bytes(
-        &db,
-        &[
+    db.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4243,7 +4252,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     db.test_sql(move |database| database.register_external_blob(&reference, &source))
         .await
         .expect("register exact external audio fixture");
-    make_test_root_remote(&db, &storage, &store_dir, "n1").await;
+    storage.make_root_remote(&db, &store_dir, "n1").await;
     let result = device
         .latest_local_store_position()
         .await
@@ -4266,8 +4275,7 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
         CacheFill::CacheLazy,
     ));
     let storage = create_store(&db, UserKeypair::generate()).await;
-    exec(
-        &db,
+    db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
          INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
@@ -4276,25 +4284,27 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
     // is just the DELETE under test.
-    let outgoing = capture_bytes(&db, &["DELETE FROM note_photos WHERE id = 'audio1'"]).await;
+    let outgoing = db
+        .capture_test_changeset(&["DELETE FROM note_photos WHERE id = 'audio1'"])
+        .await;
     let (_tmp, ld) = temp_store_dir();
 
-    let result = sync_for_test(
-        &db,
-        &test_synced_tables_with_blob(BlobDecl::new(
-            "audio",
-            Provenance::UserProvided,
-            CacheFill::CacheLazy,
-        )),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &storage.protocol_founder_keypair(),
-        &ld,
-    )
-    .await
-    .expect("delete does not require the removed blob to exist remotely");
+    let result = storage
+        .sync_for_test(
+            &db,
+            &test_synced_tables_with_blob(BlobDecl::new(
+                "audio",
+                Provenance::UserProvided,
+                CacheFill::CacheLazy,
+            )),
+            outgoing,
+            0,
+            "",
+            &storage.protocol_founder_keypair(),
+            &ld,
+        )
+        .await
+        .expect("delete does not require the removed blob to exist remotely");
     assert!(result.is_some(), "the delete publishes a Store commit");
 
     assert_eq!(
@@ -4325,28 +4335,26 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
                  '0000000001000-0000-dev1', '2026-01-01')",
         crate::blob::content_hash(b"missing"),
     );
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &missing_blob,
-        ],
-    )
-    .await;
+        ])
+        .await;
 
     let (_t1, ld1) = temp_store_dir();
-    let result = sync_for_test(
-        &db1,
-        &test_synced_tables_with_blob(photo_decl()),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await;
+    let result = storage
+        .sync_for_test(
+            &db1,
+            &test_synced_tables_with_blob(photo_decl()),
+            outgoing,
+            0,
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await;
     let err = result.expect_err("missing blob blocks Store publication");
     assert!(
         err.contains("outbound blob photos/p1ab is absent from storage"),
@@ -4394,7 +4402,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     let db = open_test_db_with_blob(readable_photo_decl());
     let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t, ld) = temp_store_dir();
-    store_local(&ld, "p1cover", bytes).await;
+    ld.store_local("p1cover", bytes).await;
     let rows = [
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4407,9 +4415,9 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
             crate::blob::content_hash(bytes),
         ),
     ];
-    let outgoing = capture_bytes(&db, &rows).await;
+    let outgoing = db.capture_test_changeset(&rows).await;
     push_cycle(&db, &tables, &storage, outgoing.clone(), 0, &keypair, &ld).await;
-    let cover_key = row_blob_object_key(&db, "note_photos", "p1cover").await;
+    let cover_key = db.row_blob_object_key("note_photos", "p1cover").await;
     assert_eq!(
         home.get(&cover_key).as_deref(),
         Some(bytes.as_slice()),
@@ -4421,13 +4429,15 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     ld.remove_local_blob("photos", "p1cover")
         .await
         .expect("drop any local-store copy");
-    let cached = exact_cache_path(&ld, &row_blob_ref(&db, "note_photos", "p1cover").await);
+    let cached = exact_cache_path(&ld, &db.exact_row_blob_ref("note_photos", "p1cover").await);
     if cached.exists() {
         std::fs::remove_file(&cached).expect("evict the cached copy");
     }
 
     // The row is re-emitted. The blob has no local bytes to upload — and needs none.
-    let result = sync_for_test(&db, &tables, outgoing, 1, &storage, "", &keypair, &ld).await;
+    let result = storage
+        .sync_for_test(&db, &tables, outgoing, 1, "", &keypair, &ld)
+        .await;
     assert!(
         result.is_ok(),
         "a blob already in the cloud must not abort the push for want of a local copy",
@@ -4471,10 +4481,8 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let (_t1, ld1) = temp_store_dir();
     // The cover's readable key lives in the row's `cloud_path` column.
     // The host stages the cover into the cache before the inline push reads it.
-    store_local(&ld1, "p1cover", plaintext).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", plaintext).await;
+    let outgoing = db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4486,25 +4494,25 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     )
     .await;
 
-    let result = sync_for_test(
-        &db1,
-        &test_synced_tables_with_blob(readable_photo_decl()),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await
-    .expect("sync");
+    let result = storage
+        .sync_for_test(
+            &db1,
+            &test_synced_tables_with_blob(readable_photo_decl()),
+            outgoing,
+            0,
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await
+        .expect("sync");
     assert!(
         result.is_some(),
         "the readable blob row publishes a Store commit"
     );
 
     // The blob lands at an immutable version below its readable path.
-    let blob_key = row_blob_object_key(&db1, "note_photos", "p1cover").await;
+    let blob_key = db1.row_blob_object_key("note_photos", "p1cover").await;
     assert!(
         blob_key.starts_with("photos/readable/n1/cover-p1cover.jpg/.coven-versions/"),
         "the exact object stays grouped below its readable path: {blob_key}",
@@ -4530,14 +4538,14 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // pulls and downloads the cover from the readable key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld) = temp_store_dir();
-    let (_updated, result) = pull_exact_store_into(&db2, &db1, &storage, &ld).await;
+    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     // A `CacheEager` cover lands in B's evictable cache on pull.
     let downloaded = std::fs::read(exact_cache_path(
         &ld,
-        &row_blob_ref(&db2, "note_photos", "p1cover").await,
+        &db2.exact_row_blob_ref("note_photos", "p1cover").await,
     ))
     .expect("device B downloaded cover");
     assert_eq!(
@@ -4566,12 +4574,11 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     let db = open_test_db_with_blob(readable_photo_decl());
     let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t, ld) = temp_store_dir();
-    store_local(&ld, "p1cover", bytes).await;
+    ld.store_local("p1cover", bytes).await;
     // `n1/cover.jpg` names no blob: it would key p1cover today and its replacement
     // tomorrow at one and the same cloud object.
-    let outgoing = capture_bytes(
-        &db,
-        &[
+    let outgoing = db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4582,11 +4589,11 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
                 bytes.len(),
                 crate::blob::content_hash(bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
 
-    let err = sync_for_test(&db, &tables, outgoing, 0, &storage, "", &keypair, &ld)
+    let err = storage
+        .sync_for_test(&db, &tables, outgoing, 0, "", &keypair, &ld)
         .await
         .expect_err("a cloud path that does not name its blob must fail the cycle");
 
@@ -4627,10 +4634,9 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
     let db1 = open_test_db_with_blob(readable_photo_decl());
     let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
-    store_local(&ld1, "p1cover", old_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", old_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4641,11 +4647,10 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
                 old_bytes.len(),
                 crate::blob::content_hash(old_bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
-    let old_key = row_blob_object_key(&db1, "note_photos", "p1cover").await;
+    let old_key = db1.row_blob_object_key("note_photos", "p1cover").await;
     assert_eq!(
         home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
@@ -4656,24 +4661,22 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
     // Add another blob whose readable path names it.
-    store_local(&ld1, "p2cover", new_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[&format!(
+    ld1.store_local("p2cover", new_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[&format!(
             "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
             new_bytes.len(),
             crate::blob::content_hash(new_bytes),
-        )],
-    )
-    .await;
+        )])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
-    let new_key = row_blob_object_key(&db1, "note_photos", "p2cover").await;
+    let new_key = db1.row_blob_object_key("note_photos", "p2cover").await;
 
     assert_eq!(
         home.get(&new_key).as_deref(),
@@ -4688,7 +4691,7 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
 
     // Device B pulls the replacement. Its download verifies the object against the new
     // row's content hash, so an object holding the replaced bytes would fail the pull.
-    let (_updated, result) = pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -4697,7 +4700,7 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
-        &row_blob_ref(&db2, "note_photos", "p2cover").await,
+        &db2.exact_row_blob_ref("note_photos", "p2cover").await,
     ))
     .expect("device B cached the replacement cover");
     assert_eq!(
@@ -4734,10 +4737,9 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
     // The source publishes the original cover.
     let db_a = open_test_db_with_blob(replaceable_photo_decl());
     let (_ta, ld_a) = temp_store_dir();
-    store_local(&ld_a, "p0cover", original).await;
-    let outgoing = capture_bytes(
-        &db_a,
-        &[
+    ld_a.store_local("p0cover", original).await;
+    let outgoing = db_a
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4748,39 +4750,34 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
                 original.len(),
                 crate::blob::content_hash(original),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db_a, &tables, &storage, outgoing, 0, &keypair, &ld_a).await;
 
     // Each replacement uses a fresh blob id and readable path.
-    store_local(&ld_a, "pAcover", from_a).await;
-    let outgoing_a = capture_bytes(
-        &db_a,
-        &[&format!(
+    ld_a.store_local("pAcover", from_a).await;
+    let outgoing_a = db_a
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             from_a.len(),
             crate::blob::content_hash(from_a),
-        )],
-    )
-    .await;
+        )])
+        .await;
     push_cycle(&db_a, &tables, &storage, outgoing_a, 1, &keypair, &ld_a).await;
-    let from_a_key = row_blob_object_key(&db_a, "note_photos", "ph1").await;
+    let from_a_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
-    store_local(&ld_a, "pBcover", from_b).await;
-    let outgoing_b = capture_bytes(
-        &db_a,
-        &[&format!(
+    ld_a.store_local("pBcover", from_b).await;
+    let outgoing_b = db_a
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
             from_b.len(),
             crate::blob::content_hash(from_b),
-        )],
-    )
-    .await;
+        )])
+        .await;
     push_cycle(&db_a, &tables, &storage, outgoing_b, 2, &keypair, &ld_a).await;
-    let from_b_key = row_blob_object_key(&db_a, "note_photos", "ph1").await;
+    let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
     // Neither replacement overwrote the other: both objects stand, each holding the bytes
     // of the blob its key names. Under a key that did not name its blob, these two writes
@@ -4800,7 +4797,7 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
     // A peer pulls every changeset and serves the latest object.
     let db_c = open_test_db_with_blob(replaceable_photo_decl());
     let (_tc, ld_c) = temp_store_dir();
-    let (_updated, result) = pull_exact_store_into(&db_c, &db_a, &storage, &ld_c).await;
+    let (_updated, result) = db_c.pull_exact_store_into(&db_a, &storage, &ld_c).await;
     assert!(
         !result.asset_downloads_failed,
         "every row the third device applies names an object that holds its bytes",
@@ -4825,7 +4822,7 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
     let expected = from_b.as_slice();
     let cached = std::fs::read(exact_cache_path(
         &ld_c,
-        &row_blob_ref(&db_c, "note_photos", "ph1").await,
+        &db_c.exact_row_blob_ref("note_photos", "ph1").await,
     ))
     .expect("the third device cached the cover its row names");
     assert_eq!(
@@ -4853,10 +4850,9 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
 
     let db1 = open_test_db_with_blob(readable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
-    store_local(&ld1, "p1cover", old_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", old_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4867,32 +4863,29 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
                 old_bytes.len(),
                 crate::blob::content_hash(old_bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
 
     // Another blob is published while the laggard is away.
-    store_local(&ld1, "p2cover", new_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[&format!(
+    ld1.store_local("p2cover", new_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[&format!(
             "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
             new_bytes.len(),
             crate::blob::content_hash(new_bytes),
-        )],
-    )
-    .await;
+        )])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
 
     // The laggard pulls from zero: it applies the pre-replacement changeset first, whose
     // row names the replaced blob. Its bytes are still at their own key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_positions, result) = pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    let (_positions, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -4901,7 +4894,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     assert_eq!(result.changesets_applied, 2, "both changesets apply",);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
-        &row_blob_ref(&db2, "note_photos", "p2cover").await,
+        &db2.exact_row_blob_ref("note_photos", "p2cover").await,
     ))
     .expect("the laggard cached the current cover");
     assert_eq!(
@@ -4946,10 +4939,9 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let db1 = open_test_db_with_blob(write_once_photo_decl());
     let tables = test_synced_tables_with_blob(write_once_photo_decl());
     let (_t1, ld1) = temp_store_dir();
-    store_local(&ld1, "f1audio", bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("f1audio", bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4960,11 +4952,10 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
                 bytes.len(),
                 crate::blob::content_hash(bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
-    let audio_key = row_blob_object_key(&db1, "note_photos", "ph1").await;
+    let audio_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     assert_eq!(
         home.get(&audio_key).as_deref(),
@@ -4975,12 +4966,12 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A peer pulls it off that readable key and verifies it against the row's hash.
     let db2 = open_test_db_with_blob(write_once_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_positions, result) = pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    let (_positions, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
-        &row_blob_ref(&db2, "note_photos", "ph1").await,
+        &db2.exact_row_blob_ref("note_photos", "ph1").await,
     ))
     .expect("device B cached the audio");
     assert_eq!(cached, bytes.as_slice());
@@ -5013,10 +5004,9 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let db = open_test_db_with_blob(write_once_photo_decl());
     let tables = test_synced_tables_with_blob(write_once_photo_decl());
     let (_t, ld) = temp_store_dir();
-    store_local(&ld, "f1audio", first).await;
-    let outgoing = capture_bytes(
-        &db,
-        &[
+    ld.store_local("f1audio", first).await;
+    let outgoing = db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5027,26 +5017,24 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
                 first.len(),
                 crate::blob::content_hash(first),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db, &tables, &storage, outgoing, 0, &keypair, &ld).await;
-    let audio_key = row_blob_object_key(&db, "note_photos", "ph1").await;
+    let audio_key = db.row_blob_object_key("note_photos", "ph1").await;
 
     // Repoint the write-once row at a second blob — the move that would rewrite the object
     // the first blob occupies.
-    store_local(&ld, "f2audio", second).await;
-    let outgoing = capture_bytes(
-        &db,
-        &[&format!(
+    ld.store_local("f2audio", second).await;
+    let outgoing = db
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'f2audio', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             second.len(),
             crate::blob::content_hash(second),
-        )],
-    )
-    .await;
-    let err = sync_for_test(&db, &tables, outgoing, 1, &storage, "", &keypair, &ld)
+        )])
+        .await;
+    let err = storage
+        .sync_for_test(&db, &tables, outgoing, 1, "", &keypair, &ld)
         .await
         .expect_err("repointing a write-once row must fail the cycle");
 
@@ -5105,10 +5093,9 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     let db1 = open_test_db_with_blob(replaceable_photo_decl());
     let tables = test_synced_tables_with_blob(replaceable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
-    store_local(&ld1, "p1cover", old_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", old_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5119,11 +5106,10 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
                 old_bytes.len(),
                 crate::blob::content_hash(old_bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
-    let old_key = row_blob_object_key(&db1, "note_photos", "ph1").await;
+    let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
     assert_eq!(
         home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
@@ -5134,27 +5120,26 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(replaceable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
-    let old_cache_path = exact_cache_path(&ld2, &row_blob_ref(&db2, "note_photos", "ph1").await);
+    db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+    let old_cache_path =
+        exact_cache_path(&ld2, &db2.exact_row_blob_ref("note_photos", "ph1").await);
 
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
-    store_local(&ld1, "p2cover", new_bytes).await;
+    ld1.store_local("p2cover", new_bytes).await;
     ld1.remove_local_blob("photos", "p1cover")
         .await
         .expect("drop the replaced blob's local copy");
-    let outgoing = capture_bytes(
-        &db1,
-        &[&format!(
+    let outgoing = db1
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             new_bytes.len(),
             crate::blob::content_hash(new_bytes),
-        )],
-    )
-    .await;
+        )])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
-    let new_key = row_blob_object_key(&db1, "note_photos", "ph1").await;
+    let new_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     assert_eq!(
         home.get(&new_key).as_deref(),
@@ -5170,7 +5155,7 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
     // Device B pulls the repointing. Its download verifies the object against the new
     // row's content hash, so serving it the replaced bytes would fail the pull outright.
-    let (_updated, result) = pull_exact_store_into(&db2, &db1, &storage, &ld2).await;
+    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -5179,7 +5164,7 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(exact_cache_path(
         &ld2,
-        &row_blob_ref(&db2, "note_photos", "ph1").await,
+        &db2.exact_row_blob_ref("note_photos", "ph1").await,
     ))
     .expect("device B cached the replacement cover");
     assert_eq!(
@@ -5215,10 +5200,9 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     let db1 = open_test_db_with_blob(replaceable_photo_decl());
     let tables = test_synced_tables_with_blob(replaceable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
-    store_local(&ld1, "p1cover", old_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", old_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5229,26 +5213,24 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
                 old_bytes.len(),
                 crate::blob::content_hash(old_bytes),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
-    let old_key = row_blob_object_key(&db1, "note_photos", "ph1").await;
+    let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     // The repointing leaves `cloud_path` naming the blob it replaced, so the new blob
     // would be keyed at the old blob's object.
-    store_local(&ld1, "p2cover", new_bytes).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[&format!(
+    ld1.store_local("p2cover", new_bytes).await;
+    let outgoing = db1
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'p2cover', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             new_bytes.len(),
             crate::blob::content_hash(new_bytes),
-        )],
-    )
-    .await;
-    let err = sync_for_test(&db1, &tables, outgoing, 1, &storage, "", &keypair, &ld1)
+        )])
+        .await;
+    let err = storage
+        .sync_for_test(&db1, &tables, outgoing, 1, "", &keypair, &ld1)
         .await
         .expect_err("a repointing that holds its cloud path must fail the cycle");
 
@@ -5276,11 +5258,10 @@ async fn push_cycle_as<S: TestStoreStorage>(
     keypair: &UserKeypair,
     store_dir: &crate::store_dir::StoreDir,
 ) {
-    let result = sync_for_test(
-        db, tables, outgoing, local_seq, storage, "", keypair, store_dir,
-    )
-    .await
-    .expect("sync");
+    let result = storage
+        .sync_for_test(db, tables, outgoing, local_seq, "", keypair, store_dir)
+        .await
+        .expect("sync");
     assert!(result.is_some(), "the captured rows publish a Store commit");
 }
 
@@ -5327,10 +5308,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let db1 = open_test_db_with_blob(decl());
     let (_t1, ld1) = temp_store_dir();
     // The host stages the cover into the cache before the inline push reads it.
-    store_local(&ld1, "p1cover", plaintext).await;
-    let outgoing = capture_bytes(
-        &db1,
-        &[
+    ld1.store_local("p1cover", plaintext).await;
+    let outgoing = db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5342,18 +5321,18 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     )
     .await;
 
-    let result = sync_for_test(
-        &db1,
-        &test_synced_tables_with_blob(decl()),
-        outgoing,
-        0,
-        &storage,
-        "",
-        &keypair,
-        &ld1,
-    )
-    .await
-    .expect("sync");
+    let result = storage
+        .sync_for_test(
+            &db1,
+            &test_synced_tables_with_blob(decl()),
+            outgoing,
+            0,
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await
+        .expect("sync");
     assert!(
         result.is_some(),
         "the encrypted blob row publishes a Store commit"
@@ -5383,19 +5362,20 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device B: a fresh DB and its own store dir, same cloud + key + declaration.
     let db2 = open_test_db_with_blob(decl());
     let (_t, ld) = temp_store_dir();
-    let (updated, result) = pull_exact_store_into(&db2, &db1, &storage, &ld).await;
+    let (updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
-        query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
+        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "WithPhoto"
     );
     // A `CacheEager` cover lands in B's evictable cache on pull.
     let downloaded = std::fs::read(exact_cache_path(
         &ld,
-        &row_blob_ref(&db2, "note_photos", "p1cover").await,
+        &db2.exact_row_blob_ref("note_photos", "p1cover").await,
     ))
     .expect("device B downloaded photo");
     assert_eq!(
@@ -5441,29 +5421,22 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     // the cover CacheLazy. Both inherit the `notes` gate, so a shared note carries
     // both through the inline push in one cycle.
     let (_t1, ld1) = temp_store_dir();
-    exec(
-        &db1,
+    db1.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithBlobs', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    exec(
-        &db1,
-        &format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+    db1.execute_test_sql(&format!(
+        "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('peager01', 'n1', 'cover', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"EAGER-BYTES"),
-        ),
-    )
+        crate::blob::content_hash(b"EAGER-BYTES"),
+    ))
     .await;
-    exec(
-        &db1,
-        &format!(
-            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
+    db1.execute_test_sql(&format!(
+        "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
              VALUES ('clazy001', 'n1', 10, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"LAZY-BYTES"),
-        ),
-    )
+        crate::blob::content_hash(b"LAZY-BYTES"),
+    ))
     .await;
     // The host stores both blobs in the local store (their Local home) before the
     // inline push reads them to upload.
@@ -5473,7 +5446,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     crate::store_dir::StoreDir::store_local_blob(&ld1, "covers", "clazy001", b"LAZY-BYTES")
         .await
         .expect("store lazy blob in local store");
-    make_test_root_remote(&db1, &storage, &ld1, "n1").await;
+    storage.make_root_remote(&db1, &ld1, "n1").await;
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.
     let eager = db1
@@ -5504,9 +5477,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
     // Source dev1: a note + a CacheEager cover row, the cover present in the cloud.
-    capture_bytes(
-        &db1,
-        &[
+    db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5519,14 +5490,18 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     )
     .await;
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    store_local(&source_store_dir, "pdel1234", b"COVERBYTES").await;
-    make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+    source_store_dir
+        .store_local("pdel1234", b"COVERBYTES")
+        .await;
+    storage
+        .make_root_remote(&db1, &source_store_dir, "n1")
+        .await;
 
     // dev2 pulls → the CacheEager cover lands in the evictable cache.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
-    pull_into(&db2, &storage, &ld).await;
-    let deleted_reference = row_blob_ref(&db2, "note_photos", "pdel1234").await;
+    storage.pull_into(&db2, &ld).await;
+    let deleted_reference = db2.exact_row_blob_ref("note_photos", "pdel1234").await;
     let deleted_cache_path = exact_cache_path(&ld, &deleted_reference);
     let deleted_pinned_path = exact_pinned_path(&ld, &deleted_reference);
     assert!(
@@ -5549,7 +5524,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         .publish_pending(&db1, &source_store_dir)
         .await
         .expect("publish exact gate retraction"));
-    let (_positions, result) = pull_into(&db2, &storage, &ld).await;
+    let (_positions, result) = storage.pull_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
         !deleted_pinned_path.exists() && !deleted_cache_path.exists(),
@@ -5562,9 +5537,8 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let cleanup_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy);
     let source = open_test_db_with_blob(cleanup_decl());
     let storage = create_store(&source, UserKeypair::generate()).await;
-    capture_bytes(
-        &source,
-        &[
+    source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5574,18 +5548,19 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
                          '0000000001000-0000-dev1', '2026-01-01')",
                 crate::blob::content_hash(b"cleanup"),
             ),
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    store_local(&source_store_dir, "cleanup01", b"cleanup").await;
-    make_test_root_remote(&source, &storage, &source_store_dir, "n1").await;
+    source_store_dir.store_local("cleanup01", b"cleanup").await;
+    storage
+        .make_root_remote(&source, &source_store_dir, "n1")
+        .await;
 
     let database_dir = tempfile::tempdir().expect("database temp dir");
     let database_path = database_dir.path().join("store.db");
     let target = open_blob_test_db_at(&database_path, cleanup_decl());
     let (_store_tmp, store_dir) = temp_store_dir();
-    pull_into(&target, &storage, &store_dir).await;
+    storage.pull_into(&target, &store_dir).await;
     let deleted_locator_hash = target
         .row_blob_ref("note_photos", "cleanup01")
         .await
@@ -5595,8 +5570,9 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
         .locator()
         .locator_hash()
         .to_string();
-    let deletion =
-        capture_bytes(&source, &["DELETE FROM note_photos WHERE id = 'cleanup01'"]).await;
+    let deletion = source
+        .capture_test_changeset(&["DELETE FROM note_photos WHERE id = 'cleanup01'"])
+        .await;
     publish_blob_changeset(&source, &storage, &source_store_dir, deletion, 1).await;
     if store_dir.storage_dir().exists() {
         std::fs::remove_dir_all(store_dir.storage_dir()).expect("remove storage directory");
@@ -5604,11 +5580,16 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let obstructing_file = store_dir.as_ref().join("storage");
     std::fs::write(&obstructing_file, b"not a directory").expect("obstruct cleanup paths");
 
-    let error = pull_into_result(&target, &storage, &store_dir)
+    let error = storage
+        .pull_into_result(&target, &store_dir)
         .await
         .expect_err("post-commit filesystem cleanup failure fails the pull");
     assert!(error.to_string().contains("local blob cleanup"), "{error}");
-    assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'cleanup01'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM note_photos WHERE id = 'cleanup01'")
+            .await
+    );
     let pending_before_restart = target
         .test_sql(|database| database.cleanup_intent_copy_identities())
         .await
@@ -5624,7 +5605,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     std::fs::remove_file(&obstructing_file).expect("restore cleanup paths");
 
     let restarted = open_blob_test_db_at(&database_path, cleanup_decl());
-    let (_updated, second) = pull_into(&restarted, &storage, &store_dir).await;
+    let (_updated, second) = storage.pull_into(&restarted, &store_dir).await;
     assert_eq!(second.changesets_applied, 0);
     assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
@@ -5645,24 +5626,24 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         .with_id_column("blob_id");
     let target = open_test_db_with_blob(decl);
     let storage = std::sync::Arc::new(create_store(&target, UserKeypair::generate()).await);
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Host write parent', NULL, \
                  '0000000001000-0000-dev2', '2026-01-01'); \
          INSERT INTO note_photos \
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
          VALUES ('existing-row', 'n1', 'cover', 9, NULL, 'other-blob', \
                  '0000000001000-0000-dev2', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     target
         .test_sql(|database| database.insert_cleanup_intent("photos", "cleanup-race", "local"))
         .await
         .unwrap();
 
     let (_tmp, store_dir) = temp_store_dir();
-    store_local(&store_dir, "cleanup-race", b"old bytes").await;
+    store_dir.store_local("cleanup-race", b"old bytes").await;
     let (reached_filesystem, resume_cleanup) = target.arm_test_pause(
         crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
             namespace: "photos".to_string(),
@@ -5673,9 +5654,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
     let cleanup =
-        tokio::spawn(
-            async move { pull_into(&pull_db, pull_storage.as_ref(), &pull_store_dir).await },
-        );
+        tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     reached_filesystem.notified().await;
     let tables = target.synced_tables().to_vec();
@@ -5722,14 +5701,18 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         host_update.is_err(),
         "the host update must abort while the cleanup intent owns the blob",
     );
-    assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'new-row'").await);
     assert!(
-        row_exists(
-            &target,
-            "SELECT 1 FROM note_photos \
+        !target
+            .test_row_exists("SELECT 1 FROM note_photos WHERE id = 'new-row'")
+            .await
+    );
+    assert!(
+        target
+            .test_row_exists(
+                "SELECT 1 FROM note_photos \
          WHERE id = 'existing-row' AND blob_id = 'other-blob'",
-        )
-        .await
+            )
+            .await
     );
     assert!(
         !store_dir
@@ -5747,20 +5730,20 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     let decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
         .with_id_column("blob_id");
     let target = open_test_db_with_blob(decl);
-    exec(
-        &target,
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    target
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Cleanup parent', NULL, \
                  '0000000001000-0000-dev2', '2026-01-01');",
-    )
-    .await;
+        )
+        .await;
     target
         .test_sql(|database| database.insert_cleanup_intent("photos", "shared-intent", "local"))
         .await
         .unwrap();
 
     let (_tmp, store_dir) = temp_store_dir();
-    store_local(&store_dir, "shared-intent", b"old bytes").await;
+    store_dir.store_local("shared-intent", b"old bytes").await;
     let mut points = target.observe_test_points();
     let before_filesystem = DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
         namespace: "photos".to_string(),
@@ -5831,15 +5814,17 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     assert!(!first.await.expect("first drain task").unwrap());
     assert!(!second.await.expect("second drain task").unwrap());
 
-    exec(
-        &target,
-        "INSERT INTO note_photos \
+    target
+        .execute_test_sql(
+            "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
          VALUES ('live-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
                  '0000000003000-0000-dev2', '2026-01-01')",
-    )
-    .await;
-    store_local(&store_dir, "shared-intent", b"recreated bytes").await;
+        )
+        .await;
+    store_dir
+        .store_local("shared-intent", b"recreated bytes")
+        .await;
     assert!(!crate::database::StoreDatabase::new(&target)
         .drain_local_blob_cleanup(&store_dir)
         .await
@@ -5859,9 +5844,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let db1 = open_test_db_with_blob(decl.clone());
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
-    capture_bytes(
-        &db1,
-        &[
+    db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'SharedBlob', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5878,39 +5861,40 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     )
     .await;
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    store_local(&source_store_dir, "sharedblob", b"SHARED-BYTES").await;
-    make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+    source_store_dir
+        .store_local("sharedblob", b"SHARED-BYTES")
+        .await;
+    storage
+        .make_root_remote(&db1, &source_store_dir, "n1")
+        .await;
 
     let db2 = open_test_db_with_blob(decl);
     let (_tmp, ld) = temp_store_dir();
-    let (_positions, result) = pull_into(&db2, &storage, &ld).await;
+    let (_positions, result) = storage.pull_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
-    let shared_reference = row_blob_ref(&db2, "note_photos", "photo-b").await;
+    let shared_reference = db2.exact_row_blob_ref("note_photos", "photo-b").await;
     let shared_cache_path = exact_cache_path(&ld, &shared_reference);
     assert!(
         shared_cache_path.exists(),
         "the shared CacheEager blob lands in the cache",
     );
 
-    store_local(&source_store_dir, "newblob", b"NEW-BYTES").await;
-    let cs2 = capture_bytes(
-        &db1,
-        &[&format!(
+    source_store_dir.store_local("newblob", b"NEW-BYTES").await;
+    let cs2 = db1
+        .capture_test_changeset(&[&format!(
             "UPDATE note_photos \
              SET cloud_path = 'newblob', size = 9, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'photo-a'",
             crate::blob::content_hash(b"NEW-BYTES"),
-        )],
-    )
-    .await;
+        )])
+        .await;
     publish_blob_changeset(&db1, &storage, &source_store_dir, cs2, 1).await;
 
-    let (_updated, result) = pull_into(&db2, &storage, &ld).await;
+    let (_updated, result) = storage.pull_into(&db2, &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        row_exists(
-            &db2,
+        db2.test_row_exists(
             "SELECT 1 FROM note_photos WHERE id = 'photo-b' AND cloud_path = 'sharedblob'",
         )
         .await,
@@ -5921,7 +5905,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         "a blob-changing update must not drop a copy another live row still references",
     );
     assert!(
-        exact_cache_path(&ld, &row_blob_ref(&db2, "note_photos", "photo-a").await).exists(),
+        exact_cache_path(&ld, &db2.exact_row_blob_ref("note_photos", "photo-a").await).exists(),
         "the replacement blob lands in the cache",
     );
 }
@@ -5934,14 +5918,12 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
 
     let chain = exact_membership_chain(&storage).await;
 
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "dev1",
@@ -5955,25 +5937,25 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         ),
     )
     .await;
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let mut unsigned: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     unsigned
         .as_object_mut()
         .expect("Store commit is a JSON object")
         .remove("signature");
-    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
-        &storage,
-        &graph,
-        serde_json::to_vec(&unsigned).unwrap(),
-        graph.commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let commit_ref = graph
+        .replace_commit_bytes_before_validation(
+            serde_json::to_vec(&unsigned).unwrap(),
+            graph.commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let expected_stream_id = commit_stream_id(&commit_ref);
 
     let db2 = open_test_db();
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a Store commit without its required signature is held");
     assert_eq!(result.held_positions.len(), 1);
@@ -5991,9 +5973,12 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         "unexpected held position: {:#?}",
         result.held_positions[0]
     );
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None,
     );
 }
@@ -6110,16 +6095,10 @@ async fn persisted_cycle_removal() -> PersistedCycleRemoval {
         .activate_joined_device(&db, &second_owner_db, &second_owner, "2026-03-01T00:00:45Z")
         .await
         .expect("activate second Owner device");
-    promote_active_member_fixture(
-        &storage,
-        &db,
-        &second_owner_db,
-        &founder,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote active second Owner");
+    storage
+        .promote_active_member_fixture(&db, &second_owner_db, &founder, &second_owner, &encryption)
+        .await
+        .expect("promote active second Owner");
     let loaded = storage
         .open_into(&db)
         .await
@@ -6261,14 +6240,12 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         )
         .expect("active Owner signs membership grant");
     publish_exact_membership_entry(&storage, &mut chain, add_member, &owner).await;
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'AdvancedHead', NULL, '0000000002000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "devM",
@@ -6297,7 +6274,11 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
 
     assert_eq!(result.changesets_applied, 1);
     assert!(unauthorized_positions(&result).is_empty());
-    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
@@ -6317,14 +6298,12 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     // A founder entry + a changeset the owner authored: without the fail-closed
     // guard the cycle would (fail to list, drop to chain=None, then) apply this.
     let _chain = exact_membership_chain(&storage).await;
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'X', NULL, '0000000001000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     storage
         .publish_changeset(&owner_pk, 1, &cs, SCHEMA_VERSION)
         .await
@@ -6354,7 +6333,8 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         "an exact membership read failure on an owner-pinned store must abort the cycle",
     );
     assert!(
-        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await,
         "nothing is applied when membership cannot be verified",
     );
 }
@@ -6373,14 +6353,12 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
 
     let chain = exact_membership_chain(&storage).await;
     // The owner authors a signed changeset.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromOwner', NULL, '0000000001000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "devOwner",
@@ -6401,10 +6379,13 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
@@ -6450,16 +6431,16 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         )
         .await
         .expect("activate second Owner device");
-    promote_active_member_fixture(
-        &storage,
-        &source,
-        &second_owner_db,
-        &owner,
-        &second_owner,
-        &encryption,
-    )
-    .await
-    .expect("promote active second Owner");
+    storage
+        .promote_active_member_fixture(
+            &source,
+            &second_owner_db,
+            &owner,
+            &second_owner,
+            &encryption,
+        )
+        .await
+        .expect("promote active second Owner");
     let chain = storage
         .open_into(&source)
         .await
@@ -6467,14 +6448,12 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .membership_for_test()
         .await
         .expect("load membership after second Owner promotion");
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'BeforeDemotion', NULL, '0000000002000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "devOwner",
@@ -6515,8 +6494,8 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    pull_into(&target, &storage, &temp_store_dir().1).await;
-    let (_, result) = pull_into(&target, &storage, &temp_store_dir().1).await;
+    storage.pull_into(&target, &temp_store_dir().1).await;
+    let (_, result) = storage.pull_into(&target, &temp_store_dir().1).await;
 
     assert!(result.changesets_applied > 0);
     assert!(unauthorized_positions(&result).is_empty());
@@ -6542,29 +6521,26 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
 
     let _chain = exact_membership_chain(&storage).await;
 
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'MissingGrant', NULL, '0000000001000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = storage
         .publish_changeset("devOwner", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish valid Store changeset before removing its authority");
-    let graph = load_exact_published_commit(&storage, reference).await;
-    let commit = resign_exact_commit(&storage, &graph, SCHEMA_VERSION, None).await;
-    let reference = replace_exact_commit_bytes_before_commit_validation(
-        &storage,
-        &graph,
-        commit.to_bytes(),
-        commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let commit = graph.resign_commit(SCHEMA_VERSION, None).await;
+    let reference = graph
+        .replace_commit_bytes_before_validation(
+            commit.to_bytes(),
+            commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let stream_id = commit_stream_id(&reference);
 
     let target = open_test_db();
@@ -6572,10 +6548,14 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(&target, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&target, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), None);
 }
 
@@ -6602,19 +6582,18 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .await
         .unwrap();
     let (_pull_tmp, pull_store_dir) = temp_store_dir();
-    let (_, activation_result) = pull_into_result(&target, &storage, &pull_store_dir)
+    let (_, activation_result) = storage
+        .pull_into_result(&target, &pull_store_dir)
         .await
         .expect("materialize device activation before replacing heads");
     assert!(activation_result.held_positions.is_empty());
 
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WrongStreamSigner', NULL, '0000000002000-0000-devOwner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let owner_sequence = storage
         .next_commit_sequence("devOwner")
         .await
@@ -6623,7 +6602,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("devOwner", owner_sequence, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let other_sequence = storage
         .next_commit_sequence("other-device")
         .await
@@ -6632,23 +6611,23 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("other-device", other_sequence, &[], SCHEMA_VERSION)
         .await
         .expect("publish second exact device graph");
-    let other = load_exact_published_commit(&storage, other_reference).await;
+    let other = ExactPublishedCommit::load(&storage, other_reference).await;
     storage
         .storage
         .delete_protocol_object(&graph.head_object)
         .await
         .expect("remove original stream head");
-    replace_exact_head(
-        &storage,
-        &other,
-        graph.reference.clone(),
-        other.head.author_registration.clone(),
-        &other.device_signer,
-    )
-    .await;
+    other
+        .replace_head(
+            graph.reference.clone(),
+            other.head.author_registration.clone(),
+            &other.device_signer,
+        )
+        .await;
     let expected_stream_id = commit_stream_id(&other.reference);
 
-    let (_, result) = pull_into_result(&target, &storage, &pull_store_dir)
+    let (_, result) = storage
+        .pull_into_result(&target, &pull_store_dir)
         .await
         .expect("a head signer mismatch holds only that device");
 
@@ -6664,9 +6643,14 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         "unexpected held positions: {:#?}",
         result.held_positions
     );
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(
-        materialized_sequences(&target)
+        target
+            .materialized_sequences()
             .await
             .get(&expected_stream_id),
         None
@@ -6722,28 +6706,26 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .expect("activate member device");
     // The member authors a signed changeset, stamping the grant coordinate of the
     // entry that authorizes them: (owner, 2), the Add that is lagging the LIST.
-    let cs = capture_bytes(
-        &member_db,
-        &[
+    let cs = member_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
-    let reference = sync_for_test(
-        &member_db,
-        member_db.synced_tables(),
-        cs,
-        0,
-        &storage,
-        "",
-        &member,
-        &member_store_dir,
-    )
-    .await
-    .expect("publish member Store changeset")
-    .expect("member Store changeset produces a commit");
+    let reference = storage
+        .sync_for_test(
+            &member_db,
+            member_db.synced_tables(),
+            cs,
+            0,
+            "",
+            &member,
+            &member_store_dir,
+        )
+        .await
+        .expect("publish member Store changeset")
+        .expect("member Store changeset produces a commit");
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
@@ -6783,13 +6765,16 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .pull(&pull_store_dir, None)
         .await
         .expect("pull through lagging membership listing");
-    let updated = materialized_sequences(&db2).await;
+    let updated = db2.materialized_sequences().await;
 
     // The lagging entry was fetched by coordinate and the changeset applied — not
     // dropped as non-member, and not surfaced as a rejection.
     assert_eq!(result.changesets_applied, 1);
     assert!(unauthorized_positions(&result).is_empty());
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
@@ -6821,14 +6806,12 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
 
     // Replace the valid commit's authority with another membership coordinate.
     // The commit remains signed, but its proof no longer matches its predecessor.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Forged', NULL, '0000000001000-0000-devX', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference =
         publish_exact_changeset_with_authority(&storage, "devX", 1, &cs, Some(unrelated_authority))
             .await;
@@ -6839,11 +6822,14 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     // Nothing applies and the durable frontier remains before the forged commit.
     assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     let invalid_authority = missing_exact_membership_authority_positions(&result);
     assert_eq!(
         invalid_authority.len(),
@@ -6858,7 +6844,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         }
     );
     assert_eq!(updated.get(&stream_id), None);
-    assert_eq!(materialized_sequences(&db2).await.get(&stream_id), None,);
+    assert_eq!(db2.materialized_sequences().await.get(&stream_id), None,);
 }
 
 /// Issue #86 — a changeset whose signature does not verify (forged or corrupt in
@@ -6878,14 +6864,12 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     // The owner (a current member) authors a changeset that WOULD be authorized,
     // then its signature is corrupted. The signature check must reject it before
     // authorization is even considered.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Tampered', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "dev1",
@@ -6899,18 +6883,17 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         ),
     )
     .await;
-    let graph = load_exact_published_commit(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference).await;
     let mut forged: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
-    let commit_ref = replace_exact_commit_bytes_before_commit_validation(
-        &storage,
-        &graph,
-        serde_json::to_vec(&forged).unwrap(),
-        graph.commit.commit_hash(),
-        graph.head.author_registration.clone(),
-        &graph.device_signer,
-    )
-    .await;
+    let commit_ref = graph
+        .replace_commit_bytes_before_validation(
+            serde_json::to_vec(&forged).unwrap(),
+            graph.commit.commit_hash(),
+            graph.head.author_registration.clone(),
+            &graph.device_signer,
+        )
+        .await;
     let expected_stream_id = commit_stream_id(&graph.reference);
 
     let db2 = open_test_db();
@@ -6918,7 +6901,8 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         .await
         .unwrap();
 
-    let (_, result) = pull_into_result(&db2, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&db2, &temp_store_dir().1)
         .await
         .expect("a Store commit with an invalid signature is held");
 
@@ -6936,9 +6920,12 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         }
     );
     assert!(unauthorized_positions(&result).is_empty());
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(
-        materialized_sequences(&db2).await.get(&expected_stream_id),
+        db2.materialized_sequences().await.get(&expected_stream_id),
         None
     );
 }
@@ -6973,28 +6960,26 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         .await
         .expect("activate member device");
 
-    let cs = capture_bytes(
-        &member_db,
-        &[
+    let cs = member_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromRemoved', NULL, '0000000003000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
-    let reference = sync_for_test(
-        &member_db,
-        member_db.synced_tables(),
-        cs,
-        0,
-        &storage,
-        "",
-        &member,
-        &member_store_dir,
-    )
-    .await
-    .expect("publish member Store changeset")
-    .expect("member Store changeset produces a commit");
+    let reference = storage
+        .sync_for_test(
+            &member_db,
+            member_db.synced_tables(),
+            cs,
+            0,
+            "",
+            &member,
+            &member_store_dir,
+        )
+        .await
+        .expect("publish member Store changeset")
+        .expect("member Store changeset produces a commit");
     let stream_id = commit_stream_id(&reference);
 
     let remove_member = chain
@@ -7012,14 +6997,17 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         .await
         .unwrap();
 
-    let (_, activation_result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (_, activation_result) = storage.pull_into(&db2, &temp_store_dir().1).await;
     assert!(
         activation_result.held_positions.is_empty(),
         "device activation must materialize before its stream is discovered: {activation_result:#?}"
     );
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert!(
         unauthorized_positions(&result).is_empty(),
         "causally authorized member write was held: {result:#?}"
@@ -7065,30 +7053,28 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .activate_joined_device(&owner_db, &member_db, &member, "2026-03-01T00:02:00Z")
         .await
         .expect("activate member device");
-    let member_changeset = capture_bytes(
-        &member_db,
-        &[
+    let member_changeset = member_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('member-candidate', 'Member candidate', NULL, \
                    '0000000003000-0000-member', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
-    let candidate = sync_for_test(
-        &member_db,
-        member_db.synced_tables(),
-        member_changeset,
-        0,
-        &storage,
-        "",
-        &member,
-        &member_store_dir,
-    )
-    .await
-    .expect("publish member candidate")
-    .expect("member candidate produces a Store commit");
-    let candidate_graph = load_exact_published_commit_as(&storage, candidate, &member).await;
+    let candidate = storage
+        .sync_for_test(
+            &member_db,
+            member_db.synced_tables(),
+            member_changeset,
+            0,
+            "",
+            &member,
+            &member_store_dir,
+        )
+        .await
+        .expect("publish member candidate")
+        .expect("member candidate produces a Store commit");
+    let candidate_graph = ExactPublishedCommit::load_as(&storage, candidate, &member).await;
     let write_id = candidate_graph.commit.write_id.clone();
 
     let remove_member = chain
@@ -7100,34 +7086,32 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         )
         .expect("active Owner removes membership grant");
     publish_exact_membership_entry(&storage, &mut chain, remove_member, &owner).await;
-    let owner_changeset = capture_bytes(
-        &owner_db,
-        &[
+    let owner_changeset = owner_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('revocation-witness', 'Revocation witness', NULL, \
                    '0000000005000-0000-owner', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_owner_temp, owner_store_dir) = temp_store_dir();
     let owner_sequence = owner_device
         .latest_local_store_position()
         .await
         .expect("read Owner witness predecessor")
         .map_or(0, |reference| reference.coord.sequence());
-    sync_for_test(
-        &owner_db,
-        owner_db.synced_tables(),
-        owner_changeset,
-        owner_sequence,
-        &storage,
-        "",
-        &owner,
-        &owner_store_dir,
-    )
-    .await
-    .expect("publish accepted revocation witness")
-    .expect("revocation witness produces a Store commit");
+    storage
+        .sync_for_test(
+            &owner_db,
+            owner_db.synced_tables(),
+            owner_changeset,
+            owner_sequence,
+            "",
+            &owner,
+            &owner_store_dir,
+        )
+        .await
+        .expect("publish accepted revocation witness")
+        .expect("revocation witness produces a Store commit");
 
     let (_pull_temp, pull_store_dir) = temp_store_dir();
     storage.home.fail_nth_exact_delete_of(
@@ -7231,7 +7215,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .await
         .unwrap();
     let (_temp, store_dir) = temp_store_dir();
-    let (_, first) = pull_into(&db2, &storage, &store_dir).await;
+    let (_, first) = storage.pull_into(&db2, &store_dir).await;
     assert_eq!(first.changesets_applied, 0);
 
     // The provider now lags: the slot holding the Remove's head reads as absent,
@@ -7314,14 +7298,12 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
 
     // The member authors a signed changeset, stamping the grant coordinate of the
     // entry that authorizes them: (owner, 2), the Add no head covers yet.
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromUncommittedMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference =
         publish_exact_changeset_with_authority(&storage, "devM", 1, &cs, Some(grant)).await;
     let stream_id = commit_stream_id(&reference);
@@ -7331,7 +7313,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(
@@ -7339,7 +7321,10 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         1,
         "unexpected uncovered-grant result: {result:#?}"
     );
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), None);
 }
 
@@ -7390,14 +7375,12 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .await
         .expect("relocate the grant to another author's coordinate");
 
-    let changeset = capture_bytes(
-        &source,
-        &[
+    let changeset = source
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'RelocatedGrant', NULL, '0000000002000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "devM",
@@ -7419,7 +7402,8 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (_, result) = pull_into_result(&target, &storage, &temp_store_dir().1)
+    let (_, result) = storage
+        .pull_into_result(&target, &temp_store_dir().1)
         .await
         .expect("a relocated membership grant holds its Store stream");
 
@@ -7429,8 +7413,12 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         1,
         "unexpected relocated-grant result: {result:#?}"
     );
-    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(materialized_sequences(&target).await.get(&stream_id), None);
+    assert!(
+        !target
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
+    assert_eq!(target.materialized_sequences().await.get(&stream_id), None);
 }
 
 /// A storage read failure while resolving a grant holds the affected stream at
@@ -7486,28 +7474,26 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await
         .expect("activate member device");
 
-    let cs = capture_bytes(
-        &member_db,
-        &[
+    let cs = member_db
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let (_publish_tmp, publish_store_dir) = temp_store_dir();
-    let reference = sync_for_test(
-        &member_db,
-        member_db.synced_tables(),
-        cs,
-        0,
-        &storage,
-        "",
-        &member,
-        &publish_store_dir,
-    )
-    .await
-    .expect("publish member Store changeset")
-    .expect("member Store changeset produces a commit");
+    let reference = storage
+        .sync_for_test(
+            &member_db,
+            member_db.synced_tables(),
+            cs,
+            0,
+            "",
+            &member,
+            &publish_store_dir,
+        )
+        .await
+        .expect("publish member Store changeset")
+        .expect("member Store changeset produces a commit");
     let stream_id = commit_stream_id(&reference);
 
     failing.interceptor().arm_membership(1);
@@ -7523,8 +7509,11 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         HeldStorePositionReason::InvalidObject(detail)
             if detail.contains("forced exact membership read failure")
     )));
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(materialized_sequences(&db2).await.get(&stream_id), None);
+    assert!(
+        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
+    assert_eq!(db2.materialized_sequences().await.get(&stream_id), None);
 }
 
 /// Cycle start and the mid-cycle reload now share the same head-committed,
@@ -7579,14 +7568,14 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
 
     // First cycle: accepts the head at seq 3 (member removed), persisting the
     // reader's watermark at 3.
-    pull_into(&db2, &storage, &temp_store_dir().1).await;
+    storage.pull_into(&db2, &temp_store_dir().1).await;
 
     storage
         .delete_protocol_object(&remove_head.object)
         .await
         .expect("hide exact remove head to serve the predecessor as terminal");
 
-    let result = pull_into_result(&db2, &storage, &temp_store_dir().1).await;
+    let result = storage.pull_into_result(&db2, &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(StorePullError::Membership(_))),
         "a head regressing below the accepted watermark must be refused, got {:?}",
@@ -7654,7 +7643,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .await
         .unwrap();
 
-    let result = pull_into_result(&db2, &storage, &temp_store_dir().1).await;
+    let result = storage.pull_into_result(&db2, &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(StorePullError::Membership(_))),
         "a malformed chain on a pinned-owner store must be refused, got {:?}",
@@ -7675,14 +7664,12 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
 
     let chain = exact_membership_chain(&storage).await;
 
-    let cs = capture_bytes(
-        &db1,
-        &[
+    let cs = db1
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromMember', NULL, '0000000001000-0000-devA', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let reference = publish_exact_changeset_with_authority(
         &storage,
         "devA",
@@ -7703,10 +7690,13 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, &temp_store_dir().1).await;
+    let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(
+        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            .await
+    );
     assert_eq!(updated.get(&stream_id), Some(&1));
 }
 
@@ -7737,9 +7727,7 @@ mod blob_path_traversal {
         // The source's changeset adds a note + a photo row whose id is the
         // traversal string. (The mock stored the blob above; this is the row that
         // references it.)
-        capture_bytes(
-            &db1,
-            &[
+        db1.capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
                 &format!(
@@ -7775,20 +7763,17 @@ mod blob_path_traversal {
         let db1 = open_test_db_with_blob(photo_decl());
         create_store(&db1, UserKeypair::generate()).await;
 
-        capture_bytes(
-            &db1,
-            &[
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+        db1.capture_test_changeset(&[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-                // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
-                // prefix slice, so the path builder refuses it.
-                &format!(
-                    "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+            // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
+            // prefix slice, so the path builder refuses it.
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('a', 'n1', 'cover', 1, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                    crate::blob::content_hash(b"A"),
-                ),
-            ],
-        )
+                crate::blob::content_hash(b"A"),
+            ),
+        ])
         .await;
         let (_tmp, store_dir) = temp_store_dir();
         let error =
@@ -7812,9 +7797,7 @@ mod blob_path_traversal {
         let db1 = open_test_db_with_blob(photo_decl());
         let storage = create_store(&db1, UserKeypair::generate()).await;
 
-        capture_bytes(
-            &db1,
-            &[
+        db1.capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
                 &format!(
@@ -7826,19 +7809,21 @@ mod blob_path_traversal {
         )
         .await;
         let (_source_tmp, source_store_dir) = temp_store_dir();
-        store_local(&source_store_dir, "p1ab", b"PHOTOBYTES").await;
-        make_test_root_remote(&db1, &storage, &source_store_dir, "n1").await;
+        source_store_dir.store_local("p1ab", b"PHOTOBYTES").await;
+        storage
+            .make_root_remote(&db1, &source_store_dir, "n1")
+            .await;
 
         let db2 = open_test_db_with_blob(photo_decl());
         let (_t, ld) = temp_store_dir();
-        let (updated, result) = pull_into(&db2, &storage, &ld).await;
+        let (updated, result) = storage.pull_into(&db2, &ld).await;
 
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
         let written = std::fs::read(exact_cache_path(
             &ld,
-            &row_blob_ref(&db2, "note_photos", "p1ab").await,
+            &db2.exact_row_blob_ref("note_photos", "p1ab").await,
         ))
         .expect("blob written");
         assert_eq!(
@@ -7876,10 +7861,10 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     }
     for participant in [&first, &second, &receiver] {
         let (_activation_temp, activation_store_dir) = temp_store_dir();
-        pull_into(participant, &storage, &activation_store_dir).await;
+        storage.pull_into(participant, &activation_store_dir).await;
     }
-    let first_stream = local_announcement_stream(&first).await;
-    let second_stream = local_announcement_stream(&second).await;
+    let first_stream = first.local_announcement_stream().await;
+    let second_stream = second.local_announcement_stream().await;
     let (db_ins, db_upd, insert_stream, update_stream) = if first_stream > second_stream {
         (&first, &second, first_stream, second_stream)
     } else {
@@ -7892,14 +7877,12 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         .expect("retain inserter Store device");
 
     let (_ti, ld_ins) = temp_store_dir();
-    let insert = capture_bytes(
-        db_ins,
-        &[
+    let insert = db_ins
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('n1', 'orig', NULL, 1, '0000000001000-0000-ins', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle_as(db_ins, &tables, &storage, insert, 0, &keypair, &ld_ins).await;
     let insert_position = inserter_device
         .latest_local_store_position()
@@ -7908,7 +7891,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         .expect("inserter published one Store commit");
 
     let (_tu, ld_upd) = temp_store_dir();
-    pull_into(db_upd, &storage, &ld_upd).await;
+    storage.pull_into(db_upd, &ld_upd).await;
     assert_eq!(
         store_database(db_upd)
             .materialized_frontier()
@@ -7918,24 +7901,22 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         Some(&insert_position),
         "the updater durably materializes the exact insert before capturing its update",
     );
-    let update = capture_bytes(
-        db_upd,
-        &[
+    let update = db_upd
+        .capture_test_changeset(&[
             "UPDATE notes SET title = 'updated', _updated_at = '0000000002000-0000-upd' \
            WHERE id = 'n1'",
-        ],
-    )
-    .await;
+        ])
+        .await;
     push_cycle_as(db_upd, &tables, &storage, update, 0, &keypair, &ld_upd).await;
     let updater = storage
         .bind_device(db_upd, &keypair)
         .await
         .expect("load updater Store");
-    let (_, update_commit) =
-        load_exact_materialized_commit(&updater, &update_stream.to_string(), 1)
-            .await
-            .expect("load updater Store commit")
-            .expect("updater Store commit is materialized");
+    let (_, update_commit) = updater
+        .load_exact_materialized_commit(&update_stream.to_string(), 1)
+        .await
+        .expect("load updater Store commit")
+        .expect("updater Store commit is materialized");
     assert_eq!(
         update_commit.order.dependencies().get(&insert_stream),
         Some(&insert_position),
@@ -7943,10 +7924,12 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     );
 
     let (_tc, ld_c) = temp_store_dir();
-    pull_into(&receiver, &storage, &ld_c).await;
+    storage.pull_into(&receiver, &ld_c).await;
 
     assert_eq!(
-        query_text(&receiver, "SELECT title FROM notes WHERE id = 'n1'").await,
+        receiver
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+            .await,
         "updated",
         "the dependent UPDATE must wait for its exact INSERT dependency",
     );

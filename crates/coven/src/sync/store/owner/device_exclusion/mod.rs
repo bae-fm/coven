@@ -570,6 +570,115 @@ pub(crate) enum StoreDeviceExclusionError {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) async fn device_exclusion_operations_for_test(
+        &self,
+    ) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
+        self.database
+            .outbound_store_device_exclusion_operations()
+            .await?
+            .into_iter()
+            .map(|operation| {
+                let operation_id = operation.operation_id();
+                let status = if operation.is_completed() {
+                    StoreDeviceExclusionOperationStatus::Completed(completion_result(&operation)?)
+                } else {
+                    StoreDeviceExclusionOperationStatus::Pending
+                };
+                Ok(StoreDeviceExclusionOperationInfo {
+                    operation_id,
+                    status,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
+        &self,
+    ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+        let plan = writer.prepare_plan().await?;
+        let target = plan.registration_ref().clone();
+        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+            b"restart exclusion proposal",
+        ));
+        let outcome_prefix =
+            device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id);
+        let outcome_context = ProtocolObjectContext::signed_plaintext(
+            plan.root().store_root_hash,
+            ProtocolObjectDomain::StoreDeviceExclusionOutcome,
+        );
+        let outcome_slot = self
+            .storage
+            .allocate_protocol_slot(&outcome_context, &outcome_prefix, ".json")
+            .await?;
+        let proposal = StoreDeviceExclusionProposal::signed(
+            plan.root().store_root_hash,
+            proposal_id,
+            target.clone(),
+            plan.registration(),
+            plan.device_state().clone(),
+            outcome_slot,
+            target.clone(),
+            plan.owner_grant()
+                .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?
+                .clone(),
+            plan.registration(),
+            plan.device_signer(),
+        )?;
+        let prefix = device_exclusion_proposal_semantic_prefix(
+            target.device_id,
+            proposal_id,
+            proposal.proposal_hash(),
+        );
+        let context = ProtocolObjectContext::signed_plaintext(
+            plan.root().store_root_hash,
+            ProtocolObjectDomain::StoreDeviceExclusionProposal,
+        );
+        let slot = self
+            .storage
+            .allocate_protocol_slot(&context, &prefix, ".json")
+            .await?;
+        let prepared =
+            self.storage
+                .prepare_protocol_object(&context, slot, &prefix, proposal.to_bytes())?;
+        let reference = StoreDeviceExclusionProposalRef::from_proposal(
+            &proposal,
+            prepared.reference().clone(),
+        )?;
+        let retained =
+            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
+                reference.clone(),
+                &proposal,
+                plan.registration(),
+                plan.registration(),
+            )?;
+        let candidate = writer
+            .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionProposal(retained))
+            .await?;
+        let operation = DurableStoreDeviceExclusionOperation::prepared(
+            DurableStoreDeviceExclusionObject::Proposal {
+                reference: reference.clone(),
+                value: proposal,
+                prepared,
+            },
+            candidate,
+        )?;
+        let durable = self
+            .database
+            .begin_outbound_store_device_exclusion(operation)
+            .await?;
+        durable.create_exact_object(self.storage.as_ref()).await?;
+        self.database
+            .mark_store_device_exclusion_authority_uploaded(durable)
+            .await?;
+        Ok(reference)
+    }
+
     pub(crate) async fn propose_device_exclusion_for_device(
         &self,
         device_id: crate::protocol::store_commit::StoreDeviceId,
@@ -804,29 +913,6 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .await;
         Ok(durable)
     }
-}
-
-#[cfg(test)]
-async fn get_device_exclusion_operations(
-    database: &StoreDatabase,
-) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
-    database
-        .outbound_store_device_exclusion_operations()
-        .await?
-        .into_iter()
-        .map(|operation| {
-            let operation_id = operation.operation_id();
-            let status = if operation.is_completed() {
-                StoreDeviceExclusionOperationStatus::Completed(completion_result(&operation)?)
-            } else {
-                StoreDeviceExclusionOperationStatus::Pending
-            };
-            Ok(StoreDeviceExclusionOperationInfo {
-                operation_id,
-                status,
-            })
-        })
-        .collect()
 }
 
 #[derive(Clone, Copy)]

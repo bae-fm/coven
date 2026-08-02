@@ -28,31 +28,6 @@ use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };
 
-async fn local_device_id(db: &Database) -> String {
-    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device id")
-        .expect("local Store device is active")
-}
-
-async fn publish_circle_epoch_close_response(
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    db: &Database,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-        .circles()
-        .close()
-        .publish_circle_epoch_close_responses()
-        .await
-}
-
 async fn create_test_store_in_its_own_task(
     db: &Database,
     name: &str,
@@ -67,449 +42,19 @@ async fn create_test_store_in_its_own_task(
         .expect("create exact Circle test Store")
 }
 
-async fn prepare_circle_operation(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    metadata_stamp: &str,
-    name: &str,
-    signer: &UserKeypair,
-) -> Result<CircleOperationJournal, CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    authority
-        .circles()
-        .preparer()
-        .prepare_create(metadata_stamp, name)
-        .await
-}
-
-async fn prepare_circle_operation_request(
-    authority: &mut AuthorizedWriterOperation<'_>,
-    request: CircleOperationRequest,
-) -> Result<CircleOperationJournal, CircleOperationError> {
-    authority
-        .circles()
-        .preparer()
-        .prepare_request(request)
-        .await
-}
-
-async fn prepare_test_circle_object(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    signer: &UserKeypair,
-    context: &ProtocolObjectContext,
-    semantic_prefix: &str,
-    extension: &str,
-    bytes: Vec<u8>,
-) -> Result<PreparedExactObject, CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    authority
-        .circles()
-        .preparer()
-        .prepare_circle_object(context, semantic_prefix, extension, bytes)
-        .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn prepare_test_circle_object_at(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    signer: &UserKeypair,
-    context: &ProtocolObjectContext,
-    slot: crate::storage::cloud::ObjectSlot,
-    semantic_prefix: &str,
-    bytes: Vec<u8>,
-) -> Result<PreparedExactObject, CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    authority
-        .circles()
-        .preparer()
-        .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
-}
-
-async fn prepare_test_circle_activation_objects(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    signer: &UserKeypair,
-    draft: CircleTransitionDraft,
-    history: &CircleTransitionHistory,
-    candidate_family: crate::protocol::store_commit::CandidateFamilyId,
-) -> Result<
-    (
-        PreparedCircleTransition,
-        CircleActivationObjects,
-        std::collections::BTreeMap<String, PreparedExactObject>,
-        Option<ExactObjectRef>,
-        Vec<StreamActivation>,
-    ),
-    CircleOperationError,
-> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    authority
-        .circles()
-        .preparer()
-        .prepare_circle_activation_objects(draft, history, &[], candidate_family)
-        .await
-}
-
-async fn publish_circle_operation(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    operation_id: &CircleOperationId,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
-        store.store_root().store_root_hash,
-    )
-    .expect("derive Circle test routing key");
-    authority
-        .circles()
-        .publisher()
-        .publish(operation_id, Some(&routing_key))
-        .await
-}
-
-async fn resume_circle_operations(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    let store =
-        crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-            .await?;
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
-        store.store_root().store_root_hash,
-    )
-    .expect("derive Circle test routing key");
-    store
-        .authorize_writer()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-        .circles()
-        .resume_circle_operations(Some(&routing_key))
-        .await
-}
-
-async fn retry_circle_operation(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    operation_id: &CircleOperationId,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-        .await?
-        .circles()
-        .retry_circle_operation(
-            operation_id,
-            Some(&crate::encryption::EncryptionService::from_key([42; 32])),
-        )
-        .await
-}
-
-async fn discard_circle_operation(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    operation_id: &CircleOperationId,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-        .await?
-        .circles()
-        .discard_circle_operation(operation_id)
-        .await
-}
-
-async fn remote_object_exists(db: &Database, object: &ExactObjectRef) -> bool {
-    db.remote_object_exists_for_test(object.clone())
-        .await
-        .expect("check stored remote object")
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn rename_circle(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    metadata_stamp: &str,
-    circle_id: CircleId,
-    name: &str,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-        .await?
-        .circles()
-        .rename_circle(metadata_stamp, circle_id, name)
-        .await
-}
-
-async fn delete_circle(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    circle_id: CircleId,
-    signer: &UserKeypair,
-) -> Result<(), CircleOperationError> {
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), signer.clone())
-        .await?
-        .circles()
-        .delete_circle(circle_id)
-        .await
-}
-
-async fn verified_circle_activation(
-    store: &TestStore,
-    db: &Database,
-    identity: &UserKeypair,
-    circle_id: CircleId,
-    control: crate::protocol::circle::CircleControlCoord,
-) -> Result<
-    Option<crate::sync::store::circle_controls::VerifiedCircleReference>,
-    crate::database::DbError,
-> {
-    store
-        .bind_device(db, identity)
-        .await
-        .map_err(crate::database::DbError::Message)?
-        .verified_circle_activation_for_test(circle_id, control)
-        .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn load_circle_activations(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    commit_ref: &StoreBatchCommitRef,
-    commit: &StoreBatchCommit,
-    author: &crate::protocol::store_commit::StoreDeviceRegistration,
-    identity: &UserKeypair,
-) -> Result<VerifiedCircleActivations, CircleOperationError> {
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
-        commit.store_root_hash,
-    )
-    .expect("derive Circle test routing key");
-    crate::sync::store::Store::load(StoreDatabase::new(db), storage.clone(), identity.clone())
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-        .load_circle_activations_for_test(commit_ref, commit, author, Some(&routing_key))
-        .await
-}
-
-/// Publish a valid, different Store commit and activation head at a prepared
-/// Circle operation's exact device-stream successor slot, so the operation's
-/// candidate loses that slot to a verified Merge winner. Returns the winner's
-/// commit and head objects so a test can assert they survive the loser's
-/// candidate-exclusive cleanup.
-async fn publish_competing_store_head(
-    db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
-    signer: &UserKeypair,
-    journal: &CircleOperationJournal,
-) -> (ExactObjectRef, ExactObjectRef) {
-    let database = StoreDatabase::new(db);
-    let root = database
-        .local_store_root_ref()
-        .await
-        .expect("read Store root")
-        .expect("Store root installed");
-    let candidate = journal.commit().expect("parse candidate Store commit");
-    let coord = journal.operation().commit_ref.coord.clone();
-    let head = &journal.operation().policy.head;
-    let registration = database
-        .activated_store_device_registration(candidate.author_registration.clone())
-        .await
-        .expect("load candidate author registration");
-    let device_signer = registration
-        .device_signer(signer)
-        .expect("derive candidate device signer");
-    let package = crate::protocol::audience_package::AudiencePackage::store(
-        root.store_root_hash,
-        candidate.candidate_family(),
-        candidate.write_id.clone(),
-        coord.clone(),
-        db.schema_version(),
-        b"competing valid package".to_vec(),
-        Vec::new(),
-    )
-    .expect("construct competing package");
-    let package_bytes = package.to_bytes();
-    let package_prefix = crate::protocol::store_commit::package_semantic_prefix(
-        candidate.candidate_family(),
-        &coord.stream_id.to_string(),
-        candidate.seq(),
-        ObjectHash::digest(&package_bytes),
-    );
-    let package_context = ProtocolObjectContext::store_encrypted(
-        root.store_root_hash,
-        ProtocolObjectDomain::StorePackage,
-    );
-    let package_slot = storage
-        .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
-        .await
-        .expect("reserve competing package slot");
-    let package_prepared = storage
-        .prepare_protocol_object(
-            &package_context,
-            package_slot,
-            &package_prefix,
-            package_bytes.clone(),
-        )
-        .expect("prepare competing package");
-    storage
-        .create_protocol_object(&package_prepared)
-        .await
-        .expect("publish competing package");
-    let membership =
-        crate::sync::store::Store::load(database.clone(), storage.clone(), signer.clone())
-            .await
-            .expect("load competing commit Store")
-            .membership_for_test()
-            .await
-            .expect("load competing commit membership");
-    let predecessor = membership
-        .write_grant_authority(&registration.author_pubkey)
-        .expect("competing author has an active write grant");
-    let winner = StoreBatchCommit::signed(
-        root.store_root_hash,
-        candidate.write_id.clone(),
-        coord.clone(),
-        candidate.author_registration.clone(),
-        &registration,
-        candidate.order.clone(),
-        candidate.membership_state.clone(),
-        candidate.device_state.clone(),
-        crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
-        crate::protocol::store_commit::StorePackageInput {
-            candidate_family: candidate.candidate_family(),
-            schema_version: db.schema_version(),
-            bytes: &package_bytes,
-            object: package_prepared.reference().clone(),
-        },
-        &device_signer,
-    )
-    .expect("sign competing commit");
-    let commit_prefix = commit_semantic_prefix(
-        winner.candidate_family(),
-        &coord.stream_id.to_string(),
-        winner.seq(),
-        winner.commit_hash(),
-    );
-    let commit_context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreCommit,
-    );
-    let commit_slot = storage
-        .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
-        .await
-        .expect("reserve competing commit slot");
-    let commit_prepared = storage
-        .prepare_protocol_object(
-            &commit_context,
-            commit_slot,
-            &commit_prefix,
-            winner.to_bytes(),
-        )
-        .expect("prepare competing commit");
-    storage
-        .create_protocol_object(&commit_prepared)
-        .await
-        .expect("publish competing commit");
-    let winner_ref = StoreBatchCommitRef::from_commit(
-        &winner,
-        coord.clone(),
-        commit_prepared.reference().clone(),
-    )
-    .expect("reference competing commit");
-    assert_ne!(winner_ref, journal.operation().commit_ref);
-    let winner_head = StoreDeviceHead::signed(
-        root.store_root_hash,
-        candidate.author_registration.clone(),
-        winner_ref,
-        head.history_summary,
-        head.successor.clone(),
-        &device_signer,
-    )
-    .expect("sign competing head");
-    let head_context = ProtocolObjectContext::signed_plaintext(
-        root.store_root_hash,
-        ProtocolObjectDomain::StoreHead,
-    );
-    let head_slot = journal
-        .operation()
-        .prepared_objects
-        .get("store-head")
-        .expect("candidate carries a prepared Store head")
-        .reference()
-        .slot()
-        .clone();
-    let head_prefix = head_slot_prefix(
-        &candidate.author_registration.device_id.to_string(),
-        candidate.seq(),
-    );
-    let head_prepared = storage
-        .prepare_protocol_object(
-            &head_context,
-            head_slot,
-            &head_prefix,
-            winner_head.to_bytes(),
-        )
-        .expect("prepare competing head");
-    storage
-        .create_protocol_object(&head_prepared)
-        .await
-        .expect("publish competing head");
-    (
-        commit_prepared.reference().clone(),
-        head_prepared.reference().clone(),
-    )
-}
-
 async fn persist_merge_operation(
     db: &Database,
     name: &str,
 ) -> (TestStore, UserKeypair, CircleOperationJournal) {
     let signer = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(db, name, &signer).await;
-    let journal = prepare_circle_operation(
-        db,
-        &store.storage,
-        "0000000001000-0000-creator",
-        "Household",
-        &signer,
-    )
-    .await
-    .expect("prepare circle operation");
+    let journal = store
+        .bind_device(db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-creator", "Household")
+        .await
+        .expect("prepare circle operation");
     StoreDatabase::new(db)
         .insert_circle_operation(journal.clone())
         .await
@@ -519,7 +64,7 @@ async fn persist_merge_operation(
 
 async fn resign_merge_journal_with_objects(
     db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
+    store: &TestStore,
     signer: &UserKeypair,
     journal: &mut CircleOperationJournal,
     mutate: impl FnOnce(&mut CircleActivationObjects),
@@ -534,12 +79,12 @@ async fn resign_merge_journal_with_objects(
         .operation()
         .creation
         .control_ref(objects, Some(old_reference.head_object().clone()));
-    resign_merge_journal_with_reference(db, storage, signer, journal, reference, |_| {}).await;
+    resign_merge_journal_with_reference(db, store, signer, journal, reference, |_| {}).await;
 }
 
 async fn resign_merge_journal_with_reference(
     db: &Database,
-    storage: &Arc<crate::storage::CloudSyncStorage>,
+    store: &TestStore,
     signer: &UserKeypair,
     journal: &mut CircleOperationJournal,
     reference: crate::protocol::store_commit::CircleControlRef,
@@ -575,25 +120,27 @@ async fn resign_merge_journal_with_reference(
     mutate_commit(&mut commit);
     commit.signature = keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
     let StoreCommitCoord { stream_id, .. } = coord.clone();
-    let commit_prepared = prepare_test_circle_object(
-        db,
-        storage,
-        signer,
-        &ProtocolObjectContext::signed_plaintext(
-            commit.store_root_hash,
-            ProtocolObjectDomain::StoreCommit,
-        ),
-        &commit_semantic_prefix(
-            commit.candidate_family(),
-            &stream_id.to_string(),
-            commit.seq(),
-            commit.commit_hash(),
-        ),
-        ".json",
-        commit.to_bytes(),
-    )
-    .await
-    .expect("prepare substituted Circle commit");
+    let device = store
+        .bind_device(db, signer)
+        .await
+        .expect("bind substituted Circle object Store");
+    let commit_prepared = device
+        .prepare_circle_object(
+            &ProtocolObjectContext::signed_plaintext(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                commit.seq(),
+                commit.commit_hash(),
+            ),
+            ".json",
+            commit.to_bytes(),
+        )
+        .await
+        .expect("prepare substituted Circle commit");
     let commit_ref =
         StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
             .expect("bind substituted Circle commit");
@@ -618,23 +165,21 @@ async fn resign_merge_journal_with_reference(
         .reference()
         .slot()
         .clone();
-    let head_prepared = prepare_test_circle_object_at(
-        db,
-        storage,
-        signer,
-        &ProtocolObjectContext::signed_plaintext(
-            commit.store_root_hash,
-            ProtocolObjectDomain::StoreHead,
-        ),
-        head_slot,
-        &head_slot_prefix(
-            &commit.author_registration.device_id.to_string(),
-            commit.seq(),
-        ),
-        head.to_bytes(),
-    )
-    .await
-    .expect("prepare substituted Circle Store head");
+    let head_prepared = device
+        .prepare_circle_object_at(
+            &ProtocolObjectContext::signed_plaintext(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            ),
+            head_slot,
+            &head_slot_prefix(
+                &commit.author_registration.device_id.to_string(),
+                commit.seq(),
+            ),
+            head.to_bytes(),
+        )
+        .await
+        .expect("prepare substituted Circle Store head");
     let operation = journal.operation_mut();
     operation.commit_bytes = commit.to_bytes();
     operation.commit_ref = commit_ref;
@@ -740,12 +285,6 @@ fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitio
         access: creation.access.clone(),
         control: creation.control.clone(),
     }
-}
-
-async fn activation_count(db: &Database, circle_id: CircleId) -> i64 {
-    db.test_sql(move |database| database.circle_control_activation_count(circle_id))
-        .await
-        .expect("count circle activations")
 }
 
 fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOperationJournal) {

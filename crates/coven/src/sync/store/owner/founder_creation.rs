@@ -10,6 +10,7 @@ use crate::protocol::store_commit::{
 use crate::storage::{ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::protocol_root::*;
 use crate::sync::store::registration_object::prepare_registration_object;
+use std::sync::Arc;
 
 use super::authorized_history::AuthorizedStoreHistory;
 use super::verified_history::MergeHistoryVerifier;

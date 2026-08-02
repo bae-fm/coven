@@ -19,41 +19,35 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     )
     .await
     .expect("create Store");
-    let first_changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let first_changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('reclaim-target', 'target', NULL, \
            '0000000001000-0000-reclaim', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let target_activation = store
         .publish_changeset("founder", 1, &first_changeset, db.schema_version())
         .await
         .expect("publish target package");
-    let authority_changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let authority_changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('reclaim-authority', 'authority', NULL, \
            '0000000002000-0000-reclaim', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let authorization_activation = store
         .publish_changeset("founder", 2, &authority_changeset, db.schema_version())
         .await
         .expect("publish later Store position");
-    let receipt_changeset = crate::sync::test_helpers::capture_bytes(
-        &crate::sync::test_helpers::open_test_db(),
-        &[
+    let receipt_changeset = crate::sync::test_helpers::open_test_db()
+        .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('reclaim-receipt', 'receipt', NULL, \
            '0000000003000-0000-reclaim', '2026-01-01')",
-        ],
-    )
-    .await;
+        ])
+        .await;
     let receipt_activation = store
         .publish_changeset("founder", 3, &receipt_changeset, db.schema_version())
         .await

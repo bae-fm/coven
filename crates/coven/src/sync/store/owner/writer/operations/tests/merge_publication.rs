@@ -10,7 +10,8 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     );
 
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("publish prepared Store package"),
         1,
@@ -104,7 +105,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
     for failed_call in 1..=3 {
         let fixture = PreparedWriteFixture::prepare().await;
         fixture.home.fail_exact_create_before_call(failed_call);
-        let first = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
+        let first = fixture.drain_store_writes().await;
         assert!(first.is_err(), "exact create call {failed_call} fails");
         assert_eq!(
             fixture
@@ -148,7 +149,8 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
         assert!(!fixture.home.contains_exact_object(&fixture.head_object),);
 
         assert_eq!(
-            drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+            fixture
+                .drain_store_writes()
                 .await
                 .expect("retry exact outbound batch"),
             1,
@@ -189,7 +191,8 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     let winner = fixture.publish_competing_merge_head().await;
 
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("classify the occupied Merge successor slot"),
         0,
@@ -282,7 +285,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     );
     fixture.home.fail_exact_delete_on_call(2);
     assert!(fixture
-        .store
+        .device
         .cleanup_merge_candidate_for_test(fixture.write_id.clone())
         .await
         .is_err());
@@ -291,7 +294,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         .home
         .contains_exact_object(&fixture.commit_ref.object));
     fixture
-        .store
+        .device
         .cleanup_merge_candidate_for_test(fixture.write_id.clone())
         .await
         .expect("resume exact losing Merge cleanup");
@@ -332,14 +335,8 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .await
         .expect("block prepared Merge candidate");
 
-    let store = Store::load(
-        fixture.database.clone(),
-        fixture.storage.clone(),
-        fixture.keypair.clone(),
-    )
-    .await
-    .expect("load Store write recovery owner");
-    let discarded = store
+    let discarded = fixture
+        .device
         .discard_blocked_write(fixture.write_id.clone())
         .await
         .expect("abandon and discard the blocked candidate");
@@ -351,7 +348,7 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .await
         .expect("candidate cleanup completed"));
     let authority = fixture
-        .store
+        .device
         .latest_local_store_position()
         .await
         .expect("read local Merge position")
@@ -658,7 +655,8 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
     let accepted_head = fixture.publish_alternate_head_for_prepared_commit().await;
 
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("accept the exact commit through the occupied Merge head"),
         1,
@@ -686,7 +684,7 @@ async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
     let fixture = PreparedWriteFixture::prepare().await;
     fixture.home.corrupt_exact_readback_on_call(1);
 
-    let result = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
+    let result = fixture.drain_store_writes().await;
 
     assert!(matches!(
         result,
@@ -715,7 +713,8 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
     let fixture = PreparedWriteFixture::prepare().await;
     fixture.home.fail_exact_create_after_call(3);
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("settle lost head response by exact readback"),
         1
@@ -736,7 +735,8 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
     );
 
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("already-completed exact batch is idempotent"),
         0
@@ -761,7 +761,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         .test_sql(|database| database.install_outbound_completion_failure_trigger())
         .await
         .expect("install completion fault");
-    let first = drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair).await;
+    let first = fixture.drain_store_writes().await;
     assert!(matches!(first, Err(StoreError::Database(_))));
     assert_eq!(
         fixture
@@ -799,7 +799,8 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         .await
         .expect("remove completion fault");
     assert_eq!(
-        drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
+        fixture
+            .drain_store_writes()
             .await
             .expect("retry local completion"),
         1
@@ -859,21 +860,25 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .expect("in-memory home supports immutable copies"),
         );
         let db = open();
-        let (_root, _) =
-            initialize_exact_store(&db, &storage, "prepared-root-status", &keypair).await;
-        host_exec(
+        let device = crate::sync::test_helpers::TestDevice::create(
             &db,
+            storage.clone(),
+            "prepared-root-status",
+            keypair.clone(),
+        )
+        .await
+        .expect("create prepared-root-status Store");
+        db.execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('root-status', 'outbound', NULL, 1, \
                      '0000000001000-0000-writer', '2026-01-01')",
         )
         .await;
         let (_store_temp, store_dir) = temp_store_dir();
-        assert!(
-            prepare_merge_store_write(&db, &storage, &keypair, &store_dir,)
-                .await
-                .expect("prepare write")
-        );
+        assert!(device
+            .prepare_pending_store_write(&store_dir)
+            .await
+            .expect("prepare write"));
         let write_id = crate::database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
@@ -886,11 +891,21 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         db.test_sql(move |conn| conn.replace_store_root_hash(invalid_root))
             .await
             .expect("make root unusable");
+        drop(device);
         drop(db);
 
         let reopened = open();
         let reopened_database = crate::database::StoreDatabase::new(&reopened);
-        let result = drain_store_writes(&reopened, &storage, &keypair).await;
+        let result = match crate::sync::test_helpers::TestDevice::load(
+            &reopened,
+            storage.clone(),
+            keypair.clone(),
+        )
+        .await
+        {
+            Ok(device) => device.drain_store_writes().await,
+            Err(error) => Err(error),
+        };
         match (invalid_root, result) {
             (
                 None,
@@ -929,9 +944,15 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
     );
     let db = open_test_db();
     let database = crate::database::StoreDatabase::new(&db);
-    let (_root, _) = initialize_exact_store(&db, &storage, "blocked-retry", &keypair).await;
-    host_exec(
+    let device = crate::sync::test_helpers::TestDevice::create(
         &db,
+        storage.clone(),
+        "blocked-retry",
+        keypair.clone(),
+    )
+    .await
+    .expect("create blocked-retry Store");
+    db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('blocked-first', 'first', NULL, 1, \
                  '0000000001000-0000-writer', '2026-01-01')",
@@ -942,14 +963,11 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         .await
         .expect("load pending writes");
     let write_id = writes[0].write_id.clone();
-    let store = crate::sync::store::Store::load(database.clone(), storage.clone(), keypair.clone())
-        .await
-        .expect("load Store before invalidating its durable root");
-    let mut writer = store
+    let mut writer = device
         .authorize_writer()
         .await
         .expect("authorize writer before invalidating its durable root");
-    remove_exact_store_root(&db).await;
+    db.remove_store_protocol_root_for_test().await;
     let (_store_temp, store_dir) = temp_store_dir();
 
     assert!(writer
@@ -960,8 +978,9 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         database.write_status(&write_id).await.unwrap(),
         crate::WriteStatus::Publishing
     );
+    drop(writer);
     assert!(matches!(
-        crate::sync::store::Store::load(database, storage.clone(), keypair.clone(),).await,
+        crate::sync::test_helpers::TestDevice::load(&db, storage.clone(), keypair.clone()).await,
         Err(StoreError::MissingState { .. })
     ));
 }
@@ -982,16 +1001,21 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     );
     let db = open_test_db();
     let database = crate::database::StoreDatabase::new(&db);
-    initialize_exact_store(&db, &storage, "blocked-discard", &keypair).await;
-    host_exec(
+    let device = crate::sync::test_helpers::TestDevice::create(
         &db,
+        storage.clone(),
+        "blocked-discard",
+        keypair.clone(),
+    )
+    .await
+    .expect("create blocked-discard Store");
+    db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-first', 'first', NULL, 1, \
                  '0000000001000-0000-writer', '2026-01-01')",
     )
     .await;
-    host_exec(
-        &db,
+    db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-second', 'second', NULL, 1, \
                  '0000000001001-0000-writer', '2026-01-01')",
@@ -1031,20 +1055,15 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         );
     }
 
-    host_exec(
-        &db,
+    db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('after-discard', 'after', NULL, 1, \
                  '0000000001002-0000-writer', '2026-01-01')",
     )
     .await;
-    assert!(
-        prepare_merge_store_write(&db, &storage, &keypair, &store_dir,)
-            .await
-            .expect("prepare write after discarded blocked writes")
-    );
-    assert_eq!(
-        drain_store_writes(&db, &storage, &keypair).await.unwrap(),
-        1
-    );
+    assert!(device
+        .prepare_pending_store_write(&store_dir)
+        .await
+        .expect("prepare write after discarded blocked writes"));
+    assert_eq!(device.drain_store_writes().await.unwrap(), 1);
 }

@@ -9,6 +9,7 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, 
 use crate::sync::store::membership::InviteError;
 use crate::sync::store::operations::blocked_status;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
+use std::sync::Arc;
 
 pub(super) struct LocalStoreWriter<'store> {
     pub(super) identity: &'store UserKeypair,

@@ -1,6 +1,251 @@
 use crate::database::{Database, DatabaseTestSql, DbError};
+use rusqlite::OptionalExtension;
 
 impl Database {
+    pub(crate) async fn remove_store_protocol_root_for_test(&self) {
+        self.test_sql(|database| database.remove_store_protocol_root())
+            .await
+            .expect("remove exact Store root authority");
+    }
+
+    pub(crate) async fn tamper_retained_recovery_registration_for_test(
+        &self,
+        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        tamper: crate::database::RetainedRegistrationTamper,
+    ) {
+        let reference = reference.clone();
+        self.test_sql(move |database| {
+            database.tamper_retained_recovery_registration(&reference, tamper)
+        })
+        .await
+        .expect("install tampered retained recovery registration");
+    }
+
+    pub(crate) async fn execute_test_sql(&self, sql: &str) {
+        let sql = sql.to_string();
+        self.test_sql(move |database| database.execute_batch(&sql).map_err(DbError::from))
+            .await
+            .unwrap_or_else(|error| panic!("test SQL execution failed: {error}"));
+    }
+
+    pub(crate) async fn execute_test_host_write(&self, sql: &str) {
+        let sql = sql.to_string();
+        let tables = self.synced_tables().to_vec();
+        let write_id = self.new_write_id();
+        self.test_sql(move |database| {
+            database.run_prepared_blob_transition_write(&tables, None, write_id, |transaction| {
+                transaction.execute_batch(&sql).map_err(DbError::from)
+            })
+        })
+        .await
+        .unwrap_or_else(|error| panic!("test host write failed: {error}"));
+    }
+
+    pub(crate) async fn query_test_text(&self, sql: &str) -> String {
+        let sql = sql.to_string();
+        self.test_sql(move |database| {
+            database
+                .query_row(&sql, [], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)
+        })
+        .await
+        .unwrap_or_else(|error| panic!("test text query failed: {error}"))
+    }
+
+    pub(crate) async fn test_row_exists(&self, sql: &str) -> bool {
+        let sql = sql.to_string();
+        self.test_sql(move |database| {
+            database
+                .query_row(&sql, [], |_| Ok(()))
+                .optional()
+                .map(|row| row.is_some())
+                .map_err(DbError::from)
+        })
+        .await
+        .unwrap_or_else(|error| panic!("test row-existence query failed: {error}"))
+    }
+
+    pub(crate) async fn capture_test_changeset(&self, statements: &[&str]) -> Vec<u8> {
+        let statements = statements
+            .iter()
+            .map(|statement| statement.to_string())
+            .collect::<Vec<_>>();
+        let tables = self
+            .synced_tables()
+            .iter()
+            .map(|table| table.name().to_string())
+            .collect::<Vec<_>>();
+        self.test_sql(move |database| database.capture_changeset(&tables, &statements))
+            .await
+            .unwrap_or_else(|error| panic!("test changeset capture failed: {error}"))
+    }
+
+    pub(crate) async fn capture_test_changeset_for_tables(
+        &self,
+        tables: &[&str],
+        sql: &str,
+    ) -> Vec<u8> {
+        let tables = tables
+            .iter()
+            .map(|table| table.to_string())
+            .collect::<Vec<_>>();
+        let sql = sql.to_string();
+        self.test_sql(move |database| database.capture_changeset(&tables, &[sql]))
+            .await
+            .unwrap_or_else(|error| panic!("raw test changeset capture failed: {error}"))
+    }
+
+    async fn apply_test_changeset_result(
+        &self,
+        bytes: &[u8],
+    ) -> Result<crate::database::ApplyResult, DbError> {
+        let bytes = bytes.to_vec();
+        let tables = self.synced_tables().to_vec();
+        let receiver_wall_ms = self.receive_wall_ms();
+        self.test_sql(move |database| database.apply_changeset(&bytes, &tables, receiver_wall_ms))
+            .await
+    }
+
+    pub(crate) async fn try_apply_test_changeset(&self, bytes: &[u8]) -> Result<(), DbError> {
+        self.apply_test_changeset_result(bytes).await.map(|_| ())
+    }
+
+    pub(crate) async fn apply_test_changeset(&self, bytes: &[u8]) {
+        self.try_apply_test_changeset(bytes)
+            .await
+            .expect("apply test changeset");
+    }
+
+    pub(crate) async fn apply_test_changeset_reporting_foreign_key_violations(
+        &self,
+        bytes: &[u8],
+    ) -> Result<bool, DbError> {
+        self.apply_test_changeset_result(bytes)
+            .await
+            .map(|result| result.had_fk_violations)
+    }
+
+    pub(crate) async fn plant_blob_row_for_test(
+        &self,
+        blob_id: &str,
+        remote: bool,
+        size: u64,
+        hash: Option<&str>,
+    ) {
+        let note = format!("note-{blob_id}");
+        let blob_id = blob_id.to_string();
+        let hash = hash.map(str::to_string);
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES (?1, 'read-test', ?2, '0000000001000-0000-dev1', '2026-01-01')",
+                    (note.as_str(), remote as i64),
+                )
+                .map_err(DbError::from)?;
+            database
+                .execute(
+                    "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                     VALUES (?1, ?2, 'attach', ?3, ?4, '0000000001000-0000-dev1', '2026-01-01')",
+                    rusqlite::params![blob_id.as_str(), note.as_str(), size as i64, hash],
+                )
+                .map_err(DbError::from)?;
+            Ok(())
+        })
+        .await
+        .expect("plant test blob row");
+    }
+
+    pub(crate) async fn set_blob_remote_for_test(&self, blob_id: &str, remote: bool) {
+        let note = format!("note-{blob_id}");
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "UPDATE notes SET shared = ?1 WHERE id = ?2",
+                    (remote as i64, note.as_str()),
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("change test blob locality");
+    }
+
+    pub(crate) async fn register_external_blob_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+        path: &std::path::Path,
+    ) {
+        let reference = self
+            .row_blob_ref(table, row_id)
+            .await
+            .expect("load exact Local row blob reference");
+        let path = path.to_path_buf();
+        self.test_sql(move |database| database.register_external_blob(&reference, &path))
+            .await
+            .expect("register exact external blob reference");
+    }
+
+    pub(crate) async fn run_scoped_host_write_for_test(&self, sql: String) {
+        crate::database::StoreDatabase::new(self)
+            .run_host_store_write_for_test(
+                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                None,
+                move |transaction| transaction.execute_batch(&sql).map_err(DbError::from),
+            )
+            .await
+            .expect("commit scoped host write");
+    }
+
+    pub(crate) async fn scoped_routing_state_for_test(
+        &self,
+        row_id: &str,
+    ) -> crate::database::ScopedRoutingStateForTest {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| {
+            let (row, route, mirror) = database.scoped_note_routing_state(&row_id, [42; 32])?;
+            Ok(crate::database::ScopedRoutingStateForTest { row, route, mirror })
+        })
+        .await
+        .expect("read scoped routing state")
+    }
+
+    pub(crate) async fn circle_control_activation_count_for_test(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+    ) -> i64 {
+        self.test_sql(move |database| database.circle_control_activation_count(circle_id))
+            .await
+            .expect("count Circle control activations")
+    }
+
+    pub(crate) async fn row_blob_binding_count_for_test(&self, row_id: &str) -> i64 {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| database.row_blob_binding_count(&row_id))
+            .await
+            .expect("count row blob bindings")
+    }
+
+    pub(crate) async fn bind_circle_row_blob_for_test(&self, row_id: &str) {
+        let row_id = row_id.to_string();
+        let object_id = "0".repeat(64);
+        self.test_sql(move |database| {
+            database.install_blob_binding(
+                &object_id,
+                "{}",
+                &"1".repeat(64),
+                "notes",
+                &row_id,
+                "attachment",
+                "0000000002000-0000-owner",
+                "{}",
+            )
+        })
+        .await
+        .expect("bind Circle row blob");
+    }
+
     pub(crate) async fn table_has_rows_for_test(
         &self,
         table: crate::database::DatabaseTestTable,
@@ -165,6 +410,242 @@ impl Database {
                     .map_err(DbError::from)?;
                 Ok(())
             })
+        })
+        .await
+    }
+
+    pub(crate) async fn capture_circle_document_for_test(
+        &self,
+        row_id: &str,
+        circle_id: crate::protocol::circle::CircleId,
+        stamp: &str,
+    ) -> Result<crate::WriteId, DbError> {
+        let write_id = self.new_write_id();
+        let captured = write_id.clone();
+        let tables = self.synced_tables().to_vec();
+        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let audience_value = circle_id.to_string();
+        let row_id = row_id.to_string();
+        let stamp = stamp.to_string();
+        self.test_sql(move |connection| {
+            connection.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                             VALUES (?1, ?2, ?3)",
+                        rusqlite::params![row_id, audience_value, stamp],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+        })
+        .await?;
+        Ok(write_id)
+    }
+
+    pub(crate) async fn circle_document_present_for_test(
+        &self,
+        row_id: &str,
+    ) -> Result<bool, DbError> {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| {
+            database
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
+                    [row_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn local_store_device_id_for_test(
+        &self,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceId, DbError> {
+        self.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await?
+            .ok_or_else(|| DbError::Message("local device id is not installed".to_string()))?
+            .parse()
+            .map_err(|error| DbError::Message(format!("parse local device id: {error}")))
+    }
+
+    pub(crate) async fn capture_document_for_test(
+        &self,
+        row_id: &str,
+        audience: Option<crate::protocol::circle::CircleId>,
+        stamp: &str,
+    ) -> Result<crate::WriteId, DbError> {
+        let write_id = self.new_write_id();
+        let captured = write_id.clone();
+        let tables = self.synced_tables().to_vec();
+        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let audience = audience.map(|circle_id| circle_id.to_string());
+        let row_id = row_id.to_string();
+        let stamp = stamp.to_string();
+        self.test_sql(move |database| {
+            database.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![row_id, audience, stamp],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+        })
+        .await?;
+        Ok(write_id)
+    }
+
+    pub(crate) async fn capture_document_with_file_for_test(
+        &self,
+        document_id: &str,
+        file_id: &str,
+        audience: Option<crate::protocol::circle::CircleId>,
+        bytes: &[u8],
+        stamp: &str,
+    ) -> Result<crate::WriteId, DbError> {
+        let write_id = self.new_write_id();
+        let captured = write_id.clone();
+        let tables = self.synced_tables().to_vec();
+        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let document_id = document_id.to_string();
+        let file_id = file_id.to_string();
+        let audience = audience.map(|circle_id| circle_id.to_string());
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = crate::blob::content_hash(bytes);
+        let stamp = stamp.to_string();
+        self.test_sql(move |database| {
+            database.run_internal_store_write(&tables, Some(&routing), captured, |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                         VALUES (?1, ?2, ?3)",
+                        rusqlite::params![document_id, audience, stamp],
+                    )
+                    .map_err(DbError::from)?;
+                transaction
+                    .execute(
+                        "INSERT INTO document_files
+                         (id, document_id, size, hash, _updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![file_id, document_id, size, hash, stamp],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+        })
+        .await?;
+        Ok(write_id)
+    }
+
+    pub(crate) async fn document_file_stamp_for_test(
+        &self,
+        file_id: &str,
+    ) -> Result<String, DbError> {
+        let file_id = file_id.to_string();
+        self.test_sql(move |database| {
+            database
+                .query_row(
+                    "SELECT _updated_at FROM document_files WHERE id = ?1",
+                    [file_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn release_retained_replay_ownership_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database.transaction(|transaction| {
+                transaction.remove_retained_replay_ownership_from_snapshot()
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn insert_browsable_blob_row_for_test(
+        &self,
+        blob_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let note = format!("note-{blob_id}");
+        let blob_id = blob_id.to_string();
+        let cloud_path = cloud_path.to_string();
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = crate::blob::content_hash(bytes);
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                     VALUES (?1, 'browsable-test', 1, '0000000001000-0000-dev1', '2026-01-01')",
+                    [note.as_str()],
+                )
+                .map_err(DbError::from)?;
+            database
+                .execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5,
+                             '0000000001000-0000-dev1', '2026-01-01')",
+                    rusqlite::params![blob_id, note, cloud_path, size, hash],
+                )
+                .map_err(DbError::from)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn bind_stored_blob_to_row_for_test(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+        table: &str,
+        id: &str,
+        owner: crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let locator = stored.locator().clone();
+        let record =
+            crate::protocol::remote_object::RemoteObjectRecord::activated_blob(stored, owner)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        record
+            .validate()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let object_id = record.object_id().to_string();
+        let state =
+            serde_json::to_string(&record).map_err(|error| DbError::Message(error.to_string()))?;
+        let locator_hash = locator.locator_hash().to_string();
+        let authority =
+            serde_json::to_string(&crate::protocol::audience_package::PackageAudience::Store)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        let id_for_insert = id.to_string();
+        let table_for_insert = table.to_string();
+        let stamp_table = table.to_string();
+        let stamp_id = id.to_string();
+        self.test_sql(move |database| {
+            let row_stamp = database
+                .query_row(
+                    &format!(
+                        "SELECT _updated_at FROM {} WHERE id = ?1",
+                        crate::database::quote_ident(&stamp_table)
+                    ),
+                    [stamp_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?;
+            database.install_blob_binding(
+                &object_id,
+                &state,
+                &locator_hash,
+                &table_for_insert,
+                &id_for_insert,
+                "id",
+                &row_stamp,
+                &authority,
+            )
         })
         .await
     }

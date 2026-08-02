@@ -88,7 +88,51 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         &mut self,
         heads: &[MembershipHeadRef],
     ) {
-        graph::assert_deep_valid_predecessor_path_is_iterative(&mut self.authority, heads).await;
+        let seed = self
+            .authority
+            .load_exact_membership_graph_objects(heads)
+            .await
+            .expect("load seed membership graph")
+            .path_heads
+            .into_values()
+            .next()
+            .expect("founder membership head");
+
+        let mut path_heads = BTreeMap::new();
+        let mut predecessor = None;
+        for sequence in 1..=20_000_u64 {
+            let mut node = seed.clone();
+            node.entry.seq = sequence;
+            node.entry.previous_hash = predecessor
+                .as_ref()
+                .map(|reference: &MembershipHeadRef| reference.coord.entry_hash);
+            node.entry.dependencies.clear();
+            node.entry.resolution_dependencies.clear();
+            node.reference.coord = node.entry.coord();
+            node.head.body.entry.coord = node.reference.coord.clone();
+            node.head.body.predecessor = predecessor.clone();
+            predecessor = Some(node.reference.clone());
+            path_heads.insert(node.reference.coord.clone(), node);
+        }
+        let graph = graph::LoadedExactMembershipGraph {
+            entries: path_heads
+                .iter()
+                .map(|(coord, node)| (coord.clone(), node.entry.clone()))
+                .collect(),
+            heads: Vec::new(),
+            path_heads,
+        };
+        let statuses = graph::membership_projection_statuses(
+            &graph,
+            &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix::default(),
+            &BTreeMap::new(),
+        )
+        .expect("project deep predecessor path");
+
+        assert_eq!(statuses.len(), 20_000);
+        assert!(statuses
+            .values()
+            .all(|status| *status == graph::MembershipProjectionStatus::Included));
     }
 }
 

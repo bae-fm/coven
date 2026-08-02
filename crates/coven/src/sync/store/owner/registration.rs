@@ -111,19 +111,6 @@ mod tests {
         panic!("recovery commit is materialized")
     }
 
-    async fn tamper_retained_recovery_registration(
-        db: &Database,
-        reference: &StoreBatchCommitRef,
-        tamper: crate::database::RetainedRegistrationTamper,
-    ) {
-        let reference = reference.clone();
-        db.test_sql(move |database| {
-            database.tamper_retained_recovery_registration(&reference, tamper)
-        })
-        .await
-        .expect("install tampered retained recovery registration");
-    }
-
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
@@ -211,8 +198,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_bytes() {
         let (store, db, _registration, reference) = recovered_author().await;
-        tamper_retained_recovery_registration(
-            &db,
+        db.tamper_retained_recovery_registration_for_test(
             &reference,
             crate::database::RetainedRegistrationTamper::CanonicalRegistration,
         )
@@ -231,8 +217,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_authority() {
         let (store, db, _registration, reference) = recovered_author().await;
-        tamper_retained_recovery_registration(
-            &db,
+        db.tamper_retained_recovery_registration_for_test(
             &reference,
             crate::database::RetainedRegistrationTamper::ActivationAuthority,
         )
