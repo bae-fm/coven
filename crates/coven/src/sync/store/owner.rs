@@ -8,7 +8,9 @@ mod circle_bootstrap;
 mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;
+mod founder_creation;
 pub(super) mod history;
+mod history_construction;
 mod host_write;
 mod keyring;
 pub(super) mod owner_promotion;
@@ -22,12 +24,13 @@ mod verified_history;
 pub(super) mod writer;
 
 use super::prepare_registration_object;
-use authorized_history::{
-    authorized_history_from_verified_root, AuthorizedStoreHistory, FounderStoreInitialization,
-};
+use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
+use founder_creation::FounderStoreCreation;
+pub(crate) use history_construction::HistoryConstructionAuthority;
 pub(crate) use host_write::HostWriteBlobStaging;
+pub(crate) use keyring::StoreKeyrings;
 pub(crate) use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
 pub(crate) use restore::RestoringStore;
@@ -41,8 +44,7 @@ pub(crate) struct Store {
     storage: Arc<dyn SyncStorage>,
     identity: UserKeypair,
     device_id: Option<String>,
-    store_root: StoreRootRef,
-    protocol_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
 }
 
 #[doc(hidden)]
@@ -113,7 +115,7 @@ impl Store {
         HostWriteBlobStaging::new(
             runtime,
             Arc::clone(&self.storage),
-            self.store_root.clone(),
+            self.root.reference().clone(),
             store_dir,
         )
     }
@@ -124,116 +126,10 @@ impl Store {
         founder_timestamp: &str,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        let _creation = database.store_creation_permit().await;
-        let mut graph = match database
-            .local_store_founder_graph()
+        FounderStoreCreation::begin(database, storage, founder_timestamp, identity)
             .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-        {
-            Some(graph) => graph,
-            None => {
-                let graph = Box::pin(crate::sync::store::protocol_root::prepare_founder_graph(
-                    &database,
-                    &*storage,
-                    founder_timestamp,
-                    identity,
-                ))
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-                database
-                    .stage_store_founder_graph(graph)
-                    .await
-                    .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-                database
-                    .local_store_founder_graph()
-                    .await
-                    .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-                    .ok_or_else(|| {
-                        StoreInitializationError::ProtocolRoot(
-                            "staged Store founder graph is absent".to_string(),
-                        )
-                    })?
-            }
-        };
-        let rollback_allowed = match &graph.registration_state {
-            crate::database::LocalDeviceRegistrationState::Prepared
-            | crate::database::LocalDeviceRegistrationState::Created => true,
-            crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
-        };
-        if rollback_allowed {
-            Box::pin(
-                crate::sync::store::protocol_root::rollback_founder_publication(
-                    &database, &*storage, &graph,
-                ),
-            )
+            .execute()
             .await
-            .map_err(|rollback| {
-                StoreInitializationError::ProtocolRoot(format!(
-                    "Store founder rollback before publication: {rollback}"
-                ))
-            })?;
-            graph = database
-                .local_store_founder_graph()
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-                .ok_or_else(|| {
-                    StoreInitializationError::ProtocolRoot(
-                        "rolled-back Store founder graph is absent".to_string(),
-                    )
-                })?;
-        }
-        let history = match FounderStoreInitialization::new(
-            &database,
-            &*storage,
-            founder_timestamp,
-            identity,
-            &graph,
-        )
-        .publish()
-        .await
-        {
-            Ok(history) => history,
-            Err(operation) if rollback_allowed => {
-                match Box::pin(
-                    crate::sync::store::protocol_root::rollback_founder_publication(
-                        &database, &*storage, &graph,
-                    ),
-                )
-                .await
-                {
-                    Ok(()) => {
-                        return Err(StoreInitializationError::ProtocolRoot(
-                            operation.to_string(),
-                        ));
-                    }
-                    Err(rollback) => {
-                        return Err(StoreInitializationError::ProtocolRoot(format!(
-                            "{operation}; Store founder rollback failed: {rollback}"
-                        )));
-                    }
-                }
-            }
-            Err(operation) => {
-                return Err(StoreInitializationError::ProtocolRoot(
-                    operation.to_string(),
-                ));
-            }
-        };
-        let durable_root = database
-            .local_store_root_ref()
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-            .ok_or_else(|| {
-                StoreInitializationError::ProtocolRoot(
-                    "published Store founder graph has no durable exact root".to_string(),
-                )
-            })?;
-        if history.root() != &durable_root {
-            return Err(StoreInitializationError::ProtocolRoot(
-                "published Store founder history differs from its durable exact root".to_string(),
-            ));
-        }
-        history.finish_initialization(&storage, identity).await
     }
 
     pub(crate) async fn open(
@@ -242,82 +138,34 @@ impl Store {
         expected_root: &StoreRootRef,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        let protocol_root = Self::open_protocol_root(&database, &*storage, expected_root)
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let history = authorized_history_from_verified_root(
-            database,
+        let root = crate::sync::store::protocol_root::VerifiedStoreRoot::open(
+            &database,
             &*storage,
             expected_root,
-            protocol_root,
         )
         .await
         .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        history.finish_initialization(&storage, identity).await
-    }
-
-    async fn open_protocol_root(
-        database: &StoreDatabase,
-        storage: &dyn SyncStorage,
-        expected: &StoreRootRef,
-    ) -> Result<
-        crate::storage::VerifiedObject<StoreProtocolRoot>,
-        crate::sync::store::protocol_root::StoreProtocolRootError,
-    > {
-        let verified = crate::sync::store::protocol_root::load_exact_store_protocol_root(
-            storage,
-            expected,
-            database.sync_routing_hash(),
-        )
-        .await?;
-        let live_binding = storage.provider_binding().await.map_err(|error| {
-            crate::sync::store::protocol_root::StoreProtocolRootError::Provider(error.to_string())
-        })?;
-        if live_binding.store != verified.value.descriptor.provider {
-            return Err(
-                crate::sync::store::protocol_root::StoreProtocolRootError::Database(
-                    "live provider namespace differs from the signed Store root".to_string(),
-                ),
-            );
-        }
-        if let Some(local) = database
-            .latest_local_store_device_registration()
+        let authority = HistoryConstructionAuthority::store();
+        let history_verifier = authority
+            .bind_verified(storage.as_ref(), root.clone())
             .await
-            .map_err(|error| {
-                crate::sync::store::protocol_root::StoreProtocolRootError::Database(
-                    error.to_string(),
-                )
-            })?
-            .filter(|registration| registration.is_activated())
-        {
-            let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
-                &local.registration_bytes,
-                expected,
-                local.device_id,
-            )
-            .map_err(|error| {
-                crate::sync::store::protocol_root::StoreProtocolRootError::Database(
-                    error.to_string(),
-                )
-            })?;
-            if registration.provider != live_binding.device {
-                return Err(
-                    crate::sync::store::protocol_root::StoreProtocolRootError::Database(
-                        "live provider principal differs from the active Store registration"
-                            .to_string(),
-                    ),
-                );
-            }
-        }
-        if verified.value.descriptor.schema_version > database.schema_version() {
-            return Err(
-                crate::sync::store::protocol_root::StoreProtocolRootError::SchemaTooNew {
-                    root_schema: verified.value.descriptor.schema_version,
-                    local: database.schema_version(),
-                },
-            );
-        }
-        Ok(verified)
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
+            database.clone(),
+            storage.as_ref(),
+            root.reference().clone(),
+        );
+        let keyrings = keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
+        AuthorizedStoreHistory::new(
+            database,
+            &storage,
+            root,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
+        .finish_initialization(identity)
+        .await
     }
 
     #[doc(hidden)]
@@ -333,21 +181,17 @@ impl Store {
                 .ok_or(StoreError::MissingState {
                     key: operations::STORE_ROOT_AUTHORITY,
                 })?;
-        let protocol_root = Self::open_protocol_root(&database, &*storage, &store_root)
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let root = crate::sync::store::protocol_root::VerifiedStoreRoot::open(
+            &database,
+            &*storage,
+            &store_root,
+        )
+        .await
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_id = database
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
-        Self::new(
-            database,
-            storage,
-            identity,
-            device_id,
-            store_root,
-            protocol_root,
-        )
-        .map_err(StoreError::InvalidOutbound)
+        Ok(Self::new(database, storage, identity, device_id, root))
     }
 
     fn new(
@@ -355,25 +199,18 @@ impl Store {
         storage: Arc<dyn SyncStorage>,
         identity: UserKeypair,
         device_id: Option<String>,
-        store_root: StoreRootRef,
-        protocol_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
-    ) -> Result<Self, String> {
-        if store_root.store_root_hash != protocol_root.value.object_hash() {
-            return Err(
-                "local Store root reference differs from the verified Store root".to_string(),
-            );
-        }
-        Ok(Self {
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+    ) -> Self {
+        Self {
             database,
             storage,
             identity,
             device_id,
-            store_root,
-            protocol_root,
-        })
+            root,
+        }
     }
     pub(crate) fn store_root(&self) -> &StoreRootRef {
-        &self.store_root
+        self.root.reference()
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -394,7 +231,7 @@ impl Store {
         crate::database::DbError,
     > {
         self.database
-            .circle_package_access(self.store_root.clone(), circle_id, expected_control)
+            .circle_package_access(self.root.reference().clone(), circle_id, expected_control)
             .await
     }
 
@@ -517,20 +354,32 @@ impl Store {
     }
 
     async fn authorize_history(&self) -> Result<AuthorizedStoreHistory<'_>, SyncCycleFailure> {
-        authorized_history_from_verified_root(
+        let authority = HistoryConstructionAuthority::store();
+        let history_verifier = authority
+            .bind_verified(self.storage.as_ref(), self.root.clone())
+            .await
+            .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))?;
+        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             self.database.clone(),
-            &*self.storage,
-            &self.store_root,
-            self.protocol_root.clone(),
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("open Store history authority", error))
+            self.storage.as_ref(),
+            self.root.reference().clone(),
+        );
+        let keyrings =
+            keyring::StoreKeyrings::new(self.storage.as_ref(), self.root.reference().clone());
+        Ok(AuthorizedStoreHistory::new(
+            self.database.clone(),
+            &self.storage,
+            self.root.clone(),
+            history_verifier,
+            blob_source,
+            keyrings,
+        ))
     }
 
     pub(crate) async fn authorize(&self) -> Result<AuthorizedStore<'_>, SyncCycleFailure> {
         self.authorize_history()
             .await?
-            .authorize_store(&self.storage, &self.identity, self.device_id.as_deref())
+            .authorize_store(&self.identity, self.device_id.as_deref())
             .await
     }
 
@@ -879,7 +728,7 @@ impl Store {
     ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, crate::database::DbError>
     {
         self.database
-            .retained_merge_replay_inputs(self.store_root.clone())
+            .retained_merge_replay_inputs(self.root.reference().clone())
             .await
     }
 
@@ -889,7 +738,7 @@ impl Store {
         reference: crate::protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<crate::database::OwnedVerifiedMergeMaterialization, crate::database::DbError> {
         self.database
-            .retained_merge_materialization(self.store_root.clone(), reference)
+            .retained_merge_materialization(self.root.reference().clone(), reference)
             .await
     }
 
@@ -1140,7 +989,7 @@ impl Store {
         crate::database::DbError,
     > {
         self.database
-            .retained_merge_history_frontier(self.store_root.clone(), references)
+            .retained_merge_history_frontier(self.root.reference().clone(), references)
             .await
     }
 
@@ -1154,7 +1003,7 @@ impl Store {
         crate::database::DbError,
     > {
         self.database
-            .verified_circle_activation(self.store_root.clone(), circle_id, control)
+            .verified_circle_activation(self.root.reference().clone(), circle_id, control)
             .await
     }
 
@@ -1165,7 +1014,11 @@ impl Store {
         activation: crate::protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<bool, crate::database::DbError> {
         self.database
-            .circle_package_is_retained_for_replay(self.store_root.clone(), target, activation)
+            .circle_package_is_retained_for_replay(
+                self.root.reference().clone(),
+                target,
+                activation,
+            )
             .await
     }
 
@@ -1196,7 +1049,7 @@ impl Store {
     > {
         let verified = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
             &commit.to_bytes(),
-            self.store_root.store_root_hash,
+            self.root.reference().store_root_hash,
             commit_ref,
             author,
         )
@@ -1234,7 +1087,66 @@ impl Store {
 
     #[cfg(test)]
     pub(crate) fn protocol_root_for_test(&self) -> &StoreProtocolRoot {
-        &self.protocol_root.value
+        self.root.protocol()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_device_join_observation_for_test(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        offer: &crate::sync::store::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, StorePullError> {
+        if &offer.store_root != self.root.reference() {
+            return Err(StorePullError::Database(
+                "pending device join belongs to another Store root".to_string(),
+            ));
+        }
+        let history_verifier = HistoryConstructionAuthority::for_pending_device_join()
+            .bind_verified(self.storage.as_ref(), self.root.clone())
+            .await?;
+        Ok(crate::sync::store::PendingDeviceJoinObservation::new(
+            pending,
+            &self.storage,
+            self.root.clone(),
+            history_verifier,
+            offer.attempt_id,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_pending_device_join_for_test(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        identity: &UserKeypair,
+        offer: crate::sync::store::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, DeviceJoinError> {
+        let observation = self
+            .pending_device_join_observation_for_test(pending, &offer)
+            .await?;
+        crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_snapshot_bootstrap_for_test(
+        &self,
+        membership_floor: &crate::joining::MembershipFloor,
+        binary_schema_version: u32,
+        target_path: &std::path::Path,
+        restorer_identity: &UserKeypair,
+    ) -> Result<crate::sync::store::PreparedSnapshotBootstrap<'_>, SnapshotError> {
+        let history_verifier = HistoryConstructionAuthority::for_snapshot()
+            .bind_verified(self.storage.as_ref(), self.root.clone())
+            .await?;
+        crate::sync::store::PreparedSnapshotBootstrap::prepare(
+            &self.storage,
+            self.root.clone(),
+            history_verifier,
+            membership_floor,
+            binary_schema_version,
+            target_path,
+            restorer_identity,
+        )
+        .await
     }
 
     #[cfg(test)]

@@ -9,10 +9,9 @@ all selected images, replays the missing commits, runs audience filtering
 and final foreign-key validation, then commits one final database and
 Store frontier atomically."
 
-Today restore installs exactly one Store image
-(`bootstrap_from_snapshot` → `BootstrapResult` →
-`VerifiedSnapshotBootstrapInstall`, `sync/store/snapshot/image.rs:932`,
-`database.rs:436`); a restored device gets Circle control indexes from the
+Restore prepares and installs one Store image through
+`PreparedSnapshotBootstrap::prepare` → `PreparedSnapshotBootstrap::install` →
+`VerifiedSnapshotBootstrapInstall`; a restored device gets Circle control indexes from the
 Store image but no Circle rows until/unless a fresh bootstrap arrives —
 and Circle packages older than reclaimed history could never be
 rematerialized at all.
@@ -56,7 +55,7 @@ selection reports explicitly rather than silently).
 ### 2. One installing transaction
 
 Extend `VerifiedSnapshotBootstrapInstall` to carry the staged Circle
-images. `open_database` installs, in its single existing transaction:
+images. `PreparedSnapshotBootstrap::install` installs, in its single existing transaction:
 
 - the Store image (unchanged);
 - for each staged Circle image: the image rows and routes, the
@@ -117,8 +116,8 @@ the preserved row — stage-nothing must leave no coverage row the
 restoring identity cannot decrypt, or the replay bomb returns for the
 removed-member case. The whole set commits or rolls back atomically.
 
-**Wiring**: `bootstrap_from_snapshot` → a `StagedRestore` carrying the
-decisions; `StagedRestore::open_database` installs the union; `join.rs`
+**Wiring**: `PreparedSnapshotBootstrap::prepare` produces a `StagedRestore`
+carrying the decisions; `StagedRestore::install` installs the union; joining
 threads it; `restore_from_cloud` passes through; restore codes untouched.
 
 ### 3c. As built (where the implementation diverged from 3b, and why)
@@ -177,9 +176,9 @@ packages, so its own leaf-named bootstrap is the only baseline. The image
 download and verification are the same `build_verified_leaf_bootstrap_image`
 `load_circle_activations` uses.
 
-**Staging is folded into `open_database`, not a separate `StagedRestore`
+**Staging is folded into `PreparedSnapshotBootstrap::install`, not a separate `StagedRestore`
 type.** The per-Circle decision `Vec` is the real shape; the wrapper type
-was scaffolding. `open_database` selects against a throwaway copy installed
+was scaffolding. `PreparedSnapshotBootstrap::install` selects against a throwaway copy installed
 through the same borrowed install authority, then installs the Store image
 and every decision in one `install_on` transaction. `join.rs` and
 `restore_from_cloud` pass the restoring identity and storage through; no
@@ -259,7 +258,7 @@ serde leaf, not a distinct defect.
 
 ### 4. App-level wiring
 
-`crates/coven/src/sync/restore.rs` (`restore_from_cloud`) passes through
+`crates/coven/src/restoration/restore.rs` (`restore_from_cloud`) passes through
 the staged set; restore codes and device-continuation state are untouched
 (they name the Store snapshot; Circle selection derives from the restored
 control indexes, not from the restore code).

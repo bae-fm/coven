@@ -260,7 +260,6 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     ] {
         let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
             &store,
-            "snapshot-author-exclusion-store",
             &restore.membership_floor,
             owner_db.schema_version(),
             &signer,
@@ -304,7 +303,6 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
 
     let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
         &store,
-        "snapshot-author-exclusion-store",
         &restore.membership_floor,
         owner_db.schema_version(),
         &signer,
@@ -473,23 +471,13 @@ async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
 
     let destination = tempfile::tempdir().expect("bootstrap exclusion destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap_root = store.root.clone();
     let bootstrap_floor = restore.membership_floor.clone();
-    let bootstrap = Box::pin(crate::sync::store::snapshot::bootstrap_from_snapshot(
-        store.storage.as_ref(),
-        "bootstrap-author-exclusion-store",
-        bootstrap_root,
-        &bootstrap_floor,
-        1,
-        &database_path,
-        &signer,
-    ))
-    .await
-    .expect("verify pre-exclusion snapshot");
+    let bootstrap =
+        Box::pin(store.prepare_snapshot_bootstrap(&bootstrap_floor, 1, &database_path, &signer))
+            .await
+            .expect("verify pre-exclusion snapshot");
     let mut joining_db = bootstrap
-        .open_database(
-            "bootstrap-author-exclusion-store",
-            &database_path,
+        .install(
             crate::sync::test_helpers::test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -2228,7 +2216,6 @@ async fn pull_peer_exclusion(
 
 async fn open_published_exclusion_snapshot<'storage>(
     store: &'storage TestStore,
-    store_id: &str,
     membership_floor: &crate::joining::MembershipFloor,
     schema_version: u32,
     identity: &UserKeypair,
@@ -2239,21 +2226,12 @@ async fn open_published_exclusion_snapshot<'storage>(
 ) {
     let directory = tempfile::tempdir().expect("restored exclusion directory");
     let path = directory.path().join("restored.db");
-    let bootstrap = crate::sync::store::snapshot::bootstrap_from_snapshot(
-        store.storage.as_ref(),
-        store_id,
-        store.root.clone(),
-        membership_floor,
-        schema_version,
-        &path,
-        identity,
-    )
-    .await
-    .expect("verify author exclusion snapshot");
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(membership_floor, schema_version, &path, identity)
+        .await
+        .expect("verify author exclusion snapshot");
     let database = bootstrap
-        .open_database(
-            store_id,
-            &path,
+        .install(
             crate::sync::test_helpers::test_synced_tables(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),

@@ -7,8 +7,7 @@ commits beyond that coverage.
 
 ## Snapshot contents
 
-[`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) uses
-SQLite `VACUUM INTO` to copy the live database. It then removes:
+Snapshot capture uses SQLite `VACUUM INTO` to copy the live database. It then removes:
 
 - rows from tables the host did not declare as synced;
 - coven's device-local bookkeeping rows;
@@ -50,8 +49,8 @@ author, and creation time.
 
 ## Selecting a snapshot
 
-[`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot)
-starts from the expected Store protocol root hash, founder key, and membership
+`PreparedSnapshotBootstrap::prepare` starts from the expected Store protocol
+root hash, founder key, and membership
 floor carried by the invite or restore code. It:
 
 1. Loads and verifies the exact Store protocol root.
@@ -70,12 +69,11 @@ from signed coverage and verified append-only objects.
 ## Installing coverage
 
 The downloaded image and its signed coverage stay bound together through a
-single-use [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult).
-The result binds the store id, destination path, image hash, Store protocol root,
-snapshot hash, and exact coverage. Its fields are private and it cannot be
-cloned.
+single-use `PreparedSnapshotBootstrap`. The value binds the destination path,
+image hash, verified Store protocol root, snapshot hash, and exact coverage.
+Its fields are private and it cannot be cloned.
 
-Consuming it through `BootstrapResult::open_database` rechecks the destination
+Consuming it through `PreparedSnapshotBootstrap::install` rechecks the destination
 and image bytes, opens the database with the application's normal migration
 ladder and synced-table declarations, then installs the protocol root, snapshot
 hash, and every exact covered position in one SQLite transaction. An invalid row
@@ -99,8 +97,7 @@ schema version before download:
 
 - A binary at or above the snapshot version opens the image and runs the same
   migration ladder used by an existing device.
-- A binary below the snapshot version refuses it with
-  [`SnapshotError::SchemaTooNew`](rustdoc:enum:coven::sync::snapshot::SnapshotError)
+- A binary below the snapshot version refuses it with `SnapshotError::SchemaTooNew`
   before installing the database.
 
 See [Schema evolution](/docs/schema-evolution) for live-commit version handling.

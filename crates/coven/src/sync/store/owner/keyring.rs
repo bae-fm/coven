@@ -9,13 +9,13 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::sync::store::membership::InviteError;
 
 /// Store-key operations bound to one exact Store root and its storage.
-pub(super) struct StoreKeyrings<'storage> {
+pub(crate) struct StoreKeyrings<'storage> {
     storage: &'storage dyn crate::storage::SyncStorage,
     root: crate::protocol::store_commit::StoreRootRef,
 }
 
 impl<'storage> StoreKeyrings<'storage> {
-    pub(super) fn new(
+    pub(crate) fn new(
         storage: &'storage dyn crate::storage::SyncStorage,
         root: crate::protocol::store_commit::StoreRootRef,
     ) -> Self {
@@ -31,7 +31,7 @@ impl<'storage> StoreKeyrings<'storage> {
         self.open_references(identity, &references).await
     }
 
-    pub(super) async fn open_containing(
+    pub(crate) async fn open_containing(
         &self,
         identity: &UserKeypair,
         membership: &MembershipChain,

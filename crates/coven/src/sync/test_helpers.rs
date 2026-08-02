@@ -1306,16 +1306,18 @@ pub(crate) fn install_cross_principal_device_fixture<'a>(
                 .clone()
                 .with_provider_binding(peer_binding),
         );
-        let peer_storage = crate::storage::CloudSyncStorage::new(
-            peer_home.clone(),
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
-            crate::storage::BlobPathScheme::Hashed,
-            "cross-principal-test-store",
-            identity.clone(),
-        )
-        .map_err(|error| error.to_string())?;
+        let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
+            crate::storage::CloudSyncStorage::new(
+                peer_home.clone(),
+                crate::storage::CloudCipher::Encrypted(
+                    crate::encryption::EncryptionService::from_key([42; 32]),
+                ),
+                crate::storage::BlobPathScheme::Hashed,
+                "cross-principal-test-store",
+                identity.clone(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -1326,14 +1328,22 @@ pub(crate) fn install_cross_principal_device_fixture<'a>(
             .begin_device_join(&pubkey_hex(identity))
             .await
             .map_err(|error| error.to_string())?;
-        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
+        let (join_root, join_history) =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                .await
+                .map_err(|error| error.to_string())?;
+        let observation = crate::sync::store::PendingDeviceJoinObservation::new(
             &pending,
             &peer_storage,
-            identity,
-            offer,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+            join_root,
+            join_history,
+            offer.attempt_id,
+        );
+        let mut pending_join =
+            crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
+                .await
+                .map_err(|error| error.to_string())?;
         let access_request = pending_join
             .prepare_provider_access_request()
             .await
@@ -1407,6 +1417,7 @@ pub(crate) struct TestStore {
     pub storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
     pub root: crate::protocol::store_commit::StoreRootRef,
     pub signer: UserKeypair,
+    founder: TestDevice,
     producers: tokio::sync::Mutex<TestStoreProducers>,
 }
 
@@ -1714,7 +1725,6 @@ impl TestDevice {
 }
 
 struct TestStoreProducers {
-    founder: TestDevice,
     unassigned: Option<TestDevice>,
     by_name: HashMap<String, TestDevice>,
 }
@@ -1895,8 +1905,8 @@ impl TestStore {
             storage,
             root,
             signer,
+            founder: founder.clone(),
             producers: tokio::sync::Mutex::new(TestStoreProducers {
-                founder: founder.clone(),
                 unassigned: Some(founder),
                 by_name: HashMap::new(),
             }),
@@ -1928,6 +1938,50 @@ impl TestStore {
 
     pub(crate) fn protocol_founder_keypair(&self) -> UserKeypair {
         self.signer.clone()
+    }
+
+    pub(crate) async fn pending_device_join_observation(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        offer: &crate::sync::store::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, String> {
+        self.founder
+            .store
+            .pending_device_join_observation_for_test(pending, offer)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn open_pending_device_join(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        identity: &UserKeypair,
+        offer: crate::sync::store::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, String> {
+        self.founder
+            .store
+            .open_pending_device_join_for_test(pending, identity, offer)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn prepare_snapshot_bootstrap<'a>(
+        &'a self,
+        membership_floor: &crate::joining::MembershipFloor,
+        binary_schema_version: u32,
+        target_path: &std::path::Path,
+        restorer_identity: &UserKeypair,
+    ) -> Result<crate::sync::store::PreparedSnapshotBootstrap<'a>, crate::sync::store::SnapshotError>
+    {
+        self.founder
+            .store
+            .prepare_snapshot_bootstrap_for_test(
+                membership_floor,
+                binary_schema_version,
+                target_path,
+                restorer_identity,
+            )
+            .await
     }
 
     pub(crate) async fn bind_device(
@@ -1976,14 +2030,10 @@ impl TestStore {
             .begin_device_join(&pubkey_hex(joining_identity))
             .await
             .map_err(|error| format!("begin device join: {error}"))?;
-        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &*self.storage,
-            joining_identity,
-            offer,
-        )
-        .await
-        .map_err(|error| format!("open pending device join: {error}"))?;
+        let mut pending_join = self
+            .open_pending_device_join(&pending, joining_identity, offer)
+            .await
+            .map_err(|error| format!("open pending device join: {error}"))?;
         let access_request = pending_join
             .prepare_provider_access_request()
             .await
@@ -2131,7 +2181,7 @@ impl TestStore {
     }
 
     pub(crate) async fn founder_device(&self) -> Result<TestDevice, String> {
-        Ok(self.producers.lock().await.founder.clone())
+        Ok(self.founder.clone())
     }
 
     pub(crate) async fn next_commit_sequence(&self, name: &str) -> Result<u64, String> {

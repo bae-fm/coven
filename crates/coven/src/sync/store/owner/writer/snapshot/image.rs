@@ -28,6 +28,8 @@ pub enum SnapshotError {
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
     StoreObject(#[source] crate::storage::StoreObjectError),
+    #[error("Store history: {0}")]
+    StoreHistory(#[from] crate::sync::store::owner::pull::StorePullError),
     /// The snapshot's author is not authorized to publish a catalog image: not a
     /// current Owner of the store's membership chain, or the
     /// chain itself is not anchored to the store's owner (a wiped/refounded
@@ -48,14 +50,6 @@ pub enum SnapshotError {
     },
     #[error("snapshot blob preflight failed: {0}")]
     PublishBlobs(String),
-    #[error("snapshot bootstrap belongs to store {bound:?}, not {requested:?}")]
-    BootstrapStoreMismatch { bound: String, requested: String },
-    #[error(
-        "snapshot bootstrap belongs to database path {bound}, not {requested}",
-        bound = .bound.display(),
-        requested = .requested.display()
-    )]
-    BootstrapDestinationMismatch { bound: PathBuf, requested: PathBuf },
     #[error("snapshot bootstrap database changed after verification")]
     BootstrapDatabaseChanged,
     #[error("snapshot bootstrap database: {0}")]
@@ -115,17 +109,16 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
 /// The authority is consumed by installation and cannot be duplicated:
 ///
 /// ```compile_fail
-/// fn duplicate(result: crate::sync::store::snapshot::BootstrapResult) {
+/// fn duplicate(result: crate::sync::store::snapshot::PreparedSnapshotBootstrap) {
 ///     let _copy = result.clone();
 /// }
 /// ```
-pub(crate) struct BootstrapResult<'storage> {
-    store_id: String,
+pub(crate) struct PreparedSnapshotBootstrap<'storage> {
     database_image: SnapshotDatabaseImage,
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage std::sync::Arc<dyn SyncStorage>,
     founder_registration:
         crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
     restorer_identity: crate::keys::UserKeypair,
@@ -137,11 +130,10 @@ pub(crate) struct BootstrapResult<'storage> {
     fail_circle_install: bool,
 }
 
-impl std::fmt::Debug for BootstrapResult<'_> {
+impl std::fmt::Debug for PreparedSnapshotBootstrap<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("BootstrapResult")
-            .field("store_id", &self.store_id)
+            .debug_struct("PreparedSnapshotBootstrap")
             .field("target_path", &self.database_image.path())
             .field("db_hash", &self.db_hash)
             .field("snapshot", &self.snapshot.reference)
@@ -150,14 +142,141 @@ impl std::fmt::Debug for BootstrapResult<'_> {
     }
 }
 
-impl<'storage> BootstrapResult<'storage> {
-    /// Arm the Circle-install failure injection carried into `open_database`'s
+impl<'storage> PreparedSnapshotBootstrap<'storage> {
+    /// Authenticate and stage one snapshot image as installation authority.
+    pub(crate) async fn prepare(
+        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+        mut history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+        membership_floor: &crate::joining::MembershipFloor,
+        binary_schema_version: u32,
+        target_path: &Path,
+        restorer_identity: &crate::keys::UserKeypair,
+    ) -> Result<Self, SnapshotError> {
+        if root.protocol().descriptor.store_root_id() != root.reference().store_root_id {
+            return Err(SnapshotError::UnauthorizedAuthor(
+                "Store root differs from bootstrap authority".to_string(),
+            ));
+        }
+        let heads = &membership_floor.0;
+        let mut registrations = std::collections::BTreeMap::new();
+        let mut resolutions = std::collections::BTreeSet::new();
+        for reference in heads {
+            let head = history_verifier
+                .load_exact_membership_head(reference)
+                .await
+                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+            resolutions.extend(head.body.resolutions.iter().cloned());
+            let registration = history_verifier
+                .load_registration(&head.body.author_registration)
+                .await
+                .map_err(|error| SnapshotError::Parse(error.to_string()))?
+                .value;
+            registrations.insert(head.body.author_registration.clone(), registration);
+        }
+        let resolutions = resolutions.into_iter().collect::<Vec<_>>();
+        let membership = history_verifier
+            .load_membership_at_exact_heads(heads, &resolutions)
+            .await
+            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+        let registrations = registrations
+            .into_iter()
+            .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
+            .collect::<Vec<_>>();
+        let mut authorized = Vec::new();
+        for (registration_ref, registration) in registrations {
+            authorized.extend(
+                history_verifier
+                    .load_store_snapshot_stream(&registration_ref, &registration)
+                    .await?,
+            );
+        }
+        let selected = Box::pin(history_verifier.select_maximal_stable_store_snapshot(authorized))
+            .await
+            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
+            .ok_or_else(|| {
+                SnapshotError::Bucket(crate::storage::StorageError::NotFound(
+                    "Store snapshot stream".to_string(),
+                ))
+            })?;
+        let snapshot = selected.snapshot;
+        if snapshot.meta.schema_version > binary_schema_version {
+            return Err(SnapshotError::SchemaTooNew {
+                snapshot_version: snapshot.meta.schema_version,
+                supported: binary_schema_version,
+            });
+        }
+        let plaintext = history_verifier
+            .load_snapshot_image(&snapshot)
+            .await
+            .map_err(SnapshotError::StoreObject)?;
+        if crate::protocol::store_commit::ObjectHash::digest(&plaintext)
+            != snapshot.meta.image.image_hash
+        {
+            return Err(SnapshotError::Parse(
+                "Store snapshot image differs from its exact reference".to_string(),
+            ));
+        }
+        let founder_registration = history_verifier
+            .load_founder_registration()
+            .await
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let stability = selected.stability;
+        let coverage = snapshot.meta.coverage.clone();
+        let database_image =
+            SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
+        info!(
+            num_positions = coverage.position_count(),
+            db_size = plaintext.len(),
+            path = %database_image.path().display(),
+            "bootstrapped from snapshot"
+        );
+
+        Ok(Self {
+            database_image,
+            db_hash: snapshot_db_hash(&plaintext),
+            history_verifier,
+            root,
+            storage,
+            founder_registration,
+            restorer_identity: restorer_identity.clone(),
+            snapshot,
+            coverage,
+            stability,
+            membership,
+            #[cfg(test)]
+            fail_circle_install: false,
+        })
+    }
+
+    /// Arm the Circle-install failure injection carried into `install`'s
     /// install transaction — a test's stand-in for a crash between the Store and
     /// Circle installs.
     #[cfg(test)]
     pub(crate) fn fail_circle_install_for_test(mut self) -> Self {
         self.fail_circle_install = true;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_snapshot_hash_for_test(
+        &self,
+    ) -> crate::protocol::store_commit::ObjectHash {
+        self.snapshot.reference.snapshot_hash
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_snapshot_object_hash_for_test(
+        &self,
+    ) -> crate::protocol::store_commit::ObjectHash {
+        self.snapshot.reference.object.stored_hash()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn staged_database_bytes_for_test(&self) -> Result<Vec<u8>, SnapshotError> {
+        Ok(std::fs::read(self.database_image.path())?)
     }
 
     pub(crate) fn coverage_count(&self) -> usize {
@@ -176,10 +295,8 @@ impl<'storage> BootstrapResult<'storage> {
     /// then applies the Store image and every decision inside one transaction, so
     /// a partially installed union is never exposed.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn open_database(
+    pub(crate) async fn install(
         self,
-        store_id: &str,
-        target_path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
@@ -188,8 +305,7 @@ impl<'storage> BootstrapResult<'storage> {
         migrations: &[Migration],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
-        let BootstrapResult {
-            store_id: bound_store_id,
+        let PreparedSnapshotBootstrap {
             database_image,
             db_hash,
             mut history_verifier,
@@ -206,20 +322,7 @@ impl<'storage> BootstrapResult<'storage> {
         } = self;
         let bound_path = database_image.path().to_path_buf();
         let result = async {
-            if store_id != bound_store_id {
-                return Err(SnapshotError::BootstrapStoreMismatch {
-                    bound: bound_store_id,
-                    requested: store_id.to_string(),
-                });
-            }
-            let requested = std::fs::canonicalize(target_path)?;
-            if requested != bound_path {
-                return Err(SnapshotError::BootstrapDestinationMismatch {
-                    bound: bound_path.clone(),
-                    requested,
-                });
-            }
-            let database_bytes = std::fs::read(&requested)?;
+            let database_bytes = std::fs::read(&bound_path)?;
             if snapshot_db_hash(&database_bytes) != db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
@@ -247,9 +350,9 @@ impl<'storage> BootstrapResult<'storage> {
                         root_ref.store_root_hash,
                     )
                     .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-                    let query_path = requested.with_extension("restore-select.db");
+                    let query_path = bound_path.with_extension("restore-select.db");
                     let query_image = SnapshotDatabaseImage::prepare(query_path)?;
-                    if let Err(error) = std::fs::copy(&requested, query_image.path()) {
+                    if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
                         return finish_database_image_operation(
                             query_image,
                             Err(SnapshotError::Io(error)),
@@ -272,7 +375,7 @@ impl<'storage> BootstrapResult<'storage> {
                             crate::database::StoreDatabase::from_database(query_db);
                         crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
                             &store_database,
-                            storage,
+                            storage.as_ref(),
                             &root_ref,
                             &mut history_verifier,
                         )
@@ -296,7 +399,7 @@ impl<'storage> BootstrapResult<'storage> {
                 install
             };
             let (db, _stamper) = Database::open_initialized_store(
-                &requested,
+                &bound_path,
                 &install,
                 synced_tables,
                 blob_tombstone_grace,
@@ -309,11 +412,11 @@ impl<'storage> BootstrapResult<'storage> {
             let database = crate::database::StoreDatabase::from_database(db);
             let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
                 database.clone(),
-                storage,
+                storage.as_ref(),
                 root_ref.clone(),
             );
             let keyrings =
-                crate::sync::store::owner::keyring::StoreKeyrings::new(storage, root_ref);
+                crate::sync::store::owner::keyring::StoreKeyrings::new(storage.as_ref(), root_ref);
             Ok(
                 crate::sync::store::owner::history::AuthorizedStoreHistory::from_snapshot(
                     super::SnapshotHistoryConstruction,
@@ -324,7 +427,7 @@ impl<'storage> BootstrapResult<'storage> {
                     blob_source,
                     keyrings,
                 )
-                .bind_restore(storage, membership, restorer_identity),
+                .bind_restore(membership, restorer_identity),
             )
         }
         .await;
@@ -368,67 +471,6 @@ pub(crate) fn should_create_snapshot(
     }
 
     false
-}
-
-/// Bootstrap a new device from an immutable Store snapshot.
-///
-/// The reader verifies the expected Store protocol root, loads the owner-anchored membership
-/// chain, and considers only snapshot metadata signed by a current owner. It
-/// selects a maximal signed coverage vector deterministically, refuses a schema
-/// newer than this binary, loads the exact content-addressed image, and writes it
-/// to `target_path`. Any failure returns a typed [`SnapshotError`] without
-/// granting authority to install coverage.
-///
-/// The returned [`BootstrapResult`] binds the verified image, store, destination,
-/// Store protocol root, snapshot hash, and coverage. Consuming it rechecks the image and
-/// installs all bootstrap state in one database transaction.
-pub(crate) async fn bootstrap_from_snapshot<'storage>(
-    storage: &'storage dyn SyncStorage,
-    store_id: &str,
-    expected_store_root: crate::protocol::store_commit::StoreRootRef,
-    membership_floor: &crate::joining::MembershipFloor,
-    binary_schema_version: u32,
-    target_path: &Path,
-    restorer_identity: &crate::keys::UserKeypair,
-) -> Result<BootstrapResult<'storage>, SnapshotError> {
-    // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
-    // before returning installation authority.
-    let selected = Box::pin(super::open_snapshot_bootstrap_authority(
-        storage,
-        &expected_store_root,
-    ))
-    .await?
-    .select(membership_floor, binary_schema_version)
-    .await?;
-    let founder_registration = selected.founder_registration().await?;
-    let (root, history_verifier, snapshot, plaintext, stability, membership) =
-        selected.into_parts();
-    let coverage = snapshot.meta.coverage.clone();
-    let database_image =
-        SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
-    info!(
-        num_positions = coverage.position_count(),
-        db_size = plaintext.len(),
-        path = %database_image.path().display(),
-        "bootstrapped from snapshot"
-    );
-
-    Ok(BootstrapResult {
-        store_id: store_id.to_string(),
-        database_image,
-        db_hash: snapshot_db_hash(&plaintext),
-        history_verifier,
-        root,
-        storage,
-        founder_registration,
-        restorer_identity: restorer_identity.clone(),
-        snapshot,
-        coverage,
-        stability,
-        membership,
-        #[cfg(test)]
-        fail_circle_install: false,
-    })
 }
 
 /// The outcome of snapshot blob reconciliation: every required eager blob is
@@ -937,25 +979,21 @@ mod tests {
 
     async fn open_published_scoped_snapshot<'storage>(
         fixture: &'storage PublishedScopedSnapshot,
-        store_id: &str,
         database_path: &Path,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
         let restorer_identity = crate::keys::UserKeypair::generate();
-        let bootstrap = bootstrap_from_snapshot(
-            &fixture.store.storage,
-            store_id,
-            fixture.store.root.clone(),
-            &crate::joining::MembershipFloor(fixture.membership.head_refs().to_vec()),
-            1,
-            database_path,
-            &restorer_identity,
-        )
-        .await?;
+        let bootstrap = fixture
+            .store
+            .prepare_snapshot_bootstrap(
+                &crate::joining::MembershipFloor(fixture.membership.head_refs().to_vec()),
+                1,
+                database_path,
+                &restorer_identity,
+            )
+            .await?;
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
         bootstrap
-            .open_database(
-                store_id,
-                database_path,
+            .install(
                 fixture.source.synced_tables().to_vec(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -1289,7 +1327,7 @@ mod tests {
         let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::Valid).await;
         let destination = tempfile::tempdir().expect("valid-route bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let database = open_published_scoped_snapshot(&fixture, store_id, &database_path)
+        let database = open_published_scoped_snapshot(&fixture, &database_path)
             .await
             .expect("open valid scoped snapshot");
         let counts = database
@@ -1395,22 +1433,18 @@ mod tests {
         ];
         let destination = tempfile::tempdir().expect("scoped migration bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let bootstrap = bootstrap_from_snapshot(
-            &store.storage,
-            store_id,
-            store.root.clone(),
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-            2,
-            &database_path,
-            &signer,
-        )
-        .await
-        .expect("verify pre-migration scoped snapshot");
+        let bootstrap = store
+            .prepare_snapshot_bootstrap(
+                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                2,
+                &database_path,
+                &signer,
+            )
+            .await
+            .expect("verify pre-migration scoped snapshot");
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
         let database = bootstrap
-            .open_database(
-                store_id,
-                &database_path,
+            .install(
                 target_tables,
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -1436,7 +1470,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::UnauthenticatedRoute).await;
         let destination = tempfile::tempdir().expect("route-tamper bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, store_id, &database_path).await;
+        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
         let error = match result {
             Ok(_) => panic!("unauthenticated private route must block bootstrap"),
             Err(error) => error,
@@ -1459,7 +1493,7 @@ mod tests {
         let fixture = publish_scoped_snapshot(store_id, ScopedSnapshotImage::CircleRow).await;
         let destination = tempfile::tempdir().expect("Circle-row bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, store_id, &database_path).await;
+        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
         let error = match result {
             Ok(_) => panic!("Store snapshot containing a Circle row must block bootstrap"),
             Err(error) => error,
@@ -1483,7 +1517,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::InvalidCircleMirror).await;
         let destination = tempfile::tempdir().expect("invalid-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, store_id, &database_path).await;
+        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
         let error = match result {
             Ok(_) => panic!("invalid opaque Circle mirror must block bootstrap"),
             Err(error) => error,
@@ -1507,7 +1541,7 @@ mod tests {
             publish_scoped_snapshot(store_id, ScopedSnapshotImage::OrphanStoreMirror).await;
         let destination = tempfile::tempdir().expect("orphan-mirror bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = open_published_scoped_snapshot(&fixture, store_id, &database_path).await;
+        let result = open_published_scoped_snapshot(&fixture, &database_path).await;
         let error = match result {
             Ok(_) => panic!("orphan Store mirror must block bootstrap"),
             Err(error) => error,
@@ -1639,21 +1673,17 @@ mod tests {
 
         let destination = tempfile::tempdir().expect("bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let bootstrap = bootstrap_from_snapshot(
-            &store.storage,
-            "snapshot-bootstrap-exact-root",
-            store.root.clone(),
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-            1,
-            &database_path,
-            &signer,
-        )
-        .await
-        .expect("verify bootstrap authority");
-        let installed = bootstrap
-            .open_database(
-                "snapshot-bootstrap-exact-root",
+        let bootstrap = store
+            .prepare_snapshot_bootstrap(
+                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                1,
                 &database_path,
+                &signer,
+            )
+            .await
+            .expect("verify bootstrap authority");
+        let installed = bootstrap
+            .install(
                 tables,
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -1742,16 +1772,14 @@ mod tests {
 
         let destination = tempfile::tempdir().expect("bootstrap destination");
         let database_path = destination.path().join("store.db");
-        let result = bootstrap_from_snapshot(
-            &store.storage,
-            "snapshot-bootstrap-requires-stability",
-            store.root,
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-            1,
-            &database_path,
-            &signer,
-        )
-        .await;
+        let result = store
+            .prepare_snapshot_bootstrap(
+                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                1,
+                &database_path,
+                &signer,
+            )
+            .await;
 
         assert!(result.is_err());
         assert!(!database_path.exists());

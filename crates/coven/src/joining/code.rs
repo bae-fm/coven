@@ -56,14 +56,20 @@ impl InviteCode {
         self.membership_floor
             .validate()
             .map_err(crate::sync::store::InviteError::Crypto)?;
-        let mut history =
-            crate::sync::store::open_invitation_history(storage, identity, &self.store_root)
-                .await?;
+        let (_, mut history) = crate::sync::store::HistoryConstructionAuthority::invitation()
+            .open_pinned(storage, &self.store_root)
+            .await
+            .map_err(|error| {
+                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
+            })?;
         let chain = history
-            .load_membership(&self.membership_floor.0, &self.owner_pubkey)
-            .await?;
-        history
-            .open_keyring_containing(&chain, &self.wrapped_key)
+            .load_exact_anchored_membership(&self.membership_floor.0, Some(&self.owner_pubkey))
+            .await
+            .map_err(|error| {
+                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
+            })?;
+        crate::sync::store::StoreKeyrings::new(storage, self.store_root.clone())
+            .open_containing(identity, &chain, &self.wrapped_key)
             .await
     }
 }
@@ -90,15 +96,15 @@ pub(crate) fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     // the invite against (`join.rs`): a malformed value can't name a real chain,
     // so it is refused here rather than surfacing as an opaque chain-lookup
     // failure deep in the join.
-    crate::restoration::decode_hex_bytes("owner public key", &code.owner_pubkey, 32)
+    crate::code_envelope::decode_fixed_hex("owner public key", &code.owner_pubkey, 32)
         .map_err(JoinCodeError::InvalidOwnerPubkey)?;
-    crate::restoration::decode_hex_bytes(
+    crate::code_envelope::decode_fixed_hex(
         "wrapped-key author public key",
         &code.wrapped_key.owner_pubkey,
         32,
     )
     .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
-    crate::restoration::decode_hex_bytes(
+    crate::code_envelope::decode_fixed_hex(
         "wrapped-key recipient public key",
         &code.wrapped_key.recipient_pubkey,
         32,

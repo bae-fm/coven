@@ -29,12 +29,6 @@ pub(super) use operation::StoreWriterAuthorizationError;
 #[derive(Clone, Copy)]
 pub(super) struct SnapshotHistoryConstruction;
 
-impl SnapshotHistoryConstruction {
-    fn authorize_history(self) -> super::history::HistoryConstructionAuthority {
-        super::history::HistoryConstructionAuthority::snapshot(self)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn authorize<'storage>(
     database: StoreDatabase,

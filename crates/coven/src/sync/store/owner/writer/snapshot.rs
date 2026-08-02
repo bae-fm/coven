@@ -6,7 +6,7 @@ mod publication;
 pub(super) use publication::AuthorizedSnapshotPublication;
 
 pub(crate) use image::should_create_snapshot;
-pub(crate) use image::{bootstrap_from_snapshot, SnapshotBlobReconcile, SnapshotError};
+pub(crate) use image::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 
 use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
 
@@ -20,7 +20,7 @@ use crate::protocol::store_commit::{
     ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
     StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
 pub(crate) struct SnapshotCut {
     pub(crate) snapshot: CreatedSnapshot,
@@ -688,187 +688,6 @@ pub(crate) fn publication_error(error: crate::database::DbError) -> SnapshotErro
     SnapshotError::PublicationState(error.to_string())
 }
 
-struct SnapshotBootstrapAuthority<'storage> {
-    storage: &'storage dyn SyncStorage,
-    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
-}
-
-struct VerifiedSnapshotBootstrap<'storage> {
-    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
-    snapshot: crate::database::PublishedStoreSnapshot,
-    image: Vec<u8>,
-    stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
-    membership: crate::protocol::membership::MembershipChain,
-}
-
-impl<'storage> SnapshotBootstrapAuthority<'storage> {
-    fn new(
-        storage: &'storage dyn SyncStorage,
-        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-        history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
-            'storage,
-        >,
-    ) -> Self {
-        Self {
-            storage,
-            root,
-            history_verifier,
-        }
-    }
-
-    async fn select(
-        mut self,
-        membership_floor: &crate::joining::MembershipFloor,
-        binary_schema_version: u32,
-    ) -> Result<VerifiedSnapshotBootstrap<'storage>, SnapshotError> {
-        let root = self.root.reference();
-        let root_value = self.root.protocol();
-        if root_value.descriptor.store_root_id() != root.store_root_id {
-            return Err(SnapshotError::UnauthorizedAuthor(
-                "Store root differs from bootstrap authority".to_string(),
-            ));
-        }
-        let heads = &membership_floor.0;
-        let mut registrations = std::collections::BTreeMap::new();
-        let mut resolutions = std::collections::BTreeSet::new();
-        for reference in heads {
-            let head = self
-                .history_verifier
-                .load_exact_membership_head(reference)
-                .await
-                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-            resolutions.extend(head.body.resolutions.iter().cloned());
-            let registration = self
-                .history_verifier
-                .load_registration(&head.body.author_registration)
-                .await
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?
-                .value;
-            registrations.insert(head.body.author_registration.clone(), registration);
-        }
-        let resolutions = resolutions.into_iter().collect::<Vec<_>>();
-        let membership = self
-            .history_verifier
-            .load_membership_at_exact_heads(heads, &resolutions)
-            .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-        let registrations = registrations
-            .into_iter()
-            .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
-            .collect::<Vec<_>>();
-        let mut authorized = Vec::new();
-        for (registration_ref, registration) in registrations {
-            authorized.extend(
-                self.history_verifier
-                    .load_store_snapshot_stream(&registration_ref, &registration)
-                    .await?,
-            );
-        }
-        let selected = Box::pin(
-            self.history_verifier
-                .select_maximal_stable_store_snapshot(authorized),
-        )
-        .await
-        .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
-        .ok_or_else(|| {
-            SnapshotError::Bucket(crate::storage::StorageError::NotFound(
-                "Store snapshot stream".to_string(),
-            ))
-        })?;
-        let chosen = selected.snapshot;
-        if chosen.meta.schema_version > binary_schema_version {
-            return Err(SnapshotError::SchemaTooNew {
-                snapshot_version: chosen.meta.schema_version,
-                supported: binary_schema_version,
-            });
-        }
-        let image_context = ProtocolObjectContext::store_encrypted(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotImage,
-        );
-        let image = self
-            .storage
-            .read_protocol_object(
-                &image_context,
-                &chosen.meta.image.object,
-                &snapshot_image_semantic_prefix(
-                    &chosen.meta.author_registration.device_id.to_string(),
-                    chosen.meta.image.image_hash,
-                ),
-            )
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        if ObjectHash::digest(&image) != chosen.meta.image.image_hash {
-            return Err(SnapshotError::Parse(
-                "Store snapshot image differs from its exact reference".to_string(),
-            ));
-        }
-        Ok(VerifiedSnapshotBootstrap {
-            root: self.root,
-            history_verifier: self.history_verifier,
-            snapshot: chosen,
-            image,
-            stability: selected.stability,
-            membership,
-        })
-    }
-}
-
-async fn open_snapshot_bootstrap_authority<'storage>(
-    storage: &'storage dyn SyncStorage,
-    root: &StoreRootRef,
-) -> Result<SnapshotBootstrapAuthority<'storage>, SnapshotError> {
-    let (verified_root, history_verifier) =
-        crate::sync::store::owner::verified_history::open_merge_history_verifier_with_root(
-            SnapshotHistoryConstruction.authorize_history(),
-            storage,
-            root,
-        )
-        .await
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-    Ok(SnapshotBootstrapAuthority::new(
-        storage,
-        verified_root,
-        history_verifier,
-    ))
-}
-
-impl<'storage> VerifiedSnapshotBootstrap<'storage> {
-    async fn founder_registration(
-        &self,
-    ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
-        SnapshotError,
-    > {
-        self.history_verifier
-            .load_founder_registration()
-            .await
-            .map_err(|error| SnapshotError::Parse(error.to_string()))
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        crate::sync::store::protocol_root::VerifiedStoreRoot,
-        crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
-        crate::database::PublishedStoreSnapshot,
-        Vec<u8>,
-        crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
-        crate::protocol::membership::MembershipChain,
-    ) {
-        (
-            self.root,
-            self.history_verifier,
-            self.snapshot,
-            self.image,
-            self.stability,
-            self.membership,
-        )
-    }
-}
-
 pub(crate) fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {
     let left = left.clone().into_refs();
     let right = right.clone().into_refs();
@@ -1056,23 +875,32 @@ mod tests {
             .await
             .expect("activate exact snapshot selector acknowledgement");
 
-        let selected = open_snapshot_bootstrap_authority(&store.storage, &store.root)
-            .await
-            .expect("open exact snapshot bootstrap authority")
-            .select(
+        let destination = tempfile::tempdir().expect("snapshot selector destination");
+        let database_path = destination.path().join("store.db");
+        let selected = store
+            .prepare_snapshot_bootstrap(
                 &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
                 1,
+                &database_path,
+                &signer,
             )
             .await
             .expect("select verified exact snapshot");
-        let (_, _, selected, image, _, _) = selected.into_parts();
 
-        assert_eq!(selected.reference.snapshot_hash, published.snapshot_hash());
-        assert_ne!(
-            selected.reference.snapshot_hash,
-            selected.reference.object.stored_hash(),
+        assert_eq!(
+            selected.selected_snapshot_hash_for_test(),
+            published.snapshot_hash()
         );
-        assert_eq!(image, b"snapshot selector image");
+        assert_ne!(
+            selected.selected_snapshot_hash_for_test(),
+            selected.selected_snapshot_object_hash_for_test(),
+        );
+        assert_eq!(
+            selected
+                .staged_database_bytes_for_test()
+                .expect("read selected snapshot image"),
+            b"snapshot selector image"
+        );
     }
 
     #[tokio::test]

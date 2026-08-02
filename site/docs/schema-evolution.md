@@ -190,8 +190,7 @@ Version skew at bootstrap is handled on both sides:
 - **Joiner below the snapshot's version (reverse):** refused *before the
   download*. The metadata's recorded version exceeds the joiner's ladder top,
   so bootstrap fails with
-  [`SnapshotError::SchemaTooNew`](rustdoc:enum:coven::sync::snapshot::SnapshotError)
-  and writes nothing. The at-open
+  `SnapshotError::SchemaTooNew` and writes nothing. The at-open
   [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::migration::MigrationError)
   check backs this up for a database file that is already on disk (a copied
   file, a downgraded app): a binary never runs against a schema from its

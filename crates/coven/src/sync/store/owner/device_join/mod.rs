@@ -47,12 +47,6 @@ pub(super) use provider_administrator::AuthorizedProviderAdministratorJoin;
 #[derive(Clone, Copy)]
 pub(super) struct PendingDeviceJoinHistoryConstruction;
 
-impl PendingDeviceJoinHistoryConstruction {
-    fn authorize_history(self) -> super::history::HistoryConstructionAuthority {
-        super::history::HistoryConstructionAuthority::pending_device_join(self)
-    }
-}
-
 pub use cleanup::*;
 pub use error::*;
 pub use exchange::*;

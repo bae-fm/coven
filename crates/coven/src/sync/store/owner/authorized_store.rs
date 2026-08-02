@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MembershipChain;
@@ -7,7 +5,6 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistration, StoreDeviceRegistrationActivation, StoreDeviceRegistrationRef,
     StoreRootRef,
 };
-use crate::storage::SyncStorage;
 use crate::sync::store::StoreError;
 
 use super::history::AuthorizedStoreHistory;
@@ -77,7 +74,6 @@ impl LocalStoreDevice {
 
 pub(crate) struct AuthorizedStore<'storage> {
     history: AuthorizedStoreHistory<'storage>,
-    storage: &'storage Arc<dyn SyncStorage>,
     identity: &'storage UserKeypair,
     local_device: Option<LocalStoreDevice>,
     membership: MembershipChain,
@@ -86,14 +82,12 @@ pub(crate) struct AuthorizedStore<'storage> {
 impl<'storage> AuthorizedStore<'storage> {
     pub(super) fn new(
         history: AuthorizedStoreHistory<'storage>,
-        storage: &'storage Arc<dyn SyncStorage>,
         identity: &'storage UserKeypair,
         local_device: Option<LocalStoreDevice>,
         membership: MembershipChain,
     ) -> Self {
         Self {
             history,
-            storage,
             identity,
             local_device,
             membership,
@@ -273,11 +267,8 @@ impl<'storage> AuthorizedStore<'storage> {
 
     #[cfg(test)]
     pub(super) fn bind_restore_for_test(self) -> super::RestoringStore<'storage> {
-        self.history.bind_restore(
-            self.storage.as_ref(),
-            self.membership,
-            self.identity.clone(),
-        )
+        self.history
+            .bind_restore(self.membership, self.identity.clone())
     }
 
     #[cfg(test)]
@@ -328,7 +319,6 @@ impl<'storage> AuthorizedStore<'storage> {
     ) -> Result<super::AuthorizedWriterOperation<'storage>, super::StoreRegistrationError> {
         let Self {
             history,
-            storage,
             identity,
             local_device,
             membership,
@@ -345,8 +335,7 @@ impl<'storage> AuthorizedStore<'storage> {
             )
             .into());
         }
-        let live_provider = storage
-            .as_ref()
+        let live_provider = history
             .provider_binding()
             .await
             .map_err(crate::storage::StoreObjectError::from)
@@ -361,7 +350,6 @@ impl<'storage> AuthorizedStore<'storage> {
             .device_signer(identity)
             .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history.authorize_writer(
-            storage,
             membership,
             identity,
             local_device.registration_ref,

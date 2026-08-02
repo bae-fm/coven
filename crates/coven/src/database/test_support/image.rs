@@ -248,23 +248,6 @@ impl DatabaseImageTest {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn local_recovery_registration_evidence(
-        &self,
-    ) -> Result<(String, Vec<u8>, String), DbError> {
-        self.connection
-            .query_row(
-                "SELECT registration.device_id, registration.registration_bytes,
-                        activation.activation_authority
-                 FROM local_store_device_registration AS registration
-                 JOIN store_device_registration_activations AS activation
-                   ON activation.device_id = registration.device_id
-                 WHERE registration.singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(DbError::from)
-    }
-
     pub(crate) fn into_bytes(self) -> Result<Vec<u8>, DbError> {
         self.connection
             .serialize(rusqlite::MAIN_DB)

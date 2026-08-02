@@ -12,17 +12,16 @@ use crate::database::supported_version;
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
-use crate::joining::{InviteCode, MembershipFloor};
+use crate::joining::InviteCode;
 use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::session::SyncedTable;
 use crate::sync::store::{
-    bootstrap_from_snapshot, InviteError, PullError, SnapshotBlobReconcile, SnapshotError,
+    InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
 use crate::Migration;
 
@@ -184,46 +183,6 @@ impl<'a> BootstrapCleanup<'a> {
     }
 }
 
-/// Fail with [`BootstrapError::Cancelled`] if the caller's cancel signal has
-/// fired. Called only at phase boundaries — never mid-download or mid-write —
-/// so a cancellation returns through the same failure-cleanup path a real error
-/// takes, mirroring `make_local`'s cooperative cancellation.
-fn error_if_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), BootstrapError> {
-    if *cancel.borrow() {
-        Err(BootstrapError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-/// The identity and verified authority carried by a restore code. Bootstrap
-/// installs the identity in store custody before writing the config marker.
-pub(crate) struct RestoreBootstrapContext<'a> {
-    pub keypair: &'a UserKeypair,
-    pub authority: &'a crate::restoration::RestoreAuthority,
-    pub continuation: Option<(
-        &'a crate::restoration::ActivatedContinuation,
-        &'a UserKeypair,
-    )>,
-}
-
-impl RestoreBootstrapContext<'_> {
-    fn keypair(&self) -> &UserKeypair {
-        self.keypair
-    }
-
-    fn activated_continuation(&self) -> Option<&crate::restoration::ActivatedContinuation> {
-        self.continuation.map(|(continuation, _)| continuation)
-    }
-
-    fn owner_recovery(&self) -> Option<&crate::restoration::OwnerRecoveryAuthority> {
-        match self.authority {
-            crate::restoration::RestoreAuthority::OwnerRecovery(authority) => Some(authority),
-            crate::restoration::RestoreAuthority::ActivatedContinuation(_) => None,
-        }
-    }
-}
-
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
@@ -382,7 +341,7 @@ pub struct DeviceJoinClient {
 }
 
 struct DeviceJoinStorage {
-    storage: CloudSyncStorage,
+    storage: Arc<dyn crate::storage::SyncStorage>,
     keyring: MasterKeyring,
 }
 
@@ -449,12 +408,15 @@ impl DeviceJoinClient {
     ) -> Result<crate::DeviceProviderAccessRequest, BootstrapError> {
         self.require_offer(&offer)?;
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage = self.transport_storage().await?;
+        let storage: Arc<dyn crate::storage::SyncStorage> =
+            Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let authority = crate::sync::store::open_pending_device_join_authority(
-            &pending, &storage, &signer, offer,
-        )
-        .await?;
+        let observation = self
+            .pending_observation(&pending, &storage, &offer.store_root, offer.attempt_id)
+            .await?;
+        let authority =
+            crate::sync::store::PendingDeviceJoinAuthority::open(observation, &signer, offer)
+                .await?;
         Ok(authority.prepare_provider_access_request().await?)
     }
 
@@ -462,15 +424,17 @@ impl DeviceJoinClient {
         &self,
         abandonment: crate::DeviceJoinAbandonment,
     ) -> Result<crate::DeviceJoinAbandonment, BootstrapError> {
-        let storage = self.transport_storage().await?;
+        let storage: Arc<dyn crate::storage::SyncStorage> =
+            Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let mut observation = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &storage,
-            &self.code.store_root,
-            abandonment.abandonment.attempt_id,
-        )
-        .await?;
+        let mut observation = self
+            .pending_observation(
+                &pending,
+                &storage,
+                &self.code.store_root,
+                abandonment.abandonment.attempt_id,
+            )
+            .await?;
         Ok(observation.observe_abandonment(abandonment).await?)
     }
 
@@ -492,15 +456,17 @@ impl DeviceJoinClient {
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::JoinerJoinTerminal, BootstrapError> {
         let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
-        let storage = self.transport_storage().await?;
+        let storage: Arc<dyn crate::storage::SyncStorage> =
+            Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &storage,
-            &self.code.store_root,
-            cancellation.outcome.attempt().attempt_id,
-        )
-        .await?;
+        let observation = self
+            .pending_observation(
+                &pending,
+                &storage,
+                &self.code.store_root,
+                cancellation.outcome.attempt().attempt_id,
+            )
+            .await?;
         let mut closure = observation.authorize_closure(&signer);
         Ok(closure.close(cancellation).await?)
     }
@@ -518,14 +484,16 @@ impl DeviceJoinClient {
                 return Err(crate::DeviceJoinError::JournalConflict.into());
             }
             _ => {
-                let storage = self.transport_storage().await?;
-                let mut observation = crate::sync::store::observe_pending_device_join(
-                    &pending,
-                    &storage,
-                    &self.code.store_root,
-                    activation.receipt.attempt_id,
-                )
-                .await?;
+                let storage: Arc<dyn crate::storage::SyncStorage> =
+                    Arc::new(self.transport_storage().await?);
+                let mut observation = self
+                    .pending_observation(
+                        &pending,
+                        &storage,
+                        &self.code.store_root,
+                        activation.receipt.attempt_id,
+                    )
+                    .await?;
                 observation.accept_cleanup(activation.clone()).await?;
             }
         }
@@ -559,11 +527,14 @@ impl DeviceJoinClient {
         let offer = &approval.request.offer;
         self.require_offer(offer)?;
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage = self.transport_storage().await?;
+        let storage: Arc<dyn crate::storage::SyncStorage> =
+            Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let mut authority = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &storage,
+        let observation = self
+            .pending_observation(&pending, &storage, &offer.store_root, offer.attempt_id)
+            .await?;
+        let mut authority = crate::sync::store::PendingDeviceJoinAuthority::open(
+            observation,
             &signer,
             offer.as_ref().clone(),
         )
@@ -581,7 +552,9 @@ impl DeviceJoinClient {
         self.require_offer(offer)?;
         let attempt = &bootstrap.bootstrap.publication_authorization.attempt;
         let pending = self.open_pending_journal()?;
-        error_if_cancelled(cancel)?;
+        if *cancel.borrow() {
+            return Err(BootstrapError::Cancelled);
+        }
         let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
         let join = self.build_storage(&signer).await?;
         let store_dir = self.layout.store_dir(&self.code.store_id);
@@ -596,10 +569,15 @@ impl DeviceJoinClient {
         std::fs::create_dir_all(&*store_dir)?;
         on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
-        let snapshot = bootstrap_from_snapshot(
+        let (root, history_verifier) =
+            crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+                .open_pinned(join.storage.as_ref(), &offer.store_root)
+                .await
+                .map_err(SnapshotError::from)?;
+        let snapshot = PreparedSnapshotBootstrap::prepare(
             &join.storage,
-            &self.code.store_id,
-            offer.store_root.clone(),
+            root,
+            history_verifier,
             &self.code.membership_floor,
             supported_version(&self.migrations),
             &db_path,
@@ -614,9 +592,7 @@ impl DeviceJoinClient {
             .device_id
             .to_string();
         let opened = snapshot
-            .open_database(
-                &self.code.store_id,
-                &db_path,
+            .install(
                 self.synced_tables.clone(),
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -702,15 +678,12 @@ impl DeviceJoinClient {
         // has to hold those commits and the row data they carry.
         on_status("Catching up on store history...");
         let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let mut joining = crate::sync::store::resume_joining_store(
-            &pending,
-            database,
-            &join.storage,
-            &signer,
-            &self.code.store_root,
-            attempt_id,
-        )
-        .await?;
+        let observation = self
+            .pending_observation(&pending, &join.storage, &self.code.store_root, attempt_id)
+            .await?;
+        let mut joining = observation
+            .into_joining_store(database, signer.clone())
+            .await?;
         joining
             .pull_store_history(&store_dir, Some(&routing_encryption))
             .await?;
@@ -770,6 +743,26 @@ impl DeviceJoinClient {
         Ok(crate::DeviceJoinJournalDatabase::open(
             directory.join(format!("{}.sqlite", self.code.store_id)),
         )?)
+    }
+
+    async fn pending_observation<'storage>(
+        &self,
+        pending: &crate::DeviceJoinJournalDatabase,
+        storage: &'storage Arc<dyn crate::storage::SyncStorage>,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        attempt_id: crate::DeviceJoinAttemptId,
+    ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'storage>, BootstrapError> {
+        let (root, history_verifier) =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(storage.as_ref(), root)
+                .await?;
+        Ok(crate::sync::store::PendingDeviceJoinObservation::new(
+            pending,
+            storage,
+            root,
+            history_verifier,
+            attempt_id,
+        ))
     }
 
     async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
@@ -833,160 +826,11 @@ impl DeviceJoinClient {
             self.code.store_id.clone(),
             signer.clone(),
         )?;
-        Ok(DeviceJoinStorage { storage, keyring })
+        Ok(DeviceJoinStorage {
+            storage: Arc::new(storage),
+            keyring,
+        })
     }
-}
-
-/// Inner restore bootstrap logic, separated so callers can clean up the store
-/// directory on failure.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn bootstrap_and_save_store(
-    storage: &CloudSyncStorage,
-    cipher: &CloudCipher,
-    master_key: Option<&MasterKeyring>,
-    store_dir: &StoreDir,
-    store_id: &str,
-    device_id: &str,
-    clock: crate::clock::ClockRef,
-    store_root: crate::protocol::store_commit::StoreRootRef,
-    context: RestoreBootstrapContext<'_>,
-    membership_floor: &MembershipFloor,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    join_info: &CloudHomeJoinInfo,
-    store_name: &str,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
-    key_service: &StoreKeys,
-    custody: &dyn MasterKeyCustody,
-    identity_custody: &dyn DeviceIdentityCustody,
-    on_status: &impl Fn(&str),
-    cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError> {
-    // Join pins the store owner from the invite. Restore adopts the owner
-    // from the chain founder while opening the bootstrapped store, because the
-    // restore code carries the bucket credentials rather than an inviter assertion.
-    //
-    // Cancellation is checked between phases (before the snapshot download here,
-    // before the subsequent Store pull, and per-blob during blob reconciliation),
-    // never inside a download. A cancel returns through the same failure-cleanup
-    // the caller runs, so the store directory is removed.
-    error_if_cancelled(cancel)?;
-    on_status("Downloading store snapshot...");
-    let db_path = store_dir.db_path();
-    let bucket_dyn: &dyn SyncStorage = storage;
-    let binary_schema_version = supported_version(migrations);
-    let bootstrap_result = bootstrap_from_snapshot(
-        bucket_dyn,
-        store_id,
-        store_root.clone(),
-        membership_floor,
-        binary_schema_version,
-        &db_path,
-        context.keypair(),
-    )
-    .await?;
-
-    info!(
-        "Bootstrapped from snapshot ({} device coverage entries)",
-        bootstrap_result.coverage_count()
-    );
-
-    let committed = async {
-        // Pull Store commits beyond the snapshot coverage.
-        error_if_cancelled(cancel)?;
-        on_status("Applying recent changes...");
-        let routing_encryption = master_key.map(|keyring| EncryptionService::from(keyring.clone()));
-        let mut store = bootstrap_result
-            .open_database(
-                store_id,
-                &db_path,
-                synced_tables.to_vec(),
-                // This bootstrap database only applies changesets during restore; it never runs
-                // tombstone collection, so the grace is immaterial and takes the default.
-                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
-                device_id.to_string(),
-                clock,
-                migrations,
-                routing_encryption.as_ref(),
-            )
-            .await?;
-
-        match store
-            .reconcile_snapshot_blobs(store_dir, cancel)
-            .await
-            .map_err(|error| {
-                BootstrapError::Database(format!("failed to reconcile snapshot blobs: {error}"))
-            })? {
-            SnapshotBlobReconcile::Complete => {}
-            SnapshotBlobReconcile::Incomplete => {
-                return Err(BootstrapError::Database(
-                    "snapshot blob reconciliation did not land every required eager blob"
-                        .to_string(),
-                ));
-            }
-            SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
-        }
-
-        error_if_cancelled(cancel)?;
-        let pull_result = store.pull(store_dir, routing_encryption.as_ref()).await?;
-
-        if let Some(continuation) = context.activated_continuation() {
-            store
-                .install_activated_device_continuation(continuation.clone())
-                .await?;
-        }
-
-        if let Some(authority) = context.owner_recovery() {
-            store.recover_owner_device(authority).await?;
-        }
-
-        if pull_result.changesets_applied > 0 {
-            info!(
-                "Applied {} changesets since snapshot",
-                pull_result.changesets_applied
-            );
-        }
-
-        // Persist the master key via custody.
-        on_status("Saving configuration...");
-        if let Some(keyring) = master_key {
-            custody.persist(keyring)?;
-        }
-
-        // Save cloud credentials to keyring.
-        if let Some(credentials) = derive_credentials(join_info) {
-            key_service.set_cloud_home_credentials(&credentials)?;
-        }
-
-        // Establish the store's signing identity BEFORE the config save, so
-        // the saved config — the completion marker — always implies a
-        // resolvable identity. A crash before the save is a torn bootstrap the
-        // retry clears and re-establishes from the restore code the user still
-        // holds. Inside the unit, so a later failure deletes the bootstrap
-        // reader the same as any other.
-        identity_custody.establish(context.keypair())?;
-
-        // Create and save config — the last durable write and the
-        // store's completion marker.
-        let mut config = build_config(
-            store_id, device_id, store_dir, store_name, join_info, cipher,
-        );
-        if matches!(
-            join_info,
-            CloudHomeJoinInfo::S3 {
-                endpoint: Some(_),
-                ..
-            }
-        ) {
-            config.cloud_home.s3_exact_slots = custom_s3_exact_slots;
-        }
-        config.save_to_config_yaml()?;
-        Ok(config)
-    }
-    .await;
-
-    committed
 }
 
 /// The credentials to persist for this join, or `None` when the provider needs

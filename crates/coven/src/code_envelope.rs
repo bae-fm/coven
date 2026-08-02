@@ -44,3 +44,19 @@ pub(crate) fn decode_code<T: DeserializeOwned>(prefix: &str, s: &str) -> Result<
         .map_err(|_| EnvelopeError::InvalidBase64)?;
     serde_json::from_slice(&bytes).map_err(|e| EnvelopeError::InvalidJson(e.to_string()))
 }
+
+/// Decode fixed-length hex material carried inside a pasted code.
+pub(crate) fn decode_fixed_hex(
+    label: &str,
+    value: &str,
+    expected_len: usize,
+) -> Result<Vec<u8>, String> {
+    let bytes = hex::decode(value).map_err(|error| format!("{label} is not hex: {error}"))?;
+    if bytes.len() != expected_len {
+        return Err(format!(
+            "{label} must be {expected_len} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}

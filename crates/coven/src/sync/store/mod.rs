@@ -61,12 +61,7 @@ pub(crate) use owner::device_exclusion::{
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
 #[cfg(test)]
-pub(crate) use owner::device_join::{begin_joining_store_from_pending, PendingDeviceJoinAuthority};
-pub(crate) use owner::device_join::{
-    observe_pending_device_join, open_pending_device_join_authority, resume_joining_store,
-    DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
-    DeviceProviderResponseReservation, JoiningStore,
-};
+pub(crate) use owner::device_join::begin_joining_store_from_pending;
 pub use owner::device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
@@ -79,7 +74,11 @@ pub use owner::device_join::{
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
 };
-pub(crate) use owner::history::open_invitation_history;
+pub(crate) use owner::device_join::{
+    DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
+    DeviceProviderResponseReservation, JoiningStore, PendingDeviceJoinAuthority,
+    PendingDeviceJoinObservation,
+};
 #[cfg(test)]
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
 pub(crate) use owner::operations::{
@@ -107,11 +106,12 @@ pub(crate) use owner::reclaim::{
 };
 pub(crate) use owner::snapshot::verify_store_snapshot_bytes;
 #[doc(hidden)]
-pub(crate) use owner::snapshot::{bootstrap_from_snapshot, SnapshotBlobReconcile, SnapshotError};
+pub(crate) use owner::snapshot::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 #[cfg(test)]
 pub(crate) use owner::StoreAckError;
 pub(crate) use owner::{
-    AuthorizedWriterOperation, HostWriteBlobStaging, Store, StoreInitializationError,
+    AuthorizedWriterOperation, HistoryConstructionAuthority, HostWriteBlobStaging, Store,
+    StoreInitializationError, StoreKeyrings,
 };
 pub(crate) use owner::{RestoringStore, StoreRegistrationError};
 pub(crate) use protocol_root::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};

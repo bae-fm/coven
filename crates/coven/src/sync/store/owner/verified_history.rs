@@ -22,9 +22,7 @@ use crate::protocol::store_commit::{
 use crate::protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
 };
-use crate::storage::{
-    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
-};
+use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::storage::{StoreObjectError, VerifiedObject};
 use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull::*;
@@ -2572,7 +2570,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(super) async fn from_commit_verifier(
-        _authority: super::history::HistoryConstructionAuthority,
+        _authority: super::HistoryConstructionAuthority,
         root: super::super::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
@@ -2741,6 +2739,23 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
         self.commit_verifier.load_founder_registration().await
+    }
+
+    pub(crate) async fn load_snapshot_image(
+        &self,
+        snapshot: &crate::database::PublishedStoreSnapshot,
+    ) -> Result<Vec<u8>, StoreObjectError> {
+        let context = ProtocolObjectContext::store_encrypted(
+            self.root.reference().store_root_hash,
+            ProtocolObjectDomain::StoreSnapshotImage,
+        );
+        let semantic_prefix = crate::protocol::store_commit::snapshot_image_semantic_prefix(
+            &snapshot.meta.author_registration.device_id.to_string(),
+            snapshot.meta.image.image_hash,
+        );
+        self.commit_verifier
+            .read_protocol_object(&context, &snapshot.meta.image.object, &semantic_prefix)
+            .await
     }
 
     pub(crate) async fn load_device_join_attempt_and_owner(
@@ -4751,45 +4766,4 @@ fn held_protocol_error(error: StoreProtocolError) -> HeldStorePositionReason {
         }
         error => HeldStorePositionReason::InvalidObject(error.to_string()),
     }
-}
-
-pub(super) async fn open_merge_history_verifier<'storage>(
-    authority: super::history::HistoryConstructionAuthority,
-    storage: &'storage dyn SyncStorage,
-    root: &StoreRootRef,
-) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
-    open_merge_history_verifier_with_root(authority, storage, root)
-        .await
-        .map(|(_, verifier)| verifier)
-}
-
-pub(super) async fn open_merge_history_verifier_with_root<'storage>(
-    authority: super::history::HistoryConstructionAuthority,
-    storage: &'storage dyn SyncStorage,
-    root: &StoreRootRef,
-) -> Result<
-    (
-        super::super::protocol_root::VerifiedStoreRoot,
-        MergeHistoryVerifier<'storage>,
-    ),
-    StorePullError,
-> {
-    let verified_root =
-        crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
-            .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let verified_root = super::super::protocol_root::VerifiedStoreRoot::from_verified_object(
-        root.clone(),
-        verified_root,
-    )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
-    let commit_verifier =
-        StoreCommitVerifier::from_verified_root(authority, storage, verified_root.clone());
-    let verifier = MergeHistoryVerifier::from_commit_verifier(
-        authority,
-        verified_root.clone(),
-        commit_verifier,
-    )
-    .await?;
-    Ok((verified_root, verifier))
 }

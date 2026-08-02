@@ -220,13 +220,13 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
     }
     match &code.authority {
         RestoreAuthority::ActivatedContinuation(continuation) => {
-            decode_hex_bytes(
+            crate::code_envelope::decode_fixed_hex(
                 "identity signing key",
                 &continuation.identity_signing_secret,
                 64,
             )
             .map_err(RestoreCodeError::InvalidSigningKey)?;
-            decode_hex_bytes(
+            crate::code_envelope::decode_fixed_hex(
                 "device signing key",
                 &continuation.device_signing_secret,
                 64,
@@ -234,7 +234,7 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
             .map_err(RestoreCodeError::InvalidSigningKey)?;
         }
         RestoreAuthority::OwnerRecovery(recovery) => {
-            decode_hex_bytes(
+            crate::code_envelope::decode_fixed_hex(
                 "Owner identity signing key",
                 &recovery.owner_identity_secret,
                 64,
@@ -247,7 +247,7 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
             }
         }
     }
-    decode_hex_bytes("founder public key", &code.founder_pubkey, 32)
+    crate::code_envelope::decode_fixed_hex("founder public key", &code.founder_pubkey, 32)
         .map_err(RestoreCodeError::InvalidFounderKey)?;
     if code.membership_floor.0.is_empty() {
         return Err(RestoreCodeError::EmptyMembershipFloor);
@@ -256,24 +256,6 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
         .validate()
         .map_err(RestoreCodeError::InvalidMembershipFloor)?;
     Ok(code)
-}
-
-/// Decode `hex_value` and check it is exactly `expected_len` bytes. Shared
-/// with `join_code`'s `owner_pubkey` check, since both are fixed-length
-/// hex-encoded key material that must be validated at decode time.
-pub(crate) fn decode_hex_bytes(
-    label: &str,
-    hex_value: &str,
-    expected_len: usize,
-) -> Result<Vec<u8>, String> {
-    let bytes = hex::decode(hex_value).map_err(|e| format!("{label} is not hex: {e}"))?;
-    if bytes.len() != expected_len {
-        return Err(format!(
-            "{label} must be {expected_len} bytes, got {}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 /// UI-ready info from a decoded restore code.

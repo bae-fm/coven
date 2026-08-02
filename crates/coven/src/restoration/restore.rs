@@ -11,15 +11,16 @@ use tracing::info;
 
 use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
-use crate::encryption::MasterKeyring;
+use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
-use crate::joining::{bootstrap_and_save_store, BootstrapCleanup, BootstrapError};
+use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
 use crate::sync::session::SyncedTable;
+use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 use crate::Migration;
 
 /// Cloud provider source for restore: the join info a restore code carries
@@ -244,9 +245,8 @@ pub async fn restore_from_cloud(
         // opaque home (encrypted, obfuscated blob paths); a key absent ⇒ a
         // browsable home (plaintext, readable blob paths). The cipher and the
         // blob-path scheme both follow from it, so this device computes the
-        // same blob keys the source wrote. Parsed once here (not re-parsed
-        // inside `bootstrap_and_save_store`) so the cipher and the persisted
-        // master key always agree on the same value.
+        // same blob keys the source wrote. Parsed once here so the cipher and
+        // the persisted master key always agree on the same value.
         let storage = if serialized_keyring.is_some() {
             HomeStorage::Opaque
         } else {
@@ -268,13 +268,13 @@ pub async fn restore_from_cloud(
 
         let (join_info, cloud_home) = build_cloud_home(source, &store_keys, clock.clone()).await?;
 
-        let storage = CloudSyncStorage::new(
+        let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(CloudSyncStorage::new(
             cloud_home,
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
             keypair.clone(),
-        )?;
+        )?);
 
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own
@@ -290,8 +290,8 @@ pub async fn restore_from_cloud(
         let continuation = match (authority, continuation_device_signer) {
             (
                 crate::restoration::RestoreAuthority::ActivatedContinuation(continuation),
-                Some(device_signer),
-            ) => Some((continuation, device_signer)),
+                Some(_),
+            ) => Some(continuation),
             (crate::restoration::RestoreAuthority::ActivatedContinuation(_), None) => {
                 return Err(BootstrapError::InvalidSigningKey(
                     "activated continuation has no device signing key".to_string(),
@@ -305,33 +305,115 @@ pub async fn restore_from_cloud(
             }
         };
 
-        Box::pin(bootstrap_and_save_store(
+        // Cancellation is checked between phases, never during a download or
+        // durable write. Every cancellation still exits through this restore's
+        // failure cleanup.
+        if *cancel.borrow() {
+            return Err(BootstrapError::Cancelled);
+        }
+        on_status("Downloading store snapshot...");
+        let (verified_root, history_verifier) =
+            crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+                .open_pinned(storage.as_ref(), &store_root)
+                .await
+                .map_err(SnapshotError::from)?;
+        let bootstrap = PreparedSnapshotBootstrap::prepare(
             &storage,
-            &cipher,
-            master_key.as_ref(),
-            &store_dir,
-            store_id,
-            &device_id,
-            clock.clone(),
-            store_root,
-            crate::joining::RestoreBootstrapContext {
-                keypair,
-                authority,
-                continuation,
-            },
+            verified_root,
+            history_verifier,
             membership_floor,
-            synced_tables,
-            migrations,
-            &join_info,
-            store_name,
-            custom_s3_exact_slots,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            &on_status,
-            cancel,
-        ))
-        .await
+            crate::database::supported_version(migrations),
+            &store_dir.db_path(),
+            keypair,
+        )
+        .await?;
+
+        info!(
+            "Bootstrapped from snapshot ({} device coverage entries)",
+            bootstrap.coverage_count()
+        );
+
+        if *cancel.borrow() {
+            return Err(BootstrapError::Cancelled);
+        }
+        on_status("Applying recent changes...");
+        let routing_encryption = master_key
+            .as_ref()
+            .map(|keyring| EncryptionService::from(keyring.clone()));
+        let mut store = bootstrap
+            .install(
+                synced_tables.to_vec(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::one_at_a_time(),
+                device_id.clone(),
+                clock.clone(),
+                migrations,
+                routing_encryption.as_ref(),
+            )
+            .await?;
+
+        match store
+            .reconcile_snapshot_blobs(&store_dir, cancel)
+            .await
+            .map_err(|error| {
+                BootstrapError::Database(format!("failed to reconcile snapshot blobs: {error}"))
+            })? {
+            SnapshotBlobReconcile::Complete => {}
+            SnapshotBlobReconcile::Incomplete => {
+                return Err(BootstrapError::Database(
+                    "snapshot blob reconciliation did not land every required eager blob"
+                        .to_string(),
+                ));
+            }
+            SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
+        }
+
+        if *cancel.borrow() {
+            return Err(BootstrapError::Cancelled);
+        }
+        let pull_result = store.pull(&store_dir, routing_encryption.as_ref()).await?;
+
+        if let Some(continuation) = continuation {
+            store
+                .install_activated_device_continuation(continuation.clone())
+                .await?;
+        }
+        if let crate::restoration::RestoreAuthority::OwnerRecovery(recovery) = authority {
+            store.recover_owner_device(recovery).await?;
+        }
+
+        if pull_result.changesets_applied > 0 {
+            info!(
+                "Applied {} changesets since snapshot",
+                pull_result.changesets_applied
+            );
+        }
+
+        if let Some(keyring) = &master_key {
+            custody.persist(keyring)?;
+        }
+        if let Some(credentials) = derive_credentials(&join_info) {
+            store_keys.set_cloud_home_credentials(&credentials)?;
+        }
+        identity_custody.establish(keypair)?;
+
+        // The config is the completion marker, so report this phase after all
+        // other durable local state is present and immediately before saving it.
+        on_status("Saving configuration...");
+        let mut config = build_config(
+            store_id, &device_id, &store_dir, store_name, &join_info, &cipher,
+        );
+        if matches!(
+            join_info,
+            CloudHomeJoinInfo::S3 {
+                endpoint: Some(_),
+                ..
+            }
+        ) {
+            config.cloud_home.s3_exact_slots = custom_s3_exact_slots;
+        }
+        config.save_to_config_yaml()?;
+        Ok(config)
     }
     .await;
 

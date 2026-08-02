@@ -1182,21 +1182,17 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
     // still restores the Circle's control indexes.
     let destination = tempfile::tempdir().expect("no-image restore destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &database_path,
-        &signer,
-    )
-    .await
-    .expect("restore the Store snapshot");
-    let restored = bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &database_path,
+            &signer,
+        )
+        .await
+        .expect("restore the Store snapshot");
+    let restored = bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1268,21 +1264,17 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
 
     let destination = tempfile::tempdir().expect("sabotage restore destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &database_path,
-        &signer,
-    )
-    .await
-    .expect("the Store snapshot itself verifies; only the Circle image is sabotaged");
-    let outcome = bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &database_path,
+            &signer,
+        )
+        .await
+        .expect("the Store snapshot itself verifies; only the Circle image is sabotaged");
+    let outcome = bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1329,22 +1321,18 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     // even the Store image on its own.
     let destination = tempfile::tempdir().expect("crash restore destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &database_path,
-        &member,
-    )
-    .await
-    .expect("restore the Store snapshot")
-    .fail_circle_install_for_test();
-    let outcome = bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &database_path,
+            &member,
+        )
+        .await
+        .expect("restore the Store snapshot")
+        .fail_circle_install_for_test();
+    let outcome = bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1522,21 +1510,17 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .expect("load membership for snapshot restore");
     let destination = tempfile::tempdir().expect("snapshot restore destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &database_path,
-        &signer,
-    )
-    .await
-    .expect("restore the post-close Store snapshot");
-    let mut restored = bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &database_path,
+            &signer,
+        )
+        .await
+        .expect("restore the post-close Store snapshot");
+    let mut restored = bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1582,21 +1566,17 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     // the removed member the very rows the epoch close took away.
     let removed_destination = tempfile::tempdir().expect("removed-member restore destination");
     let removed_path = removed_destination.path().join("store.db");
-    let removed_bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &*store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &removed_path,
-        &member,
-    )
-    .await
-    .expect("restore the post-close Store snapshot as the removed member");
-    let removed_db = removed_bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let removed_bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &removed_path,
+            &member,
+        )
+        .await
+        .expect("restore the post-close Store snapshot as the removed member");
+    let removed_db = removed_bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1814,21 +1794,17 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .expect("load membership for snapshot restore");
     let destination = tempfile::tempdir().expect("standalone-restore destination");
     let database_path = destination.path().join("store.db");
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &*store.storage,
-        store.storage.store_id(),
-        store.root.clone(),
-        &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
-        db.schema_version(),
-        &database_path,
-        &signer,
-    )
-    .await
-    .expect("restore the post-close Store snapshot");
-    let restored = bootstrap
-        .open_database(
-            store.storage.store_id(),
+    let bootstrap = store
+        .prepare_snapshot_bootstrap(
+            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
             &database_path,
+            &signer,
+        )
+        .await
+        .expect("restore the post-close Store snapshot");
+    let restored = bootstrap
+        .install(
             db.synced_tables().to_vec(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),

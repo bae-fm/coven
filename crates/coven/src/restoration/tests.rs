@@ -18,10 +18,8 @@ use crate::config::HomeStorage;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
+use crate::joining::BootstrapError;
 use crate::joining::MembershipFloor;
-use crate::joining::{
-    bootstrap_and_save_store, BootstrapCleanup, BootstrapError, RestoreBootstrapContext,
-};
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::restoration::restore_from_code;
 use crate::restoration::{
@@ -39,7 +37,6 @@ use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
-use crate::sync::store::bootstrap_from_snapshot;
 use crate::sync::test_helpers::{
     host_exec, open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
@@ -812,30 +809,31 @@ async fn failed_restore_does_not_block_a_retry_with_store_exists() {
     );
 }
 
-/// A restore failure while saving `config.yaml`, after the key, credentials,
-/// and identity are durable, rolls all of them back. The test calls the restore
-/// bootstrap helper directly so it can block that exact final write.
+/// A restore failure while saving `config.yaml`, after the key and identity are
+/// durable, rolls both back. Retrying the complete restore reuses the remote
+/// recovery publication left by the failed local completion.
 #[tokio::test]
-async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
+async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     crate::keys::test_keyring::install();
 
     let store_id = "late-step-rollback-test";
     let tmp = tempfile::tempdir().expect("temp dir");
     let layout = StoreLayout::new(tmp.path());
     let store_dir = layout.store_dir(store_id);
-    // No exists-guard runs here, so the store dir and its blocking content can
-    // be seeded directly, unlike through the public entry points.
-    std::fs::create_dir_all(&*store_dir).expect("create store dir directly");
-    std::fs::create_dir_all(store_dir.config_path())
-        .expect("seed a directory at the config path to block the final write");
-
-    let cloud = crate::InMemoryCloudHome::new();
+    let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+    let cloud = Arc::new(
+        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+    );
     let owner_keypair = UserKeypair::generate();
-    let cipher = CloudCipher::Plaintext;
-    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
+    let master_key = crate::encryption::MasterKeyring::from(
+        crate::encryption::EncryptionService::from_key([0xbb; 32]),
+    );
+    let serialized_keyring = master_key.to_serialized();
+    let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key.clone()));
+    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     let owner_storage = Arc::new(
         CloudSyncStorage::new(
-            Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+            cloud.clone(),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
@@ -873,118 +871,79 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         .expect("publish owner snapshot acknowledgement");
 
     let joiner_keypair = owner_keypair.clone();
-    let joiner_storage = CloudSyncStorage::new(
-        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        joiner_keypair.clone(),
-    )
-    .expect("build joiner cloud storage");
     let store_keys = StoreKeys::bind(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
-    let join_info = CloudHomeJoinInfo::S3 {
-        bucket: "b".to_string(),
-        region: "us-east-1".to_string(),
-        endpoint: None,
-        access_key: "ak".to_string(),
-        secret_key: "sk".to_string(),
-        key_prefix: None,
-    };
-
-    let master_key = crate::encryption::MasterKeyring::from(
-        crate::encryption::EncryptionService::from_key([0xbb; 32]),
-    );
     let authority = published_owner_recovery_authority(&owner_device, &owner_keypair).await;
     let migrations = test_migrations();
-    let result = bootstrap_and_save_store(
-        &joiner_storage,
-        &cipher,
-        Some(&master_key),
-        &store_dir,
+    let reached_config_save = std::cell::Cell::new(false);
+    let result = crate::restoration::restore_from_cloud(
         store_id,
-        "device-late",
-        std::sync::Arc::new(crate::clock::SystemClock),
         store_root.clone(),
-        RestoreBootstrapContext {
-            keypair: &joiner_keypair,
-            authority: &authority,
-            continuation: None,
-        },
-        &MembershipFloor(membership.head_refs().to_vec()),
+        Some(&serialized_keyring),
+        "Late Step Test",
         &tables,
         &migrations,
-        &join_info,
-        "Late Step Test",
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        crate::restoration::RestoreSource {
+            join_info: CloudHomeJoinInfo::CloudKit,
+            custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_tokens: None,
+            cloudkit_ops: Some(cloudkit_ops.clone()),
+        },
+        &MembershipFloor(membership.head_refs().to_vec()),
+        &joiner_keypair,
+        &authority,
         None,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &|_status: &str| {},
+        &layout,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device-late")),
+        |status| {
+            if status == "Saving configuration..." {
+                reached_config_save.set(true);
+                assert!(
+                    store_keys
+                        .get_encryption_key()
+                        .expect("read keyring before config save")
+                        .is_some(),
+                    "the encryption key is durable before the config marker",
+                );
+                assert_eq!(
+                    identity_custody
+                        .unlock()
+                        .expect("read identity before config save")
+                        .map(|keypair| keypair.public_key()),
+                    Some(joiner_keypair.public_key()),
+                    "the signing identity is durable before the config marker",
+                );
+                std::fs::create_dir_all(store_dir.config_path())
+                    .expect("block the config file with a directory");
+            }
+        },
         &tokio::sync::watch::channel(false).1,
     )
     .await;
 
-    let err = result.expect_err("the blocked config.yaml write must fail bootstrap");
+    let err = result.expect_err("the blocked config.yaml write must fail restore");
     assert!(
         matches!(&err, BootstrapError::Config(_)),
-        "bootstrap must reach the blocked config save, got {err:?}"
+        "restore must reach the blocked config save, got {err:?}"
     );
-
-    let failed_registration = {
-        let connection = crate::database::DatabaseImageTest::open(&store_dir.db_path())
-            .expect("open failed restore database");
-        connection
-            .local_recovery_registration_evidence()
-            .expect("load activated recovery registration after config failure")
-    };
+    assert!(
+        reached_config_save.get(),
+        "the restore reached the final completion marker"
+    );
     let candidate_prefix = "store-v1/candidates/";
     let candidates_after_failure = cloud
         .list(candidate_prefix)
         .await
         .expect("list candidate objects after config failure");
 
-    // The keyring accounts and restore identity were durable before the config
-    // save failed.
-    assert!(
-        store_keys
-            .get_encryption_key()
-            .expect("read keyring")
-            .is_some(),
-        "the encryption key must have been written before the late failure",
-    );
-    assert_eq!(
-        identity_custody
-            .unlock()
-            .expect("read identity custody")
-            .map(|kp| kp.public_key()),
-        Some(joiner_keypair.public_key()),
-        "restore's identity import runs before the config save, so it is present when the save fails",
-    );
-    assert!(
-        store_keys
-            .get_cloud_home_credentials()
-            .expect("read keyring")
-            .is_some(),
-        "the cloud home credentials must have been written before the late failure",
-    );
-
-    let cleanup = BootstrapCleanup::new(
-        &store_dir,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-    );
-    let wrapped = cleanup.after_failure(err);
-    assert!(
-        !matches!(wrapped, BootstrapError::Cleanup { .. }),
-        "cleanup of a directory blocked only by its own contents must fully succeed, got {wrapped:?}",
-    );
     assert!(
         !store_dir.exists(),
-        "the store dir, including the blocking config.yaml directory, must be fully removed",
+        "the failed restore removes its store directory",
     );
     assert!(
         store_keys
@@ -994,13 +953,6 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "the encryption key must be rolled back",
     );
     assert!(
-        store_keys
-            .get_cloud_home_credentials()
-            .expect("read keyring")
-            .is_none(),
-        "the cloud home credentials must be rolled back",
-    );
-    assert!(
         identity_custody
             .unlock()
             .expect("read identity custody")
@@ -1008,45 +960,35 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "the imported identity must be rolled back",
     );
 
-    std::fs::create_dir_all(&*store_dir).expect("recreate store directory for retry");
-    let retry = Box::pin(bootstrap_and_save_store(
-        &joiner_storage,
-        &cipher,
-        Some(&master_key),
-        &store_dir,
+    let retry = Box::pin(crate::restoration::restore_from_cloud(
         store_id,
-        "device-late",
-        std::sync::Arc::new(crate::clock::SystemClock),
         store_root,
-        RestoreBootstrapContext {
-            keypair: &joiner_keypair,
-            authority: &authority,
-            continuation: None,
-        },
-        &MembershipFloor(membership.head_refs().to_vec()),
+        Some(&serialized_keyring),
+        "Late Step Test",
         &tables,
         &migrations,
-        &join_info,
-        "Late Step Test",
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        crate::restoration::RestoreSource {
+            join_info: CloudHomeJoinInfo::CloudKit,
+            custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_tokens: None,
+            cloudkit_ops: Some(cloudkit_ops),
+        },
+        &MembershipFloor(membership.head_refs().to_vec()),
+        &joiner_keypair,
+        &authority,
         None,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &|_status: &str| {},
+        &layout,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device-late")),
+        |_status| {},
         &tokio::sync::watch::channel(false).1,
     ))
     .await
     .expect("retry reuses the activated recovery registration");
-    assert_eq!(retry.device_id, "device-late");
-
-    let retried_registration = {
-        let connection = crate::database::DatabaseImageTest::open(&store_dir.db_path())
-            .expect("open retried restore database");
-        connection
-            .local_recovery_registration_evidence()
-            .expect("load retried recovery registration")
-    };
-    assert_eq!(retried_registration, failed_registration);
+    assert_eq!(retry.device_id, "device-late-0");
     assert_eq!(
         cloud
             .list(candidate_prefix)
@@ -1511,17 +1453,15 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     }
 
     let (_tmp_b, lib_b) = temp_store_dir();
-    let error = bootstrap_from_snapshot(
-        &storage.storage,
-        "test-lib",
-        storage.root.clone(),
-        &membership_floor,
-        1,
-        &lib_b.db_path(),
-        &UserKeypair::generate(),
-    )
-    .await
-    .expect_err("the restore must enforce its floor before accepting a snapshot");
+    let error = storage
+        .prepare_snapshot_bootstrap(
+            &membership_floor,
+            1,
+            &lib_b.db_path(),
+            &UserKeypair::generate(),
+        )
+        .await
+        .expect_err("the restore must enforce its floor before accepting a snapshot");
 
     let message = error.to_string();
     assert!(message.contains(&owner_pk), "{message}");
@@ -1538,8 +1478,13 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     crate::keys::test_keyring::install();
 
     let store_id = "restore-blob-backfill-test";
-    let cloud = crate::InMemoryCloudHome::new();
-    let cipher = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
+    let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+    let cloud = Arc::new(
+        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+    );
+    let master_key = crate::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
+    let serialized_keyring = master_key.to_serialized();
+    let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key));
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
@@ -1550,7 +1495,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
 
     let owner_storage = Arc::new(
         CloudSyncStorage::new(
-            Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+            cloud.clone(),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
@@ -1594,7 +1539,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .await
         .expect("stage owner blob");
     let cycle_storage = CloudSyncStorage::new(
-        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cloud.clone(),
         cipher.clone(),
         blob_paths,
         store_id.to_string(),
@@ -1612,7 +1557,9 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .membership()
         .await
         .expect("load owner membership");
-    let (_tmp_b, lib_b) = temp_store_dir();
+    let restore_app = tempfile::tempdir().expect("restore app dir");
+    let layout = StoreLayout::new(restore_app.path());
+    let lib_b = layout.store_dir(store_id);
     let owner_blob = db_owner
         .row_blob_ref("note_photos", "photo1")
         .await
@@ -1629,19 +1576,6 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("cache blob path");
 
     let joiner_keypair = owner_keypair.clone();
-    let joiner_storage = CloudSyncStorage::new(
-        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        joiner_keypair.clone(),
-    )
-    .expect("build joiner cloud storage");
-    let store_keys = StoreKeys::bind(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &lib_b);
-    let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
-    let join_info = CloudHomeJoinInfo::CloudKit;
     let continuation = owner_device
         .export_activated_device_continuation()
         .await
@@ -1691,33 +1625,32 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .expect("continuation device signing key length");
     let device_signer = UserKeypair::from_signing_key_bytes(&device_signing_key)
         .expect("restore continuation device signer");
-    let restore_device_id = continuation.registration.device_id.to_string();
     let authority = RestoreAuthority::ActivatedContinuation(continuation.clone());
 
-    let config = Box::pin(bootstrap_and_save_store(
-        &joiner_storage,
-        &cipher,
-        None,
-        &lib_b,
+    let config = Box::pin(crate::restoration::restore_from_cloud(
         store_id,
-        &restore_device_id,
-        std::sync::Arc::new(crate::clock::SystemClock),
         store_root,
-        RestoreBootstrapContext {
-            keypair: &joiner_keypair,
-            authority: &authority,
-            continuation: Some((&continuation, &device_signer)),
-        },
-        &MembershipFloor(membership.head_refs().to_vec()),
+        Some(&serialized_keyring),
+        "Restored Store",
         &tables,
         &test_migrations(),
-        &join_info,
-        "Restored Store",
-        None,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &|_status: &str| {},
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        crate::restoration::RestoreSource {
+            join_info: CloudHomeJoinInfo::CloudKit,
+            custom_s3_exact_slots: None,
+            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_tokens: None,
+            cloudkit_ops: Some(cloudkit_ops),
+        },
+        &MembershipFloor(membership.head_refs().to_vec()),
+        &joiner_keypair,
+        &authority,
+        Some(&device_signer),
+        &layout,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("unused-continuation-device")),
+        |_status| {},
         &tokio::sync::watch::channel(false).1,
     ))
     .await
@@ -1794,7 +1727,7 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     )
     .await;
     let restored_storage = CloudSyncStorage::new(
-        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cloud,
         cipher,
         blob_paths,
         store_id.to_string(),

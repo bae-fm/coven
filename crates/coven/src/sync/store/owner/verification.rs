@@ -218,7 +218,7 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 
     pub(super) fn from_verified_root(
-        _authority: super::history::HistoryConstructionAuthority,
+        _authority: super::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
         root: super::super::protocol_root::VerifiedStoreRoot,
     ) -> Self {

@@ -289,8 +289,9 @@ The required stack order is:
 Completed nested bindings remain recorded here because later relocation must
 not recreate their free forms:
 
-- `Store::create` owns root-creation sequencing, while `Store::open` and
-  `Store::load` share the private `Store::open_protocol_root` operation;
+- `Store::create` delegates the complete staged founder publication to
+  `FounderStoreCreation`, while `Store::open` and `Store::load` establish one
+  `VerifiedStoreRoot` through its private opening operation;
 - the `StoreCreation` and `StoreOpening` operation wrappers are deleted, and
   `protocol_root` retains only the deterministic algorithms those Store
   operations invoke with already-selected inputs;
@@ -344,8 +345,9 @@ not recreate their free forms:
 - per-cycle wrapped-key authority refresh is an
   `AuthorizedWriterOperation::refresh_authorization_state` body; the
   membership-module implementation and its error surface are deleted.
-- pre-Store snapshot restore enters through
-  `SnapshotBootstrapAuthority::open(...).select(...)`; the selected bootstrap
+- pre-Store snapshot restore opens one history verifier at its joining or
+  restoration composition root and injects that verifier and its
+  `VerifiedStoreRoot` into `PreparedSnapshotBootstrap`; the prepared bootstrap
   retains the same verified history session through founder-registration
   loading and image installation, so restore does not reconstruct a commit
   verifier from a verified root.

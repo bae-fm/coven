@@ -66,6 +66,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build_with",
     ),
     (
+        "crates/coven/src/joining/facade_tests.rs",
+        "FacadeFixture",
+        "build",
+    ),
+    (
         "crates/coven/src/sync/store/owner/writer/reclaim/tests.rs",
         "ReclaimJourneyFixture",
         "build",
@@ -74,6 +79,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven/src/sync/test_helpers.rs",
         "TestDevice",
         "create",
+    ),
+    (
+        "crates/coven/src/sync/test_helpers.rs",
+        "TestDevice",
+        "create_with_database",
     ),
     (
         "crates/coven/src/sync/test_helpers.rs",
@@ -591,6 +601,58 @@ fn collect_free_constructors(
     constructors
 }
 
+fn collect_associated_factories(
+    files: &[RustFile],
+    owners: &BTreeSet<String>,
+) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut factories = BTreeMap::new();
+    for file in files {
+        let mut collector = AssociatedFactoryCollector {
+            owners,
+            factories: &mut factories,
+        };
+        collector.visit_file(&file.syntax);
+    }
+    factories
+}
+
+struct AssociatedFactoryCollector<'a> {
+    owners: &'a BTreeSet<String>,
+    factories: &'a mut BTreeMap<(String, String), BTreeSet<String>>,
+}
+
+impl Visit<'_> for AssociatedFactoryCollector<'_> {
+    fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
+        let Some(factory) = type_name(&node.self_ty) else {
+            return;
+        };
+        for item in &node.items {
+            let syn::ImplItem::Fn(method) = item else {
+                continue;
+            };
+            let syn::ReturnType::Type(_, output) = &method.sig.output else {
+                continue;
+            };
+            let mut names = TypeNames::default();
+            names.visit_type(output);
+            let mut returned_owners = names
+                .names
+                .intersection(self.owners)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if names.names.contains("Self") && self.owners.contains(&factory) {
+                returned_owners.insert(factory.clone());
+            }
+            if !returned_owners.is_empty() {
+                self.factories
+                    .entry((factory.clone(), method.sig.ident.to_string()))
+                    .or_default()
+                    .extend(returned_owners);
+            }
+        }
+    }
+}
+
 struct FreeConstructorCollector<'a> {
     owners: &'a BTreeSet<String>,
     constructors: &'a mut BTreeMap<String, BTreeSet<String>>,
@@ -660,12 +722,14 @@ fn find_violations(
     free_constructors: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<Violation> {
     let mut violations = BTreeSet::new();
+    let associated_factories = collect_associated_factories(files, owners);
     for file in files {
         let mut visitor = ConstructionVisitor {
             path: &file.relative_path,
             owners,
             constructors,
             free_constructors,
+            associated_factories: &associated_factories,
             current_constructor: None,
             violations: &mut violations,
         };
@@ -679,6 +743,7 @@ struct ConstructionVisitor<'a> {
     owners: &'a BTreeSet<String>,
     constructors: &'a BTreeSet<Constructor>,
     free_constructors: &'a BTreeMap<String, BTreeSet<String>>,
+    associated_factories: &'a BTreeMap<(String, String), BTreeSet<String>>,
     current_constructor: Option<Constructor>,
     violations: &'a mut BTreeSet<Violation>,
 }
@@ -733,14 +798,16 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             if segments.len() >= 2 {
                 let owner = segments[segments.len() - 2].ident.to_string();
                 let method = segments[segments.len() - 1].ident.to_string();
-                if self.constructors.contains(&Constructor {
-                    owner: owner.clone(),
-                    method,
-                }) {
-                    self.record(&owner, node.span());
+                if let Some(returned_owners) = self.associated_factories.get(&(owner, method)) {
+                    for returned_owner in returned_owners {
+                        self.record(returned_owner, node.span());
+                    }
                 }
             }
-            if let Some(method) = segments.last() {
+            if could_be_free_function_path(&segments) {
+                let method = segments
+                    .last()
+                    .expect("free function path has at least one segment");
                 if let Some(owners) = self.free_constructors.get(&method.ident.to_string()) {
                     for owner in owners {
                         self.record(owner, node.span());
@@ -760,6 +827,18 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         }
         visit::visit_expr_struct(self, node);
     }
+}
+
+fn could_be_free_function_path(segments: &[&syn::PathSegment]) -> bool {
+    segments.len() == 1
+        || segments[..segments.len() - 1].iter().all(|segment| {
+            let name = segment.ident.to_string();
+            matches!(name.as_str(), "crate" | "self" | "super")
+                || name
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_lowercase())
+        })
 }
 
 fn type_name(ty: &syn::Type) -> Option<String> {
@@ -870,6 +949,107 @@ mod tests {
         let violations = find_violations(&files, &owners, &constructors, &free_constructors);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].child, "Child");
+    }
+
+    #[test]
+    fn module_qualified_free_factory_is_rejected() {
+        let source = syn::parse_file(
+            r#"
+            struct Database;
+            struct Child { database: Database }
+            mod factory {
+                use super::*;
+                pub(super) fn build_child(database: Database) -> Child { Child { database } }
+            }
+            struct Parent { child: Child }
+            impl Parent {
+                fn new(database: Database) -> Self {
+                    Self { child: crate::factory::build_child(database) }
+                }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let structs = collect_structs(&files);
+        let owners = infer_owners(&structs);
+        let constructors = collect_constructors(&files, &owners);
+        let free_constructors = collect_free_constructors(&files, &owners);
+        let violations = find_violations(&files, &owners, &constructors, &free_constructors);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].child, "Child");
+    }
+
+    #[test]
+    fn owner_constructor_cannot_hide_child_construction_behind_an_associated_factory() {
+        let source = syn::parse_file(
+            r#"
+            struct Database;
+            struct Child { database: Database }
+            struct Parent { child: Child }
+            struct ChildFactory;
+
+            impl ChildFactory {
+                fn build(database: Database) -> Child { Child { database } }
+            }
+
+            impl Parent {
+                fn new(database: Database) -> Self {
+                    Self { child: ChildFactory::build(database) }
+                }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let structs = collect_structs(&files);
+        let owners = infer_owners(&structs);
+        let constructors = collect_constructors(&files, &owners);
+        let free_constructors = collect_free_constructors(&files, &owners);
+        let violations = find_violations(&files, &owners, &constructors, &free_constructors);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].parent, "Parent::new");
+        assert_eq!(violations[0].child, "Child");
+    }
+
+    #[test]
+    fn qualified_call_does_not_match_an_unrelated_free_constructor() {
+        let source = syn::parse_file(
+            r#"
+            struct StoreDatabase;
+            struct Database { database: StoreDatabase }
+            fn open(database: StoreDatabase) -> Database { Database { database } }
+
+            struct ParsedValue;
+            impl ParsedValue { fn open() -> Self { Self } }
+
+            struct Parent { database: StoreDatabase, value: ParsedValue }
+            impl Parent {
+                fn new(database: StoreDatabase) -> Self {
+                    Self { database, value: ParsedValue::open() }
+                }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let structs = collect_structs(&files);
+        let owners = infer_owners(&structs);
+        let constructors = collect_constructors(&files, &owners);
+        let free_constructors = collect_free_constructors(&files, &owners);
+
+        assert!(find_violations(&files, &owners, &constructors, &free_constructors).is_empty());
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub(crate) struct PendingDeviceJoinAuthority<'storage> {
 #[doc(hidden)]
 pub(crate) struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage std::sync::Arc<dyn SyncStorage>,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
@@ -31,44 +31,6 @@ pub(crate) struct JoiningStore<'storage> {
     identity: UserKeypair,
 }
 
-pub(crate) async fn observe_pending_device_join<'storage>(
-    pending: &DeviceJoinJournalDatabase,
-    storage: &'storage dyn SyncStorage,
-    store_root: &StoreRootRef,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<PendingDeviceJoinObservation<'storage>, DeviceJoinError> {
-    let (root, history_verifier) =
-        crate::sync::store::owner::verified_history::open_merge_history_verifier_with_root(
-            PendingDeviceJoinHistoryConstruction.authorize_history(),
-            storage,
-            store_root,
-        )
-        .await?;
-    Ok(PendingDeviceJoinObservation {
-        journal: PendingJoinJournal::new(pending, attempt_id),
-        storage,
-        root,
-        history_verifier,
-    })
-}
-
-pub(crate) async fn open_pending_device_join_authority<'storage>(
-    pending: &DeviceJoinJournalDatabase,
-    storage: &'storage dyn SyncStorage,
-    identity: &UserKeypair,
-    offer: DeviceJoinOffer,
-) -> Result<PendingDeviceJoinAuthority<'storage>, DeviceJoinError> {
-    let mut observation =
-        observe_pending_device_join(pending, storage, &offer.store_root, offer.attempt_id).await?;
-    observation.verify_offer(identity, &offer).await?;
-    observation.journal.accept_offer(&offer)?;
-    Ok(PendingDeviceJoinAuthority {
-        observation,
-        offer,
-        identity: identity.clone(),
-    })
-}
-
 #[cfg(test)]
 pub(crate) async fn begin_joining_store_from_pending<'storage>(
     pending: PendingDeviceJoinAuthority<'storage>,
@@ -77,20 +39,6 @@ pub(crate) async fn begin_joining_store_from_pending<'storage>(
     pending
         .observation
         .into_joining_store(database, pending.identity)
-        .await
-}
-
-pub(crate) async fn resume_joining_store<'storage>(
-    pending: &DeviceJoinJournalDatabase,
-    database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
-    identity: &UserKeypair,
-    store_root: &StoreRootRef,
-    attempt_id: DeviceJoinAttemptId,
-) -> Result<JoiningStore<'storage>, DeviceJoinError> {
-    let observation = observe_pending_device_join(pending, storage, store_root, attempt_id).await?;
-    observation
-        .into_joining_store(database, identity.clone())
         .await
 }
 
@@ -291,8 +239,41 @@ impl<'storage> JoiningStore<'storage> {
     }
 }
 
+impl<'storage> PendingDeviceJoinAuthority<'storage> {
+    pub(crate) async fn open(
+        mut observation: PendingDeviceJoinObservation<'storage>,
+        identity: &UserKeypair,
+        offer: DeviceJoinOffer,
+    ) -> Result<Self, DeviceJoinError> {
+        observation.verify_offer(identity, &offer).await?;
+        observation.journal.accept_offer(&offer)?;
+        Ok(Self {
+            observation,
+            offer,
+            identity: identity.clone(),
+        })
+    }
+}
+
 impl<'storage> PendingDeviceJoinObservation<'storage> {
-    async fn into_joining_store(
+    pub(crate) fn new(
+        pending: &DeviceJoinJournalDatabase,
+        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
+        history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+            'storage,
+        >,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Self {
+        Self {
+            journal: PendingJoinJournal::new(pending, attempt_id),
+            storage,
+            root,
+            history_verifier,
+        }
+    }
+
+    pub(crate) async fn into_joining_store(
         self,
         database: StoreDatabase,
         identity: UserKeypair,
@@ -305,10 +286,11 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         } = self;
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             database.clone(),
-            storage,
+            storage.as_ref(),
             root.reference().clone(),
         );
-        let keyrings = super::super::keyring::StoreKeyrings::new(storage, root.reference().clone());
+        let keyrings =
+            super::super::keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
         let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
             PendingDeviceJoinHistoryConstruction,
             database,

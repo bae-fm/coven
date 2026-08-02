@@ -417,14 +417,10 @@ fn exercise_pre_attempt_abandonment<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let pending_join = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &*storage.storage,
-            member,
-            offer.clone(),
-        )
-        .await
-        .expect("bind pending Store join");
+        let pending_join = storage
+            .open_pending_device_join(&pending, member, offer.clone())
+            .await
+            .expect("bind pending Store join");
         let _request = pending_join
             .prepare_provider_access_request()
             .await
@@ -441,14 +437,10 @@ fn exercise_pre_attempt_abandonment<'a>(
             .expect("retry device join abandonment");
         assert_eq!(retried, abandonment);
 
-        let mut observation = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &*storage.storage,
-            &offer.store_root,
-            offer.attempt_id,
-        )
-        .await
-        .expect("open pending Store join observation");
+        let mut observation = storage
+            .pending_device_join_observation(&pending, &offer)
+            .await
+            .expect("open pending Store join observation");
         let observed = observation
             .observe_abandonment(abandonment.clone())
             .await
@@ -511,14 +503,10 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             .await
             .expect("begin exact device join");
         let attempt_id = offer.attempt_id;
-        let pending_join = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &*storage.storage,
-            member,
-            offer,
-        )
-        .await
-        .expect("bind pending Store join");
+        let pending_join = storage
+            .open_pending_device_join(&pending, member, offer)
+            .await
+            .expect("bind pending Store join");
         let request = pending_join
             .prepare_provider_access_request()
             .await
@@ -600,14 +588,10 @@ fn exercise_post_attempt_cancellation<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &*storage.storage,
-            member,
-            offer.clone(),
-        )
-        .await
-        .expect("bind pending Store join");
+        let mut pending_join = storage
+            .open_pending_device_join(&pending, member, offer.clone())
+            .await
+            .expect("bind pending Store join");
         let access_request = pending_join
             .prepare_provider_access_request()
             .await
@@ -622,15 +606,11 @@ fn exercise_post_attempt_cancellation<'a>(
             .prepare_registration_request(approval)
             .await
             .expect("prepare exact registration request");
-        let mut joiner_closure = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &*storage.storage,
-            &offer.store_root,
-            offer.attempt_id,
-        )
-        .await
-        .expect("open joining device closure")
-        .authorize_closure(member);
+        let mut joiner_closure = storage
+            .pending_device_join_observation(&pending, &offer)
+            .await
+            .expect("open joining device closure")
+            .authorize_closure(member);
         let provisional = owner_device
             .store
             .accept_device_registration_request(registration_request)
@@ -819,14 +799,10 @@ fn exercise_post_attempt_cancellation<'a>(
         let mut forged_activation = activation.clone();
         forged_activation.activation.commit_hash =
             crate::protocol::store_commit::ObjectHash::digest(b"forged cleanup activation");
-        let mut cleanup_observation = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &*storage.storage,
-            &offer.store_root,
-            offer.attempt_id,
-        )
-        .await
-        .expect("open joiner cleanup observation");
+        let mut cleanup_observation = storage
+            .pending_device_join_observation(&pending, &offer)
+            .await
+            .expect("open joiner cleanup observation");
         assert!(
             cleanup_observation
                 .accept_cleanup(forged_activation)
@@ -892,16 +868,18 @@ fn exercise_missing_provider_administrator<'a>(
                 },
             },
         ));
-        let peer_storage = crate::storage::CloudSyncStorage::new(
-            peer_home.clone(),
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
-            crate::storage::BlobPathScheme::Hashed,
-            "cross-principal-revocation-store",
-            member.clone(),
-        )
-        .expect("create peer exact storage");
+        let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
+            crate::storage::CloudSyncStorage::new(
+                peer_home.clone(),
+                crate::storage::CloudCipher::Encrypted(
+                    crate::encryption::EncryptionService::from_key([42; 32]),
+                ),
+                crate::storage::BlobPathScheme::Hashed,
+                "cross-principal-revocation-store",
+                member.clone(),
+            )
+            .expect("create peer exact storage"),
+        );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
             pending_dir.path().join("pending-device-join.sqlite"),
@@ -913,9 +891,20 @@ fn exercise_missing_provider_administrator<'a>(
             .await
             .expect("begin cross-principal device join");
         let provider_locator = offer.provider_admin.access.clone();
-        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
+        let (join_root, join_history) =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                .await
+                .expect("open pending cross-principal Store history");
+        let observation = crate::sync::store::PendingDeviceJoinObservation::new(
             &pending,
             &peer_storage,
+            join_root,
+            join_history,
+            offer.attempt_id,
+        );
+        let mut pending_join = crate::sync::store::PendingDeviceJoinAuthority::open(
+            observation,
             member,
             offer.clone(),
         )
@@ -937,14 +926,18 @@ fn exercise_missing_provider_administrator<'a>(
             .prepare_registration_request(approval)
             .await
             .expect("prepare cross-principal registration request");
-        let mut joiner_closure = crate::sync::store::observe_pending_device_join(
+        let (join_root, join_history) =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                .await
+                .expect("open cross-principal closure history");
+        let mut joiner_closure = crate::sync::store::PendingDeviceJoinObservation::new(
             &pending,
             &peer_storage,
-            &offer.store_root,
+            join_root,
+            join_history,
             offer.attempt_id,
         )
-        .await
-        .expect("open cross-principal joining device closure")
         .authorize_closure(member);
         let provisional = owner_device
             .store
@@ -1022,14 +1015,18 @@ fn exercise_missing_provider_administrator<'a>(
             .complete_owner_device_join_cleanup(activation.clone())
             .await
             .expect("complete owner cleanup");
-        let mut cleanup_observation = crate::sync::store::observe_pending_device_join(
+        let (join_root, join_history) =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                .await
+                .expect("open cross-principal cleanup history");
+        let mut cleanup_observation = crate::sync::store::PendingDeviceJoinObservation::new(
             &pending,
             &peer_storage,
-            &offer.store_root,
+            join_root,
+            join_history,
             offer.attempt_id,
-        )
-        .await
-        .expect("open cross-principal cleanup observation");
+        );
         cleanup_observation
             .accept_cleanup(activation.clone())
             .await
@@ -1062,14 +1059,10 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = crate::sync::store::open_pending_device_join_authority(
-            &pending,
-            &*storage.storage,
-            member,
-            offer.clone(),
-        )
-        .await
-        .expect("bind pending Store join");
+        let mut pending_join = storage
+            .open_pending_device_join(&pending, member, offer.clone())
+            .await
+            .expect("bind pending Store join");
         let access_request = pending_join
             .prepare_provider_access_request()
             .await
@@ -1118,15 +1111,11 @@ fn exercise_cancellation_against_inflight_registration<'a>(
             .close_device_provider_admission(cancellation.clone())
             .await
             .expect("close provider admission during late create");
-        let mut cancellation_join = crate::sync::store::observe_pending_device_join(
-            &pending,
-            &*storage.storage,
-            &offer.store_root,
-            offer.attempt_id,
-        )
-        .await
-        .expect("bind concurrent pending Store join")
-        .authorize_closure(member);
+        let mut cancellation_join = storage
+            .pending_device_join_observation(&pending, &offer)
+            .await
+            .expect("bind concurrent pending Store join")
+            .authorize_closure(member);
         let joiner = cancellation_join
             .close(cancellation.clone())
             .await
@@ -1721,21 +1710,17 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let (restore_temp, restore_dir) = temp_store_dir();
     let restore_path = restore_dir.db_path();
     let restorer_identity = crate::keys::UserKeypair::generate();
-    let bootstrap = crate::sync::store::bootstrap_from_snapshot(
-        &storage.storage,
-        "test-lib",
-        storage.root.clone(),
-        &restore_membership.membership_floor,
-        db.schema_version(),
-        &restore_path,
-        &restorer_identity,
-    )
-    .await
-    .expect("verify snapshot-only blob bootstrap");
-    let restored = bootstrap
-        .open_database(
-            "test-lib",
+    let bootstrap = storage
+        .prepare_snapshot_bootstrap(
+            &restore_membership.membership_floor,
+            db.schema_version(),
             &restore_path,
+            &restorer_identity,
+        )
+        .await
+        .expect("verify snapshot-only blob bootstrap");
+    let restored = bootstrap
+        .install(
             tables.clone(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -5519,14 +5504,10 @@ async fn prepare_same_principal_approval_fixture<'storage>(
         .begin_device_join(&pubkey_hex(member))
         .await
         .expect("begin exact device join");
-    let pending_join = crate::sync::store::open_pending_device_join_authority(
-        &pending,
-        &*storage.storage,
-        member,
-        offer,
-    )
-    .await
-    .expect("bind pending Store join");
+    let pending_join = storage
+        .open_pending_device_join(&pending, member, offer)
+        .await
+        .expect("bind pending Store join");
     let access_request = pending_join
         .prepare_provider_access_request()
         .await

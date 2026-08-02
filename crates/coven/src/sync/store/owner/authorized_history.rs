@@ -11,7 +11,7 @@ use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamA
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage Arc<dyn SyncStorage>,
     root: super::super::protocol_root::VerifiedStoreRoot,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
@@ -23,9 +23,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.history_verifier.membership_objects()
     }
 
-    fn new(
+    pub(super) fn new(
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage Arc<dyn SyncStorage>,
         root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
@@ -43,7 +43,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn finish_initialization(
         mut self,
-        storage: &Arc<dyn SyncStorage>,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
         let database = self.database.clone();
@@ -51,23 +50,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-        let identity_is_founder = self.root.object().value.descriptor.founder_pubkey
-            == crate::keys::public_key_hex(identity);
+        let identity_is_founder =
+            self.root.protocol().descriptor.founder_pubkey == crate::keys::public_key_hex(identity);
         if device_id.is_none() && !identity_is_founder {
             return Err(StoreInitializationError::ProtocolRoot(
                 "opening a Store for a non-founder requires an installed local device".to_string(),
             ));
         }
-        let founder_pubkey = self
-            .verified_root_object()
-            .value
-            .descriptor
-            .founder_pubkey
-            .clone();
+        let founder_pubkey = self.root.protocol().descriptor.founder_pubkey.clone();
         self.load_and_install_owner_membership(&founder_pubkey)
             .await
             .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
-
         if device_id.is_none() && identity_is_founder {
             self.install_existing_founder_device(identity)
                 .await
@@ -82,21 +75,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 "initialized Store has no local device registration id".to_string(),
             )
         })?;
-        let store_root = self.root.reference().clone();
-        let protocol_root = self.root.object().clone();
         let store = Store::new(
             database,
-            Arc::clone(storage),
+            Arc::clone(self.storage),
             identity.clone(),
             Some(device_id.clone()),
-            store_root,
-            protocol_root,
-        )
-        .map_err(StoreInitializationError::ProtocolRoot)?;
+            self.root.clone(),
+        );
         Ok(InitializedStore { store, device_id })
     }
 
-    async fn install_existing_founder_device(
+    pub(super) async fn install_existing_founder_device(
         &self,
         signer: &UserKeypair,
     ) -> Result<(), super::registration::StoreRegistrationError> {
@@ -219,7 +208,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn authorize_store(
         mut self,
-        storage: &'storage Arc<dyn SyncStorage>,
         identity: &'storage UserKeypair,
         device_id: Option<&str>,
     ) -> Result<AuthorizedStore<'storage>, SyncCycleFailure> {
@@ -246,7 +234,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         };
         Ok(AuthorizedStore::new(
             self,
-            storage,
             identity,
             local_device,
             membership,
@@ -256,7 +243,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn authorize_writer(
         self,
-        storage: &'storage Arc<dyn SyncStorage>,
         membership: crate::protocol::membership::MembershipChain,
         identity: &'storage UserKeypair,
         registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -264,6 +250,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         device_signer: UserKeypair,
     ) -> super::writer::AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
+        let storage = self.storage;
         super::writer::authorize(
             database,
             self,
@@ -327,7 +314,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::activation::CircleActivationVerifier<'_, 'storage> {
         super::circles::activation::CircleActivationVerifier::new(
             &self.database,
-            self.storage,
+            self.storage.as_ref(),
             self.root.reference(),
             &mut self.history_verifier,
         )
@@ -338,7 +325,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::packages::CirclePackageReader<'_, 'storage> {
         super::circles::packages::CirclePackageReader::new(
             &self.database,
-            self.storage,
+            self.storage.as_ref(),
             self.root.reference(),
             &mut self.history_verifier,
         )
@@ -349,7 +336,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
         super::circles::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
-            self.storage,
+            self.storage.as_ref(),
             self.root.reference(),
         )
     }
@@ -360,7 +347,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
         super::circles::snapshots::CircleSnapshotReader::new(
             &self.database,
-            self.storage,
+            self.storage.as_ref(),
             self.root.reference(),
             &mut self.history_verifier,
         )
@@ -371,7 +358,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::device_join::history::DeviceJoinHistory<'_, 'storage> {
         super::device_join::history::DeviceJoinHistory::new(
             self.database.clone(),
-            self.storage,
+            self.storage.as_ref(),
             &self.root,
             &mut self.history_verifier,
         )
@@ -386,7 +373,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) fn reclaim(&mut self) -> ReclaimHistory<'_, 'storage> {
         ReclaimHistory::new(
             self.database.clone(),
-            self.storage,
+            self.storage.as_ref(),
             self.root.reference(),
             &mut self.history_verifier,
         )
@@ -402,11 +389,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) fn bind_restore(
         self,
-        storage: &'storage dyn SyncStorage,
         membership: crate::protocol::membership::MembershipChain,
         identity: UserKeypair,
     ) -> super::RestoringStore<'storage> {
         let database = self.database.clone();
+        let storage = self.storage.as_ref();
         let root = self.root.reference().clone();
         let protocol = self.root.object().value.clone();
         super::RestoringStore::from_parts(
@@ -414,10 +401,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
     }
 
+    pub(super) async fn provider_binding(
+        &self,
+    ) -> Result<crate::storage::ResolvedProviderBinding, crate::storage::StorageError> {
+        self.storage.provider_binding().await
+    }
+
     pub(super) fn from_pending_device_join(
         _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage Arc<dyn SyncStorage>,
         root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
@@ -436,7 +429,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) fn from_snapshot(
         _authority: super::writer::SnapshotHistoryConstruction,
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage Arc<dyn SyncStorage>,
         root: super::super::protocol_root::VerifiedStoreRoot,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
@@ -453,210 +446,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct HistoryConstructionAuthority(());
-
-impl HistoryConstructionAuthority {
-    pub(super) fn pending_device_join(
-        _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
-    ) -> Self {
-        Self(())
-    }
-
-    pub(super) fn snapshot(_authority: super::writer::SnapshotHistoryConstruction) -> Self {
-        Self(())
-    }
-}
-
-pub(super) struct FounderStoreInitialization<'operation, 'storage> {
-    database: &'operation StoreDatabase,
-    storage: &'storage dyn SyncStorage,
-    founder_timestamp: &'operation str,
-    identity: &'operation crate::keys::UserKeypair,
-    graph: &'operation crate::database::DurableFounderGraph,
-}
-
-impl<'operation, 'storage> FounderStoreInitialization<'operation, 'storage> {
-    pub(super) fn new(
-        database: &'operation StoreDatabase,
-        storage: &'storage dyn SyncStorage,
-        founder_timestamp: &'operation str,
-        identity: &'operation crate::keys::UserKeypair,
-        graph: &'operation crate::database::DurableFounderGraph,
-    ) -> Self {
-        Self {
-            database,
-            storage,
-            founder_timestamp,
-            identity,
-            graph,
-        }
-    }
-
-    pub(super) async fn publish(
-        self,
-    ) -> Result<AuthorizedStoreHistory<'storage>, protocol_root::StoreProtocolRootError> {
-        let root = StoreRootRef {
-            store_root_id: self.graph.root.value.descriptor.store_root_id(),
-            store_root_hash: self.graph.root.value.object_hash(),
-            object: self.graph.root.object.clone(),
-        };
-        if self.graph.initial_ack.value.last_sync != self.founder_timestamp {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "durable Store founder timestamp differs from this creation request".to_string(),
-            ));
-        }
-        let protocol_root = StoreProtocolRoot::parse_expected(
-            &self.graph.root.bytes,
-            &root,
-            self.database.sync_routing_hash(),
-        )
-        .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
-        if protocol_root.descriptor.founder_pubkey != crate::keys::public_key_hex(self.identity) {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "durable Store founder differs from the creation signer".to_string(),
-            ));
-        }
-        if protocol_root.descriptor.schema_version > self.database.schema_version() {
-            return Err(protocol_root::StoreProtocolRootError::SchemaTooNew {
-                root_schema: protocol_root.descriptor.schema_version,
-                local: self.database.schema_version(),
-            });
-        }
-        let registration_ref =
-            crate::protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
-                &self.graph.registration.value,
-                self.graph.registration.object.clone(),
-            );
-        self.storage
-            .create_protocol_object(&self.graph.root.prepared)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let opened_root = protocol_root::load_exact_store_protocol_root(
-            self.storage,
-            &root,
-            self.database.sync_routing_hash(),
-        )
-        .await?;
-        if opened_root.value != protocol_root {
-            return Err(protocol_root::StoreProtocolRootError::Missing(
-                root.store_root_hash,
-            ));
-        }
-        let verified_root =
-            protocol_root::VerifiedStoreRoot::from_verified_object(root.clone(), opened_root)
-                .map_err(|error| {
-                    protocol_root::StoreProtocolRootError::Database(error.to_string())
-                })?;
-        let authority = HistoryConstructionAuthority(());
-        let commit_verifier =
-            StoreCommitVerifier::from_verified_root(authority, self.storage, verified_root.clone());
-        self.storage
-            .create_protocol_object(&self.graph.registration.prepared)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let registration = commit_verifier
-            .load_registration(&registration_ref)
-            .await?
-            .value;
-        if registration != self.graph.registration.value {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "founder registration readback differs from durable bytes".to_string(),
-            ));
-        }
-        self.storage
-            .create_protocol_object(&self.graph.initial_ack.prepared)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let initial_ack = commit_verifier
-            .load_store_ack(&self.graph.initial_ack_ref, &registration)
-            .await?
-            .value;
-        if initial_ack != self.graph.initial_ack.value {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "founder initial acknowledgement readback differs from durable bytes".to_string(),
-            ));
-        }
-        if !matches!(
-            &self.graph.registration_state,
-            crate::database::LocalDeviceRegistrationState::Activated { .. }
-        ) {
-            self.database
-                .mark_local_store_device_registration_created(
-                    self.graph.registration.clone(),
-                    self.graph.initial_ack_ref.clone(),
-                    self.graph.initial_ack.clone(),
-                )
-                .await
-                .map_err(|error| {
-                    protocol_root::StoreProtocolRootError::Database(error.to_string())
-                })?;
-        }
-        let membership = &self.graph.membership;
-        self.storage
-            .create_protocol_object(&membership.entry.prepared)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let loaded_entry = commit_verifier
-            .membership_objects()
-            .load_entry(&membership.entry_ref)
-            .await?
-            .value;
-        if loaded_entry != membership.entry.value {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "founder membership entry readback differs from durable bytes".to_string(),
-            ));
-        }
-        self.storage
-            .create_protocol_object(&membership.head.prepared)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let loaded_head = commit_verifier
-            .membership_objects()
-            .load_head_for_registration(&membership.head_ref, &registration)
-            .await?
-            .value;
-        if loaded_head != membership.head.value {
-            return Err(protocol_root::StoreProtocolRootError::Database(
-                "founder membership head readback differs from durable bytes".to_string(),
-            ));
-        }
-        self.database
-            .complete_store_founder_graph(
-                root.clone(),
-                registration_ref,
-                self.graph.initial_ack_ref.clone(),
-                crate::database::FounderMembershipRefs {
-                    entry: membership.entry_ref.clone(),
-                    head: membership.head_ref.clone(),
-                },
-            )
-            .await
-            .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
-        let history_verifier = MergeHistoryVerifier::from_commit_verifier(
-            authority,
-            verified_root.clone(),
-            commit_verifier,
-        )
-        .await
-        .map_err(|error| protocol_root::StoreProtocolRootError::Database(error.to_string()))?;
-        let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
-            self.database.clone(),
-            self.storage,
-            root.clone(),
-        );
-        let keyrings = super::keyring::StoreKeyrings::new(self.storage, root);
-        Ok(AuthorizedStoreHistory::new(
-            self.database.clone(),
-            self.storage,
-            verified_root,
-            history_verifier,
-            blob_source,
-            keyrings,
-        ))
-    }
-}
-
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{
     AuthorStreamId, MembershipChain, MembershipHeadRef, MembershipStatus,
@@ -665,127 +454,6 @@ use crate::protocol::store_commit::{
     CommitFrontier, OpenedRetainedMergeHistorySummary, ResolvedStoreDeviceState,
     StoreBatchCommitRef, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
 };
-
-fn invitation_history_error(
-    error: pull::StorePullError,
-) -> crate::sync::store::membership::AnchoredChainError {
-    match error {
-        pull::StorePullError::Object(error) => {
-            crate::sync::store::membership::AnchoredChainError::from_store_object(error)
-        }
-        pull::StorePullError::Storage(source) if source.is_transport() => {
-            crate::sync::store::membership::AnchoredChainError::StorageUnavailable {
-                operation: "authenticating membership Store history".to_string(),
-                source,
-            }
-        }
-        pull::StorePullError::Storage(error) => {
-            crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string())
-        }
-        error => crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string()),
-    }
-}
-
-pub(crate) struct InvitationHistory<'storage> {
-    verifier: MergeHistoryVerifier<'storage>,
-    identity: &'storage crate::keys::UserKeypair,
-    keyrings: super::keyring::StoreKeyrings<'storage>,
-}
-
-impl<'storage> InvitationHistory<'storage> {
-    fn new(
-        verifier: MergeHistoryVerifier<'storage>,
-        identity: &'storage crate::keys::UserKeypair,
-        keyrings: super::keyring::StoreKeyrings<'storage>,
-    ) -> Self {
-        Self {
-            verifier,
-            identity,
-            keyrings,
-        }
-    }
-
-    pub(crate) async fn load_membership(
-        &mut self,
-        floor: &[MembershipHeadRef],
-        founder: &str,
-    ) -> Result<MembershipChain, crate::sync::store::membership::InviteError> {
-        self.verifier
-            .load_exact_anchored_membership(floor, Some(founder))
-            .await
-            .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(format!(
-                    "membership chain: {error}"
-                ))
-            })
-    }
-
-    pub(crate) async fn open_keyring_containing(
-        &self,
-        membership: &MembershipChain,
-        required: &crate::protocol::wrapped_store_key::WrappedStoreKeyRef,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
-        self.keyrings
-            .open_containing(self.identity, membership, required)
-            .await
-    }
-}
-
-pub(crate) async fn open_invitation_history<'storage>(
-    storage: &'storage dyn crate::storage::SyncStorage,
-    identity: &'storage crate::keys::UserKeypair,
-    root: &StoreRootRef,
-) -> Result<InvitationHistory<'storage>, crate::sync::store::membership::InviteError> {
-    let verifier = super::verified_history::open_merge_history_verifier(
-        HistoryConstructionAuthority(()),
-        storage,
-        root,
-    )
-    .await
-    .map_err(invitation_history_error)
-    .map_err(|error| {
-        crate::sync::store::membership::InviteError::Crypto(format!("membership chain: {error}"))
-    })?;
-    let keyrings = super::keyring::StoreKeyrings::new(storage, root.clone());
-    Ok(InvitationHistory::new(verifier, identity, keyrings))
-}
-
-pub(super) async fn authorized_history_from_verified_root<'storage>(
-    database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
-    root: &StoreRootRef,
-    verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
-) -> Result<AuthorizedStoreHistory<'storage>, pull::StorePullError> {
-    let verified_root = super::super::protocol_root::VerifiedStoreRoot::from_verified_object(
-        root.clone(),
-        verified_root,
-    )
-    .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
-    let authority = HistoryConstructionAuthority(());
-    let commit_verifier =
-        StoreCommitVerifier::from_verified_root(authority, storage, verified_root.clone());
-    let history_verifier = MergeHistoryVerifier::from_commit_verifier(
-        authority,
-        verified_root.clone(),
-        commit_verifier,
-    )
-    .await?;
-    let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
-        database.clone(),
-        storage,
-        root.clone(),
-    );
-    let keyrings = super::keyring::StoreKeyrings::new(storage, root.clone());
-    Ok(AuthorizedStoreHistory::new(
-        database,
-        storage,
-        verified_root,
-        history_verifier,
-        blob_source,
-        keyrings,
-    ))
-}
 
 pub(super) struct MergeConflictResolutionAuthorization {
     pub(super) membership: MembershipChain,
