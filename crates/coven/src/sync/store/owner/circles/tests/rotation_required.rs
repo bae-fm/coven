@@ -2674,18 +2674,6 @@ async fn stored_blobs(fixture: &RotationFixture) -> Vec<crate::blob::locator::St
         .collect()
 }
 
-/// Whether the exact blob ciphertext is still readable in cloud storage.
-async fn blob_object_present(
-    fixture: &RotationFixture,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> bool {
-    match fixture.store.storage.verify_blob_object(stored).await {
-        Ok(()) => true,
-        Err(crate::storage::StorageError::NotFound(_)) => false,
-        Err(error) => panic!("read the exact stored blob: {error}"),
-    }
-}
-
 /// A user-initiated blob deletion writes a signed tombstone and the graced GC
 /// performs the delete, but only after re-checking that no live row still
 /// references the blob. That check has to be able to answer for a row whose
@@ -2778,7 +2766,11 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         "a live row still references the blob, so nothing is collected"
     );
     assert!(
-        blob_object_present(&fixture, &stored).await,
+        fixture
+            .store
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("read the exact stored blob"),
         "the referenced ciphertext stays in cloud storage"
     );
     assert!(
@@ -2902,7 +2894,11 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     );
     for stored in &sources {
         assert!(
-            blob_object_present(&fixture, stored).await,
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
             "the published ciphertext is uploaded"
         );
     }
@@ -2917,7 +2913,11 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     .expect("run reclamation while every blob is still bound");
     for stored in &sources {
         assert!(
-            blob_object_present(&fixture, stored).await,
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
             "a blob a live row still binds is never reclaimed"
         );
     }
@@ -2976,14 +2976,22 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     for stored in &sources {
         if pinned_by_an_image.contains(stored) {
             assert!(
-                blob_object_present(&fixture, stored).await,
+                fixture
+                    .store
+                    .contains_stored_blob_object(stored)
+                    .await
+                    .expect("read the exact stored blob"),
                 "a blob a published snapshot image lists survives its rows moving away: {:?}",
                 stored.locator().audience()
             );
             continue;
         }
         assert!(
-            !blob_object_present(&fixture, stored).await,
+            !fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
             "the stranded source ciphertext is deleted: {:?}",
             stored.locator().audience()
         );
@@ -2995,7 +3003,11 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     );
     for stored in &destinations {
         assert!(
-            blob_object_present(&fixture, stored).await,
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
             "the destination ciphertext a live row binds survives: {:?}",
             stored.locator().audience()
         );
@@ -3062,7 +3074,11 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
         "the delete failure fails the reclaim to its initiator: {interrupted:?}"
     );
     assert!(
-        blob_object_present(&fixture, &source).await,
+        fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
         "the stranded ciphertext survives the interrupted deletion"
     );
 
@@ -3075,7 +3091,11 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     .await
     .expect("restart resumes the interrupted audience blob reclaim");
     assert!(
-        !blob_object_present(&fixture, &source).await,
+        !fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
         "the restart deletes the stranded ciphertext"
     );
 
@@ -3089,7 +3109,11 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     .await
     .expect("a further run finds nothing left to reclaim");
     assert!(
-        !blob_object_present(&fixture, &source).await,
+        !fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
         "the reclaimed ciphertext stays absent"
     );
 }
@@ -3132,45 +3156,6 @@ async fn owner_circle_snapshot_stream(
         .expect("walk the owner's Circle snapshot stream")
 }
 
-/// Whether the exact Circle snapshot image ciphertext is still readable in cloud
-/// storage, read under the epoch key of the control its generation was authored
-/// under.
-async fn circle_snapshot_image_present(
-    fixture: &RotationFixture,
-    meta: &crate::protocol::store_commit::CircleSnapshotMeta,
-) -> bool {
-    let device = fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind Circle snapshot image Store");
-    let access = device
-        .circle_package_access(fixture.circle_id, meta.control.clone())
-        .await
-        .expect("resolve Circle snapshot image access")
-        .expect("the generation's control stays retained");
-    let context = crate::storage::ProtocolObjectContext::circle(
-        fixture.store.root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
-        access.into_encryption(),
-    );
-    let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
-        &meta.bootstrap.image.object,
-        crate::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
-    )
-    .expect("derive the Circle snapshot image prefix");
-    match fixture
-        .store
-        .storage
-        .read_protocol_object(&context, &meta.bootstrap.image.object, &prefix)
-        .await
-    {
-        Ok(_) => true,
-        Err(crate::storage::StorageError::NotFound(_)) => false,
-        Err(error) => panic!("read the exact Circle snapshot image: {error}"),
-    }
-}
-
 /// A device authors its Circle snapshots as one create-once stream of
 /// generations, and a reader finds any generation only by walking that stream from
 /// generation zero. Once a later generation is acknowledgement-stable and its cut
@@ -3207,7 +3192,11 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     .await
     .expect("run reclamation with no superseding Circle snapshot generation");
     assert!(
-        circle_snapshot_image_present(&fixture, &latest).await,
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
         "the latest generation's image survives while nothing supersedes it"
     );
 
@@ -3253,7 +3242,11 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
     .await
     .expect("run reclamation against an unacknowledged superseding generation");
     assert!(
-        circle_snapshot_image_present(&fixture, &latest).await,
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
         "a superseding generation nobody acknowledged does not release the earlier image"
     );
 
@@ -3286,11 +3279,19 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
         "a later generation's cut strictly dominates the earlier one"
     );
     assert!(
-        !circle_snapshot_image_present(&fixture, &latest).await,
+        !fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
         "the superseded generation's image is deleted"
     );
     assert!(
-        circle_snapshot_image_present(&fixture, &newest).await,
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &newest)
+            .await
+            .expect("read the exact Circle snapshot image"),
         "the generation no later snapshot supersedes keeps its image"
     );
     assert!(

@@ -124,8 +124,8 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .expect_err("local activation must verify every signed exact Circle edge");
 
     assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
-    assert_exact_object_absent(&store.home, &store_commit).await;
-    assert_exact_object_absent(&store.home, &store_head).await;
+    assert!(!store.home.contains_exact_object(&store_commit));
+    assert!(!store.home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]
@@ -213,8 +213,8 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .await
             .expect("read rejected Circle Store position")
             .is_none());
-        assert_exact_object_absent(&store.home, &store_commit).await;
-        assert_exact_object_absent(&store.home, &store_head).await;
+        assert!(!store.home.contains_exact_object(&store_commit));
+        assert!(!store.home.contains_exact_object(&store_head));
     }
 }
 
@@ -292,8 +292,8 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .await
         .expect("read rejected Circle Store position")
         .is_none());
-    assert_exact_object_absent(&store.home, &store_commit).await;
-    assert_exact_object_absent(&store.home, &store_head).await;
+    assert!(!store.home.contains_exact_object(&store_commit));
+    assert!(!store.home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]
@@ -411,8 +411,8 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .await
         .expect_err("common verifier must reject an unreserved Circle predecessor");
     assert_eq!(activation_count(&db, circle_id).await, 1);
-    assert_exact_object_absent(&store.home, &store_commit).await;
-    assert_exact_object_absent(&store.home, &store_head).await;
+    assert!(!store.home.contains_exact_object(&store_commit));
+    assert!(!store.home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]

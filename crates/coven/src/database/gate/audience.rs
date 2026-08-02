@@ -2152,21 +2152,6 @@ mod tests {
     use crate::sync::session::{RowIdentity, SyncedTable};
     use rusqlite::session::{ConflictAction, Session};
 
-    fn row_blob_locator_schema(conn: &Connection) {
-        conn.execute_batch(
-            "CREATE TABLE row_blob_locators (
-                 table_name TEXT NOT NULL,
-                 row_id TEXT NOT NULL,
-                 column_name TEXT NOT NULL,
-                 row_stamp TEXT NOT NULL,
-                 audience_authority TEXT NOT NULL CHECK (json_valid(audience_authority)),
-                 remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
-                 PRIMARY KEY (table_name, row_id, column_name, row_stamp)
-             ) STRICT;",
-        )
-        .expect("create row blob locator schema");
-    }
-
     fn routing_schema(conn: &Connection) {
         conn.execute_batch(
             "CREATE TABLE notes (
@@ -2186,10 +2171,18 @@ mod tests {
                  row_id TEXT NOT NULL,
                  _updated_at TEXT NOT NULL,
                  UNIQUE(table_name, row_id)
+             ) STRICT;
+             CREATE TABLE row_blob_locators (
+                 table_name TEXT NOT NULL,
+                 row_id TEXT NOT NULL,
+                 column_name TEXT NOT NULL,
+                 row_stamp TEXT NOT NULL,
+                 audience_authority TEXT NOT NULL CHECK (json_valid(audience_authority)),
+                 remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
+                 PRIMARY KEY (table_name, row_id, column_name, row_stamp)
              ) STRICT;",
         )
         .expect("create inbound audience test schema");
-        row_blob_locator_schema(conn);
     }
 
     fn note_gates(conn: &Connection) -> Gates {

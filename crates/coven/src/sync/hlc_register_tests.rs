@@ -22,11 +22,6 @@ use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 /// that version.
 const SCHEMA_VERSION: u32 = 1;
 
-async fn create_store(db: &crate::database::Database) -> TestStore {
-    TestStore::create(db, "test-store", UserKeypair::generate())
-        .await
-        .expect("create exact test Store for the test database")
-}
 use crate::sync::test_helpers::*;
 
 /// The causality-under-skew guarantee, driven through the Store pull path.
@@ -182,7 +177,9 @@ async fn pull_advances_register_as_each_changeset_applies() {
 
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db();
-    let storage = create_store(&db_a).await;
+    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
+        .await
+        .expect("create exact test Store for the test database");
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(
@@ -218,7 +215,11 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let remote_hlc = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 9_000));
     let remote_stamp = remote_hlc.now().to_string();
     let source = open_test_db();
-    let storage = Arc::new(create_store(&source).await);
+    let storage = Arc::new(
+        TestStore::create(&source, "test-store", UserKeypair::generate())
+            .await
+            .expect("create exact test Store for the test database"),
+    );
     let changeset = capture_bytes(
         &source,
         &[&format!(
@@ -655,7 +656,9 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     let a_future_ms = b_wall + 10 * 365 * 24 * 60 * 60 * 1000;
     let a_future_stamp = format!("{a_future_ms:013}-0000-dev-a");
     let db_a = open_test_db();
-    let storage = create_store(&db_a).await;
+    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
+        .await
+        .expect("create exact test Store for the test database");
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(
@@ -720,7 +723,9 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     let a_ms = b_wall + 3 * 24 * 60 * 60 * 1000;
     let a_stamp = format!("{a_ms:013}-0000-dev-a");
     let db_a = open_test_db();
-    let storage = create_store(&db_a).await;
+    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
+        .await
+        .expect("create exact test Store for the test database");
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(

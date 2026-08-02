@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::database::Database;
 use crate::{Migration, RowIdentity, SyncedTable};
 use rusqlite::Connection;
@@ -39,11 +37,7 @@ fn ordinary_open_rejects_coven_schema_without_initialization_marker() {
     };
     assert!(error.contains("initialization marker"), "{error}");
 
-    assert_rejected_database_unchanged(&path);
-}
-
-fn assert_rejected_database_unchanged(path: &Path) {
-    let conn = Connection::open(path).expect("inspect rejected database");
+    let conn = Connection::open(&path).expect("inspect rejected database");
     let marker_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM protocol_state WHERE key = 'coven_initialized'",

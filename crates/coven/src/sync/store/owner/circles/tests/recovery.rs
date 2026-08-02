@@ -412,7 +412,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         .await
         .expect_err("publication loses the successor slot to the winner");
     assert!(
-        exact_object_present(&store.home, &candidate_commit).await,
+        store.home.contains_exact_object(&candidate_commit),
         "the candidate commit reached cloud storage before the slot was lost"
     );
 
@@ -428,17 +428,17 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
             .is_none(),
         "discard clears the journal row"
     );
-    assert_exact_object_absent(&store.home, &candidate_commit).await;
+    assert!(!store.home.contains_exact_object(&candidate_commit));
     assert!(
         !remote_object_exists(&db, &candidate_commit).await,
         "the candidate commit's remote-object row is deleted"
     );
     assert!(
-        exact_object_present(&store.home, &winner_commit).await,
+        store.home.contains_exact_object(&winner_commit),
         "the winner's commit is untouched"
     );
     assert!(
-        exact_object_present(&store.home, &winner_head).await,
+        store.home.contains_exact_object(&winner_head),
         "the winner's activation head is untouched"
     );
 }
@@ -486,7 +486,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
             .is_none(),
         "resume clears the discarded operation's journal row"
     );
-    assert_exact_object_absent(&store.home, &candidate_commit).await;
+    assert!(!store.home.contains_exact_object(&candidate_commit));
 }
 
 #[tokio::test]

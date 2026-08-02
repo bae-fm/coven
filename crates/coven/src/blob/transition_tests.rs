@@ -229,13 +229,6 @@ async fn cover_ref(db: &Database, id: &str) -> RowBlobRef {
         .expect("load exact cover row blob reference")
 }
 
-async fn remote_blob_exists(storage: &TestStore, reference: &RowBlobRef) -> bool {
-    match reference.stored() {
-        Some(stored) => storage.verify_blob_object(stored).await.is_ok(),
-        None => false,
-    }
-}
-
 async fn external_blob(
     db: &Database,
     table: &str,
@@ -966,7 +959,9 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
         "the drain read the re-registered path and completed the make_remote",
     );
     assert!(
-        remote_blob_exists(&storage, &photo_ref(&db, "photoaaa").await).await,
+        storage
+            .contains_blob_object(&photo_ref(&db, "photoaaa").await)
+            .await,
         "the blob uploaded from the new path",
     );
 }
@@ -1614,7 +1609,9 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
-        remote_blob_exists(&storage, &cover_ref(&db_a, "coveraaa").await).await,
+        storage
+            .contains_blob_object(&cover_ref(&db_a, "coveraaa").await)
+            .await,
         "the host-provided cover is uploaded to the cloud",
     );
     assert!(
@@ -1775,7 +1772,9 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     assert_eq!(pending_uploads(&db_a).await, 1);
     assert!(
-        !remote_blob_exists(&storage, &cover_ref(&db_a, "coverhost").await).await,
+        !storage
+            .contains_blob_object(&cover_ref(&db_a, "coverhost").await)
+            .await,
         "the host-provided blob is not published before the cycle uploads it"
     );
 
@@ -1787,7 +1786,9 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "the gate flips after the host-provided blob lands"
     );
     assert!(
-        remote_blob_exists(&storage, &cover_ref(&db_a, "coverhost").await).await,
+        storage
+            .contains_blob_object(&cover_ref(&db_a, "coverhost").await)
+            .await,
         "inline push uploads the host-provided blob"
     );
     assert!(storage.home.exact_create_count() > exact_creates_before);
@@ -1957,8 +1958,16 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             .unwrap(),
         "the dropped cover is not pinned",
     );
-    assert!(remote_blob_exists(&storage, &cover_ref(&db, "cover-pin").await).await);
-    assert!(remote_blob_exists(&storage, &cover_ref(&db, "cover-drop").await).await);
+    assert!(
+        storage
+            .contains_blob_object(&cover_ref(&db, "cover-pin").await)
+            .await
+    );
+    assert!(
+        storage
+            .contains_blob_object(&cover_ref(&db, "cover-drop").await)
+            .await
+    );
 }
 
 /// The drain applies a disposition (copy to the destination, drop the local-store
@@ -2142,14 +2151,14 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
-        remote_blob_exists(
-            &storage,
-            &db_a
-                .row_blob_ref("note_photos", "coverrrr")
-                .await
-                .expect("load exact remote-root cover reference"),
-        )
-        .await,
+        storage
+            .contains_blob_object(
+                &db_a
+                    .row_blob_ref("note_photos", "coverrrr")
+                    .await
+                    .expect("load exact remote-root cover reference"),
+            )
+            .await,
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 

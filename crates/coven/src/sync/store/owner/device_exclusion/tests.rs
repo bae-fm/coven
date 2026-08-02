@@ -32,19 +32,6 @@ fn open(path: &Path, device_id: &str) -> Database {
     .0
 }
 
-fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncStorage> {
-    Arc::new(
-        CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "device-exclusion-store",
-            signer.clone(),
-        )
-        .expect("construct exclusion test storage"),
-    )
-}
-
 async fn prepare_pending_store_write(
     db: &Database,
     storage: &Arc<CloudSyncStorage>,
@@ -111,7 +98,16 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
     let path = directory.path().join("store.sqlite");
     let signer = UserKeypair::generate();
     let home = InMemoryCloudHome::new();
-    let storage = storage(&home, &signer);
+    let storage = Arc::new(
+        CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "device-exclusion-store",
+            signer.clone(),
+        )
+        .expect("construct exclusion test storage"),
+    );
     let db = open(&path, "exclusion-host");
     Box::pin(create_exclusion_test_store(&db, &storage, &signer)).await;
     let reference = Box::pin(stage_uploaded_proposal(&db, &storage, &signer)).await;

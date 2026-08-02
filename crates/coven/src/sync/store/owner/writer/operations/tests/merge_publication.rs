@@ -134,14 +134,16 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             "local position cannot advance before a verified head",
         );
         assert_eq!(
-            exact_object_exists(&fixture.home, &fixture.package_object),
+            fixture.home.contains_exact_object(&fixture.package_object),
             failed_call > 1,
         );
         assert_eq!(
-            exact_object_exists(&fixture.home, &fixture.commit_ref.object),
+            fixture
+                .home
+                .contains_exact_object(&fixture.commit_ref.object),
             failed_call > 2,
         );
-        assert!(!exact_object_exists(&fixture.home, &fixture.head_object),);
+        assert!(!fixture.home.contains_exact_object(&fixture.head_object),);
 
         assert_eq!(
             drain_store_writes(&fixture.db, &fixture.storage, &fixture.keypair)
@@ -280,11 +282,10 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         .cleanup_merge_candidate_for_test(fixture.write_id.clone())
         .await
         .is_err());
-    assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
+    assert!(!fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
     fixture
         .store
         .cleanup_merge_candidate_for_test(fixture.write_id.clone())
@@ -305,12 +306,11 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
             .expect("discard the cleaned losing Merge write"),
         crate::database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
     );
-    assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(!exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
-    assert!(exact_object_exists(&fixture.home, &winner.object));
+    assert!(!fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(!fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
+    assert!(fixture.home.contains_exact_object(&winner.object));
 }
 
 #[tokio::test]
@@ -364,11 +364,10 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
                 } if reference == &authority
             )
     ));
-    assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(!exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
+    assert!(!fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(!fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
     assert!(matches!(
         fixture
             .database
@@ -584,12 +583,11 @@ async fn original_candidate_activation_wins_abandonment_race() {
         crate::WriteStatus::Published(position)
             if position.commit() == &fixture.commit_ref
     ));
-    assert!(exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
-    assert!(exact_object_exists(&fixture.home, &fixture.head_object));
+    assert!(fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
+    assert!(fixture.home.contains_exact_object(&fixture.head_object));
 }
 
 #[tokio::test]
@@ -642,12 +640,11 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         .merge_candidate_cleanup_pending(&fixture.write_id)
         .await
         .expect("all losing candidates are cleaned"));
-    assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(!exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
-    assert!(exact_object_exists(&fixture.home, &winner.object));
+    assert!(!fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(!fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
+    assert!(fixture.home.contains_exact_object(&winner.object));
     assert!(!remote_object_exists(&fixture.db, &authority_commit).await);
     assert!(!remote_object_exists(&fixture.db, &authority_head).await);
     assert_eq!(
@@ -696,12 +693,11 @@ async fn alternate_head_for_abandonment_authority_is_accepted() {
         .expect("accept alternate abandonment head"),
         MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(!exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
-    assert!(exact_object_exists(&fixture.home, &accepted_head.object));
+    assert!(!fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(!fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
+    assert!(fixture.home.contains_exact_object(&accepted_head.object));
 }
 
 #[tokio::test]
@@ -772,12 +768,11 @@ async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idemp
             .expect("settle lost head response by exact readback"),
         1
     );
-    assert!(exact_object_exists(&fixture.home, &fixture.package_object));
-    assert!(exact_object_exists(
-        &fixture.home,
-        &fixture.commit_ref.object
-    ));
-    assert!(exact_object_exists(&fixture.home, &fixture.head_object));
+    assert!(fixture.home.contains_exact_object(&fixture.package_object));
+    assert!(fixture
+        .home
+        .contains_exact_object(&fixture.commit_ref.object));
+    assert!(fixture.home.contains_exact_object(&fixture.head_object));
     assert_eq!(
         fixture
             .database
@@ -824,7 +819,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
             .unwrap(),
         crate::WriteStatus::Publishing,
     );
-    assert!(exact_object_exists(&fixture.home, &fixture.head_object));
+    assert!(fixture.home.contains_exact_object(&fixture.head_object));
     assert!(fixture
         .database
         .clone()

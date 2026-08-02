@@ -7,75 +7,6 @@ use crate::database::StoreDatabase;
 
 use super::fixtures::*;
 
-fn assert_coven_schema_mutation_is_rejected(
-    name: &str,
-    tables: Vec<SyncedTable>,
-    migrations: Vec<Migration>,
-    mutate: impl FnOnce(&Connection),
-) {
-    let directory = tempfile::tempdir().expect("temp dir");
-    let path = directory.path().join(format!("{name}.sqlite"));
-    let (database, _) = Database::open(
-        &path,
-        tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        "schema-seed".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &migrations,
-    )
-    .expect("seed database");
-    drop(database);
-
-    let conn = Connection::open(&path).expect("open database for schema mutation");
-    mutate(&conn);
-    drop(conn);
-
-    let writer_error = match Database::open(
-        &path,
-        tables.clone(),
-        BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        "schema-writer".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &migrations,
-    ) {
-        Ok(_) => panic!("writer must reject Coven schema mutation {name}"),
-        Err(error) => error.to_string(),
-    };
-    assert!(
-        writer_error.contains("Coven schema"),
-        "{name}: {writer_error}"
-    );
-
-    let reader_error = match Database::open_read_only(
-        &path,
-        tables,
-        BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        "schema-reader".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &migrations,
-    ) {
-        Ok(_) => panic!("read-only open must reject Coven schema mutation {name}"),
-        Err(error) => error.to_string(),
-    };
-    assert!(
-        reader_error.contains("Coven schema"),
-        "{name}: {reader_error}"
-    );
-
-    let conn = Connection::open(&path).expect("inspect rejected database");
-    let host_device_id: String = conn
-        .query_row(
-            "SELECT value FROM protocol_state WHERE key = ?1",
-            [HOST_DEVICE_ID_STATE_KEY],
-            |row| row.get(0),
-        )
-        .expect("host device id");
-    assert_eq!(host_device_id, "schema-seed", "{name} was rewritten");
-}
-
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
     let (db, _) = Database::open(
@@ -408,14 +339,69 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
     ];
 
     for (name, mutation) in cases {
-        assert_coven_schema_mutation_is_rejected(
-            name,
-            vec![scoped_things_table()],
-            vec![scoped_things_migration()],
-            |conn| {
-                conn.execute_batch(mutation).expect("mutate Coven schema");
-            },
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join(format!("{name}.sqlite"));
+        let tables = vec![scoped_things_table()];
+        let migrations = vec![scoped_things_migration()];
+        let (database, _) = Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "schema-seed".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &migrations,
+        )
+        .expect("seed database");
+        drop(database);
+
+        let conn = Connection::open(&path).expect("open database for schema mutation");
+        conn.execute_batch(mutation).expect("mutate Coven schema");
+        drop(conn);
+
+        let writer_error = match Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "schema-writer".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &migrations,
+        ) {
+            Ok(_) => panic!("writer must reject Coven schema mutation {name}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            writer_error.contains("Coven schema"),
+            "{name}: {writer_error}"
         );
+
+        let reader_error = match Database::open_read_only(
+            &path,
+            tables,
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::one_at_a_time(),
+            "schema-reader".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &migrations,
+        ) {
+            Ok(_) => panic!("read-only open must reject Coven schema mutation {name}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            reader_error.contains("Coven schema"),
+            "{name}: {reader_error}"
+        );
+
+        let conn = Connection::open(&path).expect("inspect rejected database");
+        let host_device_id: String = conn
+            .query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [HOST_DEVICE_ID_STATE_KEY],
+                |row| row.get(0),
+            )
+            .expect("host device id");
+        assert_eq!(host_device_id, "schema-seed", "{name} was rewritten");
     }
 }
 

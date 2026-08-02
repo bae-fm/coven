@@ -307,13 +307,6 @@ pub(super) async fn publish_alternate_head_for_prepared_commit(
     }
 }
 
-pub(super) fn exact_object_exists(
-    home: &InMemoryCloudHome,
-    object: &crate::storage::ExactObjectRef,
-) -> bool {
-    home.get(object.slot().logical_key()).is_some()
-}
-
 pub(super) fn commit_stream(reference: &StoreBatchCommitRef) -> String {
     reference.coord.stream_id.to_string()
 }

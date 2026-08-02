@@ -1130,6 +1130,70 @@ impl CloudSyncStorage {
         &self.keypair
     }
 
+    #[cfg(test)]
+    async fn blob_write_registration(
+        &self,
+        label: &str,
+    ) -> (
+        crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        crate::protocol::store_commit::StoreDeviceRegistration,
+    ) {
+        use crate::protocol::store_commit::{
+            DeviceStreamAnchor, StoreCreationId, StoreDeviceRegistration,
+            StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
+        };
+
+        let root_bytes = format!("{label} Store root").into_bytes();
+        let root = StoreRootRef {
+            store_root_id: ObjectHash::digest(format!("{label} root id").as_bytes()),
+            store_root_hash: ObjectHash::digest(&root_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical(format!("store-v1/store-protocol-root/{label}.json")).unwrap(),
+                root_bytes.len() as u64,
+                ObjectHash::digest(&root_bytes),
+            ),
+        };
+        let anchor_slot = |stream: &str| {
+            ObjectSlot::logical(format!(
+                "store-v1/test-device-streams/{label}/{stream}.json"
+            ))
+            .unwrap()
+        };
+        let provider = SyncStorage::provider_binding(self).await.unwrap().device;
+        let registration = StoreDeviceRegistration::signed(
+            root,
+            StoreDeviceRegistrationOrigin::Founder {
+                creation_id: StoreCreationId::from_nonce(label),
+            },
+            provider,
+            DeviceStreamAnchor::StoreAnnouncements {
+                first_slot: anchor_slot("announcements"),
+            },
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: anchor_slot("acknowledgements"),
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: anchor_slot("snapshots"),
+            },
+            &self.keypair,
+        )
+        .unwrap();
+        let bytes = registration.to_bytes();
+        let reference = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            ExactObjectRef::new(
+                ObjectSlot::logical(format!(
+                    "store-v1/devices/{}/registration.json",
+                    registration.device_id
+                ))
+                .unwrap(),
+                bytes.len() as u64,
+                ObjectHash::digest(&bytes),
+            ),
+        );
+        (reference, registration)
+    }
+
     /// The session's fixed-mode cipher state. The state exposes key-generation
     /// merging but no operation that can replace encrypted mode with plaintext.
     pub(crate) fn cipher_state(&self) -> &Arc<CloudCipherState> {
@@ -2344,12 +2408,9 @@ mod tests {
     use super::*;
     use crate::blob::locator::{BlobLocator, RemoteAudience};
     use crate::blob::BlobScope;
-    use crate::protocol::store_commit::{
-        DeviceStreamAnchor, ObjectHash, StoreCreationId, StoreDeviceRegistration,
-        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
-    };
+    use crate::protocol::store_commit::ObjectHash;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::{BlobWriteAuthority, ExactObjectRef};
+    use crate::storage::BlobWriteAuthority;
 
     #[test]
     fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
@@ -2476,61 +2537,6 @@ mod tests {
         );
     }
 
-    async fn blob_write_registration(
-        storage: &CloudSyncStorage,
-        label: &str,
-    ) -> (StoreDeviceRegistrationRef, StoreDeviceRegistration) {
-        let root_bytes = format!("{label} Store root").into_bytes();
-        let root = StoreRootRef {
-            store_root_id: ObjectHash::digest(format!("{label} root id").as_bytes()),
-            store_root_hash: ObjectHash::digest(&root_bytes),
-            object: ExactObjectRef::new(
-                ObjectSlot::logical(format!("store-v1/store-protocol-root/{label}.json")).unwrap(),
-                root_bytes.len() as u64,
-                ObjectHash::digest(&root_bytes),
-            ),
-        };
-        let anchor_slot = |stream: &str| {
-            ObjectSlot::logical(format!(
-                "store-v1/test-device-streams/{label}/{stream}.json"
-            ))
-            .unwrap()
-        };
-        let provider = SyncStorage::provider_binding(storage).await.unwrap().device;
-        let registration = StoreDeviceRegistration::signed(
-            root,
-            StoreDeviceRegistrationOrigin::Founder {
-                creation_id: StoreCreationId::from_nonce(label),
-            },
-            provider,
-            DeviceStreamAnchor::StoreAnnouncements {
-                first_slot: anchor_slot("announcements"),
-            },
-            DeviceStreamAnchor::StoreAcknowledgements {
-                first_slot: anchor_slot("acknowledgements"),
-            },
-            DeviceStreamAnchor::StoreSnapshots {
-                first_slot: anchor_slot("snapshots"),
-            },
-            storage.user_keypair(),
-        )
-        .unwrap();
-        let bytes = registration.to_bytes();
-        let reference = StoreDeviceRegistrationRef::from_registration(
-            &registration,
-            ExactObjectRef::new(
-                ObjectSlot::logical(format!(
-                    "store-v1/devices/{}/registration.json",
-                    registration.device_id
-                ))
-                .unwrap(),
-                bytes.len() as u64,
-                ObjectHash::digest(&bytes),
-            ),
-        );
-        (reference, registration)
-    }
-
     /// Publish one sealed blob into `home` and hand back the reference a reader
     /// opens it through. `chunking` is the installation setting the blob is
     /// sealed under; the reader honors whatever the stored header records.
@@ -2555,7 +2561,7 @@ mod tests {
         )
         .expect("test cloud storage supports exact slots")
         .with_blob_chunking(chunking);
-        let (uploader, registration) = blob_write_registration(&storage, store_id).await;
+        let (uploader, registration) = storage.blob_write_registration(store_id).await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let locator = BlobLocator::opaque(
@@ -2707,7 +2713,7 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = blob_write_registration(&storage, "browsable-range").await;
+        let (uploader, registration) = storage.blob_write_registration("browsable-range").await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let plaintext = ramp(4096);
         let locator = BlobLocator::browsable(
@@ -3152,7 +3158,7 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = blob_write_registration(&storage, "circle-blob-spool").await;
+        let (uploader, registration) = storage.blob_write_registration("circle-blob-spool").await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let circle_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"circle audience blob";
@@ -3219,8 +3225,9 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) =
-            blob_write_registration(&storage, "blob-spool-key-mismatch").await;
+        let (uploader, registration) = storage
+            .blob_write_registration("blob-spool-key-mismatch")
+            .await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let declared_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"audience blob";
@@ -3271,8 +3278,9 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) =
-            blob_write_registration(&storage, "verified-blob-download").await;
+        let (uploader, registration) = storage
+            .blob_write_registration("verified-blob-download")
+            .await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let plaintext: Vec<u8> = (0..150_000u32).map(|value| (value % 251) as u8).collect();
@@ -3348,8 +3356,9 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) =
-            blob_write_registration(&storage, "corrupt-blob-download").await;
+        let (uploader, registration) = storage
+            .blob_write_registration("corrupt-blob-download")
+            .await;
         let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"signed blob plaintext";

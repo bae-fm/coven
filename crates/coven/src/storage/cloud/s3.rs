@@ -241,6 +241,28 @@ impl S3CloudHome {
             .await?;
         MultipartUpload::new(key, body, sink, progress).run().await
     }
+
+    #[cfg(test)]
+    async fn provision_test_bucket(&self) {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        self.runtime
+            .run(async move {
+                client
+                    .create_bucket()
+                    .bucket(&bucket)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        CloudHomeError::Transport(format!(
+                            "create test S3 bucket {bucket}: {error}"
+                        ))
+                    })?;
+                Ok(())
+            })
+            .await
+            .expect("create test bucket");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2463,16 +2485,6 @@ mod tests {
         eprintln!("read_range first {n} bytes match the full read");
     }
 
-    /// Provision the bucket configured on `home`.
-    async fn provision_test_bucket(home: &S3CloudHome) {
-        home.client
-            .create_bucket()
-            .bucket(&home.bucket)
-            .send()
-            .await
-            .expect("create test bucket");
-    }
-
     #[tokio::test]
     #[ignore]
     async fn probe_succeeds_against_existing_bucket() {
@@ -2489,7 +2501,7 @@ mod tests {
         )
         .await
         .expect("construct S3CloudHome");
-        provision_test_bucket(&home).await;
+        home.provision_test_bucket().await;
         home.probe().await.expect("probe should succeed");
     }
 
@@ -2538,7 +2550,7 @@ mod tests {
         )
         .await
         .expect("construct good S3CloudHome");
-        provision_test_bucket(&good).await;
+        good.provision_test_bucket().await;
 
         let bad = open_cloud_home(
             bucket,

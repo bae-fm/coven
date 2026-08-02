@@ -1345,23 +1345,23 @@ async fn replace_store_package_with_malformed_bytes(
     let graph = load_exact_published_commit(storage, reference).await;
     let malformed = b"not a SQLite changeset";
     let stream_id = commit_stream_id(&graph.reference);
-    let package_object = create_exact_protocol_object(
-        &storage.storage,
-        &crate::storage::ProtocolObjectContext::store_encrypted(
-            storage.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StorePackage,
-        ),
-        &crate::protocol::store_commit::package_semantic_prefix(
-            graph.commit.candidate_family(),
-            &stream_id,
-            graph.reference.coord.sequence(),
-            crate::protocol::store_commit::ObjectHash::digest(malformed),
-        ),
-        ".pkg",
-        malformed,
-    )
-    .await
-    .expect("publish malformed exact Store package");
+    let package_object = storage
+        .create_exact_protocol_object(
+            &crate::storage::ProtocolObjectContext::store_encrypted(
+                storage.root.store_root_hash,
+                crate::storage::ProtocolObjectDomain::StorePackage,
+            ),
+            &crate::protocol::store_commit::package_semantic_prefix(
+                graph.commit.candidate_family(),
+                &stream_id,
+                graph.reference.coord.sequence(),
+                crate::protocol::store_commit::ObjectHash::digest(malformed),
+            ),
+            ".pkg",
+            malformed,
+        )
+        .await
+        .expect("publish malformed exact Store package");
     let malformed_commit = sign_exact_commit_with_package(
         &graph,
         SCHEMA_VERSION,
@@ -3147,23 +3147,23 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         sequence: 2,
     };
     let expected_stream_id = stream_id.to_string();
-    let relocated_object = create_exact_protocol_object(
-        &storage.storage,
-        &crate::storage::ProtocolObjectContext::signed_plaintext(
-            storage.root.store_root_hash,
-            ProtocolObjectDomain::StoreCommit,
-        ),
-        &crate::protocol::store_commit::commit_semantic_prefix(
-            graph.commit.candidate_family(),
-            &stream_id.to_string(),
-            2,
-            graph.commit.commit_hash(),
-        ),
-        ".json",
-        &graph.commit.to_bytes(),
-    )
-    .await
-    .expect("publish relocated exact Store commit");
+    let relocated_object = storage
+        .create_exact_protocol_object(
+            &crate::storage::ProtocolObjectContext::signed_plaintext(
+                storage.root.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &crate::protocol::store_commit::commit_semantic_prefix(
+                graph.commit.candidate_family(),
+                &stream_id.to_string(),
+                2,
+                graph.commit.commit_hash(),
+            ),
+            ".json",
+            &graph.commit.to_bytes(),
+        )
+        .await
+        .expect("publish relocated exact Store commit");
     let relocated_ref = crate::protocol::store_commit::StoreBatchCommitRef {
         coord: relocated_coord,
         commit_hash: graph.commit.commit_hash(),
@@ -3223,23 +3223,23 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         .expect("publish exact Store changeset");
     let graph = load_exact_published_commit(&storage, reference).await;
     let relocated_stream = crate::protocol::membership::AuthorStreamId::from_bytes([99; 32]);
-    let relocated_object = create_exact_protocol_object(
-        &storage.storage,
-        &crate::storage::ProtocolObjectContext::signed_plaintext(
-            storage.root.store_root_hash,
-            ProtocolObjectDomain::StoreCommit,
-        ),
-        &crate::protocol::store_commit::commit_semantic_prefix(
-            graph.commit.candidate_family(),
-            &relocated_stream.to_string(),
-            1,
-            graph.commit.commit_hash(),
-        ),
-        ".json",
-        &graph.commit.to_bytes(),
-    )
-    .await
-    .expect("publish relocated exact Store commit");
+    let relocated_object = storage
+        .create_exact_protocol_object(
+            &crate::storage::ProtocolObjectContext::signed_plaintext(
+                storage.root.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &crate::protocol::store_commit::commit_semantic_prefix(
+                graph.commit.candidate_family(),
+                &relocated_stream.to_string(),
+                1,
+                graph.commit.commit_hash(),
+            ),
+            ".json",
+            &graph.commit.to_bytes(),
+        )
+        .await
+        .expect("publish relocated exact Store commit");
     let relocated_ref = crate::protocol::store_commit::StoreBatchCommitRef {
         coord: crate::protocol::store_commit::StoreCommitCoord {
             stream_id: relocated_stream,

@@ -118,41 +118,6 @@ fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
     )
 }
 
-async fn overwrite_head(fixture: &MergeFixture, reference: &MembershipHeadRef, head: &AuthorHead) {
-    fixture
-        .store
-        .storage
-        .delete_protocol_object(&reference.object)
-        .await
-        .expect("delete exact head before replacement");
-    let context = ProtocolObjectContext::signed_plaintext(
-        fixture.store.root.store_root_hash,
-        ProtocolObjectDomain::StoreMembershipHead,
-    );
-    let prefix = crate::protocol::store_commit::membership_head_slot_prefix(
-        &reference.coord.author_pubkey,
-        &reference.coord.author_owner_grant,
-        reference.coord.stream_id,
-        reference.coord.seq,
-    );
-    let prepared = fixture
-        .store
-        .storage
-        .prepare_protocol_object(
-            &context,
-            reference.object.slot().clone(),
-            &prefix,
-            serde_json::to_vec(head).expect("serialize replacement head"),
-        )
-        .expect("prepare replacement head");
-    fixture
-        .store
-        .storage
-        .create_protocol_object(&prepared)
-        .await
-        .expect("write replacement head");
-}
-
 #[tokio::test]
 async fn anchored_chain_loads_the_root_named_by_its_authoritative_hash() {
     let fixture = merge_fixture("pinned-root").await;
@@ -250,7 +215,10 @@ async fn membership_head_must_match_its_exact_author_coordinate() {
         .await
         .expect("load exact head");
     head.body.entry.coord.author_pubkey = hex::encode([9; 32]);
-    overwrite_head(&fixture, &reference, &head).await;
+    fixture
+        .store
+        .overwrite_membership_head(&reference, &head)
+        .await;
 
     load_fixture_result(&fixture)
         .await
@@ -281,7 +249,10 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
         .await
         .expect("load exact head");
     head.signature = hex::encode([0; 64]);
-    overwrite_head(&fixture, &reference, &head).await;
+    fixture
+        .store
+        .overwrite_membership_head(&reference, &head)
+        .await;
 
     load_fixture_result(&fixture)
         .await

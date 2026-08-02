@@ -19,7 +19,7 @@ use crate::protocol::store_commit::{
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StreamActivation,
 };
-use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
+use crate::storage::cloud::CloudHome;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
@@ -258,13 +258,6 @@ async fn remote_object_exists(db: &Database, object: &ExactObjectRef) -> bool {
         .expect("check stored remote object")
 }
 
-async fn exact_object_present(home: &InMemoryCloudHome, reference: &ExactObjectRef) -> bool {
-    let storage = Arc::new(home.clone())
-        .exact_slot_storage()
-        .expect("in-memory storage supports exact slots");
-    storage.read_at(reference.slot()).await.is_ok()
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn rename_circle(
     db: &Database,
@@ -500,20 +493,6 @@ async fn publish_competing_store_head(
         commit_prepared.reference().clone(),
         head_prepared.reference().clone(),
     )
-}
-
-async fn assert_exact_object_absent(home: &InMemoryCloudHome, reference: &ExactObjectRef) {
-    let storage = Arc::new(home.clone())
-        .exact_slot_storage()
-        .expect("in-memory storage supports exact slots");
-    let error = storage
-        .read_at(reference.slot())
-        .await
-        .expect_err("rejected Store object must be absent");
-    assert!(
-        matches!(error, crate::storage::cloud::CloudHomeError::NotFound(_)),
-        "{error}"
-    );
 }
 
 async fn persist_merge_operation(

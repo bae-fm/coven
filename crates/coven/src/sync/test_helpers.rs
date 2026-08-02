@@ -12,6 +12,7 @@ use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::protocol::store_commit::ObjectHash;
+use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::Migration;
@@ -930,7 +931,7 @@ pub(crate) fn create_synced_schema(conn: &crate::MigrationContext<'_>) -> Result
 /// schema and the [`test_synced_tables`] synced set. The returned stamper is
 /// dropped (tests stamp `_updated_at` literally in their SQL).
 pub(crate) fn open_test_db() -> Database {
-    open_test_db_with(test_synced_tables())
+    open_test_db_schema(test_synced_tables(), test_migrations())
 }
 
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
@@ -951,10 +952,6 @@ pub(crate) fn open_test_db_schema(
     )
     .expect("open test database");
     db
-}
-
-fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
-    open_test_db_schema(tables, test_migrations())
 }
 
 /// Open a test [`Database`] over the synthetic schema with a caller-supplied
@@ -1079,7 +1076,7 @@ pub(crate) fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
 /// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
 /// store identify a member.
 pub(crate) fn pubkey_hex(kp: &UserKeypair) -> String {
-    hex::encode(kp.public_key())
+    crate::keys::public_key_hex(kp)
 }
 
 /// Ed25519 identity derived from exact test-owned seed bytes.
@@ -1087,27 +1084,6 @@ pub(crate) fn user_keypair_from_seed(seed: [u8; 32]) -> UserKeypair {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     UserKeypair::from_signing_key_bytes(&signing_key.to_keypair_bytes())
         .expect("seed-derived signing key is valid")
-}
-
-pub(crate) async fn create_exact_protocol_object(
-    storage: &dyn crate::storage::SyncStorage,
-    context: &crate::storage::ProtocolObjectContext,
-    semantic_prefix: &str,
-    extension: &str,
-    bytes: &[u8],
-) -> Result<crate::storage::ExactObjectRef, String> {
-    let slot = storage
-        .allocate_protocol_slot(context, semantic_prefix, extension)
-        .await
-        .map_err(|error| error.to_string())?;
-    let prepared = storage
-        .prepare_protocol_object(context, slot, semantic_prefix, bytes.to_vec())
-        .map_err(|error| error.to_string())?;
-    storage
-        .create_protocol_object(&prepared)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(prepared.reference().clone())
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1941,6 +1917,116 @@ impl TestStore {
 
     pub(crate) fn protocol_founder_keypair(&self) -> UserKeypair {
         self.signer.clone()
+    }
+
+    pub(crate) async fn create_exact_protocol_object(
+        &self,
+        context: &crate::storage::ProtocolObjectContext,
+        semantic_prefix: &str,
+        extension: &str,
+        bytes: &[u8],
+    ) -> Result<crate::storage::ExactObjectRef, String> {
+        let slot = self
+            .storage
+            .allocate_protocol_slot(context, semantic_prefix, extension)
+            .await
+            .map_err(|error| error.to_string())?;
+        let prepared = self
+            .storage
+            .prepare_protocol_object(context, slot, semantic_prefix, bytes.to_vec())
+            .map_err(|error| error.to_string())?;
+        self.storage
+            .create_protocol_object(&prepared)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(prepared.reference().clone())
+    }
+
+    pub(crate) async fn contains_blob_object(&self, reference: &crate::blob::RowBlobRef) -> bool {
+        match reference.stored() {
+            Some(stored) => self
+                .contains_stored_blob_object(stored)
+                .await
+                .unwrap_or_else(|error| panic!("verify exact blob object: {error}")),
+            None => false,
+        }
+    }
+
+    pub(crate) async fn contains_stored_blob_object(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<bool, crate::storage::StorageError> {
+        match self.storage.verify_blob_object(stored).await {
+            Ok(()) => Ok(true),
+            Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) async fn contains_circle_snapshot_image(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        meta: &crate::protocol::store_commit::CircleSnapshotMeta,
+    ) -> Result<bool, String> {
+        let access = self
+            .founder
+            .circle_package_access(circle_id, meta.control.clone())
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the Circle snapshot control has no retained access".to_string())?;
+        let context = crate::storage::ProtocolObjectContext::circle(
+            self.root.store_root_hash,
+            crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
+            access.into_encryption(),
+        );
+        let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+            &meta.bootstrap.image.object,
+            crate::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
+        )
+        .map_err(|error| error.to_string())?;
+        match self
+            .storage
+            .read_protocol_object(&context, &meta.bootstrap.image.object, &prefix)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(crate) async fn overwrite_membership_head(
+        &self,
+        reference: &crate::protocol::membership::MembershipHeadRef,
+        head: &crate::protocol::membership::AuthorHead,
+    ) {
+        self.storage
+            .delete_protocol_object(&reference.object)
+            .await
+            .expect("delete exact head before replacement");
+        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            self.root.store_root_hash,
+            crate::storage::ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let prefix = crate::protocol::store_commit::membership_head_slot_prefix(
+            &reference.coord.author_pubkey,
+            &reference.coord.author_owner_grant,
+            reference.coord.stream_id,
+            reference.coord.seq,
+        );
+        let prepared = self
+            .storage
+            .prepare_protocol_object(
+                &context,
+                reference.object.slot().clone(),
+                &prefix,
+                serde_json::to_vec(head).expect("serialize replacement head"),
+            )
+            .expect("prepare replacement head");
+        self.storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("write replacement head");
     }
 
     pub(crate) async fn pending_device_join_observation(

@@ -9,7 +9,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         .await
         .expect("load prepared Merge write")
         .expect("prepared Merge write exists");
-    assert!(!exact_object_exists(&fixture.home, &batch.commit.object));
+    assert!(!fixture.home.contains_exact_object(&batch.commit.object));
     publish_competing_merge_head(&fixture).await;
     let observation = match fixture
         .store

@@ -608,13 +608,6 @@ mod tests {
             .expect("seed pre-existing database state");
     }
 
-    fn precreate_interrupted_coven_database(dir: &StoreDir) {
-        crate::database::DatabaseImageTest::open(&dir.db_path())
-            .expect("precreate interrupted Coven database")
-            .create_interrupted_coven_schema()
-            .expect("seed interrupted Coven schema");
-    }
-
     #[test]
     fn precreated_empty_sqlite_file_initializes_coven_metadata() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -646,7 +639,10 @@ mod tests {
     fn interrupted_coven_schema_without_a_marker_is_rejected() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        precreate_interrupted_coven_database(&dir);
+        crate::database::DatabaseImageTest::open(&dir.db_path())
+            .expect("precreate interrupted Coven database")
+            .create_interrupted_coven_schema()
+            .expect("seed interrupted Coven schema");
 
         let error = match open_gated_roots_at(dir) {
             Ok(_) => panic!("partial Coven schema has no valid initialization commit"),

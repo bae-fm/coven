@@ -353,6 +353,12 @@ impl InMemoryCloudHome {
         self.writes.lock().unwrap().get(&key).cloned()
     }
 
+    /// Whether one exact protocol object is currently stored.
+    pub fn contains_exact_object(&self, object: &crate::storage::ExactObjectRef) -> bool {
+        let key = Self::exact_storage_key(object.slot()).expect("test exact slot is valid");
+        self.writes.lock().unwrap().contains_key(&key)
+    }
+
     /// Re-insert bytes at one exact slot, restoring an object dropped by
     /// [`remove_exact_object`](Self::remove_exact_object).
     pub fn restore_exact_object(&self, slot: &ObjectSlot, bytes: Vec<u8>) {

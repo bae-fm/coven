@@ -1745,6 +1745,29 @@ mod tests {
             assert!(previous.is_none(), "a CloudKit write is already paused");
             (stored, release)
         }
+
+        fn write_chunk_manifest_with_upload_id(
+            &self,
+            key: &str,
+            total_len: usize,
+            upload_id: &str,
+        ) {
+            self.write_record(
+                &CloudKitScope::Private,
+                &chunk_manifest_key(key),
+                encode_chunk_manifest(ChunkManifest::new(total_len, upload_id.to_string())),
+            )
+            .unwrap();
+        }
+
+        fn write_chunk_part(&self, key: &str, index: usize, data: Vec<u8>) {
+            self.write_record(
+                &CloudKitScope::Private,
+                &chunk_part_key(key, "0123456789abcdef0123456789abcdef", index),
+                data,
+            )
+            .unwrap();
+        }
     }
 
     impl CloudKitOps for MockCloudKitOps {
@@ -2164,35 +2187,7 @@ mod tests {
     }
 
     fn write_chunk_manifest(ops: &MockCloudKitOps, key: &str, total_len: usize) {
-        write_chunk_manifest_with_upload_id(
-            ops,
-            key,
-            total_len,
-            "0123456789abcdef0123456789abcdef",
-        );
-    }
-
-    fn write_chunk_manifest_with_upload_id(
-        ops: &MockCloudKitOps,
-        key: &str,
-        total_len: usize,
-        upload_id: &str,
-    ) {
-        ops.write_record(
-            &CloudKitScope::Private,
-            &chunk_manifest_key(key),
-            encode_chunk_manifest(ChunkManifest::new(total_len, upload_id.to_string())),
-        )
-        .unwrap();
-    }
-
-    fn write_chunk_part(ops: &MockCloudKitOps, key: &str, index: usize, data: Vec<u8>) {
-        ops.write_record(
-            &CloudKitScope::Private,
-            &chunk_part_key(key, "0123456789abcdef0123456789abcdef", index),
-            data,
-        )
-        .unwrap();
+        ops.write_chunk_manifest_with_upload_id(key, total_len, "0123456789abcdef0123456789abcdef");
     }
 
     struct FailingBodyReader {
@@ -2468,8 +2463,8 @@ mod tests {
         let (ch, ops) = make_cloud_home_with_ops();
         let first = vec![1u8; CHUNK_SIZE];
         let second = b"tail".to_vec();
-        write_chunk_part(&ops, "chunked.bin", 0, first.clone());
-        write_chunk_part(&ops, "chunked.bin", 1, second.clone());
+        ops.write_chunk_part("chunked.bin", 0, first.clone());
+        ops.write_chunk_part("chunked.bin", 1, second.clone());
 
         let err = ch
             .read("chunked.bin")
@@ -2489,8 +2484,8 @@ mod tests {
         let (ch, ops) = make_cloud_home_with_ops();
         // Part records with no manifest — an interrupted upload that never
         // published. `read` cannot assemble them, so `list` must not report them.
-        write_chunk_part(&ops, "files/orphan.bin", 0, vec![1u8; CHUNK_SIZE]);
-        write_chunk_part(&ops, "files/orphan.bin", 1, b"tail".to_vec());
+        ops.write_chunk_part("files/orphan.bin", 0, vec![1u8; CHUNK_SIZE]);
+        ops.write_chunk_part("files/orphan.bin", 1, b"tail".to_vec());
         ch.write(
             "files/ok.bin",
             BlobBody::from_bytes(b"hi".to_vec()),
@@ -2542,8 +2537,8 @@ mod tests {
         let second = vec![2u8; CHUNK_SIZE];
         let total_len = (CHUNK_SIZE * 2) + 4;
         write_chunk_manifest(&ops, "chunked.bin", total_len);
-        write_chunk_part(&ops, "chunked.bin", 0, first);
-        write_chunk_part(&ops, "chunked.bin", 1, second);
+        ops.write_chunk_part("chunked.bin", 0, first);
+        ops.write_chunk_part("chunked.bin", 1, second);
 
         let err = ch
             .read("chunked.bin")
@@ -2584,8 +2579,8 @@ mod tests {
         let (ch, ops) = make_cloud_home_with_ops();
         let total_len = CHUNK_SIZE + 8;
         write_chunk_manifest(&ops, "short-tail.bin", total_len);
-        write_chunk_part(&ops, "short-tail.bin", 0, vec![1u8; CHUNK_SIZE]);
-        write_chunk_part(&ops, "short-tail.bin", 1, vec![2u8; 4]);
+        ops.write_chunk_part("short-tail.bin", 0, vec![1u8; CHUNK_SIZE]);
+        ops.write_chunk_part("short-tail.bin", 1, vec![2u8; 4]);
 
         let err = ch
             .read_range("short-tail.bin", CHUNK_SIZE as u64, (CHUNK_SIZE + 8) as u64)
