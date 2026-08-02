@@ -9,10 +9,8 @@ impl AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         observer: Option<&dyn crate::blob::BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-        StoreDatabase::validate_store_write_routing(
-            self.database.gates().as_ref(),
-            routing_encryption,
-        )?;
+        self.database
+            .validate_store_write_routing(routing_encryption)?;
         let (registration_ref, registration) = self.database.local_blob_write_authority().await?;
         let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
             .map_err(|error| crate::database::DbError::Message(error.to_string()))?;

@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::sync::cycle::{init_sync_over_storage, StoreInitialization, SyncComponents};
+use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization, SyncComponents};
 use crate::sync::test_helpers::TestDevice;
 
 fn circle_routing_migrations() -> Vec<crate::Migration> {
@@ -113,8 +113,8 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -125,6 +125,9 @@ async fn rotation_fixture(label: &str) -> RotationFixture {
         },
         Some(EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components
@@ -1058,8 +1061,8 @@ async fn setup_active_member_circle_snapshot(
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -1070,6 +1073,9 @@ async fn setup_active_member_circle_snapshot(
         },
         Some(routing.clone()),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components
@@ -1398,8 +1404,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -1410,6 +1416,9 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         },
         Some(routing.clone()),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components
@@ -1675,8 +1684,8 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -1687,6 +1696,9 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         },
         Some(routing.clone()),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components

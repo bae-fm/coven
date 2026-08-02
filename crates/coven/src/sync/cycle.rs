@@ -606,100 +606,124 @@ pub(crate) enum StoreInitialization {
     },
 }
 
-pub(crate) async fn init_sync_over_storage(
-    store_database: &crate::database::StoreDatabase,
+/// A sync session whose local and cloud representation has been validated
+/// before Store creation or opening can perform protocol work.
+pub(crate) struct PreparedSyncComponents {
+    database: crate::database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
-    storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
+    storage: std::sync::Arc<CloudSyncStorage>,
     initialization: StoreInitialization,
+    hlc: std::sync::Arc<Hlc>,
+    store_id: String,
+    cipher: std::sync::Arc<CloudCipherState>,
+    pending_rotation: std::sync::Arc<PendingRotation>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
-) -> Result<SyncComponents, InitSyncError> {
-    let db = store_database;
-    let storage = storage.into();
-    // Integration guard. The host declared its synced tables on the builder; an
-    // empty set means a synced store would attach nothing, every changeset would
-    // come out empty, and sync would silently become snapshot-only. Refuse loudly
-    // instead of pretending to sync.
-    if db.synced_tables().is_empty() {
-        return Err(InitSyncError::NoSyncedTables);
-    }
-    crate::database::StoreDatabase::validate_store_write_routing(
-        db.gates().as_ref(),
-        routing_encryption.as_ref(),
-    )
-    .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
+}
 
-    let cipher = storage.cipher_state().clone();
-    let cipher_is_plaintext = cipher.is_plaintext();
-    let representation_is_coherent = matches!(
-        (cipher_is_plaintext, storage.blob_path_scheme()),
-        (true, BlobPathScheme::Plain) | (false, BlobPathScheme::Hashed)
-    );
-    if !representation_is_coherent {
-        return Err(InitSyncError::IncoherentStorageRepresentation);
-    }
+impl PreparedSyncComponents {
+    pub(crate) async fn prepare(
+        database: crate::database::StoreDatabase,
+        local_blob_access: super::store::blob::LocalStoreBlobAccess,
+        storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
+        initialization: StoreInitialization,
+        routing_encryption: Option<crate::encryption::EncryptionService>,
+    ) -> Result<Self, InitSyncError> {
+        let storage = storage.into();
+        // Integration guard. The host declared its synced tables on the builder; an
+        // empty set means a synced store would attach nothing, every changeset would
+        // come out empty, and sync would silently become snapshot-only. Refuse loudly
+        // instead of pretending to sync.
+        if database.synced_tables().is_empty() {
+            return Err(InitSyncError::NoSyncedTables);
+        }
+        database
+            .validate_store_write_routing(routing_encryption.as_ref())
+            .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
 
-    let hlc = db.hlc();
-    let user_keypair = storage.user_keypair().clone();
-    let store_id = storage.store_id().to_string();
-    let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
-    let initialized = match initialization {
-        StoreInitialization::CreateStore => {
-            Store::create(
-                store_database.clone(),
-                store_storage.clone(),
-                &hlc.now().to_string(),
-                &user_keypair,
-            )
-            .await
+        let cipher = storage.cipher_state().clone();
+        let cipher_is_plaintext = cipher.is_plaintext();
+        let representation_is_coherent = matches!(
+            (cipher_is_plaintext, storage.blob_path_scheme()),
+            (true, BlobPathScheme::Plain) | (false, BlobPathScheme::Hashed)
+        );
+        if !representation_is_coherent {
+            return Err(InitSyncError::IncoherentStorageRepresentation);
         }
-        StoreInitialization::OpenStore {
-            expected_store_root,
-        } => {
-            Store::open(
-                store_database.clone(),
-                store_storage.clone(),
-                &expected_store_root,
-                &user_keypair,
-            )
-            .await
-        }
-    }
-    .map_err(|error| match error {
-        crate::sync::store::StoreInitializationError::ProtocolRoot(error) => {
-            InitSyncError::StoreProtocolRoot(error)
-        }
-        crate::sync::store::StoreInitializationError::MembershipAnchor(error) => {
-            InitSyncError::MembershipAnchor(error)
-        }
-    })?;
 
-    // Restore any durably-recorded pending rotation into this connection's marker
-    // before the first cycle seals anything, so a restart that interrupted an
-    // unadopted rotation resumes paused rather than sealing under the superseded
-    // generation.
-    if !cipher_is_plaintext {
-        storage
-            .shared_pending_rotation()
-            .restore_from(db)
-            .await
-            .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
+        // Restore the durable marker before Store creation or opening performs
+        // protocol work, so malformed local rotation state cannot accompany new
+        // remote state from a failed initialization.
+        let pending_rotation = storage.shared_pending_rotation();
+        if !cipher_is_plaintext {
+            pending_rotation
+                .restore_from(&database)
+                .await
+                .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
+        }
+
+        let hlc = database.hlc();
+        let store_id = storage.store_id().to_string();
+        Ok(Self {
+            database,
+            local_blob_access,
+            storage,
+            initialization,
+            hlc,
+            store_id,
+            cipher,
+            pending_rotation,
+            routing_encryption,
+        })
     }
 
-    let pending_rotation = storage.shared_pending_rotation();
-    info!("Sync initialized (device: {})", initialized.device_id);
+    pub(crate) async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
+        let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
+        let user_keypair = self.storage.user_keypair().clone();
+        let initialized = match self.initialization {
+            StoreInitialization::CreateStore => {
+                Store::create(
+                    self.database.clone(),
+                    store_storage.clone(),
+                    &self.hlc.now().to_string(),
+                    &user_keypair,
+                )
+                .await
+            }
+            StoreInitialization::OpenStore {
+                expected_store_root,
+            } => {
+                Store::open(
+                    self.database.clone(),
+                    store_storage.clone(),
+                    &expected_store_root,
+                    &user_keypair,
+                )
+                .await
+            }
+        }
+        .map_err(|error| match error {
+            crate::sync::store::StoreInitializationError::ProtocolRoot(error) => {
+                InitSyncError::StoreProtocolRoot(error)
+            }
+            crate::sync::store::StoreInitializationError::MembershipAnchor(error) => {
+                InitSyncError::MembershipAnchor(error)
+            }
+        })?;
 
-    Ok(SyncComponents {
-        store: std::sync::Arc::new(initialized.store),
-        database: store_database.clone(),
-        local_blob_access,
-        storage: store_storage,
-        hlc,
-        store_id,
-        device_id: initialized.device_id,
-        cipher,
-        pending_rotation,
-        routing_encryption,
-    })
+        info!("Sync initialized (device: {})", initialized.device_id);
+        Ok(SyncComponents {
+            store: std::sync::Arc::new(initialized.store),
+            database: self.database,
+            local_blob_access: self.local_blob_access,
+            storage: store_storage,
+            hlc: self.hlc,
+            store_id: self.store_id,
+            device_id: initialized.device_id,
+            cipher: self.cipher,
+            pending_rotation: self.pending_rotation,
+            routing_encryption: self.routing_encryption,
+        })
+    }
 }
 
 /// Components needed to run sync cycles.

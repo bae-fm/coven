@@ -467,8 +467,8 @@ async fn effective_access_fixture(
         owner.clone(),
     )
     .expect("open effective-access owner storage");
-    let components = crate::sync::cycle::init_sync_over_storage(
-        &StoreDatabase::new(&owner_database),
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        StoreDatabase::new(&owner_database),
         crate::sync::test_owner_graph::local_blob_access(
             StoreDatabase::new(&owner_database),
             owner_store_dir.clone(),
@@ -479,6 +479,9 @@ async fn effective_access_fixture(
         },
         Some(crate::encryption::EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare effective-access owner sync")
+    .initialize()
     .await
     .expect("initialize effective-access owner sync");
     components

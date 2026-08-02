@@ -382,10 +382,10 @@ impl StoreDatabase {
     }
 
     pub(crate) fn validate_store_write_routing(
-        gates: &Gates,
+        &self,
         routing_encryption: Option<&EncryptionService>,
     ) -> Result<(), DbError> {
-        Self::store_write_routing(gates, routing_encryption).map(drop)
+        Self::store_write_routing(&self.gates, routing_encryption).map(drop)
     }
 
     pub(crate) fn insert_store_write_on(

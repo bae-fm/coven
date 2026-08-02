@@ -545,10 +545,7 @@ impl ConnectedBlobTransitions {
     ) -> Result<(), MakeLocalError> {
         let db = &self.local.journal.database;
         let tables = db.synced_tables().to_vec();
-        StoreDatabase::validate_store_write_routing(
-            db.gates().as_ref(),
-            self.routing_encryption.as_ref(),
-        )?;
+        db.validate_store_write_routing(self.routing_encryption.as_ref())?;
         if is_remote_root(&tables, root_table) {
             return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
         }

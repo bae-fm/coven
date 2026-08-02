@@ -519,7 +519,7 @@ fn open_routing_db() -> Database {
 #[tokio::test]
 async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     use crate::protocol::membership::MemberRole;
-    use crate::sync::cycle::{init_sync_over_storage, StoreInitialization};
+    use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization};
 
     let db1 = open_routing_db();
     let (store, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
@@ -562,8 +562,8 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         founder.clone(),
     )
     .expect("open Circle owner storage");
-    let components = init_sync_over_storage(
-        &StoreDatabase::new(&db1),
+    let components = PreparedSyncComponents::prepare(
+        StoreDatabase::new(&db1),
         crate::sync::test_owner_graph::local_blob_access(
             StoreDatabase::new(&db1),
             store_dir.clone(),
@@ -574,6 +574,9 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         },
         Some(routing()),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components

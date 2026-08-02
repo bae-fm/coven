@@ -567,8 +567,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         signer.clone(),
     )
     .expect("construct Circle blob writer");
-    let components = crate::sync::cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -579,6 +579,9 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         },
         Some(EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare scoped Circle Store")
+    .initialize()
     .await
     .expect("open scoped Circle Store");
     components
@@ -1169,8 +1172,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = crate::sync::cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -1181,6 +1184,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         },
         Some(EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components
@@ -2191,8 +2197,8 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = crate::sync::cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -2203,6 +2209,9 @@ async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
         },
         Some(EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components
@@ -3306,8 +3315,8 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         signer.clone(),
     )
     .expect("open Circle owner storage");
-    let components = crate::sync::cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir.clone(),
@@ -3318,6 +3327,9 @@ async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle 
         },
         Some(EncryptionService::from_key([42; 32])),
     )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
     .await
     .expect("initialize Circle owner sync");
     components

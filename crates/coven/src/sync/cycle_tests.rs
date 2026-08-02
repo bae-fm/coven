@@ -2375,8 +2375,8 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
     );
     let (_store_temp, store_dir) = temp_store_dir();
 
-    cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2385,6 +2385,9 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         cycle::StoreInitialization::CreateStore,
         None,
     )
+    .await
+    .expect("prepare plaintext storage")
+    .initialize()
     .await
     .expect("initialize plaintext storage");
 
@@ -2431,8 +2434,8 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
     );
     let (_store_temp, store_dir) = temp_store_dir();
 
-    let error = match cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let prepared = cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2444,7 +2447,8 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         None,
     )
     .await
-    {
+    .expect("prepare Store opening");
+    let error = match prepared.initialize().await {
         Err(error) => error,
         Ok(_) => panic!("an exact founder graph without its Store root must fail loud"),
     };
@@ -2497,8 +2501,8 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
     );
     let db = open_test_db();
     let (_store_temp, store_dir) = temp_store_dir();
-    let error = match cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    let prepared = cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2510,7 +2514,8 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         None,
     )
     .await
-    {
+    .expect("prepare foreign Store opening");
+    let error = match prepared.initialize().await {
         Err(error) => error,
         Ok(_) => panic!("a foreign founder graph without its exact root must fail loud"),
     };
@@ -2553,8 +2558,8 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         owner,
     );
     let (_store_temp, store_dir) = temp_store_dir();
-    cycle::init_sync_over_storage(
-        &crate::database::StoreDatabase::new(&db),
+    cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2565,6 +2570,9 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         },
         None,
     )
+    .await
+    .expect("prepare committed founder opening")
+    .initialize()
     .await
     .expect("accept the identity's committed founder");
 
@@ -2612,8 +2620,8 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     let (_store_temp, store_dir) = temp_store_dir();
 
     assert!(
-        cycle::init_sync_over_storage(
-            &crate::database::StoreDatabase::new(&db),
+        cycle::PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&db),
             crate::sync::test_owner_graph::local_blob_access(
                 crate::database::StoreDatabase::new(&db),
                 store_dir,
@@ -2624,6 +2632,9 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
             },
             None,
         )
+        .await
+        .expect("prepare foreign founder opening")
+        .initialize()
         .await
         .is_err(),
         "a committed foreign founder prevents initialization",
@@ -2677,8 +2688,8 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         let pending_rotation = storage.shared_pending_rotation();
 
         assert!(
-            cycle::init_sync_over_storage(
-                &crate::database::StoreDatabase::new(&db),
+            cycle::PreparedSyncComponents::prepare(
+                crate::database::StoreDatabase::new(&db),
                 crate::sync::test_owner_graph::local_blob_access(
                     crate::database::StoreDatabase::new(&db),
                     store_dir,

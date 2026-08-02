@@ -1174,8 +1174,8 @@ pub(crate) async fn run_cycle_fixture(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
-    let components = Box::pin(crate::sync::cycle::init_sync_over_storage(
-        &database,
+    let components = Box::pin(crate::sync::cycle::PreparedSyncComponents::prepare(
+        database.clone(),
         local_blob_access,
         storage,
         crate::sync::cycle::StoreInitialization::OpenStore {
@@ -1185,6 +1185,9 @@ pub(crate) async fn run_cycle_fixture(
     ))
     .await
     .map_err(|error| error.to_string())?;
+    let components = Box::pin(components.initialize())
+        .await
+        .map_err(|error| error.to_string())?;
     Box::pin(components.run_cycle(&crate::clock::SystemClock, None, store_dir, None))
         .await
         .map_err(|error| error.to_string())?;

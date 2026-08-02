@@ -18,7 +18,7 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
 use crate::store_security::StoreSecurity;
-use crate::sync::cycle::{InitSyncError, SyncComponents};
+use crate::sync::cycle::{InitSyncError, PreparedSyncComponents, SyncComponents};
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
@@ -315,13 +315,16 @@ impl StoreSync {
             },
             None => crate::sync::cycle::StoreInitialization::CreateStore,
         };
-        crate::sync::cycle::init_sync_over_storage(
-            &self.database,
+        PreparedSyncComponents::prepare(
+            self.database.clone(),
             self.local_blob_access.clone(),
             storage,
             initialization,
             routing_encryption,
         )
+        .await
+        .map_err(SyncError::from)?
+        .initialize()
         .await
         .map_err(SyncError::from)
     }

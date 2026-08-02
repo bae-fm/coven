@@ -3748,8 +3748,8 @@ mod tests {
             signer.clone(),
         )
         .expect("construct pending-rotation storage");
-        let components = crate::sync::cycle::init_sync_over_storage(
-            &store_database,
+        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+            store_database.clone(),
             crate::sync::test_owner_graph::local_blob_access(
                 store_database.clone(),
                 store_dir.clone(),
@@ -3758,6 +3758,9 @@ mod tests {
             crate::sync::cycle::StoreInitialization::CreateStore,
             None,
         )
+        .await
+        .expect("prepare pending-rotation Store")
+        .initialize()
         .await
         .expect("initialize pending-rotation Store");
         let root = store_database
@@ -3780,8 +3783,8 @@ mod tests {
             signer,
         )
         .expect("reconstruct pending-rotation storage");
-        let result = crate::sync::cycle::init_sync_over_storage(
-            &crate::database::StoreDatabase::new(&reopened),
+        let result = crate::sync::cycle::PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&reopened),
             crate::sync::test_owner_graph::local_blob_access(
                 crate::database::StoreDatabase::new(&reopened),
                 store_dir,
